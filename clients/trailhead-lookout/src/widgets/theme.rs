@@ -1,23 +1,21 @@
 //! The colors Lookout adds on top of the kit's theme.
 //!
-//! The kit's ([`trailhead_ui::Theme::new`]) is the base; Lookout paints its own tokens onto it with
-//! [`trailhead_ui::Theme::paint`]: one background per status column, the board and card surfaces, and a tone per priority.
-//! A view names a token, never a color.
+//! The kit's ([`trailhead_ui::Theme::new`]) is the base, and its semantic tokens (surfaces, text, fills, statuses) are
+//! what Lookout's views name. Lookout's own colors are categorical, encoding data rather than meaning something to the
+//! kit: one background and one text tone per status, a tone per priority and per grade, each painted with
+//! [`trailhead_ui::Theme::paint`]. The top priority is the kit's danger color, an alias. A view names a token, never a
+//! color.
 
 use bevy::prelude::*;
-use trailhead_model::{Grade, Priority, Status};
-use trailhead_ui::{Theme, Token, palette};
+use trailhead_factory::SandboxState;
+use trailhead_model::{CommentKind, Grade, Priority, Status};
+use trailhead_ui::{Icon, Theme, Token};
 
 /// The kit's tokens and Lookout's own.
 pub mod token {
     pub use trailhead_ui::token::*;
 
     use trailhead_ui::Token;
-
-    /// What the board's columns and the panels sit on.
-    pub const BOARD_BG: Token = Token::new("lookout.board.bg");
-    /// A task card.
-    pub const CARD_BG: Token = Token::new("lookout.card.bg");
 
     /// One tone per priority, the same wherever a priority shows: P1 red, P2 orange, P3 blue, P4 gray.
     pub const PRIORITY_1: Token = Token::new("lookout.priority.1");
@@ -31,6 +29,9 @@ pub mod token {
     pub const GRADE_3: Token = Token::new("lookout.grade.3");
     pub const GRADE_4: Token = Token::new("lookout.grade.4");
 
+    /// The factory, wherever it shows (the board's Factory badge): lime, a hue no priority, grade or status uses.
+    pub const FACTORY: Token = Token::new("lookout.factory");
+
     /// One background per status column, in lifecycle order.
     pub const STATUS_OPEN: Token = Token::new("lookout.status.open");
     pub const STATUS_IN_PROGRESS: Token = Token::new("lookout.status.in_progress");
@@ -39,6 +40,28 @@ pub mod token {
     pub const STATUS_APPROVED: Token = Token::new("lookout.status.approved");
     pub const STATUS_DONE: Token = Token::new("lookout.status.done");
     pub const STATUS_CANCELLED: Token = Token::new("lookout.status.cancelled");
+
+    /// One text tone per status, in its column's hue, for a status written on a panel or card rather than filled in.
+    pub const STATUS_OPEN_TEXT: Token = Token::new("lookout.status.open.text");
+    pub const STATUS_IN_PROGRESS_TEXT: Token = Token::new("lookout.status.in_progress.text");
+    pub const STATUS_NEEDS_INPUT_TEXT: Token = Token::new("lookout.status.needs_input.text");
+    pub const STATUS_IN_REVIEW_TEXT: Token = Token::new("lookout.status.in_review.text");
+    pub const STATUS_APPROVED_TEXT: Token = Token::new("lookout.status.approved.text");
+    pub const STATUS_DONE_TEXT: Token = Token::new("lookout.status.done.text");
+    pub const STATUS_CANCELLED_TEXT: Token = Token::new("lookout.status.cancelled.text");
+
+    /// One background per sandbox state, for a campsite on the trail map.
+    pub const SANDBOX_IDLE: Token = Token::new("lookout.sandbox.idle");
+    pub const SANDBOX_BUSY: Token = Token::new("lookout.sandbox.busy");
+    pub const SANDBOX_PAUSED: Token = Token::new("lookout.sandbox.paused");
+    pub const SANDBOX_BROKEN: Token = Token::new("lookout.sandbox.broken");
+
+    /// Something still waiting, such as a gate that hasn't passed or failed yet: the dim text tone.
+    pub const PENDING: Token = Token::new("lookout.pending");
+
+    /// An agent walking the trail map, and the initial written on it.
+    pub const AGENT: Token = Token::new("lookout.agent");
+    pub const AGENT_TEXT: Token = Token::new("lookout.agent.text");
 }
 
 /// The background token of a status column.
@@ -51,6 +74,30 @@ pub fn status_token(status: Status) -> Token {
         Status::Approved => token::STATUS_APPROVED,
         Status::Done => token::STATUS_DONE,
         Status::Cancelled => token::STATUS_CANCELLED,
+    }
+}
+
+/// The background of a campsite whose sandbox is in `state`.
+pub fn sandbox_token(state: SandboxState) -> Token {
+    match state {
+        SandboxState::Idle => token::SANDBOX_IDLE,
+        SandboxState::Busy => token::SANDBOX_BUSY,
+        SandboxState::Paused => token::SANDBOX_PAUSED,
+        SandboxState::Broken => token::SANDBOX_BROKEN,
+    }
+}
+
+/// The text tone of a status, the same wherever a status is written. [`status_token`] is its column's background, too
+/// dark to read as text.
+pub fn status_tone(status: Status) -> Token {
+    match status {
+        Status::Open => token::STATUS_OPEN_TEXT,
+        Status::InProgress => token::STATUS_IN_PROGRESS_TEXT,
+        Status::NeedsInput => token::STATUS_NEEDS_INPUT_TEXT,
+        Status::InReview => token::STATUS_IN_REVIEW_TEXT,
+        Status::Approved => token::STATUS_APPROVED_TEXT,
+        Status::Done => token::STATUS_DONE_TEXT,
+        Status::Cancelled => token::STATUS_CANCELLED_TEXT,
     }
 }
 
@@ -88,15 +135,24 @@ pub fn grade_tone(g: Grade) -> Token {
     }
 }
 
+/// The icon of a kind of comment, the same wherever a comment shows, so its kind reads before its words.
+pub fn comment_icon(kind: CommentKind) -> Icon {
+    match kind {
+        CommentKind::Note => Icon::Comment,
+        CommentKind::Handoff => Icon::Handshake,
+        CommentKind::Decision => Icon::Signpost,
+        CommentKind::Question => Icon::Help,
+        CommentKind::Progress => Icon::Footprints,
+        CommentKind::Review => Icon::Eye,
+    }
+}
+
 /// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
 pub fn theme() -> Theme {
     let mut theme = Theme::new();
-    theme.paint(&token::BOARD_BG, palette::GRAY_0);
-    theme.paint(&token::CARD_BG, palette::GRAY_2);
-
-    // The most urgent priority is the kit's danger red, read from the theme so the two can't drift apart.
-    let danger = theme.color(&token::DANGER);
-    theme.paint(&token::PRIORITY_1, danger);
+    // The most urgent priority is the kit's danger red.
+    theme.alias(&token::PRIORITY_1, &token::STATUS_DANGER);
+    theme.alias(&token::PENDING, &token::TEXT_DIM);
     theme.paint(&token::PRIORITY_2, Color::oklch(0.76, 0.15, 60.0));
     theme.paint(&token::PRIORITY_3, Color::oklch(0.70, 0.13, 250.0));
     theme.paint(&token::PRIORITY_4, Color::oklch(0.65, 0.0, 0.0));
@@ -105,6 +161,8 @@ pub fn theme() -> Theme {
     theme.paint(&token::GRADE_2, Color::oklch(0.74, 0.11, 190.0));
     theme.paint(&token::GRADE_3, Color::oklch(0.68, 0.15, 295.0));
     theme.paint(&token::GRADE_4, Color::oklch(0.68, 0.19, 340.0));
+
+    theme.paint(&token::FACTORY, Color::oklch(0.76, 0.15, 115.0));
 
     // Columns tinted just enough to tell apart, each toward the hue of what the status means.
     let column = |hue: f32| Color::oklch(0.24, 0.025, hue);
@@ -115,47 +173,72 @@ pub fn theme() -> Theme {
     theme.paint(&token::STATUS_APPROVED, column(150.0));
     theme.paint(&token::STATUS_DONE, Color::oklch(0.22, 0.0, 0.0));
     theme.paint(&token::STATUS_CANCELLED, Color::oklch(0.20, 0.0, 0.0));
+
+    // Written in the same hues, as light as the priorities, so they read on a panel or card.
+    let words = |hue: f32| Color::oklch(0.74, 0.12, hue);
+    theme.paint(&token::STATUS_OPEN_TEXT, words(250.0));
+    theme.paint(&token::STATUS_IN_PROGRESS_TEXT, words(210.0));
+    theme.paint(&token::STATUS_NEEDS_INPUT_TEXT, words(75.0));
+    theme.paint(&token::STATUS_IN_REVIEW_TEXT, words(300.0));
+    theme.paint(&token::STATUS_APPROVED_TEXT, words(150.0));
+    theme.paint(&token::STATUS_DONE_TEXT, Color::oklch(0.76, 0.0, 0.0));
+    theme.paint(&token::STATUS_CANCELLED_TEXT, Color::oklch(0.66, 0.0, 0.0));
+
+    // Campsites, each toward the hue of what its state means (green resting, blue working, amber paused, red broken),
+    // all as dark, so a camp's text reads on any of them.
+    let camp = |hue: f32| Color::oklch(0.38, 0.07, hue);
+    theme.paint(&token::SANDBOX_IDLE, camp(150.0));
+    theme.paint(&token::SANDBOX_BUSY, camp(245.0));
+    theme.paint(&token::SANDBOX_PAUSED, camp(80.0));
+    theme.paint(&token::SANDBOX_BROKEN, camp(25.0));
+
+    theme.paint(&token::AGENT, Color::srgb(0.95, 0.75, 0.3));
+    theme.paint(&token::AGENT_TEXT, Color::BLACK);
     theme
 }
 
 #[cfg(test)]
 mod tests {
+    use trailhead_ui::Surface;
+
     use super::*;
+
+    #[test]
+    fn each_kind_of_comment_has_its_own_icon() {
+        let icons: std::collections::HashSet<Icon> = CommentKind::ALL.into_iter().map(comment_icon).collect();
+        assert_eq!(icons.len(), CommentKind::ALL.len());
+    }
 
     #[test]
     fn every_lookout_token_resolves_rather_than_falling_back_to_fuchsia() {
         let theme = theme();
-        let all = [
-            token::BOARD_BG,
-            token::PANEL_BG,
-            token::CARD_BG,
-            token::DIVIDER,
-            token::BADGE_BG,
-            token::HINT_BG,
-            token::WARN,
-            token::DANGER,
-            token::OK,
-            token::PRIORITY_1,
-            token::PRIORITY_2,
-            token::PRIORITY_3,
-            token::PRIORITY_4,
-            token::GRADE_1,
-            token::GRADE_2,
-            token::GRADE_3,
-            token::GRADE_4,
-            token::STATUS_OPEN,
-            token::STATUS_IN_PROGRESS,
-            token::STATUS_NEEDS_INPUT,
-            token::STATUS_IN_REVIEW,
-            token::STATUS_APPROVED,
-            token::STATUS_DONE,
-            token::STATUS_CANCELLED,
-        ];
-        for t in all {
+        let lookouts =
+            Priority::ALL.map(priority_tone).into_iter().chain(Grade::ALL.map(grade_tone)).chain([token::FACTORY]);
+        let statuses = Status::ALL.into_iter().flat_map(|s| [status_token(s), status_tone(s)]);
+        for t in lookouts.chain(statuses).chain(token::ALL) {
             assert!(theme.has(&t), "{t} isn't in the theme");
         }
-        // Feathers' own controls still resolve.
-        assert!(theme.has(&token::BUTTON_BG));
+    }
+
+    #[test]
+    fn no_color_is_painted_that_a_meaning_already_has() {
+        let repeated = theme().repeated_colors();
+        assert!(repeated.is_empty(), "alias these to the meaning instead:\n{}", repeated.join("\n"));
+    }
+
+    #[test]
+    fn each_sandbox_state_has_its_own_color_and_a_camps_text_reads_on_it() {
+        let theme = theme();
+        let lightness = |t: &Token| Oklcha::from(theme.color(t)).lightness;
+        let states = [SandboxState::Idle, SandboxState::Busy, SandboxState::Paused, SandboxState::Broken];
+        let colors: std::collections::HashSet<_> =
+            states.iter().map(|s| format!("{:?}", theme.color(&sandbox_token(*s)))).collect();
+        assert_eq!(colors.len(), states.len());
+        for state in states {
+            let gap = lightness(&token::TEXT) - lightness(&sandbox_token(state));
+            assert!(gap >= TEXT_CONTRAST, "a camp's text on {state:?} is {gap:.2} lighter, too dark to read");
+        }
+        assert!(lightness(&token::AGENT) - lightness(&token::AGENT_TEXT) >= TEXT_CONTRAST);
     }
 
     #[test]
@@ -172,7 +255,13 @@ mod tests {
     #[test]
     fn the_top_priority_is_the_danger_color() {
         let theme = theme();
-        assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::DANGER));
+        assert_eq!(theme.color(&token::PRIORITY_1), theme.color(&token::STATUS_DANGER));
+    }
+
+    #[test]
+    fn pending_is_the_dim_text_color() {
+        let theme = theme();
+        assert_eq!(theme.color(&token::PENDING), theme.color(&token::TEXT_DIM));
     }
 
     #[test]
@@ -194,105 +283,77 @@ mod tests {
     }
 
     #[test]
+    fn in_the_light_theme_priorities_and_grades_still_read_on_a_card() {
+        let light = theme().light();
+        let lightness = |t: &Token| Oklcha::from(light.color(t)).lightness;
+        let card = lightness(&token::SURFACE_RAISED);
+        assert!(card > 0.5, "the card turns light");
+        for tone in written_tones() {
+            assert!(card - lightness(&tone) > 0.1, "{tone} is too faint on a light card");
+        }
+    }
+
+    /// Every tone written as text in one of Lookout's own colors: priorities, grades, statuses.
+    fn written_tones() -> Vec<Token> {
+        let priorities = Priority::ALL.map(priority_tone).into_iter();
+        priorities
+            .chain(Grade::ALL.map(grade_tone))
+            .chain(Status::ALL.map(status_tone))
+            .chain([token::FACTORY])
+            .collect()
+    }
+
+    /// The least lightness between text and the surface under it that reads easily.
+    const TEXT_CONTRAST: f32 = 0.3;
+
+    #[test]
+    fn in_the_dark_theme_every_written_tone_reads_on_the_panel_and_a_card() {
+        // The status select once wrote each status in its column's background, near-black on a dark panel.
+        let dark = theme();
+        let lightness = |t: &Token| Oklcha::from(dark.color(t)).lightness;
+        for surface in [token::SURFACE_PANEL, token::SURFACE_RAISED] {
+            for tone in written_tones() {
+                let gap = lightness(&tone) - lightness(&surface);
+                assert!(gap >= TEXT_CONTRAST, "{tone} on {surface} is {gap:.2} lighter, too dark to read");
+            }
+        }
+    }
+
+    /// The least lightness between a hover and the surface under it that reads as a response.
+    const HOVER_CONTRAST: f32 = 0.05;
+
+    #[test]
+    fn a_plain_buttons_hover_shows_on_a_card_resting_or_hovered_and_on_the_panel_in_either_theme() {
+        // The card's Edit, Comment and Answer buttons are plain, as are the inspector's and settings' (TRAIL-1091).
+        // Feathers' own plain hover is a shade of the surface, a gap too small to see.
+        for theme in [theme(), theme().light()] {
+            let on = |t: &Token, surface| Oklcha::from(theme.color_on(t, surface)).lightness;
+            for (surface, under) in [
+                (Surface::Raised, token::SURFACE_RAISED),
+                (Surface::Raised, CARD_HOVER),
+                (Surface::Panel, token::SURFACE_PANEL),
+            ] {
+                let gap = (on(&token::FILL_ITEM_HOVER, surface) - on(&under, surface)).abs();
+                assert!(gap >= HOVER_CONTRAST, "a plain button's hover on {under} is {gap:.3} away, too close to see");
+            }
+        }
+    }
+
+    /// What a card wears under the pointer (`widgets/card.rs`).
+    const CARD_HOVER: Token = token::FILL_SOLID;
+
+    #[test]
+    fn a_cards_hover_shows_on_the_card_in_either_theme() {
+        for theme in [theme(), theme().light()] {
+            let on = |t: &Token| Oklcha::from(theme.color_on(t, Surface::Raised)).lightness;
+            let gap = (on(&CARD_HOVER) - on(&token::SURFACE_RAISED)).abs();
+            assert!(gap >= HOVER_CONTRAST, "a card's hover is {gap:.3} away from the card, too close to see");
+        }
+    }
+
+    #[test]
     fn statuses_read_as_words() {
         let words = Status::ALL.map(status_label);
         assert_eq!(words, ["Open", "In Progress", "Needs Input", "In Review", "Approved", "Done", "Cancelled"]);
-    }
-
-    #[test]
-    fn no_view_formats_a_status_itself() {
-        // A status shown to a person goes through `status_label`; these are the shapes that skip it.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let skipping = [
-            "{status}",
-            "{st}",
-            "text(status,",
-            "text(status.",
-            "select(statuses",
-            "Status::ALL.iter().map(|s| s.to_string())",
-        ];
-        let mut bad = Vec::new();
-        // Every view file, found by walking `src/`, so a new one is covered without being listed. This file names
-        // the shapes it forbids, so it is the one left out.
-        let mut files = Vec::new();
-        let mut folders = vec![root.clone()];
-        while let Some(folder) = folders.pop() {
-            for entry in std::fs::read_dir(&folder).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "rs") && !path.ends_with("widgets/theme.rs") {
-                    files.push(path);
-                }
-            }
-        }
-        files.sort();
-        assert!(files.len() >= 6, "found only {files:?}");
-        for path in files {
-            let file = path.strip_prefix(&root).unwrap().display().to_string();
-            let source = std::fs::read_to_string(&path).unwrap();
-            let source = source.split("#[cfg(test)]").next().unwrap();
-            for (n, line) in source.lines().enumerate() {
-                let line = line.trim();
-                if line.starts_with("//") || line.contains("Name::new") {
-                    continue;
-                }
-                let own_words = Status::ALL.iter().map(|s| s.as_str()).flat_map(|s| {
-                    let spaced = s.replace('_', " ");
-                    // A single word is the API value too (`column_shell("open")`), so only a (text, color) pair is a label.
-                    let spelled = if spaced == *s { format!("(\"{s}\".into(),") } else { format!("\"{spaced}\"") };
-                    [spelled, format!("\"{}\"", spaced.to_uppercase())]
-                });
-                if skipping.iter().any(|p| line.contains(p)) || own_words.into_iter().any(|p| line.contains(&p)) {
-                    bad.push(format!("{file}:{}: {line}", n + 1));
-                }
-            }
-        }
-        assert!(bad.is_empty(), "show a status with widgets::status_label:\n{}", bad.join("\n"));
-    }
-
-    #[test]
-    fn lookout_never_reaches_past_the_kit_to_feathers() {
-        // Feathers stays inside trailhead-ui: what Lookout needs from it, the kit wraps and exports (TRAIL-1102). The
-        // needles are split so this file doesn't find itself.
-        let needles = [concat!("feathers", "::"), concat!("bevy_", "feathers")];
-        let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut bad = Vec::new();
-        let mut folders = vec![crate_root.join("src"), crate_root.join("examples"), crate_root.join("tests")];
-        let mut files = vec![crate_root.join("Cargo.toml")];
-        while let Some(folder) = folders.pop() {
-            let Ok(entries) = std::fs::read_dir(&folder) else { continue };
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    folders.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    files.push(path);
-                }
-            }
-        }
-        assert!(files.len() >= 10, "found only {files:?}");
-        for path in files {
-            let source = std::fs::read_to_string(&path).unwrap();
-            for (n, line) in source.lines().enumerate() {
-                let code = line.trim_start();
-                if code.starts_with("//") || (code.starts_with('#') && path.ends_with("Cargo.toml")) {
-                    continue;
-                }
-                if needles.iter().any(|needle| line.contains(needle)) {
-                    bad.push(format!("{}:{}: {}", path.strip_prefix(crate_root).unwrap().display(), n + 1, code));
-                }
-            }
-        }
-        assert!(bad.is_empty(), "use (or grow) the trailhead-ui kit instead of feathers:\n{}", bad.join("\n"));
-    }
-
-    #[test]
-    fn a_spacing_is_named_rather_than_typed() {
-        // `board.rs` predates the kit; each view moves onto it in its own task (TRAIL-798 to TRAIL-801). Take it off
-        // this list when it's moved; nothing new goes on it.
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let typed = trailhead_ui::spacing_check::typed_spacings(&root, &["board.rs"]);
-        assert!(typed.is_empty(), "name these spacings with widgets::space instead:\n{}", typed.join("\n"));
     }
 }

@@ -46,6 +46,11 @@ impl Factory {
         let mut reviews: HashSet<task::Id> = HashSet::new();
         // A failed boot reconcile (the compute API down, say) is retried in the loop rather than ending the process.
         let mut dirty = true;
+        // Whether the drain has said it is stuck on a failing reconcile, so a long outage says so once, not every poll.
+        let mut stall_logged = false;
+        // The reviews last said to be held back by a usage pause, so a pause says so when it starts or the set changes,
+        // not every poll.
+        let mut held_logged: Option<Vec<String>> = None;
         loop {
             // Shutdown is otherwise only noticed while idle; a stop during a long reconcile mustn't start new work.
             if (&mut shutdown).now_or_never().is_some() {
@@ -56,6 +61,7 @@ impl Factory {
                 self.status.control(ControlState::Reconciling);
                 match self.reconcile_deferring(&keys.values().cloned().collect()).await {
                     Ok((done, due)) => {
+                        stall_logged = false;
                         // Due reviews are new work, picked up again by the next start. Due runs are runs the daemon is
                         // still working on, so a drain keeps following them and waits for them too.
                         let due = if draining { Due { reviews: Vec::new(), ..due } } else { due };
@@ -70,10 +76,20 @@ impl Factory {
                         // next reconcile finds them due again (the resume below triggers one, and so does the poll).
                         // Due runs aren't held: the daemon already has them.
                         let hold = !due.reviews.is_empty() && self.usage_paused();
+                        if hold {
+                            let mut held: Vec<String> = due.reviews.iter().map(|t| t.key.0.clone()).collect();
+                            held.sort();
+                            if held_logged.as_ref() != Some(&held) {
+                                tracing::info!(?held, reason = "usage pause", "holding due reviews back until it ends");
+                                held_logged = Some(held);
+                            }
+                        } else {
+                            held_logged = None;
+                        }
                         let reviews_due = if hold { Vec::new() } else { due.reviews };
                         // Logged after the hold, so a pause doesn't list reviews that never start on every poll.
                         if done != Reconciled::default() || !reviews_due.is_empty() {
-                            let reviewing: Vec<&str> = reviews_due.iter().map(|t| t.key.0.as_str()).collect();
+                            let reviewing: Vec<&str> = reviews_due.iter().map(|t| t.key.as_str()).collect();
                             tracing::info!(?done, ?reviewing, "reconciled");
                         }
                         for task in reviews_due {
@@ -91,6 +107,10 @@ impl Factory {
                         // A drain mustn't conclude on a reconcile that couldn't look: a daemon may still have a run.
                         // Retry at the next poll; a shutdown still ends it.
                         dirty = draining;
+                        if draining && !stall_logged {
+                            stall_logged = true;
+                            tracing::warn!("drain waiting on reconcile; Ctrl-C again to stop");
+                        }
                     }
                 }
                 self.status.control(ControlState::Up);
@@ -135,19 +155,19 @@ impl Factory {
                     Ok((id, Ok(outcome))) => {
                         reviews.remove(&id);
                         let key = keys.remove(&id);
-                        tracing::info!(task = ?key, ?outcome, "run finished");
+                        tracing::info!(task = key.as_ref().map(|k| k.0.as_str()), ?outcome, "run finished");
                     }
                     Ok((id, Err(e))) => {
                         reviews.remove(&id);
                         let key = keys.remove(&id);
-                        tracing::warn!(task = ?key, error = %e, "run failed; reconciling");
+                        tracing::warn!(task = key.as_ref().map(|k| k.0.as_str()), error = %e, "run failed; reconciling");
                         self.status.error(format!("{} failed: {e}", key.as_ref().map_or("a run", |k| k.0.as_str())));
                         dirty = true;
                     }
                     Err(e) => {
                         reviews.remove(&e.id());
                         let key = keys.remove(&e.id());
-                        tracing::error!(task = ?key, error = %e, "run panicked; reconciling");
+                        tracing::error!(task = key.as_ref().map(|k| k.0.as_str()), error = %e, "run panicked; reconciling");
                         dirty = true;
                     }
                 },
@@ -176,33 +196,51 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
+        // Before any early return, so the status board's spend keeps moving while the factory is full or paused, and
+        // a usage reading another repo's run heard reaches this repo's board.
+        self.capped();
+        self.status.usage(self.host.usage());
         if self.usage_paused() {
             return Ok(());
         }
         let busy: HashSet<TaskKey> = keys.values().cloned().collect();
         let mut others = self.held_by_others(&busy).await?;
-        let mut room = self.room(keys.len() - reviewing + others).await?;
-        if room == 0 && self.release_parked_for_waiting(&busy).await > 0 {
+        let mut room = self.room(keys.len() - reviewing + others.len()).await?;
+        if room == 0 && self.release_parked_for_waiting(&busy, &others).await > 0 {
             others = self.held_by_others(&busy).await?;
-            room = self.room(keys.len() - reviewing + others).await?;
+            room = self.room(keys.len() - reviewing + others.len()).await?;
         }
-        if room == 0 {
-            if keys.len() > reviewing {
+        // Skipped before taking `room`, so a task still backing off at the head of the queue can't keep the ones
+        // behind it from starting (TRAIL-756).
+        let startable: Vec<Task> = self
+            .ready_graded()
+            .await?
+            .into_iter()
+            .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
+            .collect();
+        if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
+            if starvation_is_parked_tasks(keys.len(), reviewing, others.len(), self.config.repo.max_sandboxes) {
+                self.warn_if_starved(&others).await;
+            } else {
+                // Workers running, or only the host's cap full with other repos' work: forget the last warning, so
+                // the same holders starving the queue again are said so again (TRAIL-629).
                 *self.starved.lock().unwrap() = None;
-            } else if parked_fill_repo_cap(others, self.config.repo.max_sandboxes) {
-                self.warn_if_starved().await;
             }
             return Ok(());
         }
         *self.starved.lock().unwrap() = None;
-        let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
-        // Skipped before taking `room`, so a task still backing off at the head of the queue can't keep the ones
-        // behind it from starting (TRAIL-756).
-        let startable = ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key));
-        for task in startable.take(room) {
+        for task in startable {
+            // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
+            // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
+            if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
+                if room == 0 {
+                    continue;
+                }
+                room -= 1;
+            }
             let Some(target) = self.place_task(&mut survey, &task) else {
-                tracing::info!("{}", messages::no_target_has_room(&task.key.0));
+                tracing::info!("{}", messages::no_target_has_room(&task.key));
                 continue;
             };
             let key = task.key.clone();
@@ -215,14 +253,16 @@ impl Factory {
         Ok(())
     }
 
-    /// How many sandboxes in the cap are held for tasks this process isn't running: parked tasks', mostly.
-    async fn held_by_others(&self, busy: &HashSet<TaskKey>) -> Result<usize> {
-        Ok(self
+    /// The sandboxes in the cap held for tasks this process isn't running: parked tasks', mostly.
+    async fn held_by_others(&self, busy: &HashSet<TaskKey>) -> Result<Others> {
+        let others = self
             .occupied_after_release(busy)
             .await?
-            .into_iter()
-            .filter(|s| s.labels.get(label::TASK).is_none_or(|t| !busy.contains(&TaskKey(t.clone()))))
-            .count())
+            .iter()
+            .map(|s| s.labels.get(label::TASK).map(|t| TaskKey(t.clone())))
+            .filter(|t| t.as_ref().is_none_or(|t| !busy.contains(t)))
+            .collect();
+        Ok(Others(others))
     }
 
     /// With the cap full, gives up the pooled sandboxes of parked tasks to ready tasks that are waiting for a place,
@@ -230,7 +270,7 @@ impl Factory {
     /// have passed and releasing loses nothing: the daemon finds no work in the checkout that isn't on the remote
     /// branch the task resumes from. The task keeps its place in the queue; answered, it starts like a rework on a
     /// pooled sandbox. Returns how many were released. A failure is logged and the sandbox kept or left to reconcile.
-    async fn release_parked_for_waiting(&self, busy: &HashSet<TaskKey>) -> usize {
+    async fn release_parked_for_waiting(&self, busy: &HashSet<TaskKey>, others: &Others) -> usize {
         let after = self.config.repo.release_parked_after;
         if after == 0 {
             return 0;
@@ -249,8 +289,18 @@ impl Factory {
             return 0;
         }
         due.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let held = match self.occupied().await {
+            Ok(held) => held,
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't list the sandboxes held by parked tasks");
+                return 0;
+            }
+        };
         let waiting = match self.ready_graded().await {
-            Ok(ready) => ready.into_iter().filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key)).count(),
+            Ok(ready) => ready
+                .into_iter()
+                .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key) && !others.contains(&t.key))
+                .count(),
             Err(e) => {
                 tracing::warn!(error = %e, "couldn't list the ready tasks to see whether a parked task's sandbox is wanted");
                 return 0;
@@ -259,13 +309,6 @@ impl Factory {
         if waiting == 0 {
             return 0;
         }
-        let held = match self.occupied().await {
-            Ok(held) => held,
-            Err(e) => {
-                tracing::warn!(error = %e, "couldn't list the sandboxes held by parked tasks");
-                return 0;
-            }
-        };
         let mut released = 0;
         for (key, parked_for) in due {
             if released == waiting {
@@ -280,7 +323,7 @@ impl Factory {
             let task = match self.tracker.show(&key).await {
                 Ok(task) => task,
                 Err(e) => {
-                    tracing::warn!(task = %key.0, error = %e, "couldn't look up a parked task to release its sandbox");
+                    tracing::warn!(task = %key, error = %e, "couldn't look up a parked task to release its sandbox");
                     continue;
                 }
             };
@@ -288,16 +331,31 @@ impl Factory {
             if task.status != Status::NeedsInput || task.run.worker_breach.is_some() {
                 continue;
             }
-            // What the task resumes from: its PR branch on a rework, else the base branch.
-            let remote = if task.run.pr.is_some() { Self::branch(&task) } else { self.config.repo.base_branch.clone() };
-            match self.daemon_of(sandbox).unpublished(&sandbox.id, &remote).await {
+            // The asker's lease keeps everyone else's writes out until it lapses, so the release couldn't be recorded
+            // below; don't wake the suspended daemon to check for unpublished work until then.
+            if task.holder.as_deref().is_some_and(|h| h != self.tracker.agent()) {
+                tracing::debug!(task = %key, holder = ?task.holder, "a parked task is still claimed; keeping its sandbox for now");
+                continue;
+            }
+            // What the task resumes from: its own branch when the remote has it (a PR is open, or the branch was pushed
+            // and opening the PR failed), else the base branch. Asking about a branch the remote lacks is an error.
+            let branch = Self::branch(&task);
+            let daemon = self.daemon_of(sandbox);
+            let answer = match daemon.unpublished(&sandbox.id, &branch).await {
+                Err(e) if task.run.pr.is_none() => {
+                    tracing::debug!(task = %key, error = %e, "a parked task's branch isn't on the remote; comparing with the base");
+                    daemon.unpublished(&sandbox.id, &self.config.repo.base_branch).await
+                }
+                answer => answer,
+            };
+            match answer {
                 Ok(false) => {}
                 Ok(true) => {
-                    tracing::debug!(task = %key.0, sandbox = %sandbox.name, "a parked task has unpublished work; keeping its sandbox");
+                    tracing::debug!(task = %key, sandbox = %sandbox.name, "a parked task has unpublished work; keeping its sandbox");
                     continue;
                 }
                 Err(e) => {
-                    tracing::debug!(task = %key.0, sandbox = %sandbox.name, error = %e, "couldn't tell whether a parked task has unpublished work; keeping its sandbox");
+                    tracing::debug!(task = %key, sandbox = %sandbox.name, error = %e, "couldn't tell whether a parked task has unpublished work; keeping its sandbox");
                     continue;
                 }
             }
@@ -305,43 +363,67 @@ impl Factory {
             let record = RunUpdate { released: Some(unix_now()), ..RunUpdate::default() };
             if let Err(e) = self.tracker.report(&key, record).await {
                 // Most likely the asker's lease on the task hasn't lapsed yet, which keeps everyone else out of it.
-                tracing::debug!(task = %key.0, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
+                tracing::debug!(task = %key, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
                 continue;
             }
             self.parked_since.lock().unwrap().remove(&key);
             released += 1;
-            tracing::info!(task = %key.0, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
+            tracing::info!(task = %key, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
             if let Err(e) = self.release_worker(sandbox).await {
-                tracing::warn!(task = %key.0, sandbox = %sandbox.name, error = %e, "couldn't release a parked task's sandbox; reconcile will");
+                tracing::warn!(task = %key, sandbox = %sandbox.name, error = %e, "couldn't release a parked task's sandbox; reconcile will");
             }
         }
         released
     }
 
-    /// With no place left and nothing running, parked tasks are holding the cap. If ready tasks are waiting, say so
-    /// loudly, once per change in who waits: the queue stalls until a person answers (TRAIL-538).
-    async fn warn_if_starved(&self) {
-        let mut waiting: Vec<TaskKey> = match self.ready_graded().await {
-            Ok(ready) => ready.into_iter().map(|t| t.key).collect(),
+    /// With no place left and nothing running, the tasks the sandboxes are held for are what the queue waits on. If
+    /// they are parked and ready tasks are waiting, say so loudly, once per change in who holds: the queue stalls
+    /// until a person answers (TRAIL-538). Holders in setback or otherwise in flight free their place unaided, so
+    /// they're named at info instead (TRAIL-1184).
+    async fn warn_if_starved(&self, others: &Others) {
+        let waiting = match self.ready_graded().await {
+            Ok(ready) => ready.into_iter().filter(|t| !others.contains(&t.key)).count(),
             Err(e) => {
-                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether parked ones starve them");
+                tracing::warn!(error = %e, "couldn't list the ready tasks to see whether held sandboxes starve them");
                 return;
             }
         };
-        waiting.sort();
-        let mut last = self.starved.lock().unwrap();
-        if waiting.is_empty() {
-            *last = None;
-        } else if last.as_ref() != Some(&waiting) {
-            let names: Vec<&str> = waiting.iter().map(|k| k.0.as_str()).collect();
-            tracing::warn!(
-                tasks = names.join(", "),
-                max_sandboxes = self.config.repo.max_sandboxes,
-                "{} ready tasks waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
-                waiting.len()
-            );
-            *last = Some(waiting);
+        let mut holders: Vec<(TaskKey, bool)> = Vec::new();
+        for key in others.0.iter().flatten() {
+            let parked = match self.tracker.show(key).await {
+                Ok(task) => task.status == Status::NeedsInput,
+                Err(e) => {
+                    tracing::warn!(task = %key, error = %e, "couldn't look up the task holding a sandbox");
+                    false
+                }
+            };
+            holders.push((key.clone(), parked));
         }
+        holders.sort();
+        let mut last = self.starved.lock().unwrap();
+        if !should_say_starved(&mut last, &holders, waiting) {
+            return;
+        }
+        let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
+        let max_sandboxes = self.config.repo.max_sandboxes;
+        let tasks = if waiting == 1 { "task" } else { "tasks" };
+        if parked_fill_repo_cap(parked.len(), max_sandboxes) {
+            tracing::warn!(
+                held_by = parked.join(", "),
+                max_sandboxes,
+                "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
+            );
+        } else {
+            let held: Vec<String> = holders
+                .iter()
+                .map(|(k, parked)| {
+                    let retry = self.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                    describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
+                })
+                .collect();
+            tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
+        }
+        *last = Some(holders);
     }
 
     /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
@@ -376,7 +458,7 @@ impl Factory {
             if was_reported {
                 self.ungraded.lock().unwrap().insert(task.key.clone());
             }
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't clear the task's ungraded flag");
+            tracing::warn!(task = %task.key, error = %e, "couldn't clear the task's ungraded flag");
         }
     }
 
@@ -384,13 +466,13 @@ impl Factory {
         if task.run.ungraded == Some(true) || !self.ungraded.lock().unwrap().insert(task.key.clone()) {
             return;
         }
-        tracing::info!(task = %task.key.0, "no grade; skipping it until a human sets one");
+        tracing::info!(task = %task.key, "no grade; skipping it until a human sets one");
         let told = async {
             self.tracker.note(&task.key, &messages::ungraded_note()).await?;
             self.tracker.report(&task.key, RunUpdate { ungraded: Some(true), ..RunUpdate::default() }).await
         };
         if let Err(e) = told.await {
-            tracing::warn!(task = %task.key.0, error = %e, "couldn't note that the task has no grade");
+            tracing::warn!(task = %task.key, error = %e, "couldn't note that the task has no grade");
         }
     }
 
@@ -457,8 +539,12 @@ impl Factory {
         let mut released = Vec::new();
         // One listing stands in for a lookup per sandbox: parked tasks, the common case, are in it. Only a task it
         // lacks (finished, cancelled, re-parented) is looked up on its own (TRAIL-258).
+        let mut listing_ok = false;
         let listed: HashMap<TaskKey, Task> = match self.tracker.in_flight(self.project(), &self.queue()).await {
-            Ok(tasks) => tasks.into_iter().map(|t| (t.key.clone(), t)).collect(),
+            Ok(tasks) => {
+                listing_ok = true;
+                tasks.into_iter().map(|t| (t.key.clone(), t)).collect()
+            }
             Err(e) => {
                 // Debug, not warn: this runs every poll, and the fallback below works, with its own warnings.
                 tracing::debug!(error = %e, "couldn't list the tasks in flight; looking parked ones up one by one");
@@ -471,8 +557,23 @@ impl Factory {
                 Some(task) => Ok(task.clone()),
                 None => self.tracker.show(&TaskKey(key.clone())).await,
             };
+            // A live task the queues' listing lacks was taken off its queue by hand (TRAIL-1147): the factory no
+            // longer owns it, so its sandbox is released rather than held until the task closes.
+            let off_queue = listing_ok && !self.queue().is_empty() && !listed.contains_key(&TaskKey(key.clone()));
             let task = match found {
                 Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
+                Ok(task)
+                    if off_queue
+                        && matches!(task.status, Status::NeedsInput | Status::InProgress | Status::InReview) =>
+                {
+                    tracing::info!(task = %task.key, sandbox = %sandbox.name, "a task left the factory queue; releasing its sandbox");
+                    let mut done = Reconciled::default();
+                    self.reconcile_pooled(sandbox, &mut done).await;
+                    if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
+                        released.push(sandbox.name.clone());
+                    }
+                    continue;
+                }
                 Ok(task) => {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
                     if task.status == Status::NeedsInput {
@@ -490,9 +591,9 @@ impl Factory {
             let mut done = Reconciled::default();
             self.reconcile_pooled(sandbox, &mut done).await;
             if !done.released.is_empty() || !done.abandoned.is_empty() || !done.destroyed.is_empty() {
-                tracing::info!(task = %task.key.0, sandbox = %sandbox.name, "released the sandbox of a task no longer parked");
+                tracing::info!(task = %task.key, sandbox = %sandbox.name, "released the sandbox of a task no longer parked");
                 if let Err(e) = self.reconcile_task(&task, &mut done).await {
-                    tracing::warn!(task = %task.key.0, error = %e, "couldn't clean up a released task; reconcile will");
+                    tracing::warn!(task = %task.key, error = %e, "couldn't clean up a released task; reconcile will");
                 }
                 released.push(sandbox.name.clone());
             }
@@ -506,23 +607,34 @@ impl Factory {
 
     /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
+        self.capped();
+        self.status.usage(self.host.usage());
         if self.usage_paused() {
             return Ok(Vec::new());
         }
         let none = HashSet::new();
-        let mut room = self.room(self.occupied_after_release(&none).await?.len()).await?;
-        if room == 0 && self.release_parked_for_waiting(&none).await > 0 {
-            room = self.room(self.occupied_after_release(&none).await?.len()).await?;
+        let mut others = self.held_by_others(&none).await?;
+        let mut room = self.room(others.len()).await?;
+        if room == 0 && self.release_parked_for_waiting(&none, &others).await > 0 {
+            others = self.held_by_others(&none).await?;
+            room = self.room(others.len()).await?;
         }
-        if room == 0 {
+        let ready = self.ready_graded().await?;
+        let startable: Vec<Task> = ready.into_iter().filter(|t| self.setback_over(&t.key)).collect();
+        if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        let ready = self.ready_graded().await?;
         let mut survey = self.survey().await;
-        for task in ready.into_iter().filter(|t| self.setback_over(&t.key)).take(room) {
+        for task in startable {
+            if !others.contains(&task.key) {
+                if room == 0 {
+                    continue;
+                }
+                room -= 1;
+            }
             let Some(target) = self.place_task(&mut survey, &task) else {
-                tracing::info!("{}", messages::no_target_has_room(&task.key.0));
+                tracing::info!("{}", messages::no_target_has_room(&task.key));
                 continue;
             };
             let place = self.hold(&task.key, Role::Worker, target);
@@ -588,6 +700,19 @@ impl Factory {
     }
 }
 
+/// The sandboxes held for tasks that aren't running, by the key of the task each is held for.
+struct Others(Vec<Option<TaskKey>>);
+
+impl Others {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn contains(&self, key: &TaskKey) -> bool {
+        self.0.iter().any(|t| t.as_ref() == Some(key))
+    }
+}
+
 /// What reconcile found to carry on with, for the caller to run beside whatever else it does.
 #[derive(Default)]
 pub(crate) struct Due {
@@ -603,23 +728,93 @@ fn parked_fill_repo_cap(others: usize, max_sandboxes: usize) -> bool {
     others > 0 && others >= max_sandboxes
 }
 
+/// Whether, with no room, the queue waits on parked tasks: no workers running (reviews don't count, they free their
+/// places unaided) and the held sandboxes fill the repo's own cap.
+fn starvation_is_parked_tasks(running: usize, reviewing: usize, others: usize, max_sandboxes: usize) -> bool {
+    running <= reviewing && parked_fill_repo_cap(others, max_sandboxes)
+}
+
+/// Updates the last-said holders and returns whether the starvation is to be said now: not with nothing waiting
+/// (which forgets the last warning), and not again for the same holders.
+fn should_say_starved(last: &mut Option<Vec<(TaskKey, bool)>>, holders: &[(TaskKey, bool)], waiting: usize) -> bool {
+    if waiting == 0 {
+        *last = None;
+        return false;
+    }
+    last.as_deref() != Some(holders)
+}
+
 /// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
 /// open (changes requested for a conflict, CI or a review) before fresh tasks, since it is nearly done and goes stale
 /// while it waits (TRAIL-868). The sort is stable, so the tracker's order (due date, age) holds among equals.
 fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
-    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.changes_requested.is_some());
+    let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.pending_changes().is_some());
     ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
 }
 
 #[cfg(test)]
 mod starvation_tests {
-    use super::parked_fill_repo_cap;
+    use super::{parked_fill_repo_cap, should_say_starved, starvation_is_parked_tasks};
+    use trailhead_factory::TaskKey;
+
+    fn holders(keys: &[(&str, bool)]) -> Vec<(TaskKey, bool)> {
+        keys.iter().map(|(k, p)| (TaskKey((*k).to_string()), *p)).collect()
+    }
 
     #[test]
     fn only_a_full_repo_cap_counts_as_starved_by_parked_tasks() {
         assert!(parked_fill_repo_cap(2, 2));
         assert!(!parked_fill_repo_cap(1, 2), "the host's cap is what's full, and other repos' runs will free it");
         assert!(!parked_fill_repo_cap(0, 2));
+    }
+
+    #[test]
+    fn the_warning_is_said_once_per_set_of_holders() {
+        let (a, ab) = (holders(&[("T-1", true)]), holders(&[("T-1", true), ("T-2", true)]));
+        let mut last = None;
+        assert!(should_say_starved(&mut last, &a, 1));
+        last = Some(a.clone());
+        assert!(!should_say_starved(&mut last, &a, 3), "the same holders aren't said again");
+        assert!(should_say_starved(&mut last, &ab, 1), "a new set of holders is");
+        assert!(should_say_starved(&mut last, &holders(&[("T-1", false)]), 1), "so is a holder no longer parked");
+    }
+
+    #[test]
+    fn nothing_waiting_forgets_the_last_warning() {
+        let a = holders(&[("T-1", true)]);
+        let mut last = Some(a.clone());
+        assert!(!should_say_starved(&mut last, &a, 0));
+        assert_eq!(last, None);
+        assert!(should_say_starved(&mut last, &a, 1), "the same holders starving again are said again");
+    }
+
+    #[test]
+    fn only_parked_tasks_filling_the_repo_cap_keep_the_warning() {
+        assert!(starvation_is_parked_tasks(0, 0, 2, 2));
+        assert!(starvation_is_parked_tasks(1, 1, 2, 2), "reviews aren't workers");
+        assert!(!starvation_is_parked_tasks(1, 0, 2, 2), "running workers reset it");
+        assert!(!starvation_is_parked_tasks(0, 0, 1, 2), "only the host cap full resets it (TRAIL-629)");
+    }
+}
+
+/// How a task holding a sandbox reads in the starvation log: parked, backing off from an infra failure, or running.
+fn describe_holder(key: &str, parked: bool, retry_in: Option<Duration>) -> String {
+    match (parked, retry_in) {
+        (true, _) => format!("{key} (parked)"),
+        (false, Some(wait)) => format!("{key} (retrying in {}s)", wait.as_secs()),
+        (false, None) => format!("{key} (in flight)"),
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::*;
+
+    #[test]
+    fn a_holder_in_setback_is_not_called_parked() {
+        assert_eq!(describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42))), "TRAIL-1087 (retrying in 42s)");
+        assert_eq!(describe_holder("TRAIL-1", false, None), "TRAIL-1 (in flight)");
+        assert_eq!(describe_holder("TRAIL-2", true, None), "TRAIL-2 (parked)");
     }
 }

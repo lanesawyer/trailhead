@@ -25,6 +25,7 @@ pub struct Client {
     pub ours: bool,
     /// Where this server's tokens are saved on this machine.
     pub creds: CredStore,
+    api: trailhead_client::http::Client,
 }
 
 pub fn is_local(url: &Url) -> bool {
@@ -58,7 +59,7 @@ impl Client {
         if ours
             && let Some(info) = health(&http, &base, Some(&token)).await
             && is_stale(&info)
-            && !would_start_unscoped_under_systemd()
+            && !skip_restart_unscoped()
         {
             match info.runs_in_flight.unwrap_or(0) {
                 // A restart now would cancel the factory's runs: the server drains them and restarts itself, and keeps
@@ -92,7 +93,8 @@ impl Client {
                 }
             }
         }
-        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds })
+        let api = typed(&http, &base, &token, ours);
+        Ok(Client { http, base: base.clone(), token, local: is_local(&base), ours, creds, api })
     }
 
     /// Sends `req`. If the local server has gone away since `connect` (stopped, or
@@ -230,6 +232,11 @@ impl Client {
             }
         }
         Ok(out)
+    }
+
+    /// The typed client, for the commands moved onto it.
+    pub fn api(&self) -> &trailhead_client::http::Client {
+        &self.api
     }
 
     pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
@@ -555,18 +562,83 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
         return None;
     }
     let uid = std::fs::metadata("/proc/self").ok()?.uid();
-    scope_env(
-        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
-        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
-        uid,
-        |dir| std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid),
-    )
+    let xdg = std::env::var_os("XDG_RUNTIME_DIR");
+    let dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+    let vars = scope_env(xdg.as_deref(), dbus.as_deref(), uid, |dir| {
+        std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid)
+    })?;
+    // A runtime directory doesn't mean a manager: probe its bus before choosing the scoped mode.
+    let var = |name: &str, own: Option<std::ffi::OsString>| {
+        vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).or(own)
+    };
+    let runtime = var("XDG_RUNTIME_DIR", xdg)?;
+    let address = var("DBUS_SESSION_BUS_ADDRESS", dbus);
+    match manager_sockets(std::path::Path::new(&runtime), address.as_deref()) {
+        Some(sockets) if !sockets.iter().any(|s| std::os::unix::net::UnixStream::connect(s).is_ok()) => None,
+        _ => Some(vars),
+    }
+}
+
+/// The sockets `systemd-run --user` may reach the user manager through: its private socket, tried first, then the
+/// session bus. Any one accepting a connection means a manager is there (servers often have no bus daemon, only
+/// the private socket). `None` when the bus address can't be probed (abstract, tcp, ...), which is taken as usable
+/// and left to the failure backstop.
+fn manager_sockets(
+    runtime_dir: &std::path::Path,
+    address: Option<&std::ffi::OsStr>,
+) -> Option<Vec<std::path::PathBuf>> {
+    let bus = bus_socket(runtime_dir, address)?;
+    Some(vec![runtime_dir.join("systemd/private"), bus])
+}
+
+/// The filesystem socket of the user's session bus (served by dbus-daemon or dbus-broker, not by the manager): the first `unix:path=` entry
+/// of `DBUS_SESSION_BUS_ADDRESS`, or `<runtime dir>/bus` when that is unset. `None` for an address that can't be
+/// probed (abstract, tcp, ...), which is taken as usable and left to the failure backstop.
+fn bus_socket(runtime_dir: &std::path::Path, address: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let Some(address) = address.and_then(|a| a.to_str()).filter(|a| !a.is_empty()) else {
+        return Some(runtime_dir.join("bus"));
+    };
+    let entry = address.split(';').next()?;
+    let params = entry.strip_prefix("unix:")?;
+    params.split(',').find_map(|kv| kv.strip_prefix("path=")).map(Into::into)
 }
 
 /// True when a server started from here would run unscoped, in this process's cgroup, although
 /// systemd is around to do better (a cron job with no user manager to reach): it would die with the job.
 fn would_start_unscoped_under_systemd() -> bool {
     systemd_run_on_path() && current_scope_env().is_none()
+}
+
+/// The note printed when a stale server is left running because restarting it would start it unscoped.
+const UNSCOPED_RESTART_NOTE: &str = "note: a newer trailhead is installed, but the local server isn't restarted onto it: systemd-run is on PATH but there is no reachable user manager to scope it under (no /run/user/<uid>, or nothing answering on the manager's private socket or the session bus), so a restarted server would die with this process";
+
+/// True, after saying why on stderr, when a stale server must be left alone for lack of a user manager.
+fn skip_restart_unscoped() -> bool {
+    let skip = would_start_unscoped_under_systemd();
+    if skip {
+        eprintln!("{UNSCOPED_RESTART_NOTE}");
+    }
+    skip
+}
+
+/// The systemd unit (the last cgroup path component, e.g. `trailhead-server-123.scope`) a `/proc/<pid>/cgroup`
+/// says its process runs in. Only the unified (v2) hierarchy line is read.
+pub fn cgroup_unit(proc_cgroup: &str) -> Option<String> {
+    let path = proc_cgroup.lines().find_map(|l| l.strip_prefix("0::"))?;
+    path.trim().rsplit('/').find(|c| !c.is_empty()).map(str::to_string)
+}
+
+/// True for a scope the server shares with something else (`app-gnome-code-1234.scope`, `vte-spawn-<uuid>.scope`,
+/// `session-3.scope`): its death (systemd-oomd killing the app, the terminal closing, the ssh session ending) would
+/// take the server with it, the TRAIL-178 regression. Only the server's own `trailhead-server-*.scope` is safe, and a
+/// service is its own unit, so only scopes count.
+pub fn is_shared_scope(unit: &str) -> bool {
+    unit.ends_with(".scope") && !unit.starts_with("trailhead-server-")
+}
+
+/// The cgroup unit the server with this pid runs in, when this machine can say.
+pub fn server_unit(pid: u32) -> Option<String> {
+    cgroup_unit(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
 }
 
 /// Says in server.log that the server is running outside its own scope, so a death with its launcher can be traced.
@@ -589,6 +661,13 @@ fn log_since(log: &std::path::Path, from: u64) -> String {
     let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.lines().collect();
     lines[lines.len().saturating_sub(40)..].join("\n")
+}
+
+/// True when a scoped child's early exit was `systemd-run` itself failing (no usable user manager),
+/// not the server it exec'd stopping on its own. systemd-run exits 1 and prints "Failed to ..."
+/// before it execs; the server's own exits (port taken, bad database) don't.
+fn systemd_run_failed(status: std::process::ExitStatus, log: &str) -> bool {
+    status.code() == Some(1) && log.lines().any(|l| l.starts_with("Failed to "))
 }
 
 /// Runs `trailhead serve` detached, logging to the data directory. It keeps running
@@ -630,7 +709,7 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
     let mut scoped = scope_env.is_some();
     let mut started_at = log.metadata().map(|m| m.len()).unwrap_or(0);
     if !scoped && systemd_run_on_path() {
-        note_unscoped(&log, "no user systemd runtime directory found");
+        note_unscoped(&log, "no user systemd manager answering on its private socket or the session bus");
     }
     let mut child = spawn(scoped).context("couldn't start the local server")?;
     // Generous, since a busy machine (a full `cargo test` in a factory sandbox) can take well over 10 s to start it.
@@ -638,14 +717,15 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
         if health(http, base, None).await.is_some() {
             return remember_tunnel(&paths, base, false);
         }
-        if scoped && child.try_wait()?.is_some() {
+        let exited = child.try_wait()?;
+        if scoped && exited.is_some_and(|s| systemd_run_failed(s, &log_since(&paths.server_log(), started_at))) {
             // No usable user manager (a container, a bare ssh session): run it unscoped.
             scoped = false;
             note_unscoped(&log, "systemd-run --user failed");
             let from = log.metadata().map(|m| m.len()).unwrap_or(0);
             child = spawn(false).context("couldn't start the local server")?;
             started_at = from;
-        } else if let Some(status) = child.try_wait()? {
+        } else if let Some(status) = exited {
             // Another CLI's server may have taken the port first.
             if health(http, base, None).await.is_some() {
                 return remember_tunnel(&paths, base, false);
@@ -662,9 +742,54 @@ pub async fn start_local_server(http: &reqwest::Client, base: &Url) -> Result<()
 }
 
 #[cfg(test)]
+mod cgroup_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_unit_from_the_v2_line() {
+        let own = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/trailhead-server-42.scope\n";
+        assert_eq!(cgroup_unit(own).as_deref(), Some("trailhead-server-42.scope"));
+        assert_eq!(cgroup_unit("1:name=systemd:/x\n0::/\n"), None);
+        assert_eq!(cgroup_unit(""), None);
+    }
+
+    #[test]
+    fn shared_scopes_are_flagged_but_the_servers_own_is_not() {
+        assert!(is_shared_scope("app-gnome-code-1234.scope"));
+        assert!(is_shared_scope("vte-spawn-0a1b2c3d.scope"));
+        assert!(is_shared_scope("session-3.scope"));
+        assert!(!is_shared_scope("trailhead-server-42.scope"));
+        assert!(!is_shared_scope("app-dbus.service"));
+        assert!(!is_shared_scope("trailhead.service"));
+    }
+}
+
+#[cfg(test)]
 mod scope_env_tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn bus_socket_follows_the_address_or_the_runtime_dir() {
+        let run = std::path::Path::new("/run/user/7");
+        let sock = |a: Option<&str>| bus_socket(run, a.map(OsStr::new));
+        assert_eq!(sock(None), Some("/run/user/7/bus".into()));
+        assert_eq!(sock(Some("")), Some("/run/user/7/bus".into()));
+        assert_eq!(sock(Some("unix:path=/x/bus,guid=ab")), Some("/x/bus".into()));
+        assert_eq!(sock(Some("unix:guid=ab,path=/y")), Some("/y".into()));
+        assert_eq!(sock(Some("unix:abstract=/tmp/dbus-1")), None);
+        assert_eq!(sock(Some("tcp:host=localhost")), None);
+    }
+
+    #[test]
+    fn manager_sockets_try_the_private_socket_then_the_bus() {
+        let run = std::path::Path::new("/run/user/7");
+        let socks = |a: Option<&str>| manager_sockets(run, a.map(OsStr::new));
+        let private = std::path::PathBuf::from("/run/user/7/systemd/private");
+        assert_eq!(socks(None), Some(vec![private.clone(), "/run/user/7/bus".into()]));
+        assert_eq!(socks(Some("unix:path=/x/bus")), Some(vec![private, "/x/bus".into()]));
+        assert_eq!(socks(Some("unix:abstract=/tmp/dbus-1")), None);
+    }
 
     #[test]
     fn xdg_runtime_dir_set_needs_nothing_more() {
@@ -684,6 +809,24 @@ mod scope_env_tests {
     #[test]
     fn no_run_user_dir_of_ours_means_unscoped() {
         assert_eq!(scope_env(None, None, 1000, |_| false), None);
+    }
+
+    #[test]
+    fn skipped_restart_note_says_why() {
+        assert!(UNSCOPED_RESTART_NOTE.starts_with("note: "));
+        assert!(UNSCOPED_RESTART_NOTE.contains("/run/user/<uid>"));
+        assert!(!UNSCOPED_RESTART_NOTE.contains('\n'));
+    }
+
+    #[test]
+    fn only_systemd_runs_own_failure_triggers_the_fallback() {
+        use std::os::unix::process::ExitStatusExt;
+        let one = std::process::ExitStatus::from_raw(1 << 8);
+        let signal = std::process::ExitStatus::from_raw(9);
+        assert!(systemd_run_failed(one, "Failed to connect to bus: No medium found\n"));
+        assert!(!systemd_run_failed(one, "Error: address already in use\n"));
+        assert!(!systemd_run_failed(one, ""));
+        assert!(!systemd_run_failed(signal, "Failed to connect to bus\n"));
     }
 }
 
@@ -710,5 +853,35 @@ mod sse_tests {
         assert_eq!(take_sse_frame(&mut buf).unwrap().data, "a\nb");
         assert_eq!(take_sse_frame(&mut buf).unwrap().data, "c");
         assert_eq!(take_sse_frame(&mut buf), None);
+    }
+}
+
+/// A typed client for the server at `base`. Like [`Client::send`], it starts this machine's server again if it has gone
+/// away.
+fn typed(http: &reqwest::Client, base: &Url, token: &str, ours: bool) -> trailhead_client::http::Client {
+    let root = base.join("/").map_or_else(|_| base.to_string(), String::from);
+    let api = trailhead_client::http::Client::new(root, token);
+    if !ours {
+        return api;
+    }
+    let (http, base) = (http.clone(), base.clone());
+    api.with_reconnect(std::sync::Arc::new(move || {
+        let (http, base) = (http.clone(), base.clone());
+        Box::pin(async move {
+            eprintln!("note: the local server isn't running; starting it");
+            start_local_server(&http, &base).await.is_ok()
+        })
+    }))
+}
+
+/// A typed client's error as the CLI's: an API error keeps its stable code, which `main` prints.
+pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
+    use trailhead_client::http::Error;
+    match e {
+        Error::Api { error, .. } => error.into(),
+        Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
+        Error::Decode { status, source } => {
+            anyhow::Error::new(source).context(format!("Trailhead answered {status} but the response didn't decode"))
+        }
     }
 }

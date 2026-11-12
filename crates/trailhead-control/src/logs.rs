@@ -164,8 +164,9 @@ pub fn redact_value(value: &str) -> String {
     while !rest.is_empty() {
         let at_word_start = out.chars().last().is_none_or(|c| !is_token_char(c));
         if at_word_start {
-            let lower = rest.to_ascii_lowercase();
-            if let Some(after) = lower.strip_prefix("bearer ") {
+            let starts_with = |p: &str| rest.get(..p.len()).is_some_and(|s| s.eq_ignore_ascii_case(p));
+            if starts_with("bearer ") {
+                let after = &rest["bearer ".len()..];
                 let secret =
                     after.chars().take_while(|c| !c.is_whitespace() && *c != '"').map(char::len_utf8).sum::<usize>();
                 if secret > 0 {
@@ -175,7 +176,7 @@ pub fn redact_value(value: &str) -> String {
                     continue;
                 }
             }
-            if let Some(prefix) = TOKEN_PREFIXES.iter().find(|p| lower.starts_with(*p)) {
+            if let Some(prefix) = TOKEN_PREFIXES.iter().find(|p| starts_with(p)) {
                 let body = rest[prefix.len()..].chars().take_while(|c| is_token_char(*c)).count();
                 if body >= 8 {
                     out.push_str(REDACTED);
@@ -318,5 +319,14 @@ mod tests {
             assert_eq!(redact_value(text), text);
         }
         assert_eq!(redact_value("sk-ant-api03-abcdefghijkl,x"), "[redacted],x");
+    }
+
+    #[test]
+    fn redaction_matches_prefixes_case_insensitively_and_scales() {
+        assert_eq!(redact_value("BEARER abc and TH_abcdefghij"), "Bearer [redacted] and [redacted]");
+        // Multi-byte text near a prefix boundary must not panic.
+        assert_eq!(redact_value("éé bearé"), "éé bearé");
+        let long = "word é ".repeat(200_000) + "sk-abcdefghijkl";
+        assert!(redact_value(&long).ends_with("[redacted]"));
     }
 }

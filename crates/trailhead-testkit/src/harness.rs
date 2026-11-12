@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::Notify;
-use trailhead_factory::{EventSink, Feedback, Harness, Result, Role, RunContext, RunEvent, RunOutcome, Usage};
+use trailhead_factory::{
+    EventSink, Feedback, Harness, HarnessKind, Registry, Result, Role, RunContext, RunEvent, RunOutcome, Usage,
+};
 
 /// What a scripted agent does in one run: a model call per step, then an outcome.
 #[derive(Debug, Clone)]
@@ -53,6 +55,16 @@ impl Script {
         self.steps.extend((0..n).map(|_| Usage { output_tokens: tokens, ..Usage::default() }));
         self
     }
+}
+
+/// The `adapter` name the scripted harness is registered under in [`harnesses`].
+pub const SCRIPTED: &str = "scripted";
+
+/// A registry holding only `harness`, as `scripted`, so a profile can select it by name while the test keeps the
+/// handle to queue scripts into.
+pub fn harnesses(harness: Arc<ScriptedHarness>) -> Registry<HarnessKind> {
+    Registry::new("adapter")
+        .with(SCRIPTED, HarnessKind { build: Arc::new(move |_| harness.clone()), egress: |_| Vec::new() })
 }
 
 /// Plays a script per role; each run takes the next script queued for its role.

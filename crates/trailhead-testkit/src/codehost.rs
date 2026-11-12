@@ -30,6 +30,8 @@ pub struct FakePr {
     pub files: Option<Vec<ChangedFile>>,
     /// CI on the PR's head: pending until a test says otherwise.
     pub ci: CiState,
+    /// CI on earlier heads, by sha, as a test sets it.
+    pub ci_at: BTreeMap<String, CiState>,
     /// The log tails of failed checks, by check name.
     pub ci_logs: Vec<(String, String)>,
     /// Whether the host's auto-merge is on, as a person turns it on.
@@ -49,10 +51,6 @@ struct State {
     queue_updates: bool,
     /// How many times `update_branch` was asked to do something.
     update_requests: usize,
-    /// How many times `files` was asked for a PR's file list.
-    file_listings: usize,
-    /// How many times `head` was asked for a PR's head.
-    head_lookups: usize,
     /// Whether `behind` fails, like a host that is down.
     fail_behind: bool,
     /// How many times each `CodeHost` method was called, by name.
@@ -60,7 +58,12 @@ struct State {
     refuse_publish: Option<String>,
     /// Publishes still to fail with a transient error, and how many were attempted.
     flaky_publishes: usize,
+    /// Publishes still to apply and then fail with a transient error, like a ref write that landed behind a 5xx.
+    flaky_after_publishes: usize,
     publish_attempts: usize,
+    /// `open_pr` and `comment` calls still to fail with a transient error.
+    flaky_open_prs: usize,
+    flaky_comments: usize,
     refuse_merge: Option<String>,
     rate_limit: Option<RateLimit>,
 }
@@ -104,6 +107,22 @@ impl FakeCodeHost {
         self.state.lock().unwrap().flaky_publishes = times;
     }
 
+    /// Makes the next `times` publishes land and then fail with a transient error, like a ref write that succeeded
+    /// behind a GitHub 502.
+    pub fn flaky_publish_after_applying(&self, times: usize) {
+        self.state.lock().unwrap().flaky_after_publishes = times;
+    }
+
+    /// Makes the next `times` `open_pr` calls fail with a transient error, like a GitHub 502.
+    pub fn flaky_open_pr(&self, times: usize) {
+        self.state.lock().unwrap().flaky_open_prs = times;
+    }
+
+    /// Makes the next `times` `comment` calls fail with a transient error.
+    pub fn flaky_comment(&self, times: usize) {
+        self.state.lock().unwrap().flaky_comments = times;
+    }
+
     /// How many times `publish` was called.
     pub fn publish_attempts(&self) -> usize {
         self.state.lock().unwrap().publish_attempts
@@ -139,19 +158,9 @@ impl FakeCodeHost {
         }
     }
 
-    /// How many times the host was asked to list a PR's files.
-    pub fn file_listings(&self) -> usize {
-        self.state.lock().unwrap().file_listings
-    }
-
     /// How many times `update_branch` was called on a PR that was behind.
     pub fn update_requests(&self) -> usize {
         self.state.lock().unwrap().update_requests
-    }
-
-    /// How many times the host was asked for a PR's head.
-    pub fn head_lookups(&self) -> usize {
-        self.state.lock().unwrap().head_lookups
     }
 
     /// How many times the `CodeHost` method of this name (`"pr_state"`, `"merge"`, ...) was called.
@@ -159,9 +168,15 @@ impl FakeCodeHost {
         self.state.lock().unwrap().calls.get(method).copied().unwrap_or(0)
     }
 
-    /// How many calls the host got in all, whatever the method.
+    /// How many calls the host got in all, whatever the method. A `ci` call counts once, as on GitHub: it reads
+    /// the head without calling `head`.
     pub fn total_calls(&self) -> usize {
         self.state.lock().unwrap().calls.values().sum()
+    }
+
+    /// The PR's head commit, without counting a call.
+    fn head_sha(&self, pr: &PrRef) -> Result<String> {
+        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
     }
 
     fn count(&self, method: &'static str) {
@@ -207,6 +222,11 @@ impl FakeCodeHost {
     /// Sets how CI stands on the PR's head. A new head starts over at pending.
     pub fn set_ci(&self, pr: &PrRef, ci: CiState) {
         self.find(pr, |p, _| p.ci = ci).unwrap();
+    }
+
+    /// Sets how CI stood on `sha`, a head the PR had earlier (the current head's is `set_ci`'s).
+    pub fn set_ci_at(&self, pr: &PrRef, sha: &str, ci: CiState) {
+        self.find(pr, |p, _| p.ci_at.insert(sha.to_string(), ci)).unwrap();
     }
 
     /// Makes `behind` fail with a transient error until called with `false`.
@@ -275,6 +295,22 @@ impl CodeHost for FakeCodeHost {
             return Err(Error::NotFound(why.clone()));
         }
         let key = (repo.slug(), branch.to_string());
+        // The work is already on the branch, from an attempt whose answer was lost: nothing left to do.
+        let landed = !commits.is_empty()
+            && s.branches.get(&key).is_some_and(|b| {
+                let matches = b.len() >= commits.len()
+                    && b[b.len() - commits.len()..].iter().map(|c| &c.message).eq(commits.iter().map(|c| &c.message));
+                // The head that publish was made on top of: the branch's first start, or the head before it.
+                let before = if b.len() == commits.len() {
+                    s.starts.get(&key).cloned()
+                } else {
+                    Some(format!("{branch}@{}", b.len() - commits.len()))
+                };
+                matches && before.is_some_and(|before| before == start)
+            });
+        if landed {
+            return Ok(());
+        }
         if let Some(head) = s.heads.get(&key).filter(|head| *head != start) {
             return Err(Error::Conflict(format!("branch {branch} is at {head}, not at {start}")));
         }
@@ -288,12 +324,20 @@ impl CodeHost for FakeCodeHost {
             p.mergeable = Some(true);
         }
         s.branches.entry(key).or_default().extend_from_slice(commits);
+        if s.flaky_after_publishes > 0 {
+            s.flaky_after_publishes -= 1;
+            return Err(Error::Other("github 502 Bad Gateway on PATCH /repos/o/r/git/refs/heads/b: \"\"".into()));
+        }
         Ok(())
     }
 
     async fn open_pr(&self, repo: &Repo, pr: NewPr) -> Result<PrRef> {
         self.count("open_pr");
         let mut s = self.state.lock().unwrap();
+        if s.flaky_open_prs > 0 {
+            s.flaky_open_prs -= 1;
+            return Err(Error::Other("github 502 Bad Gateway on POST /repos/o/r/pulls: \"\"".into()));
+        }
         if !s.branches.contains_key(&(repo.slug(), pr.branch.clone())) {
             return Err(Error::NotFound(format!("branch {}", pr.branch)));
         }
@@ -313,6 +357,7 @@ impl CodeHost for FakeCodeHost {
             behind: false,
             files: None,
             ci: CiState::Pending,
+            ci_at: BTreeMap::new(),
             ci_logs: Vec::new(),
             auto_merge: false,
         });
@@ -340,6 +385,13 @@ impl CodeHost for FakeCodeHost {
 
     async fn comment(&self, pr: &PrRef, body: &str) -> Result<u64> {
         self.count("comment");
+        {
+            let mut s = self.state.lock().unwrap();
+            if s.flaky_comments > 0 {
+                s.flaky_comments -= 1;
+                return Err(Error::Other("github 502 Bad Gateway on POST /repos/o/r/issues/1/comments: \"\"".into()));
+            }
+        }
         self.find(pr, |p, _| {
             p.comments.push(body.to_string());
             p.comments.len() as u64
@@ -471,14 +523,26 @@ impl CodeHost for FakeCodeHost {
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
         self.count("head");
-        self.state.lock().unwrap().head_lookups += 1;
-        self.find(pr, |p, s| s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).cloned().unwrap_or_default())
+        self.head_sha(pr)
     }
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         self.count("ci");
-        let head = CodeHost::head(self, pr).await?;
+        // Read the head directly: going through `head` would count a second host call.
+        let head = self.head_sha(pr)?;
         self.find(pr, |p, _| Ci { head, state: p.ci.clone() })
+    }
+
+    async fn ci_at(&self, pr: &PrRef, sha: &str) -> Result<CiState> {
+        self.count("ci_at");
+        self.find(pr, |p, s| {
+            let current = s.heads.get(&(pr.repo.slug(), p.spec.branch.clone())).map(String::as_str);
+            match p.ci_at.get(sha) {
+                Some(state) => state.clone(),
+                None if current == Some(sha) => p.ci.clone(),
+                None => CiState::Pending,
+            }
+        })
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
@@ -488,7 +552,6 @@ impl CodeHost for FakeCodeHost {
 
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>> {
         self.count("files");
-        self.state.lock().unwrap().file_listings += 1;
         self.find(pr, |p, s| {
             if let Some(files) = &p.files {
                 return files.clone();

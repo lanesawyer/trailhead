@@ -2,12 +2,13 @@
 //! sandbox's sub-agent token. It does what a daemon needs; managing agents stays with the control plane, which
 //! uses the in-process tracker.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Method, RequestBuilder, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
+use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, TaskQuery, TaskUpdate};
 use trailhead_factory::{
     Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
     TaskKey, Tracker, Verdict, VerdictKind,
@@ -16,63 +17,105 @@ use trailhead_model::{self as model, CommentKind};
 
 #[derive(Clone)]
 pub struct RestTracker {
-    http: reqwest::Client,
-    base: String,
+    client: Client,
     cred: Credential,
 }
 
 impl RestTracker {
     /// `base` is the server's root URL, e.g. `http://127.0.0.1:7241`.
     pub fn new(base: impl Into<String>, cred: Credential) -> RestTracker {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().expect("http client");
-        RestTracker { http, base: base.into().trim_end_matches('/').to_string(), cred }
+        let base = base.into();
+        RestTracker { client: Client::new(base, cred.token.clone()), cred }
     }
 
-    fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.http.request(method, format!("{}/v1{path}", self.base)).bearer_auth(&self.cred.token)
+    async fn patch(&self, task: &TaskKey, update: TaskUpdate) -> Result<()> {
+        self.client.update_task(task, &update).await.map_err(error)
     }
 
-    async fn send(&self, req: RequestBuilder) -> Result<Value> {
-        let res = req.send().await.map_err(|e| Error::Other(format!("trailhead: {e}")))?;
-        let status = res.status();
-        let body: Value = res.json().await.unwrap_or(Value::Null);
-        if status.is_success() {
-            return Ok(body);
-        }
-        let err = &body["error"];
-        let msg = format!(
-            "trailhead {status} {}: {}",
-            err["code"].as_str().unwrap_or("error"),
-            err["message"].as_str().unwrap_or_default()
-        );
-        Err(match status {
-            StatusCode::NOT_FOUND => Error::NotFound(msg),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Forbidden(msg),
-            StatusCode::CONFLICT | StatusCode::PRECONDITION_FAILED => Error::Conflict(msg),
-            s => Error::from_status(s.as_u16(), msg),
-        })
+    async fn status(&self, task: &TaskKey, status: Status) -> Result<()> {
+        self.patch(task, TaskUpdate { status: Some(status), ..TaskUpdate::default() }).await
     }
 
-    async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        self.send(self.request(Method::POST, path).json(&body)).await
-    }
-
-    async fn patch(&self, task: &TaskKey, body: Value) -> Result<()> {
-        self.send(self.request(Method::PATCH, &format!("/tasks/{}", task.0)).json(&body)).await.map(drop)
-    }
-
-    async fn comment(&self, task: &TaskKey, body: Value) -> Result<()> {
-        self.post(&format!("/tasks/{}/comments", task.0), body).await.map(drop)
+    async fn comment(&self, task: &TaskKey, kind: CommentKind, body: &str) -> Result<()> {
+        self.client.add_comment(task, &NewComment::new(kind, body)).await.map(drop).map_err(error)
     }
 }
 
-/// A task from the API's JSON. `holder` is the claim holder's name when the response includes it (`include=claim`
-/// on lists), else its id.
-fn task(t: &Value, claim: &Value) -> Result<Task> {
-    let model: model::Task =
-        serde_json::from_value(t.clone()).map_err(|e| Error::Other(format!("a task the API sent didn't read: {e}")))?;
-    let holder = claim["holder"].as_str().or(claim["holder_id"].as_str()).map(str::to_string);
-    Task::from_model(model, holder)
+impl RestTracker {
+    /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
+    /// rework, in priority order.
+    async fn reworks(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        let parents: Vec<Option<&TaskKey>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(Some).collect() };
+        let mut seen = HashSet::new();
+        let mut reworks = Vec::new();
+        for parent in parents {
+            let query = TaskQuery {
+                project: Some(project.to_string()),
+                status: vec![Status::InReview],
+                parent: parent.cloned(),
+                changes_requested: Some(true),
+                with_claim: true,
+                limit: Some(1000),
+                ..TaskQuery::default()
+            };
+            for t in self.client.list_tasks(&query).await.map_err(error)? {
+                if t.claim.is_some() || !seen.insert(t.task.key.clone()) {
+                    continue;
+                }
+                // A blocked task can't be claimed, so it isn't ready.
+                let detail = self.client.show_task(&t.task.key).await.map_err(error)?;
+                if detail.blocked_by.is_empty() {
+                    reworks.push(Task { changes_requested: true, ..Task::from_model(t.task, None)? });
+                }
+            }
+        }
+        reworks.sort_by_key(|t| t.priority);
+        Ok(reworks)
+    }
+
+    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
+    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read is left out of the walk.
+    async fn raise_to_blocked_priority(&self, tasks: &mut [Task]) {
+        let mut seen: std::collections::HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = Default::default();
+        for task in tasks.iter_mut() {
+            let mut stack = vec![task.key.clone()];
+            let mut visited = HashSet::new();
+            while let Some(key) = stack.pop() {
+                if !visited.insert(key.clone()) {
+                    continue;
+                }
+                if !seen.contains_key(&key) {
+                    let read = match self.client.show_task(&key).await {
+                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
+                        _ => None,
+                    };
+                    seen.insert(key.clone(), read);
+                }
+                if let Some((priority, blocks)) = &seen[&key] {
+                    task.priority = task.priority.min(*priority);
+                    stack.extend(blocks.iter().cloned());
+                }
+            }
+        }
+    }
+}
+
+/// The factory's error for a failed call.
+fn error(e: ApiError) -> Error {
+    let ApiError::Api { status, error } = e else {
+        return match &e {
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {e}")),
+            _ => Error::Other(format!("trailhead: {e}")),
+        };
+    };
+    let msg = format!("trailhead {status} {}: {}", error.code, error.message);
+    match status {
+        404 => Error::NotFound(msg),
+        401 | 403 => Error::Forbidden(msg),
+        409 | 412 => Error::Conflict(msg),
+        s => Error::from_status(s, msg),
+    }
 }
 
 fn unsupported(what: &str) -> Error {
@@ -88,35 +131,43 @@ impl Tracker for RestTracker {
     /// Sandboxes don't act as other agents. The handle this returns refuses everything.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker> {
         let mut refused = self.clone();
+        refused.client = self.client.with_token("");
         refused.cred = Credential { agent: format!("{}/{name}", self.cred.agent), token: String::new() };
         Arc::new(refused)
     }
 
     async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         let fetch = if queue.is_empty() { limit } else { 1000 };
-        let req = self.request(Method::GET, "/ready").query(&[("project", project), ("limit", &fetch.to_string())]);
-        let ready = self.send(req).await?;
-        let mut queued = std::collections::HashSet::new();
+        let ready = self.client.ready(project, fetch).await.map_err(error)?;
+        let mut queued = HashSet::new();
         for q in queue {
-            let query = [("project", project), ("parent", q.0.as_str()), ("limit", "1000")];
-            let subtasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
-            queued.extend(
-                subtasks.as_array().into_iter().flatten().filter_map(|t| t["key"].as_str().map(str::to_string)),
-            );
+            let query = TaskQuery {
+                project: Some(project.to_string()),
+                parent: Some(q.clone()),
+                limit: Some(1000),
+                ..TaskQuery::default()
+            };
+            queued.extend(self.client.list_tasks(&query).await.map_err(error)?.into_iter().map(|t| t.task.key));
         }
-        ready
-            .as_array()
+        let mut tasks = ready
             .into_iter()
-            .flatten()
-            .filter(|t| queue.is_empty() || t["key"].as_str().is_some_and(|k| queued.contains(k)))
-            .take(limit)
-            .map(|t| task(t, &Value::Null))
-            .collect()
+            .filter(|t| queue.is_empty() || queued.contains(&t.key))
+            .map(|t| Task::from_model(t, None))
+            .collect::<Result<Vec<_>>>()?;
+        // As `CoreTracker::ready` does: reworks are listed ahead of new work within a priority, and the merge happens
+        // before the cut so a pile of low-priority reworks can't hide a higher-priority new task.
+        tasks.extend(self.reworks(project, queue).await?);
+        tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
+        tasks.truncate(limit);
+        self.raise_to_blocked_priority(&mut tasks).await;
+        Ok(tasks)
     }
 
     async fn show(&self, key: &TaskKey) -> Result<Task> {
-        let detail = self.send(self.request(Method::GET, &format!("/tasks/{}", key.0))).await?;
-        task(&detail["task"], &detail["claim"])
+        let detail = self.client.show_task(key).await.map_err(error)?;
+        let flag = detail.changes_requested.is_some();
+        Task::from_model(detail.task, detail.claim.map(|c| c.holder_id.to_string()))
+            .map(|task| Task { changes_requested: flag, ..task })
     }
 
     async fn human_context(&self, _: &TaskKey) -> Result<HumanContext> {
@@ -128,22 +179,24 @@ impl Tracker for RestTracker {
     }
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
-        let parents: Vec<Option<&str>> =
-            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.as_str())).collect() };
-        let unfinished: Vec<&str> = Status::ALL.into_iter().filter(|s| !s.is_closed()).map(Status::as_str).collect();
-        let unfinished = unfinished.join(",");
-        let mut seen = std::collections::HashSet::new();
+        let parents: Vec<Option<&TaskKey>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(Some).collect() };
+        let unfinished: Vec<Status> = Status::ALL.into_iter().filter(|s| !s.is_closed()).collect();
+        let mut seen = HashSet::new();
         let mut found = Vec::new();
         for parent in parents {
-            let mut query =
-                vec![("project", project), ("status", unfinished.as_str()), ("include", "claim"), ("limit", "1000")];
-            if let Some(p) = parent {
-                query.push(("parent", p));
-            }
-            let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
-            for t in tasks.as_array().into_iter().flatten() {
-                if t["metadata"].get(METADATA_KEY).is_some() && seen.insert(t["key"].as_str().map(str::to_string)) {
-                    found.push(task(t, &t["claim"])?);
+            let query = TaskQuery {
+                project: Some(project.to_string()),
+                status: unfinished.clone(),
+                parent: parent.cloned(),
+                with_claim: true,
+                limit: Some(1000),
+                ..TaskQuery::default()
+            };
+            for t in self.client.list_tasks(&query).await.map_err(error)? {
+                if t.task.metadata.get(METADATA_KEY).is_some() && seen.insert(t.task.key.clone()) {
+                    let holder = t.claim.map(|c| c.holder.unwrap_or_else(|| c.holder_id.to_string()));
+                    found.push(Task::from_model(t.task, holder)?);
                 }
             }
         }
@@ -151,44 +204,45 @@ impl Tracker for RestTracker {
     }
 
     async fn claim(&self, key: &TaskKey) -> Result<()> {
-        self.post(&format!("/tasks/{}/claim", key.0), json!({})).await.map(drop)
+        self.client.claim(key, None).await.map(drop).map_err(error)
     }
 
     async fn renew(&self, key: &TaskKey) -> Result<()> {
-        self.post(&format!("/tasks/{}/renew", key.0), json!({})).await.map(drop)
+        self.client.renew(key, None).await.map(drop).map_err(error)
     }
 
     async fn release(&self, key: &TaskKey) -> Result<()> {
-        self.post(&format!("/tasks/{}/release", key.0), json!({})).await.map(drop)
+        self.client.release(key).await.map(drop).map_err(error)
     }
 
     async fn report(&self, key: &TaskKey, update: RunUpdate) -> Result<()> {
-        self.patch(key, json!({ "metadata": { METADATA_KEY: update } })).await
+        let metadata = json!({ METADATA_KEY: update });
+        self.patch(key, TaskUpdate { metadata: Some(metadata), ..TaskUpdate::default() }).await
     }
 
     async fn request_review(&self, key: &TaskKey, handoff: &str) -> Result<()> {
         self.handoff(key, handoff).await?;
-        self.patch(key, json!({ "status": Status::InReview })).await
+        self.status(key, Status::InReview).await
     }
 
     async fn handoff(&self, key: &TaskKey, body: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": CommentKind::Handoff, "body": body })).await
+        self.comment(key, CommentKind::Handoff, body).await
     }
 
     async fn approve(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::Approved })).await
+        self.status(key, Status::Approved).await
     }
 
     async fn unapprove(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::InReview })).await
+        self.status(key, Status::InReview).await
     }
 
     async fn reopen(&self, key: &TaskKey) -> Result<()> {
-        self.patch(key, json!({ "status": Status::Open })).await
+        self.status(key, Status::Open).await
     }
 
     async fn raise_grade(&self, key: &TaskKey, grade: Grade) -> Result<()> {
-        self.patch(key, json!({ "grade": grade })).await
+        self.patch(key, TaskUpdate { grade: Some(grade), ..TaskUpdate::default() }).await
     }
 
     async fn record_verdict(&self, key: &TaskKey, verdict: &Verdict) -> Result<()> {
@@ -196,22 +250,25 @@ impl Tracker for RestTracker {
             VerdictKind::Approve => model::Verdict::Approve,
             VerdictKind::RequestChanges => model::Verdict::RequestChanges,
         };
-        let by = verdict.model.as_ref().map(|m| m.0.clone());
-        let body = json!({ "kind": CommentKind::Review, "body": verdict.body, "verdict": decision, "model": by });
-        self.comment(key, body).await
+        let comment = NewComment {
+            verdict: Some(decision),
+            model: verdict.model.as_ref().map(|m| m.0.clone()),
+            ..NewComment::new(CommentKind::Review, verdict.body.clone())
+        };
+        self.client.add_comment(key, &comment).await.map(drop).map_err(error)
     }
 
     async fn ask(&self, key: &TaskKey, question: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": CommentKind::Question, "body": question })).await
+        self.comment(key, CommentKind::Question, question).await
     }
 
     async fn note(&self, key: &TaskKey, body: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": CommentKind::Note, "body": body })).await
+        self.comment(key, CommentKind::Note, body).await
     }
 
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
-        self.comment(key, json!({ "kind": CommentKind::Handoff, "body": handoff })).await?;
-        self.patch(key, json!({ "status": Status::Done })).await
+        self.comment(key, CommentKind::Handoff, handoff).await?;
+        self.status(key, Status::Done).await
     }
 
     async fn create_task(
@@ -221,11 +278,13 @@ impl Tracker for RestTracker {
         description: &str,
         priority: Option<Priority>,
     ) -> Result<TaskKey> {
-        let body = json!({ "project": project, "title": title, "description": description, "priority": priority });
-        let created = self.post("/tasks", body).await?;
-        let task = created.get("task").unwrap_or(&created);
-        let key = task["key"].as_str().ok_or_else(|| Error::Other(format!("created task without a key: {created}")))?;
-        Ok(TaskKey(key.to_string()))
+        let new = NewTask {
+            project: project.to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
+            priority,
+        };
+        self.client.create_task(&new).await.map_err(error)
     }
 
     async fn follow_ups(&self, _: &TaskKey) -> Result<Vec<FollowUpTask>> {
@@ -234,14 +293,14 @@ impl Tracker for RestTracker {
 
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>> {
         let wanted = title.trim();
-        let query = [("project", project), ("title", wanted), ("limit", "100")];
-        let tasks = self.send(self.request(Method::GET, "/tasks").query(&query)).await?;
-        Ok(tasks
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|t| t["title"].as_str().is_some_and(|x| x.trim().eq_ignore_ascii_case(wanted)))
-            .and_then(|t| t["key"].as_str().map(|k| TaskKey(k.to_string()))))
+        let query = TaskQuery {
+            project: Some(project.to_string()),
+            title: Some(wanted.to_string()),
+            limit: Some(100),
+            ..TaskQuery::default()
+        };
+        let tasks = self.client.list_tasks(&query).await.map_err(error)?;
+        Ok(tasks.into_iter().find(|t| t.task.title.trim().eq_ignore_ascii_case(wanted)).map(|t| t.task.key))
     }
 
     async fn create_sub_agent(&self, _: &str, _: &str, _: Duration) -> Result<Credential> {
@@ -250,5 +309,19 @@ impl Tracker for RestTracker {
 
     async fn revoke_sub_agent(&self, _: &str) -> Result<()> {
         Err(unsupported("revoke agents"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_refused_connection_is_unreachable() {
+        // Bind a port, then free it, so nothing is listening there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let cred = Credential { agent: "x".into(), token: "t".into() };
+        let err = RestTracker::new(format!("http://127.0.0.1:{port}"), cred).show(&TaskKey("TRAIL-1".into())).await;
+        assert!(matches!(err, Err(Error::Unreachable(_))), "{err:?}");
     }
 }

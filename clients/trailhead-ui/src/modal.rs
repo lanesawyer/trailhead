@@ -7,9 +7,14 @@
 //!   asks the newest one to close too (from bevy-data-explorer). That is the default for every modal, so no form can opt out by accident; one that can't
 //!   close right now (a save in flight) says so with [`ModalLocked`] and stays. [`ModalClosed`] is sent first, for the
 //!   owner to drop what it holds.
-//! - **Focus.** Feathers' dialog takes focus when it opens and keeps Tab inside it.
+//! - **Focus.** Feathers' dialog keeps Tab inside it, but would hand the keyboard to the last control and draw a focus
+//!   ring there. So a modal opens with the keyboard on its title (which takes focus without joining the Tab order), or,
+//!   for a form, on the control that carries [`ModalFocus`] (a new task's title field). The one rule: a modal focuses
+//!   its first thing to act on, and one with nothing to type into focuses its title.
 //! - **Never taller than the window.** The frame is capped to [`MAX_HEIGHT_VH`] of the window and only the body
 //!   scrolls, with the kit's scrollbar, so the footer (Save, Cancel) stays in view.
+//! - **Inset like a panel.** The dialog's padding is [`space::PANEL_INSET`], not feathers' narrower one, so the body's
+//!   scrollbar sits in it as it does in every panel instead of hanging over the edge (TRAIL-1143).
 //! - **Use.** A marker type implements [`Modal`] (title, width); [`open_modal`] spawns it. Once it has spawned,
 //!   [`ModalSlots`] on the root names the [`ModalBody`] to fill, the [`ModalFooter`] for its buttons and the header's
 //!   tools, for controls beside the X. Close it by
@@ -17,15 +22,20 @@
 
 use bevy::feathers::controls::FeathersDialog;
 use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::FocusedInput;
+use bevy::input_focus::tab_navigation::TabIndex;
+use bevy::input_focus::{FocusCause, FocusedInput, InputFocus};
 use bevy::prelude::*;
-use bevy::ui_widgets::{ControlOrientation, RequestClose};
+use bevy::ui_widgets::{ControlOrientation, ModalDialog, RequestClose};
 
-use super::{HintBounds, PanelTools, ScrollDown, extent, layer, panel_header, scrollbar, space};
+use super::{
+    HintBounds, PanelTitle, PanelTools, ScrollDown, extent, layer, panel_header, scroll_body_node, scroll_frame_node,
+    scrollbar, space,
+};
 
 /// How much of the window's height the modal may take, with the barrier's margin around it.
 pub const MAX_HEIGHT_VH: f32 = 80.0;
-/// How much of the window's width, for a window narrower than the modal.
+/// How much of the window's width the modal may take: all of a [`Modal::wide`] one, and a cap on the rest for a window
+/// narrower than they are.
 pub const MAX_WIDTH_VW: f32 = 85.0;
 
 /// A kind of modal: a marker component that says what its title and width are.
@@ -37,6 +47,11 @@ pub trait Modal: Component {
     /// Whether the modal takes all the height it may ([`MAX_HEIGHT_VH`]) rather than its content's: for a detail view,
     /// which reads better at a steady size than one that jumps with what is in it.
     fn tall(&self) -> bool {
+        false
+    }
+    /// Whether the modal takes all the width it may ([`MAX_WIDTH_VW`]) instead of [`Modal::width`]: with
+    /// [`Modal::tall`], for a modal that holds a whole area of the app at one size (settings, whichever tab is shown).
+    fn wide(&self) -> bool {
         false
     }
 }
@@ -56,6 +71,11 @@ pub struct ModalBody;
 /// Where the modal's buttons go; it never scrolls away.
 #[derive(Component, Clone, Default)]
 pub struct ModalFooter;
+
+/// Put on a control inside a modal (a form's first text field) to give it the keyboard when it appears, instead of the
+/// modal's title.
+#[derive(Component, Clone, Default)]
+pub struct ModalFocus;
 
 /// Put on a modal's root while it can't close: a request to close it is ignored.
 #[derive(Component, Clone, Default)]
@@ -78,7 +98,8 @@ pub struct ModalClosed {
 
 /// Opens `modal` over everything on the board, and returns its root.
 pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
-    let (title, width, tall) = (modal.title(), modal.width(), modal.tall());
+    let width = if modal.wide() { vw(MAX_WIDTH_VW) } else { px(modal.width()) };
+    let (title, tall) = (modal.title(), modal.tall());
     commands
         .spawn_scene(bsn! {
             @FeathersDialog {
@@ -90,13 +111,13 @@ pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
         .id()
 }
 
-fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
+fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
     let height = if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto };
     Box::new(bsn_list! {
         Node {
             flex_direction: FlexDirection::Column,
             row_gap: { px(space::ROWS) },
-            width: { px(width) },
+            width: { width },
             height: { height },
             max_width: { vw(MAX_WIDTH_VW) },
             max_height: { vh(MAX_HEIGHT_VH) },
@@ -104,18 +125,14 @@ fn frame(title: String, width: f32, tall: bool) -> Box<dyn SceneList> {
         ModalFrame
         HintBounds
         Children [
-            @panel_header(title, true)
+            @panel_header(title)
             --
             // The body's box may shrink below its content, so the body scrolls and the footer keeps its place, and grows
             // into a tall modal's height.
-            Node { flex_direction: FlexDirection::Column, min_height: px(0), flex_shrink: 1.0, flex_grow: 1.0 }
+            ~{ scroll_frame_node(1.0) }
             Children [
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    min_height: px(0),
-                    row_gap: { px(space::ROWS) },
-                    overflow: { Overflow::scroll_y() },
-                }
+                // Grows into a tall modal's height too, so content can fill it (the settings Logs page's list).
+                ~{ scroll_body_node(space::ROWS, 1.0) }
                 ModalBody
                 ScrollDown
             ]
@@ -166,13 +183,17 @@ fn close_on_escape(
     }
 }
 
-/// Finds a new modal's body and footer, and gives the body its scrollbar.
+/// Finds a new modal's body and footer, gives the body its scrollbar and the dialog a panel's inset for it to sit in.
+#[allow(clippy::too_many_arguments)]
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
     parents: Query<&ChildOf>,
+    mut dialogs: Query<&mut Node, With<ModalDialog>>,
     roots: Query<(), With<ModalRoot>>,
     footers: Query<Entity, With<ModalFooter>>,
     tools: Query<Entity, With<PanelTools>>,
+    titles: Query<Entity, With<PanelTitle>>,
+    mut focus: ResMut<InputFocus>,
     mut commands: Commands,
 ) {
     for body in &bodies {
@@ -180,10 +201,27 @@ fn link_slots(
         let inside = |e: &Entity| parents.iter_ancestors(*e).any(|a| a == root);
         let Some(footer) = footers.iter().find(inside) else { continue };
         let Some(tools) = tools.iter().find(inside) else { continue };
+        if let Some(dialog) = parents.iter_ancestors(body).find(|e| dialogs.contains(*e))
+            && let Ok(mut node) = dialogs.get_mut(dialog)
+        {
+            node.padding = UiRect::all(px(space::PANEL_INSET));
+        }
         if let Ok(holder) = parents.get(body) {
             commands.queue_spawn_scene(scrollbar(body, ControlOrientation::Vertical)).insert(ChildOf(holder.parent()));
         }
         commands.entity(root).insert(ModalSlots { body, footer, tools });
+        // The keyboard starts on the title; a [`ModalFocus`] control takes it from there.
+        if let Some(title) = titles.iter().find(inside) {
+            commands.entity(title).insert(TabIndex(-1));
+            focus.set(title, FocusCause::Navigated);
+        }
+    }
+}
+
+/// Gives a [`ModalFocus`] control the keyboard when it appears.
+fn focus_requested(new: Query<Entity, Added<ModalFocus>>, mut focus: ResMut<InputFocus>) {
+    if let Some(wanted) = new.iter().last() {
+        focus.set(wanted, FocusCause::Navigated);
     }
 }
 
@@ -192,7 +230,10 @@ pub struct ModalPlugin;
 
 impl Plugin for ModalPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_request_close).add_observer(close_on_escape).add_systems(Update, link_slots);
+        app.init_resource::<InputFocus>()
+            .add_observer(on_request_close)
+            .add_observer(close_on_escape)
+            .add_systems(Update, (link_slots, focus_requested).chain());
     }
 }
 
@@ -249,6 +290,25 @@ mod tests {
     }
 
     #[test]
+    fn a_modal_opens_with_the_keyboard_on_its_title() {
+        let mut app = app();
+        open(&mut app);
+        let title = app.world_mut().query_filtered::<Entity, With<PanelTitle>>().single(app.world()).unwrap();
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(title));
+        assert_eq!(app.world().get::<TabIndex>(title), Some(&TabIndex(-1)));
+    }
+
+    #[test]
+    fn a_control_marked_for_focus_takes_the_keyboard_from_the_title() {
+        let mut app = app();
+        let modal = open(&mut app);
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        let field = app.world_mut().spawn((ModalFocus, ChildOf(slots.body))).id();
+        app.update();
+        assert_eq!(app.world().resource::<InputFocus>().get(), Some(field));
+    }
+
+    #[test]
     fn a_request_to_close_from_inside_despawns_it_and_says_so() {
         let mut app = app();
         let closed = Arc::new(AtomicUsize::new(0));
@@ -284,7 +344,8 @@ mod tests {
             repeat: false,
             window: from,
         };
-        let window = app.world_mut().spawn_empty().id();
+        // Spawning a real window registers `Window`, which the press needs to bubble up the hierarchy.
+        let window = app.world_mut().spawn(Window::default()).id();
         app.world_mut().trigger(FocusedInput::new(from, input, window));
         app.update();
     }
@@ -315,6 +376,51 @@ mod tests {
         escape(&mut app, slots.body);
         // Feathers' barrier isn't in this app, so the modal stays: the kit sent nothing of its own.
         assert_eq!(count(&mut app), 1);
+    }
+
+    /// An app with feathers' own dialog observers, which turn Escape and a click on the backdrop into `RequestClose`.
+    fn feathers_app() -> App {
+        let mut app = app();
+        // A real window registers `Window`, without which events can't bubble up the hierarchy.
+        app.world_mut().spawn(Window::default());
+        app.init_resource::<bevy::input_focus::InputFocusVisible>().add_plugins(bevy::ui_widgets::ModalDialogPlugin);
+        app
+    }
+
+    fn press(app: &mut App, on: Entity) {
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{Pointer, PointerPress};
+        use bevy::picking::pointer::{Location, PointerButton, PointerId};
+        let location = Location { target: NormalizedRenderTarget::None { width: 1, height: 1 }, position: Vec2::ZERO };
+        app.world_mut().trigger(PointerPress {
+            entity: on,
+            pointer: Pointer::new(PointerId::Mouse, location),
+            button: PointerButton::Primary,
+            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+            count: 1,
+        });
+        app.update();
+    }
+
+    #[test]
+    fn feathers_closes_the_modal_on_escape_with_the_dialog_focused() {
+        let mut app = feathers_app();
+        let modal = open(&mut app);
+        let focused = app.world().resource::<InputFocus>().get().expect("the modal focuses its title");
+        escape(&mut app, focused);
+        assert!(app.world().get_entity(modal).is_err());
+    }
+
+    #[test]
+    fn feathers_closes_the_modal_on_a_click_on_the_backdrop_but_not_in_the_dialog() {
+        let mut app = feathers_app();
+        let modal = open(&mut app);
+        let slots = *app.world().get::<ModalSlots>(modal).unwrap();
+        press(&mut app, slots.body);
+        assert_eq!(count(&mut app), 1, "a click inside the dialog leaves it open");
+        press(&mut app, modal);
+        assert_eq!(count(&mut app), 0);
     }
 
     #[test]
@@ -358,6 +464,42 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_is_inset_like_a_panel_so_the_scrollbar_fits_in_its_padding() {
+        let mut app = app();
+        open(&mut app);
+        let dialog = app.world_mut().query_filtered::<&Node, With<ModalDialog>>().single(app.world()).unwrap();
+        assert_eq!(dialog.padding, UiRect::all(px(space::PANEL_INSET)));
+        assert!(crate::has_scrollbar_room(dialog));
+    }
+
+    #[derive(Component)]
+    struct Wide;
+
+    impl Modal for Wide {
+        fn title(&self) -> String {
+            "Wide".into()
+        }
+        fn wide(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_wide_modal_takes_all_the_width_it_may_and_others_their_own() {
+        let mut app = app();
+        open(&mut app);
+        open_modal(&mut app.world_mut().commands(), Wide);
+        app.world_mut().flush();
+        for _ in 0..3 {
+            app.update();
+        }
+        let mut widths: Vec<Val> =
+            app.world_mut().query_filtered::<&Node, With<ModalFrame>>().iter(app.world()).map(|n| n.width).collect();
+        widths.sort_by_key(|w| format!("{w:?}"));
+        assert_eq!(widths, [px(extent::MODAL_WIDTH), vw(MAX_WIDTH_VW)]);
+    }
+
+    #[test]
     fn a_tall_modal_takes_all_the_height_it_may_and_others_their_contents() {
         let mut app = app();
         open(&mut app);
@@ -375,5 +517,6 @@ mod tests {
         let slots = *app.world().get::<ModalSlots>(modal).unwrap();
         let wrap = app.world().get::<ChildOf>(slots.body).unwrap().parent();
         assert_eq!(app.world().get::<Node>(wrap).unwrap().flex_grow, 1.0);
+        assert_eq!(app.world().get::<Node>(slots.body).unwrap().flex_grow, 1.0, "and the body its box, to be filled");
     }
 }

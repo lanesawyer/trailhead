@@ -1,7 +1,8 @@
 //! A task card: a pressable surface on the card background, holding a key chip, the title clamped to two lines, a
 //! "under TRAIL-n" line, and rows of [`badge`](super::badge)s and tool buttons.
 //!
-//! The card is pressable as a whole (it sends `Activate`, which opens the inspector); its tool buttons are pressable
+//! The card is pressable as a whole (it sends `Activate`, which opens the inspector), and lightens under the pointer
+//! as a button does; its tool buttons are pressable
 //! on their own and keep the press from reaching the card. A card never holds a handoff or a question body: those
 //! belong to the inspector.
 //!
@@ -11,7 +12,7 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::Button;
 
-use super::{BackgroundTone, BorderTone, radius, size, space, text, text_dim, token};
+use super::{BorderTone, HoverTone, Surface, radius, size, space, stroke, text, text_dim, token};
 
 /// How many lines of a title a card shows.
 pub const TITLE_LINES: f32 = 2.0;
@@ -28,11 +29,12 @@ pub fn card(depth: usize) -> impl Scene {
             row_gap: { px(space::STACKED) },
             padding: { UiRect::all(px(space::CONTROL_INSET)) },
             margin: { UiRect::left(px(space::INDENT * depth as f32)) },
-            border: { UiRect::all(px(1)) },
+            border: { UiRect::all(px(stroke::HAIRLINE)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
-        BackgroundTone({ token::CARD_BG })
-        BorderTone({ token::DIVIDER })
+        Surface::Raised
+        HoverTone { rest: { token::SURFACE_RAISED }, hover: { token::FILL_SOLID } }
+        BorderTone({ token::BORDER })
     }
 }
 
@@ -41,7 +43,7 @@ pub fn card_title(title: impl Into<String>) -> impl Scene {
     let title = title.into();
     bsn! {
         Node {
-            max_height: { px(size::CARD_TITLE * LINE_HEIGHT * TITLE_LINES) },
+            max_height: { px(size::CARD_TITLE.px() * LINE_HEIGHT * TITLE_LINES) },
             overflow: { Overflow::clip() },
         }
         Children [ @text(title, size::CARD_TITLE) ]

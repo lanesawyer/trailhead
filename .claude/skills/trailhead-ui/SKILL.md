@@ -21,6 +21,10 @@ Before you write a `Node` with a background, a button, a dropdown or a text styl
 - **It doesn't exist:** add a widget file to the kit, built on feathers, with a doc comment saying what it's for. Then
   use it in the view. A widget never imports a view module. A widget that is about one app's domain (Lookout's task
   card and board column) lives in that app, not the kit.
+- **Pick the widget's shape by what the caller does with it** (`lib.rs` lists them): a scene (`fn x(..) -> impl
+  Scene`) for most; `spawn_x(commands, ..) -> XParts`, unparented, when the caller fills or keeps hold of parts
+  inside it; a `Node` or bundle when the caller extends it. Name a choice instead of passing a bare `bool` (`Fold`,
+  `ButtonKind::Danger`). Keep the systems `UiPlugin` runs `pub(crate)`.
 - **Layouts that repeat are widgets too.** A panel header, a section with a heading, a label-and-value row, a form's
   button bar: if more than one surface has or will have it, it's a widget in the kit, even while only one uses it.
   Composing kit pieces inline the same way in two views drifts just like two hand-made buttons (TRAIL-861). Before
@@ -37,27 +41,48 @@ control, a component to query in a test), grow the kit: wrap it in a kit type or
 re-export a feathers type as it is, and never reach past the kit from an app, even in a test. The kit's API is the
 seam that keeps a feathers upgrade to one crate.
 
-`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu buttons and popups,
-`FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views, and panes. The kit
-wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has a bug, work around
-it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix over growing a
-private copy.
+`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu
+buttons and popups, `FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views,
+and panes. The kit wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has
+a bug, work around it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix
+over growing a private copy.
 
 - **A fixed set of choices** (a filter, a priority, a status) is a dropdown (`FeathersSelect`), never a button that
   cycles through values.
 - **A button that opens a menu** shows a chevron. One that acts when pressed doesn't.
+- **Every button changes background on hover**, `Plain` ones included (a tool button on a card is `Plain`). The hover
+  colors are theme tokens painted in `theme.rs`. Something pressable that isn't a button (a tab, a card, a hand-built
+  row) carries the kit's `HoverTone`, with a hover token visible against the surface it sits on.
 - **One primary button per surface** ("New task", "Save"). Everything else is normal or an icon-only tool button with a
   tooltip.
 
 ## 3. Colors, sizes, spacing, icons
 
 - **Colors are theme tokens**, a kit `Token` on a node as `BackgroundTone`, `TextTone` or `BorderTone`, never
-  `Color::srgb(..)` literals. The kit's base palette is in `clients/trailhead-ui/src/theme.rs`; an app's own colors
-  are `Token`s it paints onto `Theme::new()` with `Theme::paint` (from the kit's `palette` or its own colors), defined
-  once where the theme is built. The tone components are immutable: insert a new one to change the token. A missing token renders fuchsia
-  (TRAIL-777): if you see magenta, a token isn't in the theme.
-- **Text sizes** come from the kit's `size` scale and **gaps, padding and margins** from its `space` scale, named for
-  what they're for. A test fails on a literal. If no name fits, add one with a doc comment.
+  `Color::srgb(..)` literals. The tone components are immutable: insert a new one to change the token. A missing
+  token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
+- **Name a meaning.** The kit's `token` module is semantic: surfaces (`SURFACE_WINDOW`, `_PANEL`, `_RAISED`,
+  `_FLOATING`), text (`TEXT`, `TEXT_DIM`, `TEXT_DISABLED`), one `BORDER`, fills with hover and pressed (`FILL_SOLID`,
+  `FILL_ITEM`, `FILL_ACCENT`, `FILL_FIELD`) and statuses (`STATUS_OK`, `_WARN`, `_DANGER`, `_INFO`, each with a
+  `_SUBTLE`). Each sits on one of feathers' semantic slots where feathers has one, so feathers' controls wear it too.
+  Views and widgets name these. Don't add a token for a widget unless it has to be restyled on its own; then
+  `Theme::alias` it to a meaning. Feathers' own `tokens::` appear only inside the kit widget wrapping that control.
+- **A surface is a `Surface`** (`Window`, `Panel`, `Raised`, `Floating`), not a `BackgroundTone` of a surface token:
+  it also tells feathers what the controls inside sit on, so a field or solid fill on a card takes the color that
+  shows there. Check a color against a surface in a test with `Theme::color_on`.
+- **Theme API.** `Theme::set` repaints a meaning everywhere (`set_accent` for a shade of `palette::ACCENT`, which then
+  follows the desktop's accent); `Theme::alias` points a token at a meaning; `Theme::paint` is only for an app's
+  categorical colors, which encode data (Lookout's statuses, priorities, grades). `palette` and color literals appear
+  only where the theme is built. `Theme::repeated_colors` lists a painted color some meaning already has: an app's
+  test asserts it's empty.
+- **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
+  that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. A color written as a
+  literal follows neither, so it stays dark in a light theme.
+- **Text sizes** are the kit's `Size`, which only the kit makes: the text functions take one, so a size typed as a
+  number doesn't compile. Pick one from `size`; `Size::px` is for measuring (a line's height). **Gaps, padding,
+  margins and offsets** come from the `space` scale, **corners** from `radius` and **border widths** from `stroke`,
+  named for what they're for. Those go into a `Node`'s `Val`s, which take any number, so the lint is what finds a
+  literal there. If no name fits, add one to the kit with a doc comment.
 - **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything
   else shows as a box or a question mark. Adding an icon is one variant; take its codepoint from the same
   `lucide-static` release the font came from.
@@ -82,7 +107,7 @@ private copy.
   header flashes, scroll positions go. The only despawns are opening and closing the surface itself (a panel, a
   modal). On a change, set what changed: a select's chosen row and, only when its options changed, its rows
   (`SelectEdit`; never while its popup is open), a button's caption, a chip's tone and words (`ChipEdit`), a
-  disabled state. Lists that gain, lose and reorder items go through `widgets::keyed`. Each app guards this with a
+  disabled state. Lists that gain, lose and reorder items go through `trailhead_ui::Keyed`. Each app guards this with a
   test (Lookout's is in the `lookout-ui` skill).
 - Presses arrive as `Activate` events (from `bevy::ui_widgets`, which feathers builds on), not `Interaction`.
 - `system_clipboard` must stay in the Bevy features, or no text field can paste.
@@ -92,8 +117,8 @@ private copy.
 - **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
   in tests; `XUiPlugin` spawns and draws, and only `main.rs` adds it.
 - **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`,
-  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test app adds what
-  `MinimalPlugins` lacks (TRAIL-774).
+  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other
+  app-level plugins for its tests' sake; the test app adds what `MinimalPlugins` lacks (TRAIL-774).
 - **Test the logic headless.** Pure functions that turn state into a view model carry most of the tests.
 
 ## 6. Check it
@@ -102,6 +127,13 @@ No headless test builds what `main.rs` builds, and a factory sandbox can't open 
 
 - `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for the
   app that uses the change.
+- **The lint** (`trailhead_ui::lint`) runs these rules over a crate's sources from one test (the kit's in `lint.rs`,
+  Lookout's in `tests/design_system.rs`): `no-feathers` (apps only), `color-literal`, `palette`, `raw-color`,
+  `feathers-color`, `font-size`, `spacing`, `radius`, `stroke`, `position`. An app adds rules about its own domain
+  as more `Rule`s. A file that has to break a rule goes on the test's `Allowed` list with the reason (and the task
+  that will take it off, if one will); an entry that finds nothing fails, so take it off when the file is fixed.
+  Never widen a rule's exceptions inside the rule to get a line through. The rules read lines, not meaning: a number
+  hidden in a constant named for nothing gets past them, so name constants for what they're for.
 - With a display, run the app and look for panics and `bevy_feathers::theme: Theme color ... not found` in the log.
 - When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
   `inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives. A temporary

@@ -8,10 +8,12 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
+use trailhead_model::ProjectStatus;
 
 use crate::board::{BoardCard, Card, PAGE, Sources, View, grid, next_expiry};
+use crate::project_form::EditProject;
 use crate::widgets::{
-    self, ButtonKind, COLUMN_WIDTH, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
+    self, ButtonKind, COLUMN_WIDTH, Icon, Keyed, ScrollDown, button, set_text, size, space, text, text_dim,
 };
 
 /// Shows the page of the project with this key (`TRAIL`).
@@ -27,6 +29,7 @@ pub struct ProjectPage(pub Option<String>);
 pub struct ProjectView {
     pub key: String,
     pub name: String,
+    pub archived: bool,
     pub cards: Vec<Card>,
 }
 
@@ -44,7 +47,7 @@ pub struct ProjectMore(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
-    Card(Card),
+    Card(Box<Card>),
     Empty,
     More(usize),
 }
@@ -89,10 +92,13 @@ fn on_open(
     mut shown: ResMut<Shown>,
     mut next: ResMut<NextState<View>>,
 ) {
-    if page.0.as_deref() != Some(open.0.as_str()) {
-        page.0 = Some(open.0.clone());
-        shown.0 = PAGE;
+    if page.0.as_deref() == Some(open.0.as_str()) {
+        next.set_if_different(View::Project);
+        return;
     }
+    page.0 = Some(open.0.clone());
+    shown.0 = PAGE;
+    // Re-entering redraws the page, so another project's starts at the top.
     next.set(View::Project);
 }
 
@@ -117,8 +123,10 @@ fn rebuild_view(
     let Some(key) = &page.0 else { return };
     let rows = sources.rows();
     *expiry = next_expiry(&rows.claims, now);
-    let name = rows.projects.iter().find(|p| &p.key == key).map(|p| p.name.clone()).unwrap_or_default();
-    let next = ProjectView { key: key.clone(), name, cards: grid(rows.input(&[], now), key) };
+    let project = rows.projects.iter().find(|p| &p.key == key);
+    let name = project.map(|p| p.name.clone()).unwrap_or_default();
+    let archived = project.is_some_and(|p| p.status == ProjectStatus::Archived);
+    let next = ProjectView { key: key.clone(), name, archived, cards: grid(rows.input(&[], now), key) };
     if *view != next {
         *view = next;
     }
@@ -144,7 +152,8 @@ fn sync_grid(
     }
     let Some(root) = root else { return };
     let (cards, hidden) = view.cards.split_at(shown.0.min(view.cards.len()));
-    let mut items: Vec<(String, Slot)> = cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))).collect();
+    let mut items: Vec<(String, Slot)> =
+        cards.iter().map(|c| (c.id.clone(), Slot::Card(Box::new(c.clone())))).collect();
     if view.cards.is_empty() {
         items.push(("empty".into(), Slot::Empty));
     }
@@ -155,13 +164,13 @@ fn sync_grid(
         &mut commands,
         &[(root, items)],
         |commands, _, slot| match slot {
-            Slot::Card(card) => commands.spawn(BoardCard(card.clone())).id(),
+            Slot::Card(card) => commands.spawn(BoardCard((**card).clone())).id(),
             Slot::Empty => commands.spawn(ProjectEmpty).id(),
             Slot::More(next) => commands.spawn(ProjectMore(*next)).id(),
         },
         |commands, entity, slot| match slot {
             Slot::Card(card) => {
-                commands.entity(entity).insert(BoardCard(card.clone()));
+                commands.entity(entity).insert(BoardCard((**card).clone()));
             }
             Slot::More(next) => {
                 commands.entity(entity).insert(ProjectMore(*next));
@@ -190,22 +199,31 @@ struct ProjectPanel;
 #[derive(Component)]
 struct ProjectTitle;
 
+/// The Project page's panel; its padding leaves room for its scrollbar.
+fn page_node() -> Node {
+    Node {
+        min_width: px(0),
+        min_height: px(0),
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(space::PANEL_INSET)),
+        row_gap: px(space::GROUPS),
+        ..widgets::beside_sidebar()
+    }
+}
+
 fn spawn_page(mut commands: Commands) {
-    let panel = commands
+    let panel = commands.spawn((Name::new("project"), ProjectPanel, widgets::BesideSidebar, page_node())).id();
+    // The title, and the button that edits the project, at the far end of its row.
+    let head = commands
         .spawn((
-            Name::new("project"),
-            ProjectPanel,
-            Node {
-                min_width: px(0),
-                min_height: px(0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(space::PANEL_INSET)),
-                row_gap: px(space::GROUPS),
-                ..widgets::beside_sidebar()
-            },
+            Node { align_items: AlignItems::Center, justify_content: JustifyContent::SpaceBetween, ..default() },
+            ChildOf(panel),
         ))
         .id();
-    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(panel)));
+    commands.queue_spawn_scene(text("", size::APP_TITLE)).insert((ProjectTitle, ChildOf(head)));
+    commands
+        .queue_spawn_scene(bsn! { @button("Edit", Some(Icon::Pencil), ButtonKind::Normal) })
+        .insert((EditProject, ChildOf(head)));
     // The body and its scrollbar share a row, so the bar runs the body's height.
     let frame = commands
         .spawn((
@@ -248,9 +266,12 @@ fn despawn_page(mut commands: Commands, panel: Query<Entity, With<ProjectPanel>>
     }
 }
 
-/// "TRAIL · Trailhead", in place.
+/// "TRAIL · Trailhead", with "(archived)" after an archived one, in place.
 fn update_title(view: Res<ProjectView>, mut titles: Query<&mut Text, With<ProjectTitle>>) {
-    let words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    let mut words = if view.name.is_empty() { view.key.clone() } else { format!("{} · {}", view.key, view.name) };
+    if view.archived {
+        words.push_str(" (archived)");
+    }
     for mut title in &mut titles {
         if title.0 != words {
             title.0.clone_from(&words);
@@ -296,6 +317,11 @@ mod tests {
     use crate::fixture::{project_json, sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::{Snapshot, SyncItem};
+
+    #[test]
+    fn the_page_panel_has_room_for_a_scrollbar() {
+        assert!(widgets::has_scrollbar_room(&page_node()));
+    }
 
     fn task(id: &str, project: &str, status: &str, parent: Option<&str>) -> Value {
         let mut t = json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": project, "status": status,

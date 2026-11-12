@@ -10,8 +10,9 @@
 //!   ordered, and an undo puts a comment back to an earlier state, so its state can't rank it), and a snapshot's
 //!   copy, which has no event, gives way to any event for it;
 //! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
-//!   delete brings it back. A deleted task takes its claim and comments with it, which the stream sends no events
-//!   for; an undo restores the task, and its claim and comments come back with the next snapshot or event for them;
+//!   delete brings it back. A deleted task takes its claim, comments and the edges into it with it, which the stream
+//!   sends no events for; an undo restores the task, and those come back with the next snapshot or event for them;
+//! - a dependency (a blocker edge, keyed by both ids) has no version either, so the id of its event ranks it;
 //! - agents and users have no events yet, so they change only with a snapshot.
 //!
 //! Each entity holds its data as its `trailhead-model` type in a [`Mirrored`] component, read once as it arrives.
@@ -21,8 +22,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
-use trailhead_model::{Agent, Claim, Comment, Project, Task, User};
+use serde_json::{Value, json};
+use trailhead_model::{Agent, Claim, Comment, Dependency, Project, Task, User};
+use uuid::Uuid;
 
 use crate::sync::{Snapshot, SyncItem};
 
@@ -34,6 +36,8 @@ pub enum Kind {
     Claim,
     Agent,
     User,
+    /// A blocker edge, keyed `blocker_id:blocked_id`.
+    Dependency,
 }
 
 /// The Trailhead id: a UUID, except for a claim, which is keyed by its task's.
@@ -62,6 +66,7 @@ enum Record {
     Claim(Claim),
     Agent(Agent),
     User(User),
+    Dependency(Dependency),
 }
 
 impl Record {
@@ -76,6 +81,7 @@ impl Record {
             Kind::Claim => Record::Claim(of(data)?),
             Kind::Agent => Record::Agent(of(data)?),
             Kind::User => Record::User(of(data)?),
+            Kind::Dependency => Record::Dependency(of(data)?),
         })
     }
 
@@ -87,6 +93,7 @@ impl Record {
             Record::Claim(c) => entity.insert(Mirrored(c)),
             Record::Agent(a) => entity.insert(Mirrored(a)),
             Record::User(u) => entity.insert(Mirrored(u)),
+            Record::Dependency(d) => entity.insert(Mirrored(d)),
         };
     }
 }
@@ -136,6 +143,7 @@ impl Mirror {
         match &record {
             Record::Comment(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
             Record::Claim(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
+            Record::Dependency(d) => self.owner.insert(key.clone(), d.blocked_id.to_string()),
             _ => None,
         };
         match self.index.get(&key) {
@@ -186,11 +194,35 @@ impl Mirror {
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");
             let extras = task.as_object_mut().map(|o| {
-                ["claim", "open_questions", "last_handoff", "last_review"].map(|k| o.remove(k).unwrap_or(Value::Null))
+                ["claim", "open_questions", "last_handoff", "last_review", "blocked_by", "blocked_by_hidden"]
+                    .map(|k| o.remove(k).unwrap_or(Value::Null))
             });
+            let (workspace, created) = (task["workspace_id"].clone(), task["created_at"].clone());
             let rev = version(&task);
             self.put(commands, Kind::Task, &id, rev, task, true);
-            let Some([claim, questions, handoff, review]) = extras else { continue };
+            let Some([claim, questions, handoff, review, blockers, hidden]) = extras else { continue };
+            // The list carries no edge records, so each is made from its task: a task created at the same time as the
+            // edge is as good a stamp as any, and an event for the edge replaces it.
+            for blocker in blockers.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let edge = json!({
+                    "workspace_id": workspace,
+                    "blocker_id": blocker,
+                    "blocked_id": id,
+                    "created_at": created,
+                });
+                self.put(commands, Kind::Dependency, &format!("{blocker}:{id}"), Rev(0), edge, true);
+            }
+            // Blockers outside the token's scope arrive as a count. Each is an edge from the nil id, which no task has,
+            // so the board counts it as unfinished with nothing to name.
+            for n in 0..hidden.as_u64().unwrap_or(0) {
+                let edge = json!({
+                    "workspace_id": workspace,
+                    "blocker_id": Uuid::nil(),
+                    "blocked_id": id,
+                    "created_at": created,
+                });
+                self.put(commands, Kind::Dependency, &format!("{}#{n}:{id}", Uuid::nil()), Rev(0), edge, true);
+            }
             if !claim.is_null() {
                 self.put(commands, Kind::Claim, &id, Rev(0), claim, true);
             }
@@ -220,7 +252,8 @@ impl Mirror {
             Some("task") => Kind::Task,
             Some("comment") => Kind::Comment,
             Some("claim") => Kind::Claim,
-            // Dependencies aren't mirrored yet.
+            Some("agent") => Kind::Agent,
+            Some("dependency") => Kind::Dependency,
             _ => return,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
@@ -262,7 +295,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::fixture::{comment_json, sid, task_json};
+    use crate::fixture::{claim_json, comment_json, sid, task_json};
 
     fn app() -> App {
         let mut app = App::new();
@@ -363,16 +396,46 @@ mod tests {
     fn deleted_entities_are_despawned_and_undo_restores_them() {
         let mut app = app();
         send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false)]);
-        let after = task_json(json!({"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"}));
-        let gone = SyncItem::Event(
-            json!({"id": 12, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
-        );
-        send(&mut app, [gone]);
+        send(&mut app, [deleted_task_event(12, 2)]);
         assert!(data_of::<Task>(&mut app).is_empty());
         assert!(data_of::<Comment>(&mut app).is_empty(), "the task's comments go with it");
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
         assert_eq!(title(&mut app), "back");
         assert_eq!(data_of::<Comment>(&mut app).len(), 1);
+    }
+
+    fn claim_event(id: i64) -> SyncItem {
+        let after = claim_json(json!({"task_id": "t1"}));
+        SyncItem::Event(
+            json!({"id": id, "entity": "claim", "entity_id": sid("t1"), "kind": "claim.created", "after": after}),
+        )
+    }
+
+    fn deleted_task_event(id: i64, version: i64) -> SyncItem {
+        let after =
+            task_json(json!({"id": "t1", "title": "a", "version": version, "deleted_at": "2026-01-01T00:00:00Z"}));
+        SyncItem::Event(
+            json!({"id": id, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
+        )
+    }
+
+    #[test]
+    fn a_deleted_task_takes_its_claim_and_a_later_claim_or_snapshot_restores_it() {
+        let mut app = app();
+        let SyncItem::Snapshot(mut snap) = snapshot(10, 1, "a") else { unreachable!() };
+        snap.tasks[0]["claim"] = claim_json(json!({"task_id": "t1"}));
+        send(&mut app, [SyncItem::Snapshot(snap.clone())]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
+        send(&mut app, [deleted_task_event(11, 2)]);
+        assert!(data_of::<Task>(&mut app).is_empty());
+        assert!(data_of::<Claim>(&mut app).is_empty(), "the task's claim goes with it");
+        send(&mut app, [task_event(12, 3, "back"), claim_event(13)]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
+        send(&mut app, [deleted_task_event(14, 4)]);
+        assert!(data_of::<Claim>(&mut app).is_empty());
+        snap.at = 20;
+        send(&mut app, [SyncItem::Snapshot(snap)]);
+        assert_eq!(data_of::<Claim>(&mut app).len(), 1);
     }
 
     #[test]
@@ -395,5 +458,48 @@ mod tests {
         send(&mut app, [SyncItem::Event(json!({"id": 11, "entity": "task", "entity_id": sid("t1"), "after": bad}))]);
         assert_eq!(title(&mut app), "a");
         assert_eq!(app.world().resource::<Mirror>().last_event(), 11);
+    }
+    fn edges(app: &mut App) -> Vec<(String, String)> {
+        let world = app.world_mut();
+        let mut edges: Vec<_> = world
+            .query::<&Mirrored<Dependency>>()
+            .iter(world)
+            .map(|d| (d.0.blocker_id.to_string(), d.0.blocked_id.to_string()))
+            .collect();
+        edges.sort();
+        edges
+    }
+
+    fn edge_event(id: i64, kind: &str) -> SyncItem {
+        let edge = json!({
+            "workspace_id": sid("w1"), "blocker_id": sid("t2"), "blocked_id": sid("t1"),
+            "created_at": "2026-10-01T00:00:00Z"
+        });
+        let (before, after) = if kind == "dependency.added" { (Value::Null, edge) } else { (edge, Value::Null) };
+        SyncItem::Event(json!({
+            "id": id, "entity": "dependency", "entity_id": format!("{}:{}", sid("t2"), sid("t1")),
+            "kind": kind, "before": before, "after": after,
+        }))
+    }
+
+    #[test]
+    fn dependencies_come_from_the_snapshot_and_follow_the_stream() {
+        let mut app = app();
+        let SyncItem::Snapshot(mut snap) = snapshot(10, 1, "a") else { unreachable!() };
+        snap.tasks[0]["blocked_by"] = json!([sid("t2"), sid("t3")]);
+        snap.tasks[0]["blocked_by_hidden"] = json!(2);
+        send(&mut app, [SyncItem::Snapshot(snap)]);
+        let nil = Uuid::nil().to_string();
+        assert_eq!(
+            edges(&mut app),
+            [(nil.clone(), sid("t1")), (nil, sid("t1")), (sid("t2"), sid("t1")), (sid("t3"), sid("t1"))]
+        );
+        send(&mut app, [edge_event(11, "dependency.removed")]);
+        assert_eq!(edges(&mut app).len(), 3);
+        send(&mut app, [edge_event(12, "dependency.added")]);
+        assert_eq!(edges(&mut app).len(), 4);
+        // A resync forgets edges the new snapshot lacks.
+        send(&mut app, [snapshot(20, 1, "a")]);
+        assert!(edges(&mut app).is_empty());
     }
 }

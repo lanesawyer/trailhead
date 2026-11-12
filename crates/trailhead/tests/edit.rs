@@ -55,3 +55,17 @@ fn add_prints_possible_duplicates() {
     let other = th.stdout(&["add", "Write onboarding docs", "-p", "QA"]);
     assert!(!other.contains("possible duplicates"), "{other}");
 }
+
+#[test]
+fn ls_flags_every_task_awaiting_changes_past_one_page() {
+    let th = Instance::new();
+    th.stdout(&["project", "add", "QA", "Queue"]);
+    for n in 1..=101 {
+        let key = format!("QA-{n}");
+        th.stdout(&["add", "work", "-p", "QA"]);
+        th.stdout(&["review", &key]);
+        th.stdout(&["verdict", &key, "request-changes", "no"]);
+    }
+    let listed = th.stdout(&["ls", "-p", "QA", "--limit", "200"]);
+    assert_eq!(listed.matches("(changes requested)").count(), 101, "{listed}");
+}

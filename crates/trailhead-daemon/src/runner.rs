@@ -40,8 +40,8 @@ pub trait Workspace: Send + Sync {
     async fn head(&self) -> Result<String>;
     /// The commit being merged into the checkout, while a merge is under way (`PrepareRequest::merge_base`).
     async fn merge_head(&self) -> Result<Option<String>>;
-    /// The tip of `origin/<base>`, when a merge commit in `start..HEAD` has it as a parent: a merge of the base branch
-    /// the agent started and committed itself, which leaves no `MERGE_HEAD` behind.
+    /// The newest commit of `origin/<base>` that HEAD has and `start` doesn't: a merge of the base branch
+    /// the agent started and committed itself (no `MERGE_HEAD` is left), or fast-forwarded to; the tip unless it fetched again.
     async fn merged_base(&self, start: &str, base: &str) -> Result<Option<String>>;
     /// Whether `commit` is an ancestor of (or is) the checkout's HEAD.
     async fn contains(&self, commit: &str) -> Result<bool>;
@@ -168,7 +168,9 @@ impl Runner {
         // Where the agent's work starts, which is what it's published on top of.
         let start = self.workspace.head().await?;
         let merging_before = self.workspace.merge_head().await?;
-        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events).await?;
+        // One timer for both phases, so the drive-to-finish boundary doesn't restart it.
+        let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
+        let (mut outcome, usage) = self.drive(&req, ctx, tracker.as_ref(), &cancel, &events, &mut renew).await?;
         // A merge of the base branch is published as one, or the PR would still conflict. It may be one prepare
         // started or one the agent did itself, so read it again now, preferring that.
         let now = self.workspace.merge_head().await?;
@@ -205,9 +207,22 @@ impl Runner {
                 let _ = events.send(RunEvent::Heartbeat { quiet_secs: 0 });
             }
         };
+        // The checks and publishing retries can outlast a lease too, so a worker keeps renewing through them.
+        let renewing = async {
+            if req.role != Role::Worker {
+                return std::future::pending::<()>().await;
+            }
+            loop {
+                renew.tick().await;
+                Self::renew(tracker.as_ref(), &req.task.key).await;
+            }
+        };
+        // What the checks found, kept here so a failure after them doesn't lose it.
+        let mut ran = Vec::new();
         let finished = tokio::select! {
-            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events) => done,
+            done = self.finish(&req, tracker.as_ref(), outcome, &cancel, &start, merge, &events, &mut ran) => done,
             () = beating => unreachable!("heartbeats don't end"),
+            () = renewing => unreachable!("renewals don't end"),
         };
         let (result, checks) = match finished {
             Ok(done) => done,
@@ -221,10 +236,17 @@ impl Runner {
                 {
                     tracing::warn!(task = %key, error = %e, "couldn't release the task");
                 }
-                (RunResult::Failed(messages::finishing_failed(&e)), vec![])
+                (RunResult::Failed(messages::finishing_failed(&e)), ran)
             }
         };
         Ok(RunReport { result, checks, usage })
+    }
+
+    /// Renews the claim, logging a failure.
+    async fn renew(tracker: &dyn Tracker, key: &TaskKey) {
+        if let Err(e) = tracker.renew(key).await {
+            tracing::warn!(task = %key, error = %e, "renewing the claim failed");
+        }
     }
 
     /// Runs the harness, forwarding its events and totting up usage, renewing a worker's claim as it goes.
@@ -235,6 +257,7 @@ impl Runner {
         tracker: &dyn Tracker,
         cancel: &Notify,
         events: &EventSink,
+        renew: &mut tokio::time::Interval,
     ) -> Result<(RunOutcome, Usage)> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let run = match (&req.feedback, req.role) {
@@ -242,7 +265,6 @@ impl Runner {
             _ => self.harness.run(ctx, tx),
         };
         tokio::pin!(run);
-        let mut renew = tokio::time::interval_at(tokio::time::Instant::now() + self.renew_every, self.renew_every);
         let mut beat =
             tokio::time::interval_at(tokio::time::Instant::now() + self.heartbeat_every, self.heartbeat_every);
         let mut usage = Usage::default();
@@ -264,11 +286,7 @@ impl Runner {
                     let quiet_secs = quiet.secs();
                     let _ = events.send(RunEvent::Heartbeat { quiet_secs });
                 }
-                _ = renew.tick(), if req.role == Role::Worker => {
-                    if let Err(e) = tracker.renew(&req.task.key).await {
-                        tracing::warn!(task = %req.task.key.0, error = %e, "renewing the claim failed");
-                    }
-                }
+                _ = renew.tick(), if req.role == Role::Worker => Self::renew(tracker, &req.task.key).await,
                 out = &mut run => break out?,
             }
         };
@@ -291,16 +309,15 @@ impl Runner {
         let title = commits
             .first()
             .and_then(|c| c.message.lines().next())
-            .filter(|t| {
-                t.strip_suffix(&format!(" [{}]", req.task.key.0)).is_some_and(trailhead_factory::is_conventional)
-            })
+            .filter(|t| t.strip_suffix(&format!(" [{}]", req.task.key)).is_some_and(trailhead_factory::is_conventional))
             .map(str::to_string);
-        self.publish_with_retries(req, start, &commits).await?;
+        self.with_retries(req, "publishing", || self.codehost.publish(&req.repo, start, &req.branch, &commits)).await?;
         match &req.pr {
             Some(pr) => {
                 // The PR is already open, so a note on a flaky or skipped check goes on it as a comment.
                 if !notes.is_empty() {
-                    self.codehost.comment(pr, &format!("{}{}", notes.trim_start(), pr_footer(req, agent))).await?;
+                    let body = format!("{}{}", notes.trim_start(), pr_footer(req, agent));
+                    self.with_retries(req, "commenting on the PR", || self.codehost.comment(pr, &body)).await?;
                 }
                 Ok(pr.clone())
             }
@@ -313,27 +330,29 @@ impl Runner {
                     }),
                     body: format!("{summary}{notes}{}", pr_footer(req, agent)),
                 };
-                self.codehost.open_pr(&req.repo, new).await
+                self.with_retries(req, "opening the PR", || self.codehost.open_pr(&req.repo, new.clone())).await
             }
         }
     }
 
-    /// Publishes, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until the waits add up
-    /// to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is returned at once.
-    /// Repeating is safe: blobs and trees are content-addressed, an unreferenced commit is harmless, and the branch
-    /// ref moves last, only from `start`.
-    async fn publish_with_retries(
-        &self,
-        req: &RunRequest,
-        start: &str,
-        commits: &[trailhead_factory::Commit],
-    ) -> Result<()> {
+    /// Runs a code host call, asking again after a transient failure (a 5xx, a timeout) with a growing wait, until
+    /// the waits add up to `PUBLISH_RETRY_FOR`. Anything else the host answers (a 403, a 422, a moved branch) is
+    /// returned at once. Repeating is safe for what publishing does: blobs and trees are content-addressed, an
+    /// unreferenced commit is harmless, and the branch ref moves last, only from `start`. A retry after a ref write
+    /// that landed behind a 5xx finds the branch already at the new commits and is recognized as already published
+    /// (TRAIL-763), not rejected as a moved branch. `open_pr` resolves a 422 for an existing PR to that PR, and a
+    /// repeated comment at worst posts twice.
+    async fn with_retries<T, F, Fut>(&self, req: &RunRequest, what: &str, mut call: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
         let mut wait = Duration::from_secs(5);
         let mut waited = Duration::ZERO;
         loop {
-            match self.codehost.publish(&req.repo, start, &req.branch, commits).await {
+            match call().await {
                 Err(Error::Other(e)) if waited < PUBLISH_RETRY_FOR => {
-                    tracing::warn!(task = %req.task.key.0, error = %e, ?wait, "publishing failed; retrying");
+                    tracing::warn!(task = %req.task.key, error = %e, ?wait, "{what} failed; retrying");
                     tokio::time::sleep(wait).await;
                     waited += wait;
                     wait = (wait * 2).min(Duration::from_secs(120));
@@ -426,6 +445,7 @@ impl Runner {
         start: &str,
         merge: Merge,
         events: &EventSink,
+        ran: &mut Vec<CheckResult>,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
         match outcome {
@@ -463,6 +483,7 @@ impl Runner {
                     _ = cancel.notified() => return Err(Error::Cancelled),
                     done = self.checks(&req.base_branch, &req.required_checks) => done,
                 };
+                ran.clone_from(&checks);
                 if let Some(failed) = checks.iter().find(|c| !c.passed) {
                     let reason = messages::check_failed_reason(&failed.name);
                     let note = messages::checks_failed_note(&checks);
@@ -485,26 +506,41 @@ impl Runner {
                 };
                 // The PR is open and the work checked, so a tracker that fails now doesn't fail the run: the
                 // control plane records the PR and the review request itself when it sees `PrOpened`.
-                let mut written = false;
+                // Each write is retried on its own, and only while the error looks transient (`Error::is_transient`): a
+                // refusal (forbidden, conflict, rejected) would answer the same next time.
+                let mut reported = false;
+                let mut review_requested = false;
                 for attempt in 0..3u64 {
                     if attempt > 0 {
                         tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
                     }
-                    let result =
+                    if !reported {
                         match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
-                            Ok(()) => tracker.request_review(key, &messages::pushed_for_review_handoff(&pr.url)).await,
-                            Err(e) => Err(e),
-                        };
-                    match result {
+                            Ok(()) => reported = true,
+                            Err(e) => {
+                                tracing::warn!(task = %key, attempt, error = %e, "couldn't record the opened PR");
+                                if e.is_transient() {
+                                    continue;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    match tracker.request_review(key, &messages::pushed_for_review_handoff(&pr.url)).await {
                         Ok(()) => {
-                            written = true;
+                            review_requested = true;
                             break;
                         }
-                        Err(e) => tracing::warn!(task = %key.0, attempt, error = %e, "couldn't record the opened PR"),
+                        Err(e) => {
+                            tracing::warn!(task = %key, attempt, error = %e, "couldn't request review of the opened PR");
+                            if !e.is_transient() {
+                                break;
+                            }
+                        }
                     }
                 }
-                if !written {
-                    tracing::warn!(task = %key.0, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
+                if !(reported && review_requested) {
+                    tracing::warn!(task = %key, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
                 }
                 Ok((RunResult::PrOpened(pr), checks))
             }

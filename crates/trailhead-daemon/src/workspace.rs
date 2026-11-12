@@ -33,8 +33,30 @@ pub struct GitWorkspace {
 }
 
 impl GitWorkspace {
+    async fn is_ancestor(&self, commit: &str, of: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, of])
+            .envs(self.git_env.clone())
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
+            .status;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} {of} failed"))),
+        }
+    }
+
     pub fn new(dir: impl Into<PathBuf>) -> GitWorkspace {
         GitWorkspace::with_remote(dir, "https://github.com")
+    }
+
+    /// Where repos are cloned from.
+    pub fn remote_base(&self) -> &str {
+        &self.remote_base
     }
 
     pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
@@ -171,19 +193,28 @@ impl Workspace for GitWorkspace {
         if let Some(branch) = &req.branch {
             // A rework builds on the PR branch's head, so what it publishes lands on top of it; a
             // reviewer checks out the same head, so it reads the code the PR proposes.
-            self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
+            let fetched = self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await;
+            // A branch that was never pushed isn't an error when the request allows it: the work starts at the base.
+            if fetched.is_ok() || !req.branch_if_present {
+                fetched?;
+                self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")])
+                    .await?;
+            }
         }
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&req.tools).await?;
         if let Some(setup) = &req.setup {
+            tracing::info!(command = %setup.command, "running the setup step");
+            let began = std::time::Instant::now();
             let result = self.check(setup).await;
+            tracing::info!(passed = result.passed, elapsed = ?began.elapsed(), "the setup step finished");
             if !result.passed {
                 return Err(Error::SetupFailed(result.output.trim().to_string()));
             }
         }
         if let Some(trim) = &req.trim {
             // The sandbox works whatever the trim does, so a failure is logged, not returned.
+            tracing::info!(command = %trim.command, "running the trim step");
             let result = self.check(trim).await;
             if !result.passed {
                 tracing::warn!(output = %result.output.trim(), "the trim check failed; carrying on untrimmed");
@@ -239,42 +270,66 @@ impl Workspace for GitWorkspace {
         let Ok(tip) = self.git_output(&self.dir, &["rev-parse", "--verify", "--quiet", &tip]).await else {
             return Ok(None);
         };
-        let range = format!("{start}..HEAD");
-        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
-        // Each line is a commit followed by its parents.
-        let merged = merges.lines().any(|line| line.split_whitespace().skip(1).any(|parent| parent == tip));
-        Ok(merged.then_some(tip))
+        // The newest commit of the base that HEAD has. If `start` has it too, nothing of the base came in. Otherwise
+        // the agent merged the base, whether as a merge commit, a fast-forward, or before fetching again moved
+        // `origin/<base>` on.
+        let Ok(have) = self.git_output(&self.dir, &["merge-base", "HEAD", &tip]).await else {
+            return Ok(None);
+        };
+        let have = have.trim().to_string();
+        Ok((!self.is_ancestor(&have, start).await?).then_some(have))
     }
 
     async fn contains(&self, commit: &str) -> Result<bool> {
-        let status = Command::new("git")
-            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
-            .envs(self.git_env.clone())
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
-            .status;
-        match status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} HEAD failed"))),
-        }
+        self.is_ancestor(commit, "HEAD").await
     }
 
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
         // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let diff = self.git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start]).await?;
-        Ok(marker_files(&diff))
+        let mut found = marker_lines(&diff);
+        if found.is_empty() {
+            return Ok(vec![]);
+        }
+        // Lines the merged-in side already has aren't the agent's: a fixture or a deep blockquote on the base branch.
+        let mut sides = Vec::new();
+        if let Some(head) = self.merge_head().await? {
+            sides.push(head);
+        }
+        let range = format!("{start}..HEAD");
+        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
+        for line in merges.lines() {
+            sides.extend(line.split_whitespace().skip(2).map(str::to_string));
+        }
+        for side in sides {
+            let theirs = self
+                .git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start, &side])
+                .await?;
+            for line in marker_lines(&theirs) {
+                found.retain(|l| *l != line);
+            }
+        }
+        let mut files: Vec<String> = Vec::new();
+        for (file, _) in found {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        Ok(files)
     }
 
     async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
         // New files count, as in conflict_markers.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let remote = format!("origin/{base}");
-        let from = self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?;
+        // While the rework's merge of the base is in progress, diff against the base tip itself: against the
+        // merge-base, every base change since the branch point would count as the PR's and trigger scoped checks.
+        let from = if self.merge_head().await?.is_some() {
+            remote
+        } else {
+            self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?
+        };
         let names =
             self.git_output(&self.dir, &["diff", "--name-only", "--no-renames", "--no-ext-diff", "-z", &from]).await?;
         Ok(names.split('\0').filter(|f| !f.is_empty()).map(str::to_string).collect())
@@ -285,9 +340,17 @@ impl Workspace for GitWorkspace {
         if !self.git_output(&self.dir, &["status", "--porcelain"]).await?.trim().is_empty() {
             return Ok(true);
         }
+        // The factory publishes through the GitHub API, which makes new commits for the same content: the ref may not
+        // be here yet and the local commits may not be its ancestors. Fetch it, then compare content as well. A branch
+        // the remote lacks fails the fetch.
+        self.git(&self.dir, &["fetch", "--quiet", "origin", remote_branch]).await?;
         let remote = format!("origin/{remote_branch}");
         let ahead = self.git_output(&self.dir, &["rev-list", "-n1", "HEAD", "--not", &remote]).await?;
-        Ok(!ahead.trim().is_empty())
+        if ahead.is_empty() {
+            return Ok(false);
+        }
+        let differs = self.git_output(&self.dir, &["diff", "--name-only", "--no-ext-diff", &remote, "HEAD"]).await?;
+        Ok(!differs.is_empty())
     }
 
     async fn head(&self) -> Result<String> {
@@ -360,22 +423,74 @@ fn parse_df_used(out: &str) -> Option<u64> {
     out.lines().nth(1)?.split_whitespace().nth(2)?.parse().ok()
 }
 
-/// The files a unified diff adds a `<<<<<<<` or `>>>>>>>` line to.
-fn marker_files(diff: &str) -> Vec<String> {
-    let mut files: Vec<String> = Vec::new();
+/// The `(file, line)` pairs of the `<<<<<<<` and `>>>>>>>` lines a unified diff adds.
+///
+/// A file's name is read only from its header, between its `diff --git` line and its first hunk, so an added line
+/// that happens to read `+++ ...` is never taken for one.
+fn marker_lines(diff: &str) -> Vec<(String, String)> {
+    let mut lines = Vec::new();
     let mut file = None;
+    let mut in_header = false;
     for line in diff.lines() {
-        if let Some(name) = line.strip_prefix("+++ ") {
-            file = Some(name.strip_prefix("b/").unwrap_or(name).to_string());
+        if line.starts_with("diff --git ") {
+            in_header = true;
+            file = None;
+        } else if in_header {
+            if let Some(name) = line.strip_prefix("+++ ") {
+                file = diff_path(name.strip_suffix('\t').unwrap_or(name));
+            } else if line.starts_with("@@") {
+                in_header = false;
+            }
         } else if let Some(added) = line.strip_prefix('+')
             && (added.starts_with("<<<<<<<") || added.starts_with(">>>>>>>"))
             && let Some(file) = &file
-            && !files.contains(file)
         {
-            files.push(file.clone());
+            lines.push((file.clone(), added.to_string()));
         }
     }
-    files
+    lines
+}
+
+/// The path on a `+++` header: git quotes unusual ones C-style, and prefixes the new side with `b/`.
+fn diff_path(name: &str) -> Option<String> {
+    let name = match name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) {
+        Some(quoted) => unquote(quoted),
+        None => name.to_string(),
+    };
+    if name == "/dev/null" {
+        return None;
+    }
+    Some(name.strip_prefix("b/").map(str::to_string).unwrap_or(name))
+}
+
+/// Undoes git's C-style quoting of a path (`\"`, `\\`, `\t`, `\n`, and `\ooo` octal bytes).
+fn unquote(s: &str) -> String {
+    let mut out = Vec::new();
+    let mut bytes = s.bytes().peekable();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match bytes.next() {
+            Some(d @ b'0'..=b'7') => {
+                let mut n = u32::from(d - b'0');
+                for _ in 0..2 {
+                    match bytes.next_if(|c| (b'0'..=b'7').contains(c)) {
+                        Some(c) => n = n * 8 + u32::from(c - b'0'),
+                        None => break,
+                    }
+                }
+                out.push(n as u8);
+            }
+            Some(b'n') => out.push(b'\n'),
+            Some(b't') => out.push(b'\t'),
+            Some(b'r') => out.push(b'\r'),
+            Some(other) => out.push(other),
+            None => out.push(b'\\'),
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn tail(mut s: String) -> String {
@@ -391,7 +506,36 @@ fn tail(mut s: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{oom_killed, parse_df_used};
+    use super::{marker_lines, oom_killed, parse_df_used};
+
+    #[test]
+    fn marker_lines_names_the_right_file() {
+        let diff = [
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -0,0 +2 @@",
+            "++ not a header",
+            "+<<<<<<< HEAD",
+            r#"diff --git "a/q \"x.txt" "b/q \"x.txt""#,
+            r#"--- "a/q \"x.txt""#,
+            r#"+++ "b/q \"x.txt""#,
+            "@@ -0,0 +1 @@",
+            "+>>>>>>> main",
+            "diff --git a/c d.txt b/c d.txt",
+            "+++ b/c d.txt\t",
+            "@@ -0,0 +1 @@",
+            "+fine",
+        ]
+        .join("\n");
+        assert_eq!(
+            marker_lines(&diff),
+            vec![
+                ("a.txt".to_string(), "<<<<<<< HEAD".to_string()),
+                ("q \"x.txt".to_string(), ">>>>>>> main".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn an_oom_kill_is_told_apart_from_other_failures() {

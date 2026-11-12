@@ -51,7 +51,8 @@ pub(crate) struct TaskListQuery {
     /// Comma-separated extras per task: `claim` (the live claim or `null`, with the holder's
     /// name as `holder`), `open_questions` (unresolved `question` comments, oldest first) and
     /// `last_handoff` (the newest `handoff` comment or `null`) and `last_review` (the newest `review` comment
-    /// with a verdict or `null`; with `last_handoff` it is what `changes_requested` is computed from).
+    /// with a verdict or `null`; with `last_handoff` it is what `changes_requested` is computed from) and
+    /// `blocked_by` (the ids of every task blocking it, finished or not, in key order).
     include: Option<String>,
 }
 
@@ -84,13 +85,15 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         grade: parse_grade_filter(q.grade.as_deref())?,
         changes_requested: q.changes_requested,
         metadata,
+        metadata_exists: Vec::new(),
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
         offset: q.offset,
     };
     let includes = split_list(q.include.as_deref());
-    if let Some(other) =
-        includes.iter().find(|i| !["claim", "open_questions", "last_handoff", "last_review"].contains(&i.as_str()))
+    if let Some(other) = includes
+        .iter()
+        .find(|i| !["claim", "open_questions", "last_handoff", "last_review", "blocked_by"].contains(&i.as_str()))
     {
         return Err(invalid(format!("unknown include: {other}")));
     }
@@ -102,8 +105,13 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     let mut questions = if wants("open_questions") { Some(s.store.open_questions(&ctx, &ids).await?) } else { None };
     let mut handoffs = if wants("last_handoff") { Some(s.store.last_handoffs(&ctx, &ids).await?) } else { None };
     let mut reviews = if wants("last_review") { Some(s.store.last_reviews(&ctx, &ids).await?) } else { None };
+    let mut blockers = if wants("blocked_by") { Some(s.store.blockers_of(&ctx, &ids).await?) } else { None };
     if let Value::Array(items) = &mut out {
         for (item, task) in items.iter_mut().zip(&tasks) {
+            if let Some(b) = &mut blockers {
+                item["blocked_by"] = json!(b.visible.remove(&task.id).unwrap_or_default());
+                item["blocked_by_hidden"] = json!(b.hidden.remove(&task.id).unwrap_or(0));
+            }
             if let Some(c) = &mut claims {
                 item["claim"] = json!(c.remove(&task.id));
             }
@@ -181,7 +189,7 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
         scheduled_at: parse_opt_at(b.scheduled_at.as_deref())?,
         scheduled_tz: b.scheduled_tz,
-        parent: b.parent,
+        parent: b.parent.map(Into::into),
         metadata: b.metadata,
         source: b.source,
         external_id: b.external_id,
@@ -281,14 +289,14 @@ pub(crate) async fn update_task(
         status: b.status,
         priority: b.priority,
         grade: b.grade,
-        duplicate_of: b.duplicate_of,
+        duplicate_of: b.duplicate_of.map(|d| d.map(Into::into)),
         due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         due_at: b.due_at.map(|d| parse_opt_at(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
         scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         scheduled_at: b.scheduled_at.map(|t| parse_opt_at(t.as_deref())).transpose()?,
         scheduled_tz: b.scheduled_tz,
-        parent: b.parent,
+        parent: b.parent.map(|p| p.map(Into::into)),
         metadata: b.metadata,
     };
     let version = if_match(&headers)?.or(b.version);

@@ -130,6 +130,9 @@ pub struct RunStatus {
     pub last_tool: Option<String>,
     /// Unix seconds.
     pub started: i64,
+    /// Unix seconds when it entered its current phase, so a stuck one shows. Zero from a server that didn't say.
+    #[serde(default)]
+    pub phase_started: i64,
 }
 
 /// A paid target's spend against its daily cap (`docs/factory/targets.md#spend`).
@@ -142,6 +145,19 @@ pub struct TargetSpend {
     pub cap: Usd,
     /// Whether it has reached the cap, so takes no new runs.
     pub capped: bool,
+}
+
+/// How full one of the subscription's usage windows is (Claude's `five_hour` session or `seven_day` week), as a run
+/// last heard (`RunEvent::Quota`). Host-wide: every repo's board carries the same readings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageWindow {
+    pub window: String,
+    pub used_percent: u32,
+    /// Unix seconds. A reading past it is stale: the window has reset since.
+    pub resets_at: i64,
+    /// The percent at or past which the factory starts no new runs (`[factory] pause_at`), when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_at: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +183,9 @@ pub struct FactorySnapshot {
     /// uses them to tell the factory's tasks from the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queue: Vec<TaskKey>,
+    /// The subscription's usage windows, by window name. Empty until a run has reported one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage: Vec<UsageWindow>,
     /// The sequence number of the last event the snapshot includes, so a client can join the stream after it.
     pub seq: u64,
 }
@@ -209,6 +228,14 @@ pub enum FactoryEvent {
     Holding {
         holding: Option<String>,
     },
+    /// A usage window's reading changed: every window, as in the snapshot's `usage`.
+    Usage {
+        usage: Vec<UsageWindow>,
+    },
+    /// An event a newer control plane sent that this build doesn't know. Clients ignore it, so a variant can be added
+    /// without breaking older clients.
+    #[serde(other)]
+    Unknown,
 }
 
 impl FactoryEvent {
@@ -230,8 +257,13 @@ impl FactoryEvent {
         match self {
             FactoryEvent::Control { control } => format!("control plane: {}", control_label(control)),
             FactoryEvent::Error { message } => format!("error: {message}"),
+            FactoryEvent::Unknown => "unknown event".to_string(),
             FactoryEvent::Holding { holding: Some(why) } => format!("holding merges: {why}"),
             FactoryEvent::Holding { holding: None } => "no longer holding merges".to_string(),
+            FactoryEvent::Usage { usage } => {
+                let windows: Vec<String> = usage.iter().map(|w| format!("{} {}%", w.window, w.used_percent)).collect();
+                format!("usage: {}", windows.join(", "))
+            }
             FactoryEvent::SandboxChanged { sandbox } => format!("sandbox {} {}", sandbox.name, sandbox.state.as_str()),
             FactoryEvent::SandboxGone { name } => format!("sandbox {name} gone"),
             FactoryEvent::RunPhase { task, phase } => format!("{} {}", task.0, phase.label()),
@@ -259,4 +291,17 @@ pub struct Sequenced {
     pub seq: u64,
     #[serde(flatten)]
     pub event: FactoryEvent,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_event_from_a_newer_control_plane_reads_as_unknown() {
+        let e: FactoryEvent = serde_json::from_str(r#"{"event":"from_the_future","x":1}"#).unwrap();
+        assert_eq!(e, FactoryEvent::Unknown);
+        let s: Sequenced = serde_json::from_str(r#"{"seq":7,"event":"from_the_future","x":1}"#).unwrap();
+        assert_eq!((s.seq, s.event), (7, FactoryEvent::Unknown));
+    }
 }

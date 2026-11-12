@@ -466,6 +466,18 @@ async fn subscription_token_goes_in_the_secrets_file_only() {
 }
 
 #[tokio::test]
+async fn programs_share_the_daemon_binary_instead_of_copying_it() {
+    let control = endpoint(SecretKey::generate(), None).await;
+    let launch = Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE);
+    let binary = launch.binary.as_ptr();
+    let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
+    let a = remote.program(&SandboxId("a".into()));
+    let b = remote.program(&SandboxId("b".into()));
+    assert_eq!(a.files[0].contents.as_ptr(), binary, "the program shares the launch's binary");
+    assert_eq!(b.files[0].contents.as_ptr(), binary, "so does every other program");
+}
+
+#[tokio::test]
 async fn daemon_log_filter_goes_on_the_command_line_when_set() {
     let control = endpoint(SecretKey::generate(), None).await;
     let remote = RemoteDaemon::new(

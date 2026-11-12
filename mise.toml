@@ -9,7 +9,7 @@ lima = "latest"
 mdbook = "0.5.4"
 # Pinned exactly, and upgraded together with mdbook above: a newer mdbook-mermaid built for a newer mdBook could break the docs build unseen.
 # Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
-"github:badboy/mdbook-mermaid" = "0.16.0"
+"github:badboy/mdbook-mermaid" = "0.16.2"
 rust = "latest"
 
 [tasks.test-live-sprites]
@@ -115,10 +115,15 @@ depends = ["docs-mermaid"]
 run = "mdbook serve"
 
 [tasks.lookout-install]
-description = "Install Lookout with its desktop entry and icons (~/.cargo/bin, ~/.local/share), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `lookout`)"
+description = "Install Lookout with its desktop entry and icons (~/.cargo/bin, ~/.local/share; the desktop entry's Exec is the binary's absolute path), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `lookout`)"
 run = """
 cargo install --path clients/trailhead-lookout --locked
-install -Dm644 clients/trailhead-lookout/assets/lookout.desktop ~/.local/share/applications/lookout.desktop
+# Exec gets the absolute path: ~/.cargo/bin is often not on the graphical session's PATH
+bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/lookout"
+q='"'
+mkdir -p ~/.local/share/applications
+sed "s|^Exec=lookout$|Exec=$q$bin$q|" clients/trailhead-lookout/assets/lookout.desktop > ~/.local/share/applications/lookout.desktop
+chmod 644 ~/.local/share/applications/lookout.desktop
 for size in 32 64 128 256; do
   install -Dm644 clients/trailhead-lookout/assets/icon/$size.png ~/.local/share/icons/hicolor/${size}x${size}/apps/lookout.png
 done

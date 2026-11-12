@@ -32,7 +32,7 @@ pub struct Snapshot {
     pub projects: Vec<Value>,
     pub agents: Vec<Value>,
     pub users: Vec<Value>,
-    /// Tasks with `claim`, `open_questions`, `last_handoff` and `last_review` on each.
+    /// Tasks with `claim`, `open_questions`, `last_handoff`, `last_review` and `blocked_by` on each.
     pub tasks: Vec<Value>,
 }
 
@@ -118,7 +118,8 @@ impl Remote {
 
     /// Step 2. `at` is what step 1 found.
     pub async fn load_snapshot(&self, at: i64) -> Result<Snapshot, String> {
-        let projects = self.list("/v1/projects").await?;
+        // Archived ones too: the sidebar lists them apart, and unarchiving one needs it there.
+        let projects = self.list("/v1/projects?archived=true").await?;
         let agents = self.list("/v1/agents").await?;
         let users = self.list("/v1/users").await?;
         // Pages are by offset, and a task deleted from an earlier page moves the rest up one, so the one at the
@@ -141,7 +142,7 @@ impl Remote {
         loop {
             let page = self
                 .list(&format!(
-                    "/v1/tasks?include=claim,open_questions,last_handoff,last_review&status={all_statuses}\
+                    "/v1/tasks?include=claim,open_questions,last_handoff,last_review,blocked_by&status={all_statuses}\
                      &sort=created_at&limit={PAGE}&offset={}",
                     tasks.len()
                 ))

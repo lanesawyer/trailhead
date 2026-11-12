@@ -11,6 +11,9 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[lints]
+workspace = true
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
 bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
@@ -24,7 +27,7 @@ docker = ["factory", "trailhead-server/docker"]
 
 [dependencies]
 trailhead-factory-server = { workspace = true, optional = true }
-trailhead-client.workspace = true
+trailhead-client = { workspace = true, features = ["http"] }
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 trailhead-log.workspace = true

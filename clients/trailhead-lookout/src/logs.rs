@@ -15,8 +15,8 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use crate::connection::SendNet;
 use crate::net::{LogUpdate, NetCommand};
 use crate::widgets::{
-    ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, extent, field, row, scroll_body, scroll_frame,
-    scrollbar, select, set_display, set_text, size, space, text_mono, text_toned, token,
+    ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, field, row, scroll_body, scroll_frame, scrollbar,
+    select, set_display, set_text, size, space, text_mono, text_toned, token,
 };
 
 /// How many lines are kept; past this the oldest are dropped.
@@ -62,6 +62,12 @@ impl LogState {
         self.note.as_deref()
     }
 
+    /// Marks the stream as followed or not, as the Logs page does when it shows or hides: updates are dropped while it
+    /// isn't. For tests that drive the connection without the page.
+    pub fn set_streaming(&mut self, on: bool) {
+        self.streaming = on;
+    }
+
     /// The tasks seen in the lines, sorted.
     pub fn tasks(&self) -> impl Iterator<Item = &str> {
         self.tasks.iter().map(String::as_str)
@@ -94,9 +100,23 @@ impl LogState {
                 }
             }
             LogUpdate::Line(line) => self.push(line),
+            LogUpdate::Skipped(count) => self.push(gap(count)),
             LogUpdate::Dropped => {}
             LogUpdate::TooOld(why) => self.note = Some(why),
         }
+    }
+}
+
+/// The warning that marks where `count` lines were missed.
+fn gap(count: u64) -> LogLine {
+    let ts_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    LogLine {
+        ts_ms,
+        level: LogLevel::Warn,
+        target: "lookout".into(),
+        repo: None,
+        task: None,
+        message: format!("{count} log lines skipped: Lookout fell behind"),
     }
 }
 
@@ -174,8 +194,8 @@ pub fn line_text(line: &LogLine) -> String {
 /// The theme color a level is drawn in.
 pub fn level_tone(level: LogLevel) -> Token {
     match level {
-        LogLevel::Error => token::DANGER,
-        LogLevel::Warn => token::WARN,
+        LogLevel::Error => token::STATUS_DANGER,
+        LogLevel::Warn => token::STATUS_WARN,
         LogLevel::Info => token::TEXT,
         LogLevel::Debug | LogLevel::Trace => token::TEXT_DIM,
     }
@@ -210,6 +230,10 @@ impl Plugin for LogsPlugin {
 
 fn apply_items(mut items: MessageReader<LogItem>, mut state: ResMut<LogState>) {
     for LogItem(update) in items.read() {
+        // Updates still queued when the page closed would refill what `sync_stream` just cleared.
+        if !state.streaming {
+            continue;
+        }
         state.apply(update.clone());
     }
 }
@@ -246,7 +270,11 @@ struct LogRows(Keyed<Entry>);
 
 /// Fills the Logs page's box: the filters, the note, and the list with its scrollbar.
 pub fn logs_page(commands: &mut Commands, page: Entity) {
-    commands.entity(page).insert(LogsPage);
+    // The page fills the modal's body, so the list can take the rest of it.
+    commands.entity(page).insert(LogsPage).entry::<Node>().and_modify(|mut node| {
+        node.flex_grow = 1.0;
+        node.min_height = px(0);
+    });
     let filters = commands
         .spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd, column_gap: { px(space::GROUPS) } } })
         .insert(ChildOf(page))
@@ -260,20 +288,14 @@ pub fn logs_page(commands: &mut Commands, page: Entity) {
     commands
         .spawn_scene(button("Jump to latest", Some(Icon::ChevronDown), ButtonKind::Normal))
         .insert((JumpToLatest, ChildOf(filters)));
-    commands.spawn_scene(text_toned("", size::BODY, token::WARN)).insert((
+    commands.spawn_scene(text_toned("", size::BODY, token::STATUS_WARN)).insert((
         LogNote,
         Node { display: Display::None, ..default() },
         ChildOf(page),
     ));
+    // The list takes the height the modal has left under the filters, and scrolls on its own: the wheel goes to the
+    // nearest area that scrolls.
     let frame = commands.spawn(scroll_frame()).insert(ChildOf(page)).id();
-    // A list of its own inside the modal, which scrolls too: the wheel goes to the nearest.
-    commands.entity(frame).insert(Node {
-        flex_direction: FlexDirection::Column,
-        flex_grow: 0.0,
-        min_height: px(0),
-        height: px(extent::LIST_HEIGHT),
-        ..default()
-    });
     let list = commands.spawn((scroll_body(), LogList)).insert(ChildOf(frame)).id();
     commands.entity(list).insert(Node {
         flex_direction: FlexDirection::Column,
@@ -494,6 +516,23 @@ mod tests {
     }
 
     #[test]
+    fn a_skip_leaves_a_warning_where_the_lines_were_missed() {
+        let mut state = open();
+        state.apply(LogUpdate::Line(line(1, LogLevel::Info, None)));
+        state.apply(LogUpdate::Skipped(7));
+        state.apply(LogUpdate::Line(line(2, LogLevel::Info, None)));
+        let entries: Vec<_> = state.entries().map(|e| (e.line.level, e.line.message.as_str())).collect();
+        assert_eq!(
+            entries,
+            [
+                (LogLevel::Info, "line 1"),
+                (LogLevel::Warn, "7 log lines skipped: Lookout fell behind"),
+                (LogLevel::Info, "line 2"),
+            ]
+        );
+    }
+
+    #[test]
     fn the_filters_pick_by_level_and_task() {
         let mut state = open();
         state.push(line(1, LogLevel::Info, Some("TRAIL-1")));
@@ -590,6 +629,22 @@ mod tests {
         }
 
         #[test]
+        fn updates_queued_after_the_page_closed_are_dropped() {
+            let mut app = app();
+            let page = app.world_mut().spawn((LogsPage, Node::default())).id();
+            app.update();
+            feed(&mut app, LogUpdate::Line(line(1, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 1);
+            app.world_mut().get_mut::<Node>(page).unwrap().display = Display::None;
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
+            feed(&mut app, LogUpdate::Line(line(2, LogLevel::Info, None)));
+            app.update();
+            assert_eq!(app.world().resource::<LogState>().entries().count(), 0);
+        }
+
+        #[test]
         fn lines_append_without_respawning_earlier_ones_and_the_cap_drops_the_oldest() {
             let mut app = app();
             spawn_list(&mut app);
@@ -669,7 +724,7 @@ mod tests {
                 .iter(world)
                 .map(|t| t.0.clone())
                 .collect();
-            assert_eq!(tones, [token::DANGER, token::TEXT]);
+            assert_eq!(tones, [token::STATUS_DANGER, token::TEXT]);
         }
     }
 }

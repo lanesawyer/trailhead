@@ -7,14 +7,16 @@
 //! than the repo's last is a duplicate. The stream numbers from 1 on every control plane boot, but each connection
 //! starts with a snapshot, so a restarted control plane never mixes its numbers with its predecessor's.
 //!
-//! When the control plane can't be reached everything here stays as it was, and [`FactoryStatus::link`] says
-//! [`FactoryLink::Stopped`], so the map can show Trailhead's last known state marked "factory stopped".
+//! When the server can't be reached everything here stays as it was, and [`FactoryStatus::link`] says
+//! [`FactoryLink::Unreachable`]. The control plane runs inside the server, so one that isn't running in a live server
+//! (no repos, disabled, starting) says so in the status frame's `control`, which is [`FactoryLink::Control`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use trailhead_factory::{
-    ControlState, FactoryEvent, Grade, RunPhase, RunStatus, SandboxStatus, Sequenced, TaskKey, Usd,
+    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
+    UsageWindow, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
 
@@ -30,8 +32,11 @@ pub enum FactoryUpdate {
         repo: String,
         event: Sequenced,
     },
-    /// The control plane can't be reached: the mirror keeps its last state and says so.
-    Stopped,
+    /// The server's control plane state, from the status frame ahead of its snapshot; `None` from a server that
+    /// doesn't send one.
+    Control(Option<FactoryState>),
+    /// The server can't be reached: the mirror keeps its last state and says so.
+    Unreachable,
     /// The control plane answered a request with "I don't know that": it is older than this Lookout. Carries the
     /// message to show.
     TooOld(String),
@@ -66,8 +71,10 @@ pub enum FactoryLink {
     Unknown,
     /// Connected: the mirror is current.
     Running,
-    /// Not reachable. The mirror is the last state heard, and the board works from the server alone.
-    Stopped,
+    /// Connected, but the server's control plane isn't running (disabled, no repos, still starting).
+    Control(FactoryState),
+    /// Not reachable. The mirror is the last state heard.
+    Unreachable,
     /// Reachable, but older than this Lookout: it doesn't know the status request. The message says what to do.
     TooOld(String),
     /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
@@ -85,6 +92,10 @@ pub struct RepoState {
     pub last_error: Option<(i64, String)>,
     /// The grades whose gate wants a person.
     pub human_grades: Vec<Grade>,
+    /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
+    pub holding: Option<String>,
+    /// The subscription's usage windows, as this repo's control plane last heard them.
+    pub usage: Vec<UsageWindow>,
     /// The last event applied, or the snapshot's.
     pub seq: u64,
 }
@@ -100,18 +111,21 @@ pub struct Activity {
 #[derive(Resource, Debug, Default)]
 pub struct FactoryStatus {
     pub link: FactoryLink,
+    /// What the last status frame said of the server's control plane.
+    pub control: Option<FactoryState>,
     pub repos: BTreeMap<String, RepoState>,
     /// Newest last, at most [`ACTIVITY`] of them.
     pub activity: VecDeque<Activity>,
 }
 
 impl FactoryStatus {
-    /// What the map shows beside the factory: "factory stopped" when it can't be reached.
+    /// What the map shows beside the factory: why it isn't running, or that the server can't be reached.
     pub fn label(&self) -> String {
         match &self.link {
             FactoryLink::Unknown => "factory: connecting".into(),
             FactoryLink::Running => "factory running".into(),
-            FactoryLink::Stopped => "factory stopped".into(),
+            FactoryLink::Control(state) => format!("factory {}", state.label()),
+            FactoryLink::Unreachable => "unreachable".into(),
             FactoryLink::TooOld(why) | FactoryLink::Refused(why) => why.clone(),
         }
     }
@@ -125,6 +139,17 @@ impl FactoryStatus {
         Grade::ALL.into_iter().filter(|g| self.repos.values().any(|r| r.human_grades.contains(g))).collect()
     }
 
+    /// [`Self::human_grades`] for a task in `project`: the repos whose queue tasks are in that project say, since its
+    /// tasks go to those repos' gates. When no repo works the project (or it isn't known), every repo's.
+    pub fn human_grades_for(&self, project: Option<&str>) -> Vec<Grade> {
+        let in_project = |key: &String| key.rsplit_once('-').is_some_and(|(p, _)| Some(p) == project);
+        let own: Vec<&RepoState> = self.repos.values().filter(|r| r.queue.iter().any(in_project)).collect();
+        if own.is_empty() {
+            return self.human_grades();
+        }
+        Grade::ALL.into_iter().filter(|g| own.iter().any(|r| r.human_grades.contains(g))).collect()
+    }
+
     /// The queue tasks the factory works, as its repos report them, each once.
     pub fn queues(&self) -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
@@ -134,6 +159,27 @@ impl FactoryStatus {
             }
         }
         keys
+    }
+
+    /// Why each repo's merger is holding merges, for the repos that are.
+    pub fn holds(&self) -> Vec<String> {
+        self.repos
+            .iter()
+            .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
+            .collect()
+    }
+
+    /// The subscription's usage windows by name. The readings are host-wide, so every repo should carry the same; where
+    /// one lags, the reading for the latest reset wins, then the fuller one.
+    pub fn usage(&self) -> Vec<UsageWindow> {
+        let mut by_window: BTreeMap<&str, &UsageWindow> = BTreeMap::new();
+        for w in self.repos.values().flat_map(|r| &r.usage) {
+            let newer = |had: &&UsageWindow| (w.resets_at, w.used_percent) > (had.resets_at, had.used_percent);
+            if by_window.get(w.window.as_str()).is_none_or(newer) {
+                by_window.insert(&w.window, w);
+            }
+        }
+        by_window.into_values().cloned().collect()
     }
 
     /// The control plane's state for the map, repo by repo.
@@ -229,6 +275,8 @@ impl FactoryMirror {
                 control: snapshot.control,
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
+                holding: snapshot.holding,
+                usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
                 seq: snapshot.seq,
             },
@@ -242,12 +290,17 @@ impl FactoryMirror {
             return;
         }
         state.seq = event.seq;
+        // An event from a newer control plane says nothing worth logging; its number still counted above.
+        if matches!(event.event, FactoryEvent::Unknown) {
+            return;
+        }
         let line = event.event.line();
         match event.event {
             FactoryEvent::Control { control } => state.control = control,
             FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
-            // Shown in the activity log only for now.
-            FactoryEvent::Holding { .. } => {}
+            FactoryEvent::Holding { holding } => state.holding = holding,
+            FactoryEvent::Usage { usage } => state.usage = usage,
+            FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
                 if let Some((entity, _)) = self.campsites.remove(&(repo.to_string(), name)) {
@@ -278,7 +331,7 @@ impl FactoryMirror {
     fn run_phase(&mut self, commands: &mut Commands, repo: &str, task: TaskKey, phase: RunPhase) {
         let have = self.runs.get(&(repo.to_string(), task.clone())).map(|(_, r)| r.clone());
         let status = match have {
-            Some(run) => RunStatus { phase, ..run },
+            Some(run) => RunStatus { phase, phase_started: unix_now(), ..run },
             None => RunStatus {
                 task,
                 phase,
@@ -288,10 +341,36 @@ impl FactoryMirror {
                 spend: Usd::ZERO,
                 last_tool: None,
                 started: unix_now(),
+                phase_started: unix_now(),
             },
         };
         self.set_run(commands, repo, status);
     }
+}
+
+/// Whether the factory has taken `task` up: started a run on it (even one that failed before its agent started) or
+/// opened its PR. Its metadata alone doesn't say so: the control plane also marks a queued task it skipped for having
+/// no grade, which is how work done by hand is filed under a queue task (TRAIL-1159).
+pub fn factory_ran(task: &trailhead_model::Task) -> bool {
+    RunUpdate::of(task)
+        .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
+}
+
+/// A task's pull request, where its code host serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrLink {
+    /// `owner/name#12`.
+    pub label: String,
+    /// The PR's page, as the code host gave it: Lookout never builds one, so any code host works.
+    pub url: String,
+}
+
+/// The PR the factory opened for `task` (the merged one once it merged), if it has one with a page.
+pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
+    let run = RunUpdate::of(task).ok()?;
+    let pr = run.merged.map(|m| m.pr).or(run.pr)?;
+    (!pr.url.is_empty())
+        .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })
 }
 
 fn unix_now() -> i64 {
@@ -311,7 +390,10 @@ pub fn apply_factory(
     for FactoryItem(update) in items.read() {
         match update.clone() {
             FactoryUpdate::Snapshot(repos) => {
-                status.link = FactoryLink::Running;
+                status.link = match status.control.clone() {
+                    Some(state) if state != FactoryState::Running => FactoryLink::Control(state),
+                    _ => FactoryLink::Running,
+                };
                 // A repo the control plane no longer serves goes with it.
                 let gone: Vec<_> =
                     status.repos.keys().filter(|r| !repos.iter().any(|s| &s.repo == *r)).cloned().collect();
@@ -337,7 +419,8 @@ pub fn apply_factory(
                 }
             }
             FactoryUpdate::Event { repo, event } => mirror.apply_event(&mut commands, &mut status, &repo, event),
-            FactoryUpdate::Stopped => status.link = FactoryLink::Stopped,
+            FactoryUpdate::Control(state) => status.control = state,
+            FactoryUpdate::Unreachable => status.link = FactoryLink::Unreachable,
             FactoryUpdate::TooOld(why) => status.link = FactoryLink::TooOld(why),
             FactoryUpdate::Refused(why) => status.link = FactoryLink::Refused(why),
         }
@@ -361,6 +444,16 @@ mod tests {
     use trailhead_factory::{FactorySnapshot, SandboxState};
 
     use super::*;
+    #[test]
+    fn a_pr_link_is_the_code_hosts_own_url_and_the_merged_one_once_merged() {
+        let pr = |n: u64| serde_json::json!({"repo": {"owner": "o", "name": "r"}, "number": n, "url": format!("https://host/o/r/-/merge_requests/{n}")});
+        let with = |factory| crate::fixture::task(serde_json::json!({"metadata": {"factory": factory}}));
+        assert_eq!(pr_link(&with(serde_json::json!({"attempt": 1}))), None);
+        let open = pr_link(&with(serde_json::json!({"pr": pr(4)}))).unwrap();
+        assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });
+        let merged = with(serde_json::json!({"pr": pr(4), "merged": {"by": "merger", "pr": pr(5)}}));
+        assert_eq!(pr_link(&merged).unwrap().label, "o/r#5");
+    }
 
     fn app() -> App {
         let mut app = App::new();
@@ -382,6 +475,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq,
         };
         FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])
@@ -436,6 +530,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_events_advance_the_sequence_but_stay_out_of_the_activity_log() {
+        let mut app = app();
+        send(&mut app, [snapshot(3, vec![])]);
+        send(&mut app, [event(4, FactoryEvent::Unknown)]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert!(status.activity.is_empty());
+        assert_eq!(status.repos["o/r"].seq, 4);
+    }
+
+    #[test]
     fn a_run_goes_through_its_phases_and_shows_live_activity() {
         let mut app = app();
         let task = TaskKey("TRAIL-1".into());
@@ -462,8 +566,16 @@ mod tests {
         // The control plane restarted: the numbers start over, and the sandboxes are what its reconcile found.
         send(&mut app, [snapshot(1, vec![sandbox("b", SandboxState::Busy)])]);
         assert_eq!(campsites(&mut app), [("b".into(), SandboxState::Busy)]);
+        let hold = FactoryEvent::Holding { holding: Some("#306 has auto-merge on but CI failed".into()) };
+        send(&mut app, [event(2, hold)]);
+        assert_eq!(
+            app.world().resource::<FactoryStatus>().holds(),
+            ["o/r: holding merges: #306 has auto-merge on but CI failed"]
+        );
+        send(&mut app, [event(3, FactoryEvent::Holding { holding: None })]);
+        assert!(app.world().resource::<FactoryStatus>().holds().is_empty());
         let err = FactoryEvent::Error { message: "boom".into() };
-        send(&mut app, [event(2, err)]);
+        send(&mut app, [event(4, err)]);
         assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].last_error.as_ref().unwrap().1, "boom");
     }
 
@@ -479,12 +591,49 @@ mod tests {
     }
 
     #[test]
-    fn stopping_keeps_the_last_known_state_and_says_so() {
+    fn a_task_is_labelled_from_the_gates_of_the_repo_that_works_its_project() {
+        let g = |n| Grade::new(n).unwrap();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: human,
+            usage: Vec::new(),
+            seq: 1,
+        };
+        let mut status = FactoryStatus::default();
+        status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+        status.repos.insert("o/b".into(), repo("OTHER-1", vec![g(2), g(4)]));
+        assert_eq!(status.human_grades_for(Some("TRAIL")), [g(3), g(4)]);
+        assert_eq!(status.human_grades_for(Some("OTHER")), [g(2), g(4)]);
+        // A project no repo works gets every repo's.
+        assert_eq!(status.human_grades_for(Some("NONE")), [g(2), g(3), g(4)]);
+        assert_eq!(status.human_grades_for(None), [g(2), g(3), g(4)]);
+    }
+
+    #[test]
+    fn a_control_plane_that_is_not_running_is_shown_until_it_is() {
+        let mut app = app();
+        let off = FactoryState::Starting { reason: Some("keyring locked".into()) };
+        send(&mut app, [FactoryUpdate::Control(Some(off.clone())), snapshot(1, vec![])]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert_eq!(status.link, FactoryLink::Control(off));
+        assert_eq!(status.label(), "factory starting: keyring locked");
+        send(&mut app, [FactoryUpdate::Control(Some(FactoryState::Running)), snapshot(2, vec![])]);
+        assert_eq!(app.world().resource::<FactoryStatus>().link, FactoryLink::Running);
+        // A server that sends no state is taken to be running.
+        send(&mut app, [FactoryUpdate::Control(None), snapshot(3, vec![])]);
+        assert_eq!(app.world().resource::<FactoryStatus>().link, FactoryLink::Running);
+    }
+
+    #[test]
+    fn an_unreachable_server_keeps_the_last_known_state_and_says_so() {
         let mut app = app();
         send(&mut app, [snapshot(3, vec![sandbox("a", SandboxState::Idle)])]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory running");
-        send(&mut app, [FactoryUpdate::Stopped]);
-        assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory stopped");
+        send(&mut app, [FactoryUpdate::Unreachable]);
+        assert_eq!(app.world().resource::<FactoryStatus>().label(), "unreachable");
         assert_eq!(campsites(&mut app), [("a".into(), SandboxState::Idle)]);
         // Back again: the new snapshot makes it current.
         send(&mut app, [snapshot(1, vec![])]);

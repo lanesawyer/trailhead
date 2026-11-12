@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use super::{BackgroundTone, Icon, TextTone, Token, icon_text, radius, size, space, text_dim, text_toned, token};
 
 /// A chip with `label` at the small size, with `icon` before it when given. `tone` colors the text and icon (such as
-/// [`token::WARN`] for open questions); without one the text is dim, so a row of badges stays quiet beside the title.
+/// [`token::STATUS_WARN`] for open questions); without one the text is dim, so a row of badges stays quiet beside the title.
 pub fn badge(label: impl Into<String>, icon: Option<Icon>, tone: Option<Token>) -> impl Scene {
     let label = label.into();
     let inside: Box<dyn SceneList> = match (icon, tone) {
@@ -15,7 +15,7 @@ pub fn badge(label: impl Into<String>, icon: Option<Icon>, tone: Option<Token>) 
             -- @text_toned(label, size::SMALL, tone)
         }),
         (Some(icon), None) => Box::new(bsn_list! {
-            @icon_text(icon)
+            @icon_text(icon) TextTone({ token::TEXT_DIM })
             -- @text_dim(label, size::SMALL)
         }),
         (None, Some(tone)) => Box::new(bsn_list! { @text_toned(label, size::SMALL, tone) }),
@@ -28,7 +28,7 @@ pub fn badge(label: impl Into<String>, icon: Option<Icon>, tone: Option<Token>) 
             padding: { UiRect::axes(px(space::ICON_LABEL), px(space::BADGE_INSET)) },
             border_radius: { BorderRadius::all(px(radius::SMALL)) },
         }
-        BackgroundTone({ token::BADGE_BG })
+        BackgroundTone({ token::FILL_SOLID })
         Children [ { inside } ]
     }
 }

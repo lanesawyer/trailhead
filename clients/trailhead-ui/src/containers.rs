@@ -1,9 +1,11 @@
 //! The surfaces controls sit in: a panel over the board, a section within it, and a field (a label over an input).
 
-use crate::theme::BackgroundTone;
+use crate::theme::{BorderTone, Surface};
+use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::prelude::*;
+use bevy::text::LineBreak;
 
-use super::{radius, size, space, text_dim, token};
+use super::{Truncated, button_text, layer, radius, size, space, stroke, text_dim, token};
 
 /// A panel over the board (the inspector, a form, the connect panel): a column on the panel background, rounded and
 /// padded. Position it with a `Node` of the caller's, and give it a [`super::layer`].
@@ -15,7 +17,7 @@ pub fn panel() -> impl Scene {
             padding: { UiRect::all(px(space::PANEL_INSET)) },
             border_radius: { BorderRadius::all(px(radius::PANEL)) },
         }
-        BackgroundTone({ token::PANEL_BG })
+        Surface::Panel
     }
 }
 
@@ -56,5 +58,67 @@ pub fn field(label: impl Into<String>, control: impl SceneList) -> impl Scene {
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
         Children [ @text_dim(label, size::SECONDARY) -- {control} ]
+    }
+}
+
+/// A list hanging under what holds it (a search field's suggestions), floating over what comes after, so showing and
+/// hiding it moves nothing. Put it last in a node holding just the field, which it takes its width from.
+pub fn dropdown_list() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            top: percent(100),
+            left: px(0),
+            right: px(0),
+            margin: { UiRect::top(px(space::STACKED)) },
+            flex_direction: FlexDirection::Column,
+            padding: { UiRect::all(px(space::BADGE_INSET)) },
+            border: { UiRect::all(px(stroke::HAIRLINE)) },
+            border_radius: { BorderRadius::all(px(radius::CONTROL)) },
+        }
+        Surface::Floating
+        BorderTone({ token::BORDER })
+        GlobalZIndex({ layer::MENU })
+    }
+}
+
+/// A row of a [`dropdown_list`]: a plain button the list's width, its words on one line and cut with an ellipsis when
+/// too long for it. What a press does is the caller's, as for any button.
+pub fn dropdown_item(caption: impl Into<String>) -> impl Scene {
+    let caption = caption.into();
+    let full = caption.clone();
+    bsn! {
+        @FeathersButton {
+            @caption: { bsn_list! {
+                @button_text(caption)
+                Truncated { full: { full }, size: { size::BODY } }
+                TextLayout { linebreak: LineBreak::NoWrap }
+            } },
+            @variant: { ButtonVariant::Plain },
+        }
+        Node {
+            width: percent(100),
+            min_width: px(0),
+            justify_content: JustifyContent::Start,
+            overflow: Overflow::clip_x(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panel_has_room_for_a_scrollbar_in_its_padding() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let id = app.world_mut().commands().spawn_scene(panel()).id();
+        app.world_mut().flush();
+        app.update();
+        assert!(crate::has_scrollbar_room(app.world().get::<Node>(id).unwrap()));
     }
 }

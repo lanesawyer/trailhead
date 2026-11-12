@@ -39,11 +39,25 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                     parts.push(format!("up {}h {}m (since {since})", up.as_hours(), up.as_mins() % 60));
                 }
                 println!("{}", parts.join(" · "));
+                if info.ok == Some(false) {
+                    println!("store can't serve requests: {}", info.store_error.as_deref().unwrap_or("unknown error"));
+                }
                 if let Some(exe) = &info.exe {
                     println!("binary {}", exe.display());
                 }
                 if let Some(db) = &info.db {
                     println!("db {}", db.display());
+                }
+                if local
+                    && client::is_ours(&paths, &info)
+                    && let Some(unit) = info.pid.and_then(client::server_unit)
+                {
+                    println!("scope {unit}");
+                    if client::is_shared_scope(&unit) {
+                        println!(
+                            "warning: the server shares a scope with an app, terminal or login session; ending it would stop the server (`trailhead server restart` starts it in its own)"
+                        );
+                    }
                 }
                 if let Some(runs) = info.runs_in_flight {
                     println!("factory runs in flight: {runs}");

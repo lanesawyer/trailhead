@@ -30,7 +30,6 @@ use tracing::Instrument;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
-use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
 use trailhead_factory::{
@@ -42,6 +41,7 @@ use trailhead_wire::daemon::{Launch, RemoteDaemon};
 use trailhead_wire::ui::{UI_ALPN, UiAllowlist, UiProtocol};
 use trailhead_wire::{API_ALPN, build_id};
 
+mod error;
 mod find;
 mod fnox;
 mod logfile;
@@ -50,6 +50,7 @@ pub mod ops;
 mod repos;
 mod surface;
 
+pub use error::{Error, Result};
 pub use surface::Feed;
 mod wake;
 
@@ -118,16 +119,16 @@ fn saved_endpoint_id(creds: &CredStore) -> Option<iroh::EndpointId> {
     Some(trailhead_wire::parse_secret_key(&keys.endpoint).ok()?.public())
 }
 
-fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32]), String> {
+fn load_or_create_keys(creds: &CredStore) -> Result<(SecretKey, [u8; 32])> {
     if let Some((saved, _)) = creds.read(KEYS) {
-        let keys: Keys = serde_json::from_str(&saved).map_err(|e| format!("bad saved factory keys: {e}"))?;
-        let endpoint = trailhead_wire::parse_secret_key(&keys.endpoint).map_err(|e| e.to_string())?;
-        let master = hex::decode(&keys.master).ok().and_then(|b| b.try_into().ok()).ok_or("bad saved master key")?;
+        let keys: Keys = serde_json::from_str(&saved).map_err(Error::BadKeys)?;
+        let endpoint = trailhead_wire::parse_secret_key(&keys.endpoint).map_err(Error::backend)?;
+        let master = hex::decode(&keys.master).ok().and_then(|b| b.try_into().ok()).ok_or(Error::BadMasterKey)?;
         return Ok((endpoint, master));
     }
     let (endpoint, master) = (SecretKey::generate(), SecretKey::generate().to_bytes());
     let keys = Keys { endpoint: hex::encode(endpoint.to_bytes()), master: hex::encode(master) };
-    creds.save(KEYS, &serde_json::to_string(&keys).expect("keys serialize")).map_err(|e| e.to_string())?;
+    creds.save(KEYS, &serde_json::to_string(&keys).expect("keys serialize")).map_err(Error::backend)?;
     tracing::info!("created the factory's keys; losing them strands its running sandboxes");
     Ok((endpoint, master))
 }
@@ -136,16 +137,16 @@ fn ui_allowlist(paths: &Paths) -> UiAllowlist {
     UiAllowlist::new(paths.data_dir.join("factory").join("ui-allowed"))
 }
 
-fn allowlist() -> Result<UiAllowlist, String> {
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+fn allowlist() -> Result<UiAllowlist> {
+    let paths = Paths::from_env().ok_or(Error::NoDirs)?;
     Ok(ui_allowlist(&paths))
 }
 
 /// `allow` (`add`) or `disallow` a UI endpoint id.
-pub fn allow(endpoint_id: &str, add: bool) -> Result<(), String> {
-    let id = trailhead_wire::parse_endpoint_id(endpoint_id).map_err(|e| e.to_string())?;
+pub fn allow(endpoint_id: &str, add: bool) -> Result<()> {
+    let id = trailhead_wire::parse_endpoint_id(endpoint_id).map_err(Error::backend)?;
     let list = allowlist()?;
-    let changed = if add { list.add(id) } else { list.remove(&id) }.map_err(|e| e.to_string())?;
+    let changed = if add { list.add(id) } else { list.remove(&id) }.map_err(Error::backend)?;
     match (add, changed) {
         (true, true) => println!("allowed {id}"),
         (true, false) => println!("{id} was already allowed"),
@@ -156,8 +157,8 @@ pub fn allow(endpoint_id: &str, add: bool) -> Result<(), String> {
 }
 
 /// Prints the UI endpoint ids allowed to connect.
-pub fn allowed() -> Result<(), String> {
-    let ids = allowlist()?.list().map_err(|e| e.to_string())?;
+pub fn allowed() -> Result<()> {
+    let ids = allowlist()?.list().map_err(Error::backend)?;
     if ids.is_empty() {
         println!("no UI endpoints are allowed; add one with `trailhead factory allow <endpoint-id>`");
     }
@@ -166,23 +167,22 @@ pub fn allowed() -> Result<(), String> {
 }
 
 /// The `factory` agent's context, looked up through the local user.
-async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx, String> {
+async fn factory_ctx(store: &Store, create: bool) -> Result<Ctx> {
     let user = std::env::var("USER").unwrap_or_else(|_| "me".into());
-    let (ws, me) = store.bootstrap_local(&user).await.map_err(|e| e.to_string())?;
+    let (ws, me) = store.bootstrap_local(&user).await.map_err(Error::backend)?;
     let human = Ctx::user(ws.id, me.id);
-    let agent = match store.list_agents(&human).await.map_err(|e| e.to_string())?.into_iter().find(|a| a.name == AGENT)
-    {
+    let agent = match store.list_agents(&human).await.map_err(Error::backend)?.into_iter().find(|a| a.name == AGENT) {
         Some(a) => a,
-        None if create => store.create_agent(&human, AGENT).await.map_err(|e| e.to_string())?,
-        None => return Err(format!("no `{AGENT}` agent yet; create it with `trailhead --as-me agent add {AGENT}`")),
+        None if create => store.create_agent(&human, AGENT).await.map_err(Error::backend)?,
+        None => return Err(Error::NoAgent { agent: AGENT }),
     };
-    store.agent_ctx(ws.id, agent.id).await.map_err(|e| e.to_string())
+    store.agent_ctx(ws.id, agent.id).await.map_err(Error::backend)
 }
 
 /// `opts` with the secrets the environment didn't set filled in from fnox (run in `dir`), then from what `trailhead
 /// factory login` saved, and the fnox they were looked up in. It runs nothing until a name is missing from the
 /// environment, and reads its config once.
-fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::Fnox), String> {
+fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::Fnox)> {
     let creds = paths.creds();
     let fnox = fnox::Fnox::new("fnox", dir, fnox::global_config().as_deref());
     let resolved = Opts {
@@ -200,18 +200,43 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
+/// The directory of the repo whose config is at `config_path`.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
+}
+
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
-fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig), String> {
+fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
     let config_path = match &opts.config {
         Some(path) => path.clone(),
-        None => find::config(&std::env::current_dir().map_err(|e| e.to_string())?)?,
+        None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
-    let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-    let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
+    let repo_dir = config_dir(&config_path);
     let remote = find::remote(&repo_dir);
-    let config =
-        FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| format!("{}: {e}", config_path.display()))?;
+    let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok((config_path, remote, config))
+}
+
+/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
+/// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
+fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
+    let now = FactoryConfig { merge: Default::default(), ..now };
+    if now == *started {
+        *warned = None;
+        return false;
+    }
+    if warned.as_ref() == Some(&now) {
+        return false;
+    }
+    *warned = Some(now);
+    true
+}
+
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
+/// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
+fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
+    FactoryConfig { merge: Default::default(), ..config.clone() }
 }
 
 /// One repo's factory, ready to run.
@@ -221,7 +246,7 @@ struct Entry {
     slug: String,
 }
 
-/// Everything `check` and `run` share: one store, agent, key set, iroh endpoint with its API tunnel, compute and
+/// Everything the server's control plane runs on: one store, agent, key set, iroh endpoint with its API tunnel, compute and
 /// host, and a factory for each repo.
 struct Setup {
     repos: Vec<Entry>,
@@ -231,12 +256,12 @@ struct Setup {
 }
 
 /// The user config's `[factory]` table; a missing file is the default.
-fn read_host_config(paths: &Paths) -> Result<HostConfig, String> {
+fn read_host_config(paths: &Paths) -> Result<HostConfig> {
     let user_config = paths.config_dir.join("config.toml");
     match std::fs::read_to_string(&user_config) {
-        Ok(src) => HostConfig::from_user_config(&src).map_err(|e| format!("{}: {e}", user_config.display())),
+        Ok(src) => HostConfig::from_user_config(&src).map_err(|e| Error::at(&user_config, e)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
-        Err(e) => Err(format!("{}: {e}", user_config.display())),
+        Err(e) => Err(Error::at(&user_config, e)),
     }
 }
 
@@ -251,8 +276,8 @@ struct Plan {
     adapter: String,
 }
 
-fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
+    let cwd = std::env::current_dir().map_err(Error::backend)?;
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let dirs = repos::dirs(&run.repo, run.opts.config.as_deref(), &host_config, home.as_deref(), &cwd)?;
     let specs = repos::load_all(&dirs, run.opts.config.as_deref())?;
@@ -260,52 +285,40 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan, String> {
     for spec in &specs {
         spec.config
             .check_plugins(&harnesses.names(), &providers.names())
-            .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
+            .map_err(|e| Error::at(&spec.config_path, e))?;
         #[cfg(not(feature = "docker"))]
         if spec.config.target_specs().iter().any(|t| matches!(t.compute, ComputeConfig::Docker { .. })) {
-            return Err(format!(
-                "{}: Docker compute needs a build with the `docker` feature (`cargo install --features docker`)",
-                spec.config_path.display()
-            ));
+            return Err(Error::DockerNotBuiltFor { path: spec.config_path.clone() });
         }
     }
-    let (adapter, _) = specs[0].config.plugins().ok_or("the worker profile is missing")?;
+    let (adapter, _) = specs[0].config.plugins().ok_or(Error::NoWorkerProfile)?;
     let adapter = adapter.to_string();
     Ok(Plan { opts: run.opts.clone(), host_config, specs, adapter })
 }
 
-async fn setup(run: &RunOpts) -> Result<Setup, String> {
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    let plan = plan(run, read_host_config(&paths)?)?;
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    wire(plan, &paths, &cwd, None, surface::Feed::new(FactoryState::Starting { reason: None })).await
-}
-
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own when it runs the control plane; `check` has none
-/// and opens the database itself.
-async fn wire(
-    plan: Plan,
-    paths: &Paths,
-    fnox_dir: &Path,
-    store: Option<Arc<Store>>,
-    feed: surface::Feed,
-) -> Result<Setup, String> {
+/// computes. Fnox runs in `fnox_dir`, the first repo's directory. `store` is the server's own: the only process that opens the database.
+async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
     let opts = &opts;
     let (harnesses, providers) = (harnesses(), providers());
     let mut harness_secrets = HarnessSecrets::new();
-    if let (Some(token), CLAUDE_CODE) = (&opts.claude_oauth_token, adapter.as_str()) {
-        harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+    if let Some(token) = &opts.claude_oauth_token {
+        if adapter == CLAUDE_CODE {
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+        } else {
+            tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
+        }
     }
+    let baselines: Vec<_> = specs.iter().map(|spec| started_baseline(&spec.config)).collect();
     for spec in &mut specs {
         if !harness_secrets.is_empty() {
             tracing::warn!(repo = %spec.slug(), harness = %adapter, "subscription mode: sandboxes hold the harness's credential and can reach its API");
             spec.config
                 .egress
                 .always
-                .extend((harnesses.get(&adapter).map_err(|e| e.to_string())?.egress)(&harness_secrets));
+                .extend((harnesses.get(&adapter).map_err(Error::backend)?.egress)(&harness_secrets));
         }
     }
 
@@ -324,18 +337,9 @@ async fn wire(
         &release,
         &daemon_binary::cache_dir(&paths.data_dir),
     )
-    .await?;
+    .await
+    .map_err(Error::backend)?;
     let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
-    let store = match store {
-        Some(store) => store,
-        None => {
-            let db = paths.db();
-            if let Some(dir) = db.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            Arc::new(Store::open_local(&db).await.map_err(|e| e.to_string())?)
-        }
-    };
     let ctx = factory_ctx(&store, opts.create_agent).await?;
     let tracker = Arc::new(CoreTracker::new(store.clone(), ctx.clone(), AGENT));
     let (key, master) = load_or_create_keys(&paths.creds())?;
@@ -349,7 +353,7 @@ async fn wire(
         .secret_key(key)
         .bind()
         .await
-        .map_err(|e| format!("binding the iroh endpoint: {e}"))?;
+        .map_err(|e| Error::context("binding the iroh endpoint", e))?;
     let peers = trailhead_wire::Peers::default();
     let mut targets: Vec<Wired> = Vec::new();
     for (compute, target) in built {
@@ -381,11 +385,11 @@ async fn wire(
 
     let host = Host::new(&host_config);
     let mut repos = Vec::new();
-    for spec in specs {
+    for (spec, started) in specs.into_iter().zip(baselines) {
         let slug = spec.slug();
         let repos::RepoSpec { config_path, remote, config, .. } = spec;
-        let (_, provider_name) = config.plugins().ok_or("the worker profile is missing")?;
-        let provider = *providers.get(provider_name).map_err(|e| e.to_string())?;
+        let (_, provider_name) = config.plugins().ok_or(Error::NoWorkerProfile)?;
+        let provider = *providers.get(provider_name).map_err(Error::backend)?;
         let placed = targets
             .iter()
             .map(|(target, compute, daemon)| Placed {
@@ -395,13 +399,25 @@ async fn wire(
                 provider: provider(target.model_endpoint(&opts.model_endpoint).to_string()),
             })
             .collect();
+        let warned = std::sync::Mutex::new(None::<FactoryConfig>);
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
         factory = factory.with_merge_mode_source(Box::new(move || {
-            let src = std::fs::read_to_string(&config_path).map_err(|e| format!("{}: {e}", config_path.display()))?;
-            FactoryConfig::from_repo_file(&src, remote.clone())
-                .map(|c| c.merge.mode)
-                .map_err(|e| format!("{}: {e}", config_path.display()))
+            // The control plane's `MergeModeSource` reports a `String`.
+            let read = || -> Result<_> {
+                let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
+                let config =
+                    FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
+                let mode = config.merge.mode;
+                if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
+                    tracing::warn!(
+                        path = %config_path.display(),
+                        "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
+                    );
+                }
+                Ok(mode)
+            };
+            read().map_err(|e| e.to_string())
         }));
         match &opts.github_token {
             Some(token) => {
@@ -433,6 +449,7 @@ async fn run_repo(
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
+    feed: surface::Feed,
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
@@ -444,6 +461,7 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            feed.set_stopped(&entry.slug, e.to_string());
             true
         }
     }
@@ -464,13 +482,13 @@ fn computes(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
-) -> Result<Vec<Built>, String> {
+) -> Result<Vec<Built>> {
     config
         .target_specs()
         .into_iter()
         .map(|spec| {
             let (compute, target) = compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only)
-                .map_err(|e| format!("target {}: {e}", spec.name))?;
+                .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
             Ok((compute, target.listed(&spec)))
         })
         .collect()
@@ -487,27 +505,16 @@ fn compute(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
-) -> Result<(Arc<dyn Compute>, Target), String> {
+) -> Result<(Arc<dyn Compute>, Target)> {
     match config {
         ComputeConfig::Sprites => {
-            let token = opts
-                .sprites_token
-                .clone()
-                .ok_or("Sprites compute needs SPRITES_TOKEN or `trailhead factory login sprites`")?;
-            Ok((Arc::new(SpritesCompute::new(token).map_err(|e| e.to_string())?), trailhead_compute_sprites::target()))
+            let token = opts.sprites_token.clone().ok_or(Error::NoSpritesToken)?;
+            trailhead_compute_sprites::build(token).map_err(Error::backend)
         }
         #[cfg(feature = "docker")]
-        ComputeConfig::Docker { image, network, runtime, memory_mib } => {
-            use trailhead_compute_docker::{DockerCompute, DockerConfig};
+        ComputeConfig::Docker { .. } => {
+            use trailhead_compute_docker::DockerConfig;
             let mut docker = DockerConfig::new(paths.data_dir.join("factory").join("docker"), binary);
-            if let Some(image) = image {
-                docker.image = image.clone();
-            }
-            if let Some(network) = network {
-                docker.network = network.clone();
-            }
-            docker.runtime = runtime.clone();
-            docker.memory_bytes = memory_mib.map(|m| m * 1024 * 1024);
             docker.connections = gateway_connections(login::github_writer_token(fnox, &paths.creds())?);
             if docker.connections.is_empty() {
                 tracing::warn!(
@@ -519,12 +526,10 @@ fn compute(
                     "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
-            let compute = if read_only { DockerCompute::read_only(docker) } else { DockerCompute::new(docker) }
-                .map_err(|e| e.to_string())?;
-            Ok((Arc::new(compute), trailhead_compute_docker::target()))
+            trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
         }
         #[cfg(not(feature = "docker"))]
-        ComputeConfig::Docker { .. } => Err("Docker compute needs a build with the `docker` feature".into()),
+        ComputeConfig::Docker { .. } => Err(Error::DockerNotBuilt),
     }
 }
 
@@ -562,28 +567,27 @@ fn compute_name(config: &ComputeConfig) -> &'static str {
     }
 }
 
-fn check_result(failed: usize) -> Result<(), String> {
+fn check_result(failed: usize) -> Result<()> {
     match failed {
         0 => Ok(()),
-        1 => Err("1 check failed".into()),
-        n => Err(format!("{n} checks failed")),
+        n => Err(Error::ChecksFailed(n)),
     }
 }
 
-/// Sets everything up for `run`'s repos and reports what it found, without running anything.
-pub async fn check(run: &RunOpts) -> Result<(), String> {
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
-    // The control plane's iroh identity is one per machine: binding it beside the server's would flap its daemons,
-    // and a server started meanwhile would bind it too. The server's lock keeps them apart.
-    let _lock = trailhead_client::paths::lock(&paths.lock_file(), "trailhead factory check")
-        .map_err(|e| format!("{e}; stop the server to run `check`"))?;
-    let setup = setup(run).await?;
+/// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
+/// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
+/// the server.
+pub async fn check(run: &RunOpts) -> Result<()> {
+    let paths = Paths::from_env().ok_or(Error::NoDirs)?;
+    let plan = plan(run, read_host_config(&paths)?)?;
+    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
+    let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
-    for entry in &setup.repos {
-        let factory = &entry.factory;
-        let project = &factory.config.repo.project;
-        let queue: Vec<_> = factory.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
-        match factory.tracker.ready(project, &queue, 10).await {
+    for spec in &plan.specs {
+        let slug = spec.slug();
+        let project = &spec.config.repo.project;
+        let queue: Vec<_> = spec.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
+        match trailhead_factory::Tracker::ready(&tracker, project, &queue, 10).await {
             Ok(ready) => {
                 let scope = if queue.is_empty() {
                     project.clone()
@@ -591,37 +595,59 @@ pub async fn check(run: &RunOpts) -> Result<(), String> {
                     let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
                     format!("{project}, under {}", keys.join(", "))
                 };
-                println!("{}: tracker: acting as {AGENT}; {} ready task(s) in {scope}", entry.slug, ready.len());
+                println!("{slug}: tracker: the server's API; {} ready task(s) in {scope}", ready.len());
                 for t in &ready {
                     println!("  {} {}", t.key.0, t.title);
                 }
             }
             Err(e) => {
                 failed += 1;
-                println!("{}: tracker: acting as {AGENT}; {e}", entry.slug);
+                println!("{slug}: tracker: {}", ops::reach(e));
             }
         }
     }
-    let first = &setup.repos[0].factory;
-    let specs = first.config.target_specs();
-    for (p, spec) in first.targets().iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
-        match p.compute.list(&Default::default()).await {
-            Ok(live) => println!(
-                "compute: {} ({spec}, priority {}) reachable; {} sandbox(es) visible",
-                p.target.name,
-                p.target.priority,
-                live.len()
-            ),
-            Err(e) => {
-                failed += 1;
-                println!("compute: {} ({spec}): {e}", p.target.name);
+    let first = &plan.specs[0].config;
+    let specs = first.target_specs();
+    match computes(first, &opts, &fnox, &paths, Default::default(), true) {
+        Ok(built) => {
+            for ((compute, target), spec) in built.iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
+                match compute.list(&Default::default()).await {
+                    Ok(live) => println!(
+                        "compute: {} ({spec}, priority {}) reachable; {} sandbox(es) visible",
+                        target.name,
+                        target.priority,
+                        live.len()
+                    ),
+                    Err(e) => {
+                        failed += 1;
+                        println!("compute: {} ({spec}): {e}", target.name);
+                    }
+                }
             }
         }
+        Err(e) => {
+            failed += 1;
+            println!("compute: {e}");
+        }
     }
-    println!("endpoint: {}", setup.tunnel.endpoint().id());
-    println!("tunnel: forwarding to {}", run.opts.server);
-    setup.tunnel.shutdown().await.map_err(|e| e.to_string())?;
+    match saved_endpoint_id(&paths.creds()) {
+        Some(id) => println!("endpoint: {id}"),
+        None => println!("endpoint: none yet (the server's control plane makes it on its first run)"),
+    }
+    println!("tunnel: the server's control plane forwards to {}", opts.server);
     check_result(failed)
+}
+
+/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+fn loop_panicked(
+    e: &tokio::task::JoinError,
+    boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
+) {
+    let repo = boards.get(&e.id()).map(|(slug, board)| {
+        board.control(trailhead_factory::ControlState::Stopped);
+        slug.as_str()
+    });
+    tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
 }
 
 /// Runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
@@ -630,13 +656,18 @@ async fn run_loops(
     poll: Duration,
     drain: tokio::sync::watch::Receiver<bool>,
     cancel: tokio::sync::watch::Receiver<bool>,
-) -> Result<(), String> {
+    feed: surface::Feed,
+) -> Result<()> {
     let Setup { repos, tunnel, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
+    let mut boards = std::collections::HashMap::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
-        loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
+        let board = entry.factory.status().clone();
+        let slug = entry.slug.clone();
+        let id = loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel, feed.clone()).instrument(span)).id();
+        boards.insert(id, (slug, board));
     }
     let mut failed = 0;
     while let Some(joined) = loops.join_next().await {
@@ -645,14 +676,14 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                tracing::error!(error = %e, "a repo's loop panicked; the other repos carry on");
+                loop_panicked(&e, &boards);
             }
         }
     }
-    tunnel.shutdown().await.map_err(|e| e.to_string())?;
+    tunnel.shutdown().await.map_err(Error::backend)?;
     match failed {
         0 => Ok(()),
-        n => Err(format!("{n} repo loop(s) stopped on an error")),
+        n => Err(Error::LoopsFailed(n)),
     }
 }
 
@@ -707,7 +738,7 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 /// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
 /// (Sprites or GitHub unreachable, a locked keyring, a daemon download)
 /// are logged and retried with backoff while the server keeps serving.
-pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InServer, String> {
+pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InServer> {
     let host_config = read_host_config(&paths)?;
     let idle = |state| Ok(InServer { feed: surface::Feed::new(state), running: None });
     if host_config.disabled {
@@ -722,7 +753,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
         #[command(flatten)]
         run: RunOpts,
     }
-    let mut run = <Defaults as clap::Parser>::try_parse_from(["serve"]).map_err(|e| e.to_string())?.run;
+    let mut run = <Defaults as clap::Parser>::try_parse_from(["serve"]).map_err(Error::backend)?.run;
     run.opts.server = server;
     // Listing repos is the person's consent; the agent the factory acts as is the server's to make.
     run.opts.create_agent = true;
@@ -738,7 +769,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     let control = async move {
         let mut wait = RETRY_FIRST;
         let setup = loop {
-            match wire(plan.clone(), &paths, &fnox_dir, Some(store.clone()), shared.clone()).await {
+            match wire(plan.clone(), &paths, &fnox_dir, store.clone(), shared.clone()).await {
                 Ok(setup) => break setup,
                 Err(e) => {
                     tracing::warn!(
@@ -746,7 +777,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
                         retry_secs = wait.as_secs(),
                         "control: starting; the server keeps serving and tries the factory again"
                     );
-                    shared.set_state(FactoryState::Starting { reason: Some(e) });
+                    shared.set_state(FactoryState::Starting { reason: Some(e.to_string()) });
                 }
             }
             tokio::select! {
@@ -758,7 +789,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
             }
             wait = (wait * 2).min(RETRY_MAX);
         };
-        if let Err(e) = run_loops(setup, poll, drain, cancel).await {
+        if let Err(e) = run_loops(setup, poll, drain, cancel, shared.clone()).await {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
         }
         shared.set_state(FactoryState::Stopped);
@@ -860,10 +891,10 @@ fn server_subscriber(
 /// The factory's commands, as `trailhead factory <cmd>` takes them.
 #[derive(clap::Subcommand)]
 pub enum Command {
-    /// Set everything up and report, without running anything.
+    /// Report what the factory can see (queued tasks via the server, the compute, its endpoint), without running anything.
     Check(RunOpts),
-    /// Show the sandbox pool, what is running and how queued tasks have gone. Read-only; runs beside the server.
-    Status(Opts),
+    /// Show the sandbox pool, what is running and how queued tasks have gone (the latest finished ones; `--all` for every one). Read-only; asks the server.
+    Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
@@ -878,7 +909,7 @@ pub enum Command {
 }
 
 /// Sets up logging to the terminal and runs `cmd`.
-pub async fn command(cmd: Command) -> Result<(), String> {
+pub async fn command(cmd: Command) -> Result<()> {
     trailhead_log::init_stdout(trailhead_log::env_filter_or("info"));
     match cmd {
         Command::Check(opts) => check(&opts).await,
@@ -892,8 +923,8 @@ pub async fn command(cmd: Command) -> Result<(), String> {
 }
 
 /// Saves a secret for the control plane in the OS keyring (`trailhead factory login ...`).
-pub async fn login(cmd: login::Login) -> Result<(), String> {
-    let paths = Paths::from_env().ok_or("can't find Trailhead's data and config directories")?;
+pub async fn login(cmd: login::Login) -> Result<()> {
+    let paths = Paths::from_env().ok_or(Error::NoDirs)?;
     login::run(cmd, &paths.creds()).await
 }
 
@@ -932,6 +963,53 @@ impl trailhead_wire::ui::LogFeed for LogsFeed {
 mod tests {
     use super::check_result;
 
+    #[test]
+    fn a_changed_setting_other_than_merge_mode_warns_once() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let base = parse("");
+        let started = super::started_baseline(&base);
+        let mut warned = None;
+        // A mode change is applied live, so it isn't a reason to restart.
+        assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
+        let edited = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
+        assert!(!super::changed_without_restart(&started, edited, &mut warned));
+        assert!(!super::changed_without_restart(&started, base, &mut warned));
+    }
+
+    #[test]
+    fn egress_added_at_runtime_is_not_a_change_to_the_file() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let mut config = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        let started = super::started_baseline(&config);
+        // What `wire` does in subscription mode, after the baseline is taken.
+        config.egress.always.push("api.anthropic.com".into());
+        let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        assert!(!super::changed_without_restart(&started, reread, &mut None));
+        assert_ne!(started.egress, config.egress);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_loop_is_marked_stopped_on_its_board() {
+        use trailhead_factory::ControlState;
+        let (up, other) = (trailhead_control::StatusBoard::new(), trailhead_control::StatusBoard::new());
+        up.control(ControlState::Up);
+        other.control(ControlState::Up);
+        let mut loops = tokio::task::JoinSet::new();
+        let mut boards = std::collections::HashMap::new();
+        let id = loops.spawn(async { panic!("boom") }).id();
+        boards.insert(id, ("o/n".to_string(), up.clone()));
+        let id = loops.spawn(std::future::pending::<()>()).id();
+        boards.insert(id, ("o/m".to_string(), other.clone()));
+        let e = loops.join_next().await.unwrap().unwrap_err();
+        super::loop_panicked(&e, &boards);
+        assert_eq!(up.snapshot().control, ControlState::Stopped);
+        assert_eq!(other.snapshot().control, ControlState::Up);
+    }
+
     /// Paths under `dir`, and a store in it.
     async fn instance(
         dir: &std::path::Path,
@@ -969,11 +1047,11 @@ mod tests {
         let missing = dir.path().join("no-such-repo");
         let config = format!("[factory]\nrepos = [{:?}]\n", missing.display().to_string());
         let (paths, store) = instance(dir.path(), &config).await;
-        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
         assert!(err.contains("no-such-repo"), "{err}");
 
         let (paths, store) = instance(dir.path(), "[factory]\nrepos = 3\n").await;
-        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
         assert!(err.contains("config.toml"), "{err}");
     }
 
@@ -998,7 +1076,7 @@ mod tests {
         std::fs::write(repo.join(".trailhead.toml"), file).unwrap();
         let config = format!("[factory]\nrepos = [{:?}]\n", repo.display().to_string());
         let (paths, store) = instance(dir.path(), &config).await;
-        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap();
+        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
         assert!(err.contains("`docker` feature"), "{err}");
     }
 
@@ -1050,8 +1128,9 @@ mod tests {
 
     #[test]
     fn check_result_counts_failures() {
-        assert_eq!(check_result(0), Ok(()));
-        assert_eq!(check_result(1), Err("1 check failed".into()));
-        assert_eq!(check_result(2), Err("2 checks failed".into()));
+        check_result(0).unwrap();
+        assert_eq!(check_result(1).unwrap_err().to_string(), "1 check failed");
+        assert_eq!(check_result(2).unwrap_err().to_string(), "2 checks failed");
+        assert!(matches!(check_result(3), Err(crate::Error::ChecksFailed(3))));
     }
 }

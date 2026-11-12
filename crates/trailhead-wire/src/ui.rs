@@ -20,7 +20,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, FactoryState, Result, Sequenced};
 
@@ -41,7 +41,8 @@ pub enum UiRequest {
     /// The rest of the stream is raw bytes to and from the Trailhead server.
     Api,
     /// The stream carries [`StatusFrame`]s: a snapshot of every repo, then each event after it, until either side
-    /// closes it.
+    /// closes it. The control plane ends it when the UI falls behind and misses events, so a UI that sees it end
+    /// redials for a fresh snapshot.
     Status,
     /// The stream carries [`LogFrame`]s: the control plane's last log lines, then each new one.
     Logs,
@@ -119,6 +120,12 @@ pub trait StatusFeed: Send + Sync + 'static {
     fn state(&self) -> Option<FactoryState> {
         None
     }
+
+    /// Notified whenever the state or the set of repos changes. A stream with no repos to forward ends on it, so the
+    /// UI redials for a fresh snapshot; without one such a stream never learns of a change.
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        None
+    }
 }
 
 impl std::fmt::Debug for dyn StatusFeed {
@@ -135,6 +142,9 @@ pub enum LogFrame {
     Backlog { lines: Vec<LogLine> },
     /// One new line.
     Line(LogLine),
+    /// The reader fell behind and `count` lines were never sent: a gap between the line before this frame and
+    /// the one after it.
+    Skipped { count: u64 },
     /// What a control plane that doesn't know the request answers with (see [`StatusFrame::Unsupported`]).
     Unsupported(Unsupported),
 }
@@ -152,14 +162,18 @@ impl std::fmt::Debug for dyn LogFeed {
 }
 
 /// Why a stream was reset: the first frame wasn't a request this control plane knows.
-const BAD_REQUEST: u32 = 2;
+pub const BAD_REQUEST: u32 = 2;
+
+/// Why an API stream was reset: the request was fine, but the control plane couldn't reach the Trailhead server.
+/// Distinct from [`BAD_REQUEST`] so a UI can tell a server that's down from an op that's unknown.
+pub const SERVER_UNREACHABLE: u32 = 3;
 
 /// How often an open UI connection is checked against the allowlist, so a disallowed endpoint loses the streams it
 /// already has open (the event and status feeds), not just new ones.
 const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
-/// stream, and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
+/// stream (on the blocking pool), and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
 /// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {
@@ -184,8 +198,13 @@ impl UiAllowlist {
         }
     }
 
-    pub fn contains(&self, id: &EndpointId) -> bool {
-        match self.list() {
+    /// Whether `id` is listed. The file is read on the blocking pool so it never stalls an async worker; a list
+    /// that can't be read allows no one.
+    pub async fn contains(&self, id: &EndpointId) -> bool {
+        let this = self.clone();
+        let listed =
+            tokio::task::spawn_blocking(move || this.list()).await.unwrap_or_else(|e| Err(Error::Other(e.to_string())));
+        match listed {
             Ok(ids) => ids.contains(id),
             Err(e) => {
                 tracing::error!(error = %e, "can't read the UI allowlist; refusing");
@@ -196,6 +215,7 @@ impl UiAllowlist {
 
     /// Whether `id` was newly added.
     pub fn add(&self, id: EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         if ids.contains(&id) {
             return Ok(false);
@@ -207,6 +227,7 @@ impl UiAllowlist {
 
     /// Whether `id` was there to remove.
     pub fn remove(&self, id: &EndpointId) -> Result<bool> {
+        let _lock = self.lock()?;
         let mut ids = self.list()?;
         let before = ids.len();
         ids.retain(|i| i != id);
@@ -217,14 +238,31 @@ impl UiAllowlist {
         Ok(true)
     }
 
-    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+    /// Hold an exclusive lock on a sibling file for a read-modify-write, so edits from concurrent processes
+    /// can't lose each other's entries. The lock is on a separate file because `save` replaces the list's inode.
+    /// It is released when the returned file is dropped.
+    fn lock(&self) -> Result<std::fs::File> {
         let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(fail)?;
         }
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(PathBuf::from(name))
+            .map_err(fail)?;
+        file.lock().map_err(fail)?;
+        Ok(file)
+    }
+
+    fn save(&self, ids: &[EndpointId]) -> Result<()> {
+        let fail = |e: std::io::Error| Error::Other(format!("{}: {e}", self.path.display()));
         let text: String = ids.iter().map(|i| format!("{i}\n")).collect();
-        // Write beside, then rename, so a crash can't leave half a list.
-        let tmp = self.path.with_extension("tmp");
+        // Write beside, then rename, so a crash can't leave half a list. Callers hold the lock.
+        let tmp = self.path.with_extension(format!("{}.tmp", std::process::id()));
         std::fs::write(&tmp, text).map_err(fail)?;
         std::fs::rename(&tmp, &self.path).map_err(fail)
     }
@@ -276,9 +314,32 @@ impl UiProtocol {
 
 /// Sends the snapshot, then every event, until the UI goes away or the feed ends.
 async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
+    // Taken before the snapshot, so a change after it is never missed.
+    let mut changed = feed.changed();
     let feeds = feed.subscribe();
     let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
     if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
+        return;
+    }
+    // No repos (yet): there is nothing to forward from this subscription, but ending the stream would have the UI
+    // redial every couple of seconds and read the control plane as stopped. Hold it open until the UI goes away, or
+    // until the state or the repos change, when it ends so the UI redials for the snapshot that shows it.
+    if feeds.is_empty() {
+        match changed.as_mut() {
+            Some(changed) => {
+                tokio::select! {
+                    changed = changed.changed() => {
+                        if changed.is_ok() {
+                            let _ = send.finish();
+                        }
+                    }
+                    _ = send.stopped() => {}
+                }
+            }
+            None => {
+                let _ = send.stopped().await;
+            }
+        }
         return;
     }
     let (tx, mut rx) = mpsc::channel(256);
@@ -290,12 +351,16 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        if tx.send(StatusFrame::Event { repo: repo.clone(), event }).await.is_err() {
+                        if tx.send(Some(StatusFrame::Event { repo: repo.clone(), event })).await.is_err() {
                             return;
                         }
                     }
-                    // Too slow to keep up: it misses some, which shows in the numbering.
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Too slow to keep up: it missed events and the UI's mirror can't repair a gap, so
+                    // end the stream and let the UI redial for a fresh snapshot.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let _ = tx.send(None).await;
+                        return;
+                    }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
@@ -305,12 +370,13 @@ async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStrea
     loop {
         tokio::select! {
             frame = rx.recv() => match frame {
-                Some(frame) => {
+                Some(Some(frame)) => {
                     if write_frame(&mut send, &frame).await.is_err() {
                         return;
                     }
                 }
-                None => break,
+                // A forward lagged, or every feed ended.
+                Some(None) | None => break,
             },
             _ = send.stopped() => return,
         }
@@ -332,8 +398,12 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
                         return;
                     }
                 }
-                // Too slow to keep up: it misses some lines.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Too slow to keep up: say how many lines it missed, so the page can mark the gap.
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    if write_frame(&mut send, &LogFrame::Skipped { count }).await.is_err() {
+                        return;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = send.stopped() => return,
@@ -342,9 +412,21 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
     let _ = send.finish();
 }
 
+impl UiProtocol {
+    /// Closes `conn` if its peer has left the allowlist since it connected; says whether it did.
+    async fn close_if_disallowed(&self, conn: &Connection) -> bool {
+        if self.allowed.contains(&conn.remote_id()).await {
+            return false;
+        }
+        tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+        conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        true
+    }
+}
+
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        if !self.allowed.contains(&conn.remote_id()) {
+        if !self.allowed.contains(&conn.remote_id()).await {
             tracing::warn!(peer = %conn.remote_id(), "refusing a UI connection from an endpoint that isn't allowed");
             conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
@@ -357,17 +439,13 @@ impl ProtocolHandler for UiProtocol {
                     Err(_) => break,
                 },
                 _ = recheck.tick() => {
-                    if self.allowed.contains(&conn.remote_id()) {
-                        continue;
+                    if self.close_if_disallowed(&conn).await {
+                        return Ok(());
                     }
-                    tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
-                    return Ok(());
+                    continue;
                 }
             };
-            if !self.allowed.contains(&conn.remote_id()) {
-                tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+            if self.close_if_disallowed(&conn).await {
                 return Ok(());
             }
             let (server, status, logs) = (self.server, self.status.clone(), self.logs.clone());
@@ -390,7 +468,7 @@ impl ProtocolHandler for UiProtocol {
                         Ok(tcp) => pipe(send, recv, tcp).await,
                         Err(e) => {
                             tracing::warn!(%server, error = %e, "can't reach the Trailhead server");
-                            let _ = send.reset(BAD_REQUEST.into());
+                            let _ = send.reset(SERVER_UNREACHABLE.into());
                         }
                     },
                     Ok(Some(UiRequest::Status)) => match status {
@@ -486,15 +564,44 @@ impl LogStream {
 }
 
 /// A UI's end of the API forwarding: a loopback port whose connections reach the Trailhead server through the control
-/// plane, each as a stream on one long-lived connection, redialed if it drops.
-pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<SocketAddr> {
+/// plane, each as a stream on one long-lived connection, redialed if it drops. Dropping the tunnel closes the port, the
+/// forwarded connections and the cached connection to the control plane.
+pub struct UiTunnel {
+    addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl UiTunnel {
+    /// The loopback address the tunnel listens on.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl std::fmt::Display for UiTunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.addr.fmt(f)
+    }
+}
+
+impl Drop for UiTunnel {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Opens a [`UiTunnel`] to `control_plane`.
+pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<UiTunnel> {
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let conn: Arc<tokio::sync::Mutex<Option<Connection>>> = Arc::default();
-    tokio::spawn(async move {
+    // The forwarders live in a JoinSet the accept task owns, so aborting that task ends them too.
+    let task = tokio::spawn(async move {
+        let mut forwards = tokio::task::JoinSet::new();
         while let Ok((tcp, _)) = listener.accept().await {
             let (endpoint, conn) = (endpoint.clone(), conn.clone());
-            tokio::spawn(async move {
+            while forwards.try_join_next().is_some() {}
+            forwards.spawn(async move {
                 let streams = async {
                     let mut guard = conn.lock().await;
                     let live = guard.as_ref().filter(|c| c.close_reason().is_none()).cloned();
@@ -526,7 +633,7 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
             });
         }
     });
-    Ok(addr)
+    Ok(UiTunnel { addr, task })
 }
 
 #[cfg(test)]
@@ -535,8 +642,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn the_allowlist_persists_and_dedupes() {
+    #[tokio::test]
+    async fn the_allowlist_persists_and_dedupes() {
         let dir = tempfile::tempdir().unwrap();
         let list = UiAllowlist::new(dir.path().join("factory").join("ui-allowed"));
         let (a, b) = (SecretKey::generate().public(), SecretKey::generate().public());
@@ -548,7 +655,29 @@ mod tests {
         assert_eq!(reread.list().unwrap(), vec![a, b]);
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
-        assert!(!reread.contains(&a) && reread.contains(&b));
+        assert!(!reread.contains(&a).await && reread.contains(&b).await);
+    }
+
+    #[test]
+    fn concurrent_adds_keep_every_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory").join("ui-allowed");
+        let ids: Vec<_> = (0..16).map(|_| SecretKey::generate().public()).collect();
+        let threads: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let (list, id) = (UiAllowlist::new(path.clone()), *id);
+                std::thread::spawn(move || list.add(id).unwrap())
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap());
+        }
+        let mut got = UiAllowlist::new(path).list().unwrap();
+        let mut want = ids;
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -579,6 +708,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 4,
         };
         let frames = [

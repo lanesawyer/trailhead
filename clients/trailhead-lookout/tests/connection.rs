@@ -9,10 +9,12 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use trailhead_core::{Ctx, NewProject, Principal, Store};
 use trailhead_factory::logs::{LogLevel, LogLine};
-use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, SandboxState, SandboxStatus, Sequenced};
+use trailhead_factory::{
+    ControlState, FactoryEvent, FactorySnapshot, FactoryState, SandboxState, SandboxStatus, Sequenced,
+};
 use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::logs::LogState;
@@ -22,7 +24,7 @@ use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, Ui
 use trailhead_wire::{read_frame, write_frame};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
-struct TestFeed(broadcast::Sender<Sequenced>);
+struct TestFeed(broadcast::Sender<Sequenced>, Arc<std::sync::Mutex<Option<FactoryState>>>, watch::Sender<()>);
 
 fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
     SandboxStatus { name: name.into(), target: None, state, task: None, role: None, warm: false, own: false }
@@ -30,6 +32,10 @@ fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
 
 impl StatusFeed for TestFeed {
     fn subscribe(&self) -> Vec<RepoFeed> {
+        // Like the real feed, which has no repos until the control plane runs.
+        if self.state().is_some_and(|s| s != FactoryState::Running) {
+            return Vec::new();
+        }
         let snapshot = FactorySnapshot {
             control: ControlState::Up,
             last_error: None,
@@ -39,9 +45,18 @@ impl StatusFeed for TestFeed {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 1,
         };
         vec![RepoFeed { repo: "o/r".into(), snapshot, events: self.0.subscribe() }]
+    }
+
+    fn state(&self) -> Option<FactoryState> {
+        self.1.lock().unwrap().clone()
+    }
+
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        Some(self.2.subscribe())
     }
 }
 
@@ -75,7 +90,11 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         .unwrap();
     let addr = endpoint.addr();
     lookup.add_endpoint_info(addr.clone());
-    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(rig.events.clone())));
+    let mut ui = UiProtocol::new(rig.server, rig.allowed.clone()).with_status(Arc::new(TestFeed(
+        rig.events.clone(),
+        rig.control.clone(),
+        rig.changed.clone(),
+    )));
     if let Some(logs) = &rig.logs {
         ui = ui.with_logs(Arc::new(TestLogs(logs.clone())));
     }
@@ -96,6 +115,10 @@ struct Rig {
     events: broadcast::Sender<Sequenced>,
     /// The log the control plane serves; `None` for a control plane that doesn't know the request.
     logs: Option<broadcast::Sender<LogLine>>,
+    /// The control plane state the status frame carries.
+    control: Arc<std::sync::Mutex<Option<FactoryState>>>,
+    /// Notified when `control` changes, as the real feed does.
+    changed: watch::Sender<()>,
 }
 
 impl Rig {
@@ -127,6 +150,8 @@ impl Rig {
             token_id: token_row.id,
             events: broadcast::channel(16).0,
             logs: Some(broadcast::channel(16).0),
+            control: Arc::new(std::sync::Mutex::new(Some(FactoryState::Running))),
+            changed: watch::channel(()).0,
         }
     }
 
@@ -137,7 +162,6 @@ impl Rig {
             trailhead_data_dir: self.dir.path().join("data"),
             keyring: false,
             network: Network::Direct(lookup.clone()),
-            server_url: None,
             status_retry: Duration::from_millis(100),
         }
     }
@@ -216,6 +240,55 @@ async fn a_token_revoked_while_live_is_noticed() {
     rig.state.store.revoke_token(&rig.human, rig.token_id).await.unwrap();
     until(&mut app, "token rejected", |a| reason(a) == Some(Reason::TokenRejected)).await;
     assert_eq!(state(&app), Connection::Offline);
+}
+
+/// While Live the probe asks `/v1/health` every time but `/v1/me` only on every 15th, so a token check isn't one
+/// more request per probe.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_probe_checks_the_token_only_every_few_probes() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut rig = Rig::new().await;
+    let health = Arc::new(AtomicUsize::new(0));
+    let me = Arc::new(AtomicUsize::new(0));
+    let counted = {
+        let (health, me) = (health.clone(), me.clone());
+        trailhead_server::router(rig.state.clone()).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let counter = match request.uri().path() {
+                    "/v1/health" => Some(health.clone()),
+                    "/v1/me" => Some(me.clone()),
+                    _ => None,
+                };
+                async move {
+                    if let Some(counter) = counter {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ))
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    rig.server = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, counted).await.unwrap() });
+
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+
+    let (health_from, me_from) = (health.load(Ordering::SeqCst), me.load(Ordering::SeqCst));
+    // Probing every 100 ms, 5 s is about 50 probes while Live.
+    for _ in 0..100 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let probes = health.load(Ordering::SeqCst) - health_from;
+    let checks = me.load(Ordering::SeqCst) - me_from;
+    assert!(probes >= 30, "the probe ran only {probes} times in 5 s");
+    assert!(checks <= probes / 15 + 1, "{checks} token checks in {probes} probes, expected about one in 15");
+    assert_eq!(state(&app), Connection::Live);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -350,12 +423,14 @@ async fn the_log_is_followed_only_while_asked_for() {
     }
     assert!(messages(&app).is_empty());
 
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the backlog", |a| messages(a) == ["one", "two"]).await;
     rig.logs.as_ref().unwrap().send(log_line("three")).unwrap();
     until(&mut app, "a new line", |a| messages(a) == ["one", "two", "three"]).await;
 
     // Closed, nobody is following: a line sent now never arrives.
+    app.world_mut().resource_mut::<LogState>().set_streaming(false);
     send(&mut app, NetCommand::Logs(false));
     for _ in 0..20 {
         app.update();
@@ -378,41 +453,31 @@ async fn a_factory_without_logs_is_too_old_to_send_them() {
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     allowed_and_live(&mut app, &rig).await;
+    app.world_mut().resource_mut::<LogState>().set_streaming(true);
     send(&mut app, NetCommand::Logs(true));
     until(&mut app, "the note", |a| a.world().resource::<LogState>().note().is_some()).await;
     assert_eq!(app.world().resource::<LogState>().note(), Some("this factory is too old to send logs"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_server_url() {
+async fn when_the_server_goes_away_the_last_state_stays_and_it_is_unreachable() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let key = SecretKey::generate();
     let (router, addr) = control_plane(key.clone(), &lookup, &rig).await;
-    let mut config = rig.config(&lookup);
-    config.server_url = Some(format!("http://{}", rig.server));
-    let mut app = app(config, Some(addr.id.to_string()));
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     allowed_and_live(&mut app, &rig).await;
     until(&mut app, "snapshot", |a| link(a) == FactoryLink::Running).await;
     let tunnel = app.world().resource::<Api>().0.base.clone();
 
     router.shutdown().await.unwrap();
-    until(&mut app, "factory stopped", |a| link(a) == FactoryLink::Stopped).await;
-    // Trailhead's last known state is kept, marked stopped, and the board is reached without the control plane.
-    assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory stopped");
+    until(&mut app, "unreachable", |a| link(a) == FactoryLink::Unreachable).await;
+    // The last known state is kept, and there is no way around the tunnel: the board goes offline.
+    assert_eq!(app.world().resource::<FactoryStatus>().label(), "unreachable");
     assert_eq!(campsites(&mut app), [("camp-1".to_string(), SandboxState::Idle)]);
-    let direct = format!("http://{}", rig.server);
-    until(&mut app, "live on the server url", |a| {
-        state(a) == Connection::Live && a.world().resource::<Api>().0.base == direct
-    })
-    .await;
-    // The server is up but the factory is not: the chip is not green.
-    assert_eq!(chip_words(&app), "Factory down");
-    let api = &app.world().resource::<Api>().0;
-    let me = reqwest::Client::new().get(format!("{}/v1/me", api.base)).bearer_auth(&api.token).send().await.unwrap();
-    assert!(me.status().is_success());
+    until(&mut app, "offline", |a| state(a) == Connection::Offline).await;
 
-    // The control plane comes back: the tunnel and a fresh snapshot replace the fallback.
+    // The control plane comes back: the tunnel and a fresh snapshot.
     let (_router, _) = control_plane(key, &lookup, &rig).await;
     until(&mut app, "back on the tunnel", |a| {
         link(a) == FactoryLink::Running && state(a) == Connection::Live && a.world().resource::<Api>().0.base == tunnel
@@ -422,25 +487,35 @@ async fn when_the_factory_stops_the_last_state_stays_and_the_board_uses_the_serv
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_lookout_does_not_fall_back_to_the_server_url() {
+async fn a_control_plane_that_is_not_running_is_shown_over_the_board() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    *rig.control.lock().unwrap() = Some(FactoryState::Starting { reason: Some("sprites down".into()) });
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "control", |a| matches!(link(a), FactoryLink::Control(_))).await;
+    assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory starting: sprites down");
+    assert_eq!(chip_words(&app), "Factory starting");
+    // The server holds the stream open with no repos to feed; the link stays at the control state.
+    for _ in 0..30 {
+        app.update();
+        assert!(matches!(link(&app), FactoryLink::Control(_)), "{:?}", link(&app));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    *rig.control.lock().unwrap() = Some(FactoryState::Running);
+    rig.changed.send_modify(|_| {});
+    until(&mut app, "running", |a| link(a) == FactoryLink::Running).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_lookout_is_offline_not_redirected() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
-    let mut config = rig.config(&lookup);
-    config.server_url = Some(format!("http://{}", rig.server));
-    let mut app = app(config, Some(addr.id.to_string()));
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     until(&mut app, "refused", |a| reason(a) == Some(Reason::NotAllowed)).await;
     assert_eq!(state(&app), Connection::Offline);
-}
-
-#[test]
-fn the_cli_server_url_comes_from_the_environment_then_the_config_then_the_default() {
-    use trailhead_lookout::net::cli_server_url;
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(cli_server_url(dir.path(), None), "http://127.0.0.1:7241");
-    std::fs::write(dir.path().join("config.toml"), "url = \"http://10.0.0.5:9000/\"\n").unwrap();
-    assert_eq!(cli_server_url(dir.path(), None), "http://10.0.0.5:9000");
-    assert_eq!(cli_server_url(dir.path(), Some("http://127.0.0.1:1".into())), "http://127.0.0.1:1");
 }
 
 /// A control plane from before the status request: it forwards the API, and answers anything else with the error.
@@ -585,7 +660,7 @@ async fn a_dropped_link_reconnects_quickly() {
     let gaps = gaps_after(&mut app, &asked, 5).await;
     // Refusals would have reached 800 ms by now.
     assert!(gaps.iter().all(|g| *g < Duration::from_millis(500)), "the retry stays quick: {gaps:?}");
-    assert!(matches!(link(&app), FactoryLink::Stopped));
+    assert!(matches!(link(&app), FactoryLink::Unreachable));
 }
 
 /// A control plane whose allowlist doesn't have this Lookout: it closes every connection, and notes when.
@@ -630,4 +705,31 @@ async fn a_lookout_that_is_not_allowed_is_dialed_with_growing_gaps() {
     assert!(dials < 30, "the refusal is retried with growing gaps, but it was dialed {dials} times in 2 s");
     let shown = app.world().resource::<ConnectionStatus>().reason.clone().unwrap().to_string();
     assert!(shown.contains("trying again in"), "the next try is shown: {shown}");
+}
+
+/// A server built without the factory has no status feed: the op is reset, and Lookout shows what it shows for a
+/// control plane that refuses the status request.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_the_factory_is_shown_like_one_with_no_status_feed() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(SecretKey::generate())
+        .relay_mode(RelayMode::Disabled)
+        .address_lookup(lookup.clone())
+        .bind()
+        .await
+        .unwrap();
+    let addr = endpoint.addr();
+    lookup.add_endpoint_info(addr.clone());
+    let ui = UiProtocol::new(rig.server, rig.allowed.clone());
+    let _router = Router::builder(endpoint).accept(UI_ALPN, ui).spawn();
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "no status feed", |a| matches!(link(a), FactoryLink::Refused(_))).await;
+    for _ in 0..20 {
+        app.update();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(matches!(link(&app), FactoryLink::Refused(_)), "{:?}", link(&app));
 }

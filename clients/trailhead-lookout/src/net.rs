@@ -2,7 +2,6 @@
 //! endpoint, dials the control plane's `trailhead/ui/0`, serves the forwarded API on a local port, signs in, and
 //! reports to Bevy over channels. Bevy sends [`NetCommand`]s and reads [`NetEvent`]s; neither side blocks the other.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -15,9 +14,10 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
+use trailhead_factory::FactoryState;
 use trailhead_factory::logs::LogLine;
 use trailhead_wire::ui::{
-    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, dial_ui, open_ui_tunnel,
+    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
 };
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
@@ -124,6 +124,9 @@ pub enum NetEvent {
     /// Lookout's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
     State(Link, Option<Reason>),
+    /// The control plane the net thread is holding, as its parsed endpoint id; `None` once it has none (a failed
+    /// Connect, or a disconnect). Sent on every Connect that parses and opens, so it never depends on a state change.
+    Dialed(Option<String>),
     /// Signed in: where the forwarded API listens and who the user is. The token is the user's.
     Access(ApiAccess),
     /// The snapshot and then each event, for the mirror.
@@ -146,6 +149,8 @@ pub enum LogUpdate {
     /// The lines the control plane has kept, replacing what was shown; first on every connection.
     Backlog(Vec<LogLine>),
     Line(LogLine),
+    /// This many lines were missed because Lookout fell behind.
+    Skipped(u64),
     /// The stream dropped; it is being retried.
     Dropped,
     /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
@@ -174,9 +179,6 @@ pub struct NetConfig {
     /// Whether tokens may use the OS keyring (off in tests; `TRAILHEAD_NO_KEYRING` turns it off too).
     pub keyring: bool,
     pub network: Network,
-    /// The server URL the CLI uses. When the control plane can't be reached, the board talks to the server here
-    /// instead of through the tunnel. `None` keeps the tunnel as the only way in.
-    pub server_url: Option<String>,
     /// How often the link is probed, how soon the status stream is retried after a dropped link, and the first gap
     /// after a refusal of either, which then doubles up to [`STATUS_BACKOFF_STEPS`] times.
     pub status_retry: Duration,
@@ -207,7 +209,6 @@ impl NetConfig {
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
-            server_url: Some(cli_server_url(&trailhead_config_dir, std::env::var("TRAILHEAD_URL").ok())),
             status_retry: STATUS_RETRY,
         })
     }
@@ -237,22 +238,6 @@ impl NetConfig {
         }
     }
 }
-
-/// The server the CLI would use: `TRAILHEAD_URL`, else `url` in `<config dir>/config.toml` (which `trailhead login`
-/// sets), else the default.
-pub fn cli_server_url(config_dir: &Path, env: Option<String>) -> String {
-    let from_file = || {
-        let text = std::fs::read_to_string(config_dir.join("config.toml")).ok()?;
-        text.parse::<toml::Table>().ok()?.get("url")?.as_str().map(String::from)
-    };
-    env.filter(|u| !u.is_empty())
-        .or_else(from_file)
-        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:7241";
 
 /// The app's end of the channels. Dropping it stops the net thread.
 pub struct NetHandle {
@@ -288,6 +273,14 @@ impl NetHandle {
         let _ = self.commands.send(command);
     }
 
+    /// A handle with no thread, whose events the test sends itself.
+    #[cfg(test)]
+    pub fn detached() -> (NetHandle, mpsc::Sender<NetEvent>) {
+        let (commands, _) = tokio_mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel();
+        (NetHandle { commands, events: Mutex::new(rx), thread: None }, tx)
+    }
+
     /// Everything the net thread has reported since the last call.
     pub fn drain(&self) -> Vec<NetEvent> {
         let rx = self.events.lock().expect("net events lock");
@@ -310,16 +303,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Target {
     id: EndpointId,
-    api: SocketAddr,
-}
-
-/// Which way the Trailhead API is reached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Via {
-    /// Through the control plane's tunnel.
-    Tunnel,
-    /// Straight to the server the CLI uses, because the control plane can't be reached.
-    Direct,
+    /// Held so replacing or dropping the target closes its tunnel.
+    api: UiTunnel,
 }
 
 /// The default [`NetConfig::status_retry`].
@@ -328,6 +313,9 @@ pub const STATUS_RETRY: Duration = Duration::from_secs(2);
 /// again until something changes, so asking at the probe rate only fills the factory's logs; a factory that is
 /// reinstalled is still found within the minute.
 pub const STATUS_BACKOFF_STEPS: u32 = 5;
+/// While `Live`, the token is checked with `/v1/me` on every this-many-th probe (30 s by default): a revoked token
+/// doesn't need noticing within one, and the health request is all the other probes send.
+const TOKEN_CHECK_EVERY: u32 = 15;
 
 /// Why the factory won't serve the status stream.
 enum Refusal {
@@ -344,6 +332,9 @@ struct Progress {
     stopped: bool,
     /// Whether the connection has served a frame, which means the factory isn't refusing us.
     heard: bool,
+    /// Whether the last snapshot said the control plane isn't running. The server ends the stream then, having no
+    /// repos to feed, and the link is still up: the next try picks up the change.
+    waiting: bool,
 }
 
 /// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
@@ -380,7 +371,6 @@ struct Net {
     http: reqwest::Client,
     events: mpsc::Sender<NetEvent>,
     target: Option<Target>,
-    via: Via,
     /// Follows the control plane's status stream, redialing until it is back.
     status: Option<tokio::task::JoinHandle<()>>,
     /// Follows the log while the Logs page is open.
@@ -391,6 +381,8 @@ struct Net {
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
     token: Option<String>,
+    /// The `Live` probes since the token was last checked.
+    live_probes: u32,
     state: Option<(Link, Option<Reason>)>,
     /// The gaps between probes of a refusal that will be repeated until something changes.
     probe_backoff: Backoff,
@@ -428,12 +420,12 @@ async fn run(
         http,
         events,
         target: None,
-        via: Via::Tunnel,
         status: None,
         logs: None,
         logs_wanted: false,
         pasted: None,
         token: None,
+        live_probes: 0,
         state: None,
         probe_hold: None,
         sync: None,
@@ -533,7 +525,13 @@ async fn stream_status(
     let mut stream = StatusStream::open(conn).await?;
     while let Some(frame) = stream.next().await? {
         let update = match frame {
-            StatusFrame::Snapshot { repos, .. } => FactoryUpdate::Snapshot(repos),
+            StatusFrame::Snapshot { control, repos } => {
+                progress.waiting = control.as_ref().is_some_and(|c| *c != FactoryState::Running);
+                if events.send(NetEvent::Factory(FactoryUpdate::Control(control))).is_err() {
+                    return Ok(None);
+                }
+                FactoryUpdate::Snapshot(repos)
+            }
             StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
             StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
         };
@@ -566,6 +564,7 @@ async fn follow_logs(
         let update = match frame {
             LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
             LogFrame::Line(line) => LogUpdate::Line(line),
+            LogFrame::Skipped { count } => LogUpdate::Skipped(count),
             LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
         };
         if events.send(NetEvent::Logs(update)).is_err() {
@@ -594,10 +593,16 @@ fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Erro
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
 fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
+    // Only the op: a request that carries parameters would make the label long.
+    let asked = u
+        .got
+        .get("op")
+        .and_then(|op| op.as_str())
+        .map_or_else(|| "an unreadable request".to_string(), |op| format!("\"{op}\""));
     format!(
         "the factory is older than this Lookout: reinstall trailhead and restart its server (it was asked {}, and \
          serves {}; version {}, build {})",
-        u.got,
+        asked,
         u.known.join(", "),
         u.version,
         u.build
@@ -633,7 +638,6 @@ impl Net {
                     return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string())));
                 }
             }
-            self.via = Via::Tunnel;
             self.start_status(id);
             self.restart_logs();
             self.token = None;
@@ -641,6 +645,7 @@ impl Net {
             self.stop_sync();
             self.resume.clear();
         }
+        let _ = self.events.send(NetEvent::Dialed(Some(id.to_string())));
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
             && let Err(e) = std::fs::write(self.config.target_file(), format!("{id}\n"))
         {
@@ -685,6 +690,7 @@ impl Net {
     /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
     /// the error.
     fn drop_target(&mut self) {
+        let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
         self.stop_sync();
@@ -702,9 +708,9 @@ impl Net {
             }
             return;
         };
-        let (id, tunnel) = (target.id, format!("http://{}", target.api));
+        let (id, tunnel) = (target.id, format!("http://{}", target.api.addr()));
         // Signed in: live, or still loading the board or reconnecting its feed.
-        let mut live =
+        let live =
             matches!(self.state, Some((Link::Live, _) | (Link::Syncing, Some(Reason::Loading | Reason::Reconnecting))))
                 && self.pasted.is_none();
         // A token turned down stays on show until a new login, even through the probe's "connecting".
@@ -716,28 +722,22 @@ impl Net {
             _ => None,
         };
         if !live {
+            self.live_probes = 0;
             self.set(Link::Syncing, Some(Reason::Dialing));
         }
 
         // The control plane forwards to the server, which answers /v1/health to anyone.
-        let (health, via) = match self.http.get(format!("{tunnel}/v1/health")).send().await {
-            Ok(r) if r.status().is_success() => (r.json::<Health>().await.unwrap_or_default(), Via::Tunnel),
+        let health = match self.http.get(format!("{tunnel}/v1/health")).send().await {
+            Ok(r) if r.status().is_success() => r.json::<Health>().await.unwrap_or_default(),
             Ok(r) => {
                 return self
                     .set(Link::Offline, Some(Reason::Unreachable(format!("the server answered {}", r.status()))));
             }
             Err(_) => {
-                // Already on the server's own URL: the control plane stays down, and asking why again is slow.
-                let reason = if self.via == Via::Direct {
-                    Reason::Unreachable("the control plane isn't answering".into())
-                } else {
-                    self.diagnose(id).await
-                };
-                // A control plane that refuses this Lookout is up, so that is told rather than hidden; one that is
-                // gone leaves the board working from the server the CLI uses.
-                match (&reason, self.direct_health().await) {
-                    (Reason::Unreachable(_), Some(health)) => (health, Via::Direct),
-                    (Reason::NotAllowed, _) => return self.refused(reason),
+                let reason = self.diagnose(id).await;
+                // A control plane that refuses this Lookout is up, so that is told rather than hidden.
+                match reason {
+                    Reason::NotAllowed => return self.refused(reason),
                     _ => return self.set(Link::Offline, Some(reason)),
                 }
             }
@@ -746,17 +746,14 @@ impl Net {
         if matches!(&self.probe_hold, Some((_, Reason::NotAllowed))) {
             self.release_probe();
         }
-        if via != self.via {
-            // Moving between the tunnel and the server: sign in and sync again on the new address.
-            self.via = via;
-            live = false;
-        }
-        let base = match via {
-            Via::Tunnel => tunnel,
-            Via::Direct => self.config.server_url.clone().unwrap_or_default(),
-        };
+        let base = tunnel;
         if live {
             self.release_probe();
+            self.live_probes += 1;
+            if self.live_probes < TOKEN_CHECK_EVERY {
+                return;
+            }
+            self.live_probes = 0;
             // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
             // Anything but a refusal is left to the sync, which has its own way of coping.
             if let Some(token) = &self.token
@@ -800,7 +797,7 @@ impl Net {
             Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
         };
         // The user token only: an agent's would let Lookout act as one.
-        if me["agent"]["name"].as_str().is_some() {
+        if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
             return match pasted {
@@ -828,17 +825,7 @@ impl Net {
 
     /// Where the Trailhead API is reached right now.
     fn api_base(&self) -> Option<String> {
-        match self.via {
-            Via::Tunnel => self.target.as_ref().map(|t| format!("http://{}", t.api)),
-            Via::Direct => self.config.server_url.clone(),
-        }
-    }
-
-    /// The server's health at the URL the CLI uses, if it answers there.
-    async fn direct_health(&self) -> Option<Health> {
-        let url = self.config.server_url.as_ref()?;
-        let r = self.http.get(format!("{url}/v1/health")).send().await.ok()?.error_for_status().ok()?;
-        Some(r.json::<Health>().await.unwrap_or_default())
+        self.target.as_ref().map(|t| format!("http://{}", t.api.addr()))
     }
 
     /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
@@ -850,10 +837,12 @@ impl Net {
             let mut progress = Progress::default();
             loop {
                 progress.heard = false;
+                progress.waiting = false;
                 let followed = follow_status(&endpoint, id, &events, &mut progress).await;
                 if progress.heard {
                     backoff.reset();
                 }
+                let ended_cleanly = followed.is_ok();
                 let refusal = match followed {
                     Ok(refusal) => refusal,
                     Err(e) => {
@@ -875,9 +864,9 @@ impl Net {
                     tokio::time::sleep(wait).await;
                     continue;
                 }
-                if !progress.stopped {
+                if !progress.stopped && !(ended_cleanly && progress.waiting) {
                     progress.stopped = true;
-                    if events.send(NetEvent::Factory(FactoryUpdate::Stopped)).is_err() {
+                    if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
                         return;
                     }
                 }
@@ -935,7 +924,7 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err("not connected".into()));
+            return reply(Err(commands::NOT_CONNECTED.into()));
         };
         let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
@@ -1021,6 +1010,19 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn too_old_message_names_only_the_op() {
+        let u = trailhead_wire::ui::Unsupported {
+            got: serde_json::json!({"op": "logs", "task": "x".repeat(500)}),
+            known: vec!["status".into()],
+            version: "1".into(),
+            build: "b".into(),
+        };
+        let message = too_old_message(&u);
+        assert!(message.contains("asked \"logs\","), "{message}");
+        assert!(message.len() < 300, "{message}");
+    }
 
     #[test]
     fn refusals_back_off_to_a_cap_and_reset() {

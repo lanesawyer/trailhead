@@ -45,8 +45,10 @@ pub struct ConnectionStatus {
 #[derive(Resource, Default, Debug)]
 pub struct LocalEndpoint(pub Option<String>);
 
-/// The control plane's endpoint id as last given to dial (typed, or saved from last time); `None` once disconnected.
-/// It is what was asked for, not proof of a link: [`Connection`] says whether there is one.
+/// The control plane's endpoint id, as the net thread parsed it once it holds one (so not the text typed); `None`
+/// after a Connect that failed to parse or open, and once disconnected. The net thread sets it ([`NetEvent::Dialed`]),
+/// and the id handed to start is shown until it says otherwise. Not proof of a link: [`Connection`] says whether
+/// there is one.
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Dialed(pub Option<String>);
 
@@ -89,21 +91,11 @@ impl Plugin for ConnectionPlugin {
     }
 }
 
-fn forward_commands(
-    net: Res<Net>,
-    mut commands: MessageReader<SendNet>,
-    mut dialed: ResMut<Dialed>,
-    mut factory: MessageWriter<FactoryItem>,
-) {
+fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>, mut factory: MessageWriter<FactoryItem>) {
     for SendNet(command) in commands.read() {
-        match command {
-            NetCommand::Connect(target) => dialed.0 = Some(target.trim().to_string()),
-            NetCommand::Disconnect => {
-                dialed.0 = None;
-                // The status stream goes with the control plane; the mirror keeps its last state, marked stopped.
-                factory.write(FactoryItem(FactoryUpdate::Stopped));
-            }
-            _ => {}
+        if matches!(command, NetCommand::Disconnect) {
+            // The status stream goes with the control plane; the mirror keeps its last state, marked unreachable.
+            factory.write(FactoryItem(FactoryUpdate::Unreachable));
         }
         net.0.send(command.clone());
     }
@@ -116,6 +108,7 @@ fn apply_events(
     mut commands: Commands,
     mut next: ResMut<NextState<Connection>>,
     mut status: ResMut<ConnectionStatus>,
+    mut dialed: ResMut<Dialed>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
     mut factory: MessageWriter<FactoryItem>,
@@ -127,6 +120,7 @@ fn apply_events(
     for event in net.0.drain() {
         match event {
             NetEvent::Endpoint(id) => endpoint.0 = Some(id),
+            NetEvent::Dialed(id) => dialed.0 = id,
             NetEvent::State(link, reason) => {
                 next.set(link.into());
                 status.reason = reason;
@@ -151,5 +145,98 @@ fn apply_events(
                 factory.write(FactoryItem(update));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::Sender;
+
+    use bevy::state::app::StatesPlugin;
+
+    use super::*;
+
+    fn app() -> (App, Sender<NetEvent>) {
+        let (handle, events) = NetHandle::detached();
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Connection>()
+            .init_resource::<ConnectionStatus>()
+            .init_resource::<LocalEndpoint>()
+            .init_resource::<Dialed>()
+            .add_message::<SendNet>()
+            .add_message::<SyncItem>()
+            .add_message::<FactoryItem>()
+            .add_message::<Reply>()
+            .add_message::<SearchReply>()
+            .add_message::<LogItem>()
+            .add_message::<DetailReply>()
+            .insert_resource(Net(handle))
+            .add_systems(PreUpdate, (forward_commands, apply_events).chain());
+        (app, events)
+    }
+
+    fn connect(app: &mut App, text: &str) {
+        app.world_mut().write_message(SendNet(NetCommand::Connect(text.into())));
+    }
+
+    fn dialed(app: &App) -> Option<String> {
+        app.world().resource::<Dialed>().0.clone()
+    }
+
+    fn failed(text: &str) -> NetEvent {
+        NetEvent::State(Link::Offline, Some(Reason::BadTarget(text.into())))
+    }
+
+    #[test]
+    fn a_typed_connect_shows_nothing_until_the_net_thread_holds_it() {
+        let (mut app, events) = app();
+        connect(&mut app, "foo");
+        app.update();
+        assert_eq!(dialed(&app), None);
+        events.send(NetEvent::Dialed(Some("abc".into()))).unwrap();
+        app.update();
+        assert_eq!(dialed(&app), Some("abc".into()));
+    }
+
+    #[test]
+    fn a_retried_failure_leaves_nothing_dialed_though_the_state_is_unchanged() {
+        let (mut app, events) = app();
+        app.world_mut().resource_mut::<Dialed>().0 = Some("old".into());
+        for round in 0..2 {
+            connect(&mut app, "foo");
+            events.send(NetEvent::Dialed(None)).unwrap();
+            // The net thread reports a state only when it changes, so the retry brings none.
+            if round == 0 {
+                events.send(failed("foo")).unwrap();
+            }
+            app.update();
+            assert_eq!(dialed(&app), None);
+        }
+    }
+
+    #[test]
+    fn states_arriving_around_a_connect_do_not_change_what_the_net_thread_holds() {
+        let (mut app, events) = app();
+        connect(&mut app, "abc");
+        events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable("old".into())))).unwrap();
+        events.send(NetEvent::Dialed(Some("abc".into()))).unwrap();
+        app.update();
+        assert_eq!(dialed(&app), Some("abc".into()));
+        // A failed health check on the target it keeps probing leaves it shown.
+        events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable("down".into())))).unwrap();
+        app.update();
+        assert_eq!(dialed(&app), Some("abc".into()));
+    }
+
+    #[test]
+    fn a_disconnect_clears_it_when_the_net_thread_says_so() {
+        let (mut app, events) = app();
+        events.send(NetEvent::Dialed(Some("abc".into()))).unwrap();
+        app.update();
+        app.world_mut().write_message(SendNet(NetCommand::Disconnect));
+        events.send(NetEvent::Dialed(None)).unwrap();
+        app.update();
+        assert_eq!(dialed(&app), None);
     }
 }

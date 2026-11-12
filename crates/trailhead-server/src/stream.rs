@@ -80,8 +80,12 @@ pub async fn events(
     };
     if q.task.is_some() || q.project.is_some() {
         // Fail now on an unknown task or project rather than inside the stream.
-        let check =
-            EventFilter { task: q.task.clone(), project: q.project.clone(), limit: Some(0), ..Default::default() };
+        let check = EventFilter {
+            task: q.task.clone().map(Into::into),
+            project: q.project.clone(),
+            limit: Some(0),
+            ..Default::default()
+        };
         state.store.list_events(&ctx, check).await?;
     }
     let cursor = Cursor {
@@ -106,7 +110,7 @@ pub async fn events(
             c.changes.mark_unchanged();
             let filter = EventFilter {
                 after_id: Some(c.after),
-                task: c.task.clone(),
+                task: c.task.clone().map(Into::into),
                 project: c.project.clone(),
                 limit: Some(PAGE),
                 ..Default::default()

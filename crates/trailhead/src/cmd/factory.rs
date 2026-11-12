@@ -2,7 +2,7 @@
 //! the foreground; and `enable`/`disable`, which edit the user config and need no server, so they work when a broken
 //! factory configuration keeps it from starting.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 
 use crate::cli::FactoryCmd;
 use crate::{client, config};
@@ -10,7 +10,7 @@ use crate::{client, config};
 pub(crate) async fn run(cmd: FactoryCmd) -> Result<()> {
     match cmd {
         FactoryCmd::Run { bind } => run_in_foreground(&bind).await,
-        FactoryCmd::Control(cmd) => trailhead_factory_server::command(*cmd).await.map_err(|e| anyhow!(e)),
+        FactoryCmd::Control(cmd) => trailhead_factory_server::command(*cmd).await.map_err(anyhow::Error::from),
         FactoryCmd::Enable => set_enabled(true).await,
         FactoryCmd::Disable => set_enabled(false).await,
     }

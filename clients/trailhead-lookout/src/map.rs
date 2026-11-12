@@ -19,13 +19,13 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use trailhead_factory::{RunPhase, SandboxState};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task, User};
 use uuid::Uuid;
 
 use crate::board::View;
 use crate::factory::{Campsite, FactoryStatus, Run};
 use crate::mirror::{Mirrored, Rev, rows};
-use crate::widgets::{space, status_label};
+use crate::widgets::{self, BackgroundTone, sandbox_token, size, space, status_label, status_tone, text_toned, token};
 
 /// Campsites sit on a grid on the left, this many to a row.
 const CAMP_COLUMNS: usize = 3;
@@ -36,6 +36,8 @@ const WAY_COLUMNS: usize = 2;
 const WAY_CELL: Vec2 = Vec2::new(230.0, 76.0);
 const WAY_SIZE: Vec2 = Vec2::new(210.0, 60.0);
 const ORIGIN: Vec2 = Vec2::new(16.0, 56.0);
+/// An agent's token on the map.
+const AGENT_SIZE: Vec2 = Vec2::new(20.0, 20.0);
 /// A walker stands this far from the corner of its spot, below the text.
 const STAND: Vec2 = Vec2::new(6.0, 52.0);
 
@@ -117,6 +119,7 @@ pub struct Input<'a> {
     pub claims: &'a [Claim],
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
+    pub users: &'a [User],
     pub campsites: &'a [Campsite],
     pub runs: &'a [Run],
 }
@@ -159,16 +162,10 @@ pub fn build(input: Input) -> MapModel {
         .collect();
 
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
+    let user_name: HashMap<Uuid, &str> = input.users.iter().map(|u| (u.id, u.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
-    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
-    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_name = |holder: Uuid, key: &str| -> Option<String> {
-        match agent_name.get(&holder) {
-            Some(n) => Some(n.to_string()),
-            None => run_of.contains_key(key).then(|| format!("factory/{}", key.to_lowercase())),
-        }
-    };
+    let holder_name = |holder: Uuid| agent_name.get(&holder).map(|n| n.to_string());
     let mut questions: HashMap<Uuid, usize> = HashMap::new();
     let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
     for c in input.comments {
@@ -191,8 +188,8 @@ pub fn build(input: Input) -> MapModel {
         let run = run_of.get(key);
         let mut markers = Vec::new();
         if let Some(holder) = holder_of.get(&t.id) {
-            // The snapshot carries no users, so a holder that isn't a known agent gets a label, not just part of an id.
-            // A person claims for themselves (holder == on_behalf_of); anyone else is an agent the stale list lacks.
+            // A holder that is neither a known agent nor a known user gets a label, not just part of an id. A person
+            // claims for themselves (holder == on_behalf_of); anyone else is an agent the stale list lacks.
             let label = || {
                 let id = holder.to_string().chars().take(8).collect::<String>();
                 if on_behalf_of.get(&t.id) == Some(holder) {
@@ -201,7 +198,8 @@ pub fn build(input: Input) -> MapModel {
                     format!("an agent ({id})")
                 }
             };
-            markers.push(Marker::Claim(holder_name(*holder, key).unwrap_or_else(label)));
+            let name = holder_name(*holder).or_else(|| user_name.get(holder).map(|n| n.to_string()));
+            markers.push(Marker::Claim(name.unwrap_or_else(label)));
         }
         if let Some(n) = questions.get(&t.id) {
             markers.push(Marker::Questions(*n));
@@ -237,7 +235,7 @@ pub fn build(input: Input) -> MapModel {
         let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| t.id == task_id).map(|(w, _)| w) else {
             continue;
         };
-        let Some(name) = holder_name(holder, &wp.key) else { continue };
+        let Some(name) = holder_name(holder) else { continue };
         let camp = run_of
             .get(wp.key.as_str())
             .and_then(|r| r.status.sandbox.as_deref().map(|sb| (&r.repo, sb)))
@@ -253,26 +251,16 @@ pub fn build(input: Input) -> MapModel {
     MapModel { camps, waypoints, walkers }
 }
 
-fn state_color(state: SandboxState) -> Color {
-    match state {
-        SandboxState::Idle => Color::srgb(0.22, 0.30, 0.24),
-        SandboxState::Busy => Color::srgb(0.20, 0.34, 0.50),
-        SandboxState::Paused => Color::srgb(0.46, 0.38, 0.16),
-        SandboxState::Broken => Color::srgb(0.50, 0.18, 0.18),
-    }
-}
-
-fn marker_line(m: &Marker) -> (String, Color) {
-    let warn = Color::srgb(0.95, 0.75, 0.3);
-    let dim = Color::srgb(0.7, 0.7, 0.7);
+/// A marker's words and their tone: a verdict in its status's tone, as on the board.
+fn marker_line(m: &Marker) -> (String, widgets::Token) {
     match m {
-        Marker::Claim(who) => (format!("held by {who}"), dim),
-        Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), warn),
-        Marker::Handoff(h) => (format!("handoff: {h}"), dim),
-        Marker::Reviewing => ("reviewing".into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::InReview => (status_label(Status::InReview).into(), Color::srgb(0.6, 0.8, 1.0)),
-        Marker::Approved => (status_label(Status::Approved).into(), Color::srgb(0.5, 0.9, 0.5)),
-        Marker::Spend(d) => (format!("${d:.2}"), dim),
+        Marker::Claim(who) => (format!("held by {who}"), token::TEXT_DIM),
+        Marker::Questions(n) => (format!("? {n} open question{}", if *n == 1 { "" } else { "s" }), token::STATUS_WARN),
+        Marker::Handoff(h) => (format!("handoff: {h}"), token::TEXT_DIM),
+        Marker::Reviewing => ("reviewing".into(), status_tone(Status::InReview)),
+        Marker::InReview => (status_label(Status::InReview).into(), status_tone(Status::InReview)),
+        Marker::Approved => (status_label(Status::Approved).into(), status_tone(Status::Approved)),
+        Marker::Spend(d) => (format!("${d:.2}"), token::TEXT_DIM),
     }
 }
 
@@ -300,6 +288,7 @@ fn rebuild_map(
     claims: Query<&Mirrored<Claim>>,
     comments: Query<&Mirrored<Comment>>,
     agents: Query<&Mirrored<Agent>>,
+    users: Query<&Mirrored<User>>,
     campsites: Query<&Campsite>,
     runs: Query<&Run>,
     mut map: ResMut<TrailMap>,
@@ -308,13 +297,15 @@ fn rebuild_map(
     if !(gone || !changed.is_empty() || map.is_added()) {
         return;
     }
-    let (tasks, claims, comments, agents) = (rows(&tasks), rows(&claims), rows(&comments), rows(&agents));
+    let (tasks, claims, comments, agents, users) =
+        (rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
     let (campsites, runs): (Vec<_>, Vec<_>) = (campsites.iter().cloned().collect(), runs.iter().cloned().collect());
     let next = build(Input {
         tasks: &tasks,
         claims: &claims,
         comments: &comments,
         agents: &agents,
+        users: &users,
         campsites: &campsites,
         runs: &runs,
     });
@@ -363,7 +354,7 @@ struct Token {
 }
 
 fn spawn_panel(mut commands: Commands) {
-    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar()));
+    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar(), crate::widgets::BesideSidebar));
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
@@ -373,7 +364,7 @@ fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
 }
 
 /// A box at a map position, absolute inside the panel.
-fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
+fn plot(pos: Vec2, size: Vec2, tone: widgets::Token) -> impl Bundle {
     (
         Node {
             position_type: PositionType::Absolute,
@@ -386,12 +377,12 @@ fn plot(pos: Vec2, size: Vec2, color: Color) -> impl Bundle {
             overflow: Overflow::clip(),
             ..default()
         },
-        BackgroundColor(color),
+        BackgroundTone(tone),
     )
 }
 
-fn line(commands: &mut Commands, parent: Entity, text: String, color: Color) {
-    commands.spawn((Text::new(text), TextColor(color), TextFont::from_font_size(12.0), ChildOf(parent)));
+fn line(commands: &mut Commands, parent: Entity, text: String, tone: widgets::Token) {
+    commands.spawn_scene(text_toned(text, size::SECONDARY, tone)).insert(ChildOf(parent));
 }
 
 /// Tokens sit above the terrain, which is respawned (as later siblings) on every redraw.
@@ -408,19 +399,21 @@ fn redraw(
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
     mut link: Local<Option<crate::factory::FactoryLink>>,
+    mut held: Local<Vec<String>>,
 ) {
     let (panel, _) = *panel;
     let fresh = *drawn != Some(panel);
-    // The factory's status changes with every tool call; only its link is drawn.
-    if !(fresh || map.is_changed() || *link != Some(factory.link.clone())) {
+    // The factory's status changes with every tool call; only its link and what the merger is holding are drawn.
+    let holds = factory.holds();
+    if !(fresh || map.is_changed() || *link != Some(factory.link.clone()) || *held != holds) {
         return;
     }
+    held.clone_from(&holds);
     *drawn = Some(panel);
     *link = Some(factory.link.clone());
     for e in &terrain {
         commands.entity(e).despawn();
     }
-    let ink = Color::WHITE;
     let stopped = factory.link != crate::factory::FactoryLink::Running;
     let bar = commands
         .spawn((
@@ -428,27 +421,36 @@ fn redraw(
             Node {
                 position_type: PositionType::Absolute,
                 left: px(ORIGIN.x),
-                top: px(8),
-                column_gap: px(space::ROWS),
+                top: px(space::PANEL_INSET),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(space::ROWS),
                 ..default()
             },
             ChildOf(panel),
         ))
         .id();
-    let note = if stopped { format!("{}: showing the last known state", factory.label()) } else { factory.label() };
-    let color = if stopped { Color::srgb(0.9, 0.7, 0.3) } else { Color::srgb(0.7, 0.7, 0.7) };
-    commands.spawn((Text::new(note), TextColor(color), ChildOf(bar)));
+    let note = if factory.link == crate::factory::FactoryLink::Unreachable {
+        format!("{}: showing the last known state", factory.label())
+    } else {
+        factory.label()
+    };
+    let tone = if stopped { token::STATUS_WARN } else { token::TEXT_DIM };
+    commands.spawn_scene(text_toned(note, size::BODY, tone)).insert(ChildOf(bar));
+    for hold in holds {
+        commands.spawn_scene(text_toned(hold, size::BODY, token::STATUS_WARN)).insert(ChildOf(bar));
+    }
 
     for c in &map.0.camps {
-        let tint = if stopped { Color::srgb(0.2, 0.2, 0.2) } else { state_color(c.state) };
+        // A stopped factory's camps are grayed out: their state is the last known, not live.
+        let tint = if stopped { token::SURFACE_RAISED } else { sandbox_token(c.state) };
         let node = commands.spawn((Terrain, plot(c.pos, CAMP_SIZE, tint), ChildOf(panel))).id();
         for l in camp_lines(c) {
-            line(&mut commands, node, l, ink);
+            line(&mut commands, node, l, token::TEXT);
         }
     }
     for w in &map.0.waypoints {
-        let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, Color::srgb(0.16, 0.16, 0.18)), ChildOf(panel))).id();
-        line(&mut commands, node, format!("{} {}", w.key, w.title), ink);
+        let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, token::SURFACE_RAISED), ChildOf(panel))).id();
+        line(&mut commands, node, format!("{} {}", w.key, w.title), token::TEXT);
         for (l, c) in w.markers.iter().map(marker_line) {
             line(&mut commands, node, l, c);
         }
@@ -472,9 +474,9 @@ fn redraw(
         let name = Name::new(format!("agent {}", w.name));
         let node =
             commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ZIndex(TOKEN_Z), ChildOf(panel))).id();
-        commands.entity(node).insert(plot(w.pos, Vec2::new(20.0, 20.0), Color::srgb(0.95, 0.75, 0.3)));
+        commands.entity(node).insert(plot(w.pos, AGENT_SIZE, token::AGENT));
         let initial = w.name.rsplit(['/', '-']).next().unwrap_or("a").to_string();
-        commands.spawn((Text::new(initial), TextColor(Color::BLACK), TextFont::from_font_size(11.0), ChildOf(node)));
+        commands.spawn_scene(text_toned(initial, size::SMALL, token::AGENT_TEXT)).insert(ChildOf(node));
     }
 }
 
@@ -523,6 +525,7 @@ mod tests {
                 spend: Usd::dollars(spend),
                 last_tool: None,
                 started: 0,
+                phase_started: 0,
             },
         }
     }
@@ -536,6 +539,7 @@ mod tests {
         claims: Vec<Claim>,
         comments: Vec<Comment>,
         agents: Vec<Agent>,
+        users: Vec<User>,
         campsites: Vec<Campsite>,
         runs: Vec<Run>,
     }
@@ -547,6 +551,7 @@ mod tests {
                 claims: &self.claims,
                 comments: &self.comments,
                 agents: &self.agents,
+                users: &self.users,
                 campsites: &self.campsites,
                 runs: &self.runs,
             })
@@ -583,6 +588,7 @@ mod tests {
                 fixture::agent(json!({"id": "a1", "name": "factory/trail-42-a1"})),
                 fixture::agent(json!({"id": "a2", "name": "factory/trail-43-a1"})),
             ],
+            users: vec![],
             campsites: vec![
                 camp("b", SandboxState::Idle, None),
                 camp("a", SandboxState::Busy, Some("TRAIL-42")),
@@ -613,6 +619,17 @@ mod tests {
         let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
         let id = sid("u1");
         assert_eq!(markers[0], Marker::Claim(format!("a person ({})", &id[..8])));
+    }
+
+    #[test]
+    fn a_person_holding_a_claim_is_named_by_the_users_list_and_is_no_walker() {
+        let mut w = world();
+        w.tasks[2] = task("t44", "TRAIL-44", "in_progress");
+        w.users.push(fixture::user(json!({"id": "u1", "name": "Lane"})));
+        let model = w.model();
+        let markers = &model.waypoints.iter().find(|w| w.key == "TRAIL-44").unwrap().markers;
+        assert_eq!(markers[0], Marker::Claim("Lane".into()));
+        assert!(model.walkers.iter().all(|w| w.name != "Lane"));
     }
 
     #[test]
@@ -682,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_made_after_the_snapshot_still_walks_to_its_camp() {
+    fn an_agent_made_after_the_snapshot_walks_to_its_camp_once_its_event_arrives() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
         use crate::sync::{Snapshot, SyncItem};
@@ -714,6 +731,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));
@@ -725,6 +743,15 @@ mod tests {
         app.world_mut().write_message(SyncItem::Event(json!({
             "id": 2, "entity": "claim", "entity_id": sid("t42"), "kind": "claim.created",
             "after": claim_json(json!({"task_id": "t42", "holder_id": "a-new"})),
+        })));
+        for _ in 0..3 {
+            app.update();
+        }
+        // Until the agent.created event arrives it has no name, so no walker.
+        assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 3, "entity": "agent", "entity_id": sid("a-new"), "kind": "agent.created",
+            "after": crate::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
         })));
         for _ in 0..3 {
             app.update();
@@ -765,6 +792,47 @@ mod tests {
     }
 
     #[test]
+    fn the_mergers_hold_is_drawn_in_warn_and_gone_once_cleared() {
+        use crate::factory::{FactoryStatus, RepoState};
+        use trailhead_factory::ControlState;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_resource::<FactoryStatus>()
+            .init_asset::<bevy::text::Font>()
+            .add_systems(Update, redraw);
+        app.world_mut().spawn(MapPanel);
+        app.insert_resource(TrailMap(world().model()));
+        let repo = RepoState {
+            control: ControlState::Up,
+            queue: Vec::new(),
+            last_error: None,
+            human_grades: Vec::new(),
+            holding: Some("#306 has auto-merge on but CI failed".into()),
+            usage: Vec::new(),
+            seq: 1,
+        };
+        app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
+        let line = "o/r: holding merges: #306 has auto-merge on but CI failed";
+        let hold_tones = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&Text, &widgets::TextTone)>();
+            q.iter(app.world()).filter(|(t, _)| t.0 == line).map(|(_, tone)| tone.0.clone()).collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(hold_tones(&mut app), [token::STATUS_WARN]);
+
+        // Clearing the hold redraws the map without it, though nothing else changed.
+        app.world_mut().resource_mut::<FactoryStatus>().repos.get_mut("o/r").unwrap().holding = None;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(hold_tones(&mut app).is_empty());
+    }
+
+    #[test]
     fn the_map_follows_the_mirrors() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
@@ -793,6 +861,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
         };
         app.world_mut()
             .write_message(FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }])));
