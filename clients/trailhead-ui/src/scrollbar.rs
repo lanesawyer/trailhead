@@ -27,6 +27,12 @@ pub const SCROLLBAR_GAP: f32 = (space::PANEL_INSET - SCROLLBAR_WIDTH) / 2.0;
 /// How far a horizontal scrollbar is inset from the bottom edge of its holder.
 pub const SCROLLBAR_INSET: f32 = SCROLLBAR_GAP;
 
+/// Whether a node holding a vertical scroll area has the right padding its scrollbar sits in. Every holder should pass
+/// this; a test pins it for each one.
+pub fn has_room(holder: &Node) -> bool {
+    matches!(holder.padding.right, Val::Px(p) if p >= SCROLLBAR_WIDTH + SCROLLBAR_GAP)
+}
+
 /// How long a scrollbar takes to fade in, in seconds.
 pub const FADE_IN: f32 = 0.12;
 /// How long a scrollbar takes to fade out, in seconds: a little slower, so it doesn't snap away.
