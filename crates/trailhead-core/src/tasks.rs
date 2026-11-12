@@ -271,7 +271,7 @@ pub struct NewTask {
     pub scheduled_at: Option<Zoned>,
     pub scheduled_tz: Option<String>,
     /// Parent task key or id.
-    pub parent: Option<String>,
+    pub parent: Option<TaskKey>,
     pub metadata: Option<Value>,
     pub source: Option<String>,
     pub external_id: Option<String>,
@@ -287,7 +287,7 @@ pub struct TaskPatch {
     pub grade: Option<Option<Grade>>,
     /// The task this one duplicates, which needs it cancelled (set `status` in the same patch).
     /// `Some(None)` clears it. Leaving `cancelled` clears it too.
-    pub duplicate_of: Option<Option<String>>,
+    pub duplicate_of: Option<Option<TaskKey>>,
     /// A new day drops any due time unless `due_at` comes with it; clearing it
     /// removes the deadline.
     pub due_on: Option<Option<Date>>,
@@ -300,7 +300,7 @@ pub struct TaskPatch {
     /// Clearing the time keeps the day.
     pub scheduled_at: Option<Option<Zoned>>,
     pub scheduled_tz: Option<Option<String>>,
-    pub parent: Option<Option<String>>,
+    pub parent: Option<Option<TaskKey>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
 }
