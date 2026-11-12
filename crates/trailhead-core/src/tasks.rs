@@ -722,13 +722,15 @@ impl Store {
             .query(
                 &format!(
                     "SELECT {} FROM dependencies d JOIN tasks t ON t.id = d.blocked_id
-                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                     WHERE d.blocker_id = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let blocks = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut blocks = collect(rows, task_from_row).await?;
+        blocks.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let blocks = blocks.iter().map(|t| visible_key(ctx, t)).collect();
         let comments = list_comments_for(&conn, task.id).await?;
         let changes_requested = trailhead_model::changes_requested(task.status, &comments);
         let duplicate_of = match task.duplicate_of {
@@ -741,13 +743,15 @@ impl Store {
         let rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL ORDER BY t.key",
+                    "SELECT {} FROM tasks t WHERE t.duplicate_of = ?1 AND t.deleted_at IS NULL",
                     prefixed_cols("t")
                 ),
                 [task.id.to_string()],
             )
             .await?;
-        let duplicates = collect(rows, task_from_row).await?.iter().map(|t| visible_key(ctx, t)).collect();
+        let mut duplicates = collect(rows, task_from_row).await?;
+        duplicates.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
+        let duplicates = duplicates.iter().map(|t| visible_key(ctx, t)).collect();
         Ok(TaskDetail { task, claim, blocked_by, changes_requested, blocks, comments, duplicate_of, duplicates })
     }
 
@@ -991,8 +995,11 @@ impl Store {
     }
 }
 
-const STOP_WORDS: &[&str] =
-    &["the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use"];
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "with", "from", "into", "that", "this", "when", "not", "are", "was", "add", "fix", "use",
+    // Two-letter function words, which pass the length check when a title is written in capitals.
+    "to", "in", "of", "on", "or", "an", "at", "by", "is", "it", "as", "be", "if", "so", "do", "no", "up",
+];
 
 /// The lowercase words of a title that say what it's about. Words under three characters are
 /// dropped, except two-letter acronyms written in capitals (CI, UI, DB).
@@ -1056,16 +1063,24 @@ fn review_asks_changes_sql(id: &str) -> String {
 
 /// Where a task whose claim ends while `in_progress` goes back to: `in_review` when it was claimed from there and
 /// its review still asks for changes, so a rework that failed or lapsed stays in the review loop instead of sinking
-/// into the backlog; otherwise `open`.
+/// into the backlog; otherwise `open`. A claim that was undone doesn't count unless the undo was itself undone: an
+/// event is live when its chain of undos has even length.
 pub(crate) async fn unclaimed_status(conn: &libsql::Connection, task: &Task) -> Result<Status> {
     let mut rows = conn
         .query(
             &format!(
-                "SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
-                                  WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
-                                    AND json_extract(after, '$.status') = 'in_progress'
-                                    AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
-                                  ORDER BY id DESC LIMIT 1) = 'in_review', 0) AND {}",
+                "WITH RECURSIVE chain(root, cur, depth) AS (
+                     SELECT id, id, 0 FROM events
+                     WHERE task_id = ?1 AND undoes IS NULL AND entity = 'task'
+                       AND json_extract(after, '$.status') = 'in_progress'
+                       AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
+                     UNION ALL
+                     SELECT chain.root, u.id, chain.depth + 1 FROM events u JOIN chain ON u.undoes = chain.cur
+                 )
+                 SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
+                                  WHERE id = (SELECT root FROM chain GROUP BY root
+                                              HAVING MAX(depth) % 2 = 0 ORDER BY root DESC LIMIT 1)) = 'in_review', 0)
+                        AND {}",
                 review_asks_changes_sql("?1")
             ),
             [task.id.to_string()],

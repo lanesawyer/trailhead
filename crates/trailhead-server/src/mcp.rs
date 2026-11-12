@@ -164,6 +164,8 @@ pub struct ListArgs {
     /// `true`: only `in_review` tasks with changes requested (the newest review asks for changes and no handoff
     /// came after); `false`: leave those out.
     changes_requested: Option<bool>,
+    /// Only tasks with exactly this title, ignoring case and surrounding space. Handy for checking for duplicates.
+    title: Option<String>,
     limit: Option<i64>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
     as_agent: Option<String>,
@@ -529,6 +531,7 @@ impl TrailheadMcp {
             scheduled_through,
             grade: attempt!(parse_grade_filter(a.grade.as_deref())),
             changes_requested: a.changes_requested,
+            title: a.title,
             limit: a.limit,
             ..Default::default()
         };

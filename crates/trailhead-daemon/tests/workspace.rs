@@ -258,7 +258,8 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
         env: Default::default(),
     };
     ws.prepare(&req).await.unwrap();
-    assert_eq!(ws.head().await.unwrap(), rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
+    let start = ws.head().await.unwrap();
+    assert_eq!(start, rev(&src, "factory/w-1"), "still at the PR head, merge uncommitted");
     assert_eq!(ws.merge_head().await.unwrap().unwrap(), rev(&src, "main"));
     let readme = std::fs::read_to_string(ws.dir().join("README.md")).unwrap();
     assert!(readme.contains("<<<<<<<") && readme.contains("main") && readme.contains("branch"), "{readme}");
@@ -285,6 +286,11 @@ async fn prepare_can_start_merging_the_base_into_the_branch_leaving_the_conflict
     assert_eq!(ws.merge_head().await.unwrap(), None);
     assert!(ws.contains(&base).await.unwrap());
     assert!(ws.contains(&ws.head().await.unwrap()).await.unwrap());
+    let head = ws.head().await.unwrap();
+    assert_ne!(head, start, "the merge made a new commit");
+    assert_eq!(rev(&ws.dir(), &format!("{head}^1")), start);
+    assert_eq!(rev(&ws.dir(), &format!("{head}^2")), base, "a merge commit: the old tip and the base");
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(base.clone()));
 
     // A later prepare, as from a warm checkpoint taken mid-merge, drops the merge.
     ws.prepare(&PrepareRequest { branch: None, merge_base: false, ..req }).await.unwrap();
@@ -792,4 +798,35 @@ async fn a_branch_published_through_the_api_counts_as_published_and_a_resume_bui
     // A resume now builds on the pushed branch.
     ws.prepare(&req).await.unwrap();
     assert_eq!(ws.head().await.unwrap(), rev(&tmp, "HEAD"));
+}
+
+#[tokio::test]
+async fn merged_base_follows_a_fetch_that_moves_the_base_after_the_merge() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, start) = branch_behind_main(root.path()).await;
+    agent_git(&ws.dir(), &["merge", "--quiet", "--no-edit", "origin/main"]);
+    let merged = rev(&ws.dir(), "origin/main");
+    let src = root.path().join("src");
+    let bare = root.path().join("remote/acme/widget.git");
+    git(&src, &["checkout", "--quiet", "main"]);
+    std::fs::write(src.join("later.txt"), "later\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "later"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+    git(&ws.dir(), &["fetch", "--quiet", "origin"]);
+    assert_ne!(rev(&ws.dir(), "origin/main"), merged);
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(merged));
+}
+
+#[tokio::test]
+async fn merged_base_sees_a_fast_forward_to_the_base() {
+    let root = tempfile::tempdir().unwrap();
+    let (ws, _) = branch_behind_main(root.path()).await;
+    let dir = ws.dir();
+    // A branch with nothing of its own, behind main, so the merge fast-forwards.
+    git(&dir, &["checkout", "--quiet", "--detach", "origin/main~1"]);
+    let start = ws.head().await.unwrap();
+    agent_git(&dir, &["merge", "--quiet", "--no-edit", "origin/main"]);
+    assert_eq!(ws.head().await.unwrap(), rev(&dir, "origin/main"));
+    assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(rev(&dir, "origin/main")));
 }

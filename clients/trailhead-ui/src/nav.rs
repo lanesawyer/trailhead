@@ -19,8 +19,8 @@ use bevy::text::LineBreak;
 use bevy::window::SystemCursorIcon;
 
 use super::{
-    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, size, space,
-    stroke, text_dim, token, tool_button,
+    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, radius, size,
+    space, stroke, text_dim, token, tool_button,
 };
 
 /// How far the drag edge reaches past the sidebar's border, so it straddles the line rather than sitting inside it.
@@ -203,6 +203,21 @@ pub fn sidebar_footer() -> impl Scene {
             justify_content: JustifyContent::SpaceBetween,
             column_gap: { px(space::CONTROLS) },
         }
+    }
+}
+
+/// A raised box in a [`sidebar`] for something to keep an eye on (how much of a subscription is used): a padded
+/// column. Spawn it just before the [`sidebar_footer`], then its contents as its children.
+pub fn sidebar_card() -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            flex_shrink: { 0.0_f32 },
+            row_gap: { px(space::ROWS) },
+            padding: { UiRect::all(px(space::CONTROL_INSET)) },
+            border_radius: { BorderRadius::all(px(radius::PANEL)) },
+        }
+        Surface::Raised
     }
 }
 

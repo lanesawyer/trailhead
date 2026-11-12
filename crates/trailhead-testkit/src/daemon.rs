@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use tokio::sync::Notify;
 use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, InstallHost, PrepareRequest, Repo, Result,
-    RunEvent, RunReport, RunRequest, SandboxId, Tracker,
+    Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, HarnessKind, HarnessSetup, InstallHost,
+    PrepareRequest, Registry, Repo, Result, RunEvent, RunReport, RunRequest, SandboxId, Tracker,
 };
 
 pub use trailhead_daemon::Connect;
@@ -220,6 +220,19 @@ impl LocalDaemon {
             Box::pin(async move { Ok(Arc::new(tracker.authenticate(&cred)?) as Arc<dyn Tracker>) })
         });
         LocalDaemon::connecting(harness, codehost, connect)
+    }
+
+    /// [`LocalDaemon::new`] with its harness built the way the real daemon builds its own: from a registry, by the
+    /// `adapter` name the profile gives.
+    pub fn from_registry(
+        harnesses: &Registry<HarnessKind>,
+        adapter: &str,
+        codehost: Arc<dyn CodeHost>,
+        tracker: FakeTracker,
+    ) -> Result<LocalDaemon> {
+        let setup = HarnessSetup { executable: "unused".into(), secrets: Default::default() };
+        let harness = (harnesses.get(adapter)?.build)(&setup);
+        Ok(LocalDaemon::new(harness, codehost, tracker))
     }
 
     pub fn connecting(harness: Arc<dyn Harness>, codehost: Arc<dyn CodeHost>, connect: Connect) -> LocalDaemon {
@@ -578,5 +591,53 @@ mod tests {
             assert!(err.to_string().contains(want), "{err}");
         }
         ws.prepare(&req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_run_errors_of_mixed_kinds_come_out_in_the_order_they_were_queued() {
+        use trailhead_factory::{Credential, Endpoint, ModelId, Role, TaskKey, TaskSpec};
+
+        use crate::{FakeCodeHost, ScriptedHarness};
+
+        let daemon = LocalDaemon::new(
+            Arc::new(ScriptedHarness::new()),
+            Arc::new(FakeCodeHost::new()),
+            FakeTracker::new("factory"),
+        );
+        daemon.reject_runs("no");
+        daemon.cancel_runs(1);
+        let sandbox = SandboxId("s1".into());
+        let request = || RunRequest {
+            grade: None,
+            run: "r1".into(),
+            role: Role::Worker,
+            task: TaskSpec {
+                key: TaskKey("TRAIL-1".into()),
+                title: "Add a greeting".into(),
+                description: String::new(),
+                previous_failure: None,
+                context: Default::default(),
+            },
+            repo: Repo { owner: "o".into(), name: "r".into() },
+            base_branch: "main".into(),
+            branch: "factory/r1".into(),
+            pr: None,
+            feedback: None,
+            model: ModelId("fake-sonnet".into()),
+            endpoint: Endpoint { base_url: "http://gateway.invalid".into() },
+            max_steps: 5,
+            required_checks: Vec::new(),
+            worker_checks: Vec::new(),
+            blocked_hosts: Vec::new(),
+            allowed_hosts: Vec::new(),
+            env: Default::default(),
+            credential: Credential { agent: "factory".into(), token: String::new() },
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let first = daemon.run(&sandbox, request(), tx.clone()).await.unwrap_err();
+        assert!(matches!(first, Error::Rejected(ref m) if m == "no"), "{first:?}");
+        let second = daemon.run(&sandbox, request(), tx).await.unwrap_err();
+        assert!(matches!(second, Error::Cancelled), "{second:?}");
     }
 }
