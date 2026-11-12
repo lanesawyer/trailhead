@@ -208,7 +208,7 @@ mod tests {
     use super::super::testing::settle;
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::sid;
+    use crate::fixture::{sid, task_json};
 
     fn compose_button(app: &mut App, part: ComposePart) -> Entity {
         let world = app.world_mut();
@@ -233,6 +233,39 @@ mod tests {
         *app.world_mut().get_mut::<Control>(sent[0].source).unwrap() = Control::Done;
         settle(&mut app);
         assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "");
+    }
+
+    #[test]
+    fn a_sent_comment_stays_done_through_its_own_event_and_resets_on_a_later_one() {
+        let mut app = app();
+        let input = composer_input(&mut app);
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text("looks good");
+        let send = compose_button(&mut app, ComposePart::Send);
+        app.world_mut().trigger(Activate { entity: send });
+        let source = sent(&mut app)[0].source;
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
+        let task_event = |id: i64, version: i64| {
+            SyncItem::Event(json!({
+                "id": id, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+                "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "version": version})),
+            }))
+        };
+        // The reply and the task's own event land in the same frame.
+        app.world_mut().write_message(crate::commands::CommandDone {
+            source,
+            id: crate::commands::CommandId(1),
+            outcome: crate::commands::Outcome::Ok { version: Some(5) },
+        });
+        app.world_mut().write_message(task_event(200, 5));
+        app.update();
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Done));
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "", "the box is emptied");
+        settle(&mut app);
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Done), "its own change doesn't reset it");
+        // Someone else changes the task.
+        app.world_mut().write_message(task_event(201, 6));
+        settle(&mut app);
+        assert_eq!(app.world().get::<Control>(source), Some(&Control::Idle));
     }
 
     #[test]
