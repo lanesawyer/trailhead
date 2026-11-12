@@ -85,6 +85,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
         grade: parse_grade_filter(q.grade.as_deref())?,
         changes_requested: q.changes_requested,
         metadata,
+        metadata_exists: Vec::new(),
         sort: q.sort.as_deref().map(str::parse).transpose()?.unwrap_or_default(),
         limit: q.limit,
         offset: q.offset,
@@ -108,7 +109,8 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     if let Value::Array(items) = &mut out {
         for (item, task) in items.iter_mut().zip(&tasks) {
             if let Some(b) = &mut blockers {
-                item["blocked_by"] = json!(b.remove(&task.id).unwrap_or_default());
+                item["blocked_by"] = json!(b.visible.remove(&task.id).unwrap_or_default());
+                item["blocked_by_hidden"] = json!(b.hidden.remove(&task.id).unwrap_or(0));
             }
             if let Some(c) = &mut claims {
                 item["claim"] = json!(c.remove(&task.id));
@@ -187,7 +189,7 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         scheduled_on: parse_opt_date(b.scheduled_on.as_deref())?,
         scheduled_at: parse_opt_at(b.scheduled_at.as_deref())?,
         scheduled_tz: b.scheduled_tz,
-        parent: b.parent,
+        parent: b.parent.map(Into::into),
         metadata: b.metadata,
         source: b.source,
         external_id: b.external_id,
@@ -287,14 +289,14 @@ pub(crate) async fn update_task(
         status: b.status,
         priority: b.priority,
         grade: b.grade,
-        duplicate_of: b.duplicate_of,
+        duplicate_of: b.duplicate_of.map(|d| d.map(Into::into)),
         due_on: b.due_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         due_at: b.due_at.map(|d| parse_opt_at(d.as_deref())).transpose()?,
         due_tz: b.due_tz,
         scheduled_on: b.scheduled_on.map(|d| parse_opt_date(d.as_deref())).transpose()?,
         scheduled_at: b.scheduled_at.map(|t| parse_opt_at(t.as_deref())).transpose()?,
         scheduled_tz: b.scheduled_tz,
-        parent: b.parent,
+        parent: b.parent.map(|p| p.map(Into::into)),
         metadata: b.metadata,
     };
     let version = if_match(&headers)?.or(b.version);

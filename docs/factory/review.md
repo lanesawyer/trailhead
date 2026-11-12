@@ -21,7 +21,7 @@ Named after the climbing classes of the Yosemite Decimal System: the higher the 
 
 How grades are set:
 
-- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). Grading a task is what makes it the factory's work: the factory only picks up graded tasks that are direct subtasks of a task in its `queue` list (or any task in the project when the repo has no queue, where the grade filter is skipped), and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade.
+- **On the task, by a human, when it's triaged.** The grade is a field on the task ([PLAN.md](../PLAN.md), engine change #6). With a `queue`, grading a task is what makes it the factory's work: the factory only picks up graded tasks that are direct subtasks of a task in that list, and skips an ungraded one, saying so. A task that should never be worked by the factory, like an item on a shopping list, simply has no grade. A repo with no queue takes every ready task in its project, graded or not, so there leaving a task ungraded doesn't keep it out.
 - **Only raised after that.** Agents can raise a task's grade but never set the first one, lower it or clear it. The PR is graded the task's grade or higher:
   - **By the diff.** The control plane matches each changed file against the repo's path rules, and a diff over the repo's line limit is at least grade 3. If that comes out higher than the task's grade, the PR and the task are raised, with the file or rule that did it. Deleting a test or a check is never grade 1.
   - **By the reviewer.** Its verdict can name a higher grade with a reason.
@@ -39,8 +39,11 @@ Decided: gates per grade are configurable per repo, in `.trailhead.toml`. The ta
 4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
-# A Cargo.lock whose patch only edits dependency lists (a member gaining a dependency that is already locked) does not
-# match its rule; a new [[package]], or a changed version, source or checksum, or a patch the host omits, does.
+# A Cargo.lock, uv.lock or package-lock.json whose patch only edits dependency lists (a member gaining a dependency that
+# is already locked) does not match the globs that name it; a broader glob covering it (say `crates/**`) still applies.
+# A new package, or a changed version, source or checksum, or a patch the host omits, matches as usual.
+# Nor does a Rust file edited in place whose patch only changes comments (every changed line blank or starting with
+# //): a doc fix in src/ goes at the task's grade. A renamed or added file, or a patch the host omits, still matches.
 
 [factory.gates.1]
 require = ["checks", "ci"]
@@ -58,7 +61,9 @@ quorum = { reviewers = 3, agree = 3, distinct_models = true }
 mode = "shadow"          # off | shadow | on
 ```
 
-Gates are keyed by grade (`[gates.1]` to `[gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[merge] mode = "on"` (TRAIL-205).
+Gates are keyed by grade (`[factory.gates.1]` to `[factory.gates.4]`); `require` lists any of `checks`, `ci`, `agent_review`, `human` and (once built) `quorum`. Status: the gates, the `approved` move and shadow mode are built (TRAIL-203), and merging with `[factory.merge] mode = "on"` (TRAIL-205).
+
+A name in `require` that isn't one of those five must name a check in `[factory.checks]`; settings validation rejects anything else, so a typo fails at load instead of passing. A named check is treated like `checks`: the worker ran it before the PR opened, so the merger counts it as passed (and lists it once, as `checks`).
 
 `checks` in `require` gates the merge on the sandbox checks having passed; it doesn't choose which checks a worker runs. A worker runs every verifying check the repo defines (fmt, lint, typecheck, test, build, and any path-scoped ones whose paths its diff touches) before it opens a PR, whatever the grade's gates require (TRAIL-265). Leaving `checks` out of a grade's `require` doesn't skip them in the sandbox; it changes nothing else: the gate is already met when the PR opens (a PR exists only because the checks passed), so the merger never waits on it, and leaving it out only drops `checks` from the decision's `passed` list.
 

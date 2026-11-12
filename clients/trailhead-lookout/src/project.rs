@@ -47,7 +47,7 @@ pub struct ProjectMore(pub usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
-    Card(Card),
+    Card(Box<Card>),
     Empty,
     More(usize),
 }
@@ -152,7 +152,8 @@ fn sync_grid(
     }
     let Some(root) = root else { return };
     let (cards, hidden) = view.cards.split_at(shown.0.min(view.cards.len()));
-    let mut items: Vec<(String, Slot)> = cards.iter().map(|c| (c.id.clone(), Slot::Card(c.clone()))).collect();
+    let mut items: Vec<(String, Slot)> =
+        cards.iter().map(|c| (c.id.clone(), Slot::Card(Box::new(c.clone())))).collect();
     if view.cards.is_empty() {
         items.push(("empty".into(), Slot::Empty));
     }
@@ -163,13 +164,13 @@ fn sync_grid(
         &mut commands,
         &[(root, items)],
         |commands, _, slot| match slot {
-            Slot::Card(card) => commands.spawn(BoardCard(card.clone())).id(),
+            Slot::Card(card) => commands.spawn(BoardCard((**card).clone())).id(),
             Slot::Empty => commands.spawn(ProjectEmpty).id(),
             Slot::More(next) => commands.spawn(ProjectMore(*next)).id(),
         },
         |commands, entity, slot| match slot {
             Slot::Card(card) => {
-                commands.entity(entity).insert(BoardCard(card.clone()));
+                commands.entity(entity).insert(BoardCard((**card).clone()));
             }
             Slot::More(next) => {
                 commands.entity(entity).insert(ProjectMore(*next));
@@ -198,22 +199,20 @@ struct ProjectPanel;
 #[derive(Component)]
 struct ProjectTitle;
 
+/// The Project page's panel; its padding leaves room for its scrollbar.
+fn page_node() -> Node {
+    Node {
+        min_width: px(0),
+        min_height: px(0),
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(space::PANEL_INSET)),
+        row_gap: px(space::GROUPS),
+        ..widgets::beside_sidebar()
+    }
+}
+
 fn spawn_page(mut commands: Commands) {
-    let panel = commands
-        .spawn((
-            Name::new("project"),
-            ProjectPanel,
-            widgets::BesideSidebar,
-            Node {
-                min_width: px(0),
-                min_height: px(0),
-                flex_direction: FlexDirection::Column,
-                padding: UiRect::all(px(space::PANEL_INSET)),
-                row_gap: px(space::GROUPS),
-                ..widgets::beside_sidebar()
-            },
-        ))
-        .id();
+    let panel = commands.spawn((Name::new("project"), ProjectPanel, widgets::BesideSidebar, page_node())).id();
     // The title, and the button that edits the project, at the far end of its row.
     let head = commands
         .spawn((
@@ -318,6 +317,11 @@ mod tests {
     use crate::fixture::{project_json, sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::{Snapshot, SyncItem};
+
+    #[test]
+    fn the_page_panel_has_room_for_a_scrollbar() {
+        assert!(widgets::has_scrollbar_room(&page_node()));
+    }
 
     fn task(id: &str, project: &str, status: &str, parent: Option<&str>) -> Value {
         let mut t = json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": project, "status": status,

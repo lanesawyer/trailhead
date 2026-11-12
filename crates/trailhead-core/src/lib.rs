@@ -19,8 +19,9 @@ mod undo;
 mod webhooks;
 mod when;
 
-pub use claims::{ClaimResult, HeldClaim, NamedClaim};
+pub use claims::NamedClaim;
 pub use comments::NewComment;
+pub use deps::BlockersOf;
 pub use error::{Error, Result};
 pub use events::{EventFilter, UNDO_WINDOW};
 pub use idempotency::{StoredResponse, idempotency_fingerprint};

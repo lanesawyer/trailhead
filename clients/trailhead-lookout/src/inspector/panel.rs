@@ -1,3 +1,5 @@
+//! The inspector panel: its shell, its controls, and sending a control's action as a command.
+
 use super::*;
 
 #[derive(Component)]
@@ -270,7 +272,7 @@ pub(super) fn sync_panel(
     let subject = &view.subject;
     let note =
         |action: &Action| controls.0.get(&(subject.clone(), action.clone())).and_then(|e| states.get(*e).ok()).cloned();
-    let human = factory.human_grades();
+    let human = factory.human_grades_for(view.task.as_ref().and_then(|t| t.project.as_deref()));
 
     let (title, root, wanted) = match &view.task {
         Some(facts) => {
@@ -288,7 +290,7 @@ pub(super) fn sync_panel(
             let root = *drawn.header.get_or_insert_with(|| {
                 commands.spawn_scene(panel_header(view.title.clone())).insert(ChildOf(*header)).id()
             });
-            let plan = layout(view, live, &offline, window.0, &note);
+            let plan = layout(view, live, &offline, window.0, &human, &note);
             let keys = plan.iter().map(|(k, _)| (k.clone(), ())).collect::<Vec<_>>();
             (view.title.clone(), root, (vec![(body, keys)], plan))
         }
@@ -313,7 +315,7 @@ pub(super) fn sync_panel(
     drawn.items.sync(
         &mut commands,
         &wanted,
-        |commands, _, block| spawn_block(commands, controls, subject, block, &human),
+        |commands, _, block| spawn_block(commands, controls, subject, block),
         |commands, entity, block| {
             commands.entity(entity).insert(Shown(block.clone()));
         },
@@ -327,7 +329,7 @@ pub(super) fn sync_panel(
         |commands, _, gate| {
             let (icon, tone) = match gate.state {
                 GateState::Passed => (Icon::CircleCheck, token::STATUS_OK),
-                GateState::Waiting => (Icon::Circle, token::TEXT_DIM),
+                GateState::Waiting => (Icon::Circle, token::PENDING),
             };
             commands.spawn_scene(badge(gate.name.clone(), Some(icon), Some(tone))).id()
         },
@@ -386,6 +388,39 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-8");
         assert_eq!(sent[0].request.body, Some(json!({"status": "in_progress"})));
+    }
+
+    #[test]
+    fn a_finished_control_resets_when_its_task_changes_and_goes_when_the_task_does() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
+            ..Default::default()
+        }));
+        app.update();
+        let (kept, gone) = (Subject::Task(sid("t7")), Subject::Task(sid("nope")));
+        let spawn = |app: &mut App, subject: &Subject| {
+            let e = app.world_mut().spawn(Control::Done).id();
+            app.world_mut().resource_mut::<Controls>().0.insert((subject.clone(), Action::Undo), e);
+            e
+        };
+        let (a, b) = (spawn(&mut app, &kept), spawn(&mut app, &gone));
+        app.update();
+        assert_eq!(app.world().get::<Control>(a), Some(&Control::Done), "nothing changed yet");
+        assert!(app.world().get_entity(b).is_err(), "a subject not in the mirror loses its controls");
+        assert!(!app.world().resource::<Controls>().0.contains_key(&(gone, Action::Undo)));
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 9, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
+            "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7", "version": 9})),
+        })));
+        app.update();
+        assert_eq!(app.world().get::<Control>(a), Some(&Control::Idle), "the task changed");
     }
 
     #[test]
@@ -646,5 +681,22 @@ mod tests {
         let world = app.world_mut();
         let panel = world.query_filtered::<&Node, With<InspectorPanel>>().single(world).unwrap();
         assert_eq!(panel.display, Display::Flex);
+    }
+
+    #[test]
+    fn a_factory_event_that_leaves_the_human_grades_alone_dresses_nothing_again() {
+        use crate::factory::FactoryStatus;
+        let mut app = app();
+        settle(&mut app);
+        let stamps = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<(Entity, Ref<Act>)>().iter(world).map(|(e, a)| (e, a.last_changed())).collect::<Vec<_>>()
+        };
+        let before = stamps(&mut app);
+        assert!(!before.is_empty());
+        // Any factory event touches the resource; none of them changes the grades.
+        app.world_mut().resource_mut::<FactoryStatus>().set_changed();
+        settle(&mut app);
+        assert_eq!(stamps(&mut app), before);
     }
 }

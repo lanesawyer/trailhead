@@ -190,7 +190,7 @@ impl GitHub {
     }
 
     async fn read(&self, res: reqwest::Response, call: String) -> Result<(StatusCode, Value, String, Option<String>)> {
-        if let Some(rate) = rate_limit(res.headers()) {
+        if let Some(rate) = rate_limit(res.headers()).filter(|_| is_core(res.headers())) {
             *self.rate.lock().unwrap() = Some(rate);
         }
         let status = res.status();
@@ -262,6 +262,28 @@ impl GitHub {
         }
     }
 
+    /// Whether `head` is exactly `commits` on top of `start`: walking back one commit per entry meets their messages
+    /// in order and ends at `start`.
+    async fn is_published(&self, repo: &Repo, head: &str, start: &str, commits: &[Commit]) -> Result<bool> {
+        if commits.is_empty() {
+            return Ok(false);
+        }
+        let r = Self::repo_path(repo);
+        let mut sha = head.to_string();
+        for commit in commits.iter().rev() {
+            let found = self.call(self.request(Method::GET, &format!("{r}/git/commits/{sha}"))).await?;
+            if found["message"].as_str() != Some(commit.message.as_str()) {
+                return Ok(false);
+            }
+            let first = &found["parents"][0];
+            match first["sha"].as_str().or_else(|| first.as_str()) {
+                Some(parent) => sha = parent.to_string(),
+                None => return Ok(false),
+            }
+        }
+        Ok(sha == start)
+    }
+
     /// Writes one commit on top of `parent` and returns its sha.
     async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
         let r = Self::repo_path(repo);
@@ -301,6 +323,13 @@ impl GitHub {
             self.call(self.request(Method::GET, &path).query(&[("head", head.as_str()), ("state", "open")])).await?;
         Ok(prs.as_array().and_then(|a| a.first()).map(|p| pr_ref(repo, p)))
     }
+}
+
+/// Whether a response counts against the core rate limit, the one that gates this client. GitHub names the pool in
+/// `x-ratelimit-resource`; a response that doesn't say is taken as core. Search (30 a minute) and graphql have
+/// pools of their own, and their readings must not stand in for core's.
+fn is_core(headers: &reqwest::header::HeaderMap) -> bool {
+    headers.get("x-ratelimit-resource").and_then(|v| v.to_str().ok()).is_none_or(|r| r.trim() == "core")
 }
 
 /// The rate limit a response's headers report, if they all do.
@@ -358,8 +387,8 @@ fn changed_file(f: &Value) -> ChangedFile {
     let count = |k: &str| u32::try_from(f[k].as_u64().unwrap_or_default()).unwrap_or(u32::MAX);
     let path = f["filename"].as_str().unwrap_or_default().to_string();
     ChangedFile {
-        // Only a lockfile's patch is kept: the grader reads it to tell a new package from an edited dependency list.
-        patch: f["patch"].as_str().filter(|_| path.ends_with("Cargo.lock")).map(str::to_string),
+        // Only the patches the grader reads are kept (a lockfile's, a Rust source's).
+        patch: f["patch"].as_str().filter(|_| trailhead_factory::grade::reads_patch(&path)).map(str::to_string),
         path,
         status,
         additions: count("additions"),
@@ -376,7 +405,8 @@ fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
     let mut pending = runs.is_empty() && statuses.is_empty();
     for run in runs {
         let name = run["name"].as_str().unwrap_or("check").to_string();
-        if run["status"].as_str() != Some("completed") {
+        // GitHub sometimes leaves a run `in_progress` after it has a conclusion, so the conclusion decides.
+        if run["status"].as_str() != Some("completed") && run["conclusion"].is_null() {
             pending = true;
             continue;
         }
@@ -433,6 +463,11 @@ impl CodeHost for GitHub {
     async fn publish(&self, repo: &Repo, start: &str, branch: &str, commits: &[Commit]) -> Result<()> {
         let existing = self.head(repo, branch).await?;
         if let Some(head) = existing.as_deref().filter(|head| *head != start) {
+            // An earlier attempt may have moved the ref and still answered 5xx or timed out; its work is on the
+            // branch already, so the retry has nothing left to do.
+            if self.is_published(repo, head, start, commits).await? {
+                return Ok(());
+            }
             return Err(Error::Conflict(format!(
                 "branch {branch} is at {head}, not at {start} where this work started; publishing would overwrite it"
             )));
@@ -536,6 +571,10 @@ impl CodeHost for GitHub {
             if found.len() < 100 {
                 break;
             }
+            if page == MAX_PR_PAGES {
+                // Whatever lies past the cap is silently absent from the answer, so say so.
+                tracing::warn!(repo = %repo.slug(), base, listed = out.len(), "open PRs run past the page cap; the rest are not listed");
+            }
         }
         Ok(out)
     }
@@ -586,8 +625,9 @@ impl CodeHost for GitHub {
     }
 
     async fn carries_verdict(&self, pr: &PrRef, reviewed: &str) -> Result<bool> {
+        // Conditional GETs throughout: a pass that asks again about an unchanged PR gets 304s, which cost no rate limit.
         let r = Self::repo_path(&pr.repo);
-        let p = self.call(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
+        let p = self.call_cached(self.request(Method::GET, &format!("{r}/pulls/{}", pr.number))).await?;
         let (Some(base), Some(head)) = (p["base"]["ref"].as_str(), p["head"]["sha"].as_str()) else {
             return Err(Error::Other(format!("github: PR {} has no base or head", pr.number)));
         };
@@ -596,9 +636,10 @@ impl CodeHost for GitHub {
         }
         // What the PR has that its base lacks: its own commits. A merge of the base brings in base commits, which
         // aren't among them, so a commit since `reviewed` that is one of them must be a merge of the base itself.
-        let own = self.call(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
+        let own = self.call_cached(self.request(Method::GET, &format!("{r}/compare/{base}...{head}"))).await?;
         // A reviewed sha the host no longer has (a force push, then GC) 404s: it can't be vouched for.
-        let since = match self.call(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await {
+        let since = match self.call_cached(self.request(Method::GET, &format!("{r}/compare/{reviewed}...{head}"))).await
+        {
             Ok(since) => since,
             Err(Error::NotFound(_)) => return Ok(false),
             Err(e) => return Err(e),
@@ -642,6 +683,11 @@ impl CodeHost for GitHub {
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {
         let head = CodeHost::head(self, pr).await?;
+        let state = self.ci_at(pr, &head).await?;
+        Ok(Ci { state, head })
+    }
+
+    async fn ci_at(&self, pr: &PrRef, head: &str) -> Result<CiState> {
         let r = Self::repo_path(&pr.repo);
         let mut runs = Vec::new();
         for page in 1..=MAX_CHECK_PAGES {
@@ -657,7 +703,7 @@ impl CodeHost for GitHub {
         }
         let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
-        Ok(Ci { state: summarize_ci(&runs, statuses), head })
+        Ok(summarize_ci(&runs, statuses))
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
@@ -749,6 +795,14 @@ mod tests {
         assert_eq!(summarize_ci(&runs, &[]), CiState::Pending);
         let done = [run("test", "completed", Some("success"))];
         assert_eq!(summarize_ci(&done, &[status("deploy", "pending")]), CiState::Pending);
+    }
+
+    #[test]
+    fn ci_treats_a_run_with_a_conclusion_as_finished_whatever_its_status() {
+        let runs = [run("test", "completed", Some("success")), run("machete", "in_progress", Some("success"))];
+        assert_eq!(summarize_ci(&runs, &[]), CiState::Passed);
+        let bad = [run("machete", "in_progress", Some("failure"))];
+        assert_eq!(summarize_ci(&bad, &[]), CiState::Failed { checks: vec!["machete".into()] });
     }
 
     #[test]

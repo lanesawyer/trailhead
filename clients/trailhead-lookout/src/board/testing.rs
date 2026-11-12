@@ -22,7 +22,8 @@ pub(super) fn input_json() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, V
         task("t200", "OPS-1", "p2", "in_progress", None, 2),
     ];
     tasks[1]["grade"] = json!(3);
-    tasks[2]["metadata"] = json!({"factory": {"attempt": 1, "sandbox": "trail-104-a1"}});
+    tasks[2]["metadata"] = json!({"factory": {"attempt": 1, "sandbox": "trail-104-a1",
+        "pr": {"repo": {"owner": "o", "name": "r"}, "number": 9, "url": "https://host/o/r/pull/9"}}});
     // Skipped by the factory for having no grade, which isn't a run (TRAIL-1159).
     tasks[4]["metadata"] = json!({"factory": {"ungraded": true}});
     let claims = vec![
@@ -54,10 +55,6 @@ pub(super) fn at_now() -> Timestamp {
 }
 
 pub(super) fn run(filter: &Filter) -> BoardView {
-    run_with(filter, &[])
-}
-
-pub(super) fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
     let (projects, tasks, claims, comments, agents) = input_json();
     let (projects, tasks, claims, comments, agents) = (
         typed::<Project>(projects),
@@ -75,7 +72,6 @@ pub(super) fn run_with(filter: &Filter, runs: &[Run]) -> BoardView {
             comments: &comments,
             agents: &agents,
             users: &[],
-            runs,
             queues: &["TRAIL-102".to_string()],
             deep: &[],
             now: at_now(),

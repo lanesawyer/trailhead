@@ -14,12 +14,12 @@ use trailhead_model::Task;
 use crate::author::Authoring;
 use crate::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use crate::factory::FactoryStatus;
-use crate::logs::{LogsUiPlugin, logs_page};
+use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
 use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
-    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalRoot, ModalSlots, Picked, ThemeChoice, button, button_group,
-    field, open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
+    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group, field,
+    open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
 };
 
 /// A page of the modal, in tab order.
@@ -149,7 +149,17 @@ pub fn repos_text(status: &FactoryStatus) -> String {
     if lines.is_empty() { "none heard of yet".into() } else { lines.join("\n") }
 }
 
-/// The queue task new tasks go under, and how much is queued beneath it.
+/// Every queue task the factory works, one per line, or the one new tasks go under until a status has listed them.
+pub fn queues_text(authoring: &Authoring, status: &FactoryStatus, tasks: &[Task]) -> String {
+    let mut queues = status.queues();
+    if queues.is_empty() {
+        queues.push(authoring.queue.clone());
+    }
+    let lines: Vec<String> = queues.iter().map(|q| queue_text(q, tasks)).collect();
+    lines.join("\n")
+}
+
+/// One queue task, and how much is queued beneath it.
 pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
     let Some(task) = tasks.iter().find(|t| t.key == *queue) else {
         return format!("{queue} (not loaded)");
@@ -161,6 +171,29 @@ pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
 
 fn value(which: Value, label: &str) -> impl Scene {
     field(label.to_string(), bsn_list! { @text("", size::BODY) Shows({ which }) })
+}
+
+/// Show the settings Logs tab filtered to a task, given by key; sent from the inspector.
+#[derive(Event, Debug, Clone)]
+pub struct OpenLogs(pub String);
+
+/// The page the next settings modal opens on, when it isn't the first.
+#[derive(Resource, Default)]
+struct StartPage(Option<Page>);
+
+/// Filters the log to the task and opens the modal on its Logs tab.
+fn on_open_logs(
+    open: On<OpenLogs>,
+    modals: Query<(), With<SettingsModal>>,
+    mut filter: ResMut<LogFilter>,
+    mut start: ResMut<StartPage>,
+    mut commands: Commands,
+) {
+    filter.task = Some(open.0.clone());
+    if modals.is_empty() {
+        start.0 = Some(Page::Logs);
+        open_modal(&mut commands, SettingsModal);
+    }
 }
 
 /// Opens the modal from the gear, unless one is open already.
@@ -179,9 +212,11 @@ fn on_gear(
 fn fill(
     new: Query<&ModalSlots, (With<SettingsModal>, Added<ModalSlots>)>,
     appearance: Res<Appearance>,
+    mut start: ResMut<StartPage>,
     mut commands: Commands,
 ) {
     for slots in &new {
+        let first = start.0.take().unwrap_or(Page::ALL[0]);
         let strip = commands
             .spawn_scene(tab_strip(ControlOrientation::Horizontal))
             .insert((SettingsStrip, ChildOf(slots.body)))
@@ -192,7 +227,9 @@ fn fill(
                 .spawn_scene(tab(page.label(), ControlOrientation::Horizontal))
                 .insert((SettingsTab(page), ChildOf(strip)))
                 .id();
-            picked.get_or_insert(entity);
+            if page == first {
+                picked = Some(entity);
+            }
         }
         commands.entity(strip).insert(SelectedTab(picked));
 
@@ -200,7 +237,7 @@ fn fill(
             let node = Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(space::ROWS),
-                display: if page == Page::ALL[0] { Display::Flex } else { Display::None },
+                display: if page == first { Display::Flex } else { Display::None },
                 ..default()
             };
             let holder = commands.spawn((Name::new(page.label()), SettingsPage(page), node, ChildOf(slots.body))).id();
@@ -305,7 +342,7 @@ fn on_tab(
 fn on_disconnect(
     activate: On<Activate>,
     acts: Query<&SettingsAct>,
-    modals: Query<Entity, With<ModalRoot>>,
+    modals: Query<Entity, With<SettingsModal>>,
     mut send: MessageWriter<SendNet>,
     mut commands: Commands,
 ) {
@@ -357,7 +394,7 @@ fn refresh(
             Value::Endpoint => endpoint.0.clone().unwrap_or_else(|| "starting".into()),
             Value::Status => status.label(),
             Value::Repos => repos_text(&status),
-            Value::Queue => queue_text(&authoring.queue, &tasks),
+            Value::Queue => queues_text(&authoring, &status, &tasks),
         };
         set_text(text, &wanted);
     }
@@ -368,7 +405,9 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_gear)
+        app.init_resource::<StartPage>()
+            .add_observer(on_gear)
+            .add_observer(on_open_logs)
             .add_observer(on_tab)
             .add_observer(on_disconnect)
             .add_observer(on_theme_pick)
@@ -396,7 +435,7 @@ mod tests {
 
     use super::*;
     use crate::fixture::task_json;
-    use crate::widgets::ModalPlugin;
+    use crate::widgets::{ModalPlugin, ModalRoot};
 
     fn app() -> App {
         let mut app = App::new();
@@ -462,6 +501,19 @@ mod tests {
         assert_eq!(modals(&mut app), 1);
     }
 
+    #[test]
+    fn opening_the_logs_of_a_task_shows_the_logs_page_filtered_to_it() {
+        let mut app = app();
+        app.world_mut().trigger(OpenLogs("TRAIL-7".into()));
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 1);
+        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-7"));
+        let world = app.world_mut();
+        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
+        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
+        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+    }
     #[test]
     fn escape_closes_it() {
         let mut app = app();
@@ -540,6 +592,24 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_leaves_other_modals_alone() {
+        let mut app = app();
+        open(&mut app);
+        let other = app.world_mut().spawn(ModalRoot).id();
+        let world = app.world_mut();
+        let button = world
+            .query::<(Entity, &SettingsAct)>()
+            .iter(world)
+            .find(|(_, a)| **a == SettingsAct::Disconnect)
+            .unwrap()
+            .0;
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 0);
+        assert!(app.world().get_entity(other).is_ok());
+    }
+
+    #[test]
     fn the_queue_line_counts_what_is_under_it() {
         let task = |id: &str, key: &str, status: &str, parent: Option<&str>| -> Task {
             serde_json::from_value(task_json(json!({"id": id, "key": key, "status": status, "parent_id": parent})))
@@ -553,6 +623,26 @@ mod tests {
         ];
         assert_eq!(queue_text("TRAIL-102", &tasks), "TRAIL-102: 1 not closed, 2 in all");
         assert_eq!(queue_text("TRAIL-5", &tasks), "TRAIL-5 (not loaded)");
+
+        let authoring = Authoring::default();
+        let mut status = FactoryStatus::default();
+        assert_eq!(queues_text(&authoring, &status, &tasks), "TRAIL-102: 1 not closed, 2 in all");
+        status.repos.insert(
+            "r".into(),
+            crate::factory::RepoState {
+                control: trailhead_factory::status::ControlState::Up,
+                queue: vec!["TRAIL-102".into(), "TRAIL-9".into()],
+                last_error: None,
+                human_grades: vec![],
+                holding: None,
+                usage: Vec::new(),
+                seq: 0,
+            },
+        );
+        assert_eq!(
+            queues_text(&authoring, &status, &tasks),
+            "TRAIL-102: 1 not closed, 2 in all\nTRAIL-9: 0 not closed, 0 in all"
+        );
     }
 
     #[test]

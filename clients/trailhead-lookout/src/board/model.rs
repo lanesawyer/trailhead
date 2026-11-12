@@ -162,6 +162,8 @@ pub struct Card {
     pub actions: Vec<CardAction>,
     /// Where a search matched this task when its key and title did not: "in description: …".
     pub found: Option<String>,
+    /// Its pull request, which a tool button opens in the browser.
+    pub pr: Option<PrLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,8 +189,6 @@ pub struct Input<'a> {
     pub comments: &'a [Comment],
     pub agents: &'a [Agent],
     pub users: &'a [User],
-    /// The runs in flight, which name a holder the agent list hasn't caught up with.
-    pub runs: &'a [Run],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
     pub queues: &'a [String],
     /// What the server found for the filter's query, if it has answered it.
@@ -226,21 +226,18 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
-    let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
-    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
-    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_label = |task: Uuid, id: Uuid| match holder_name.get(&id) {
-        Some(n) => n.to_string(),
-        None => match task_key.get(&task) {
-            Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
-            _ => short(id),
-        },
-    };
+    let holder_label = |id: Uuid| holder_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
     // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
-    // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted, out of scope) doesn't count.
+    // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted) doesn't count, but the nil id
+    // stands for one outside the token's scope, unfinished as far as anyone can tell.
     let status_of: HashMap<Uuid, Status> = input.tasks.iter().map(|t| (t.id, t.status)).collect();
     let mut unfinished: HashMap<Uuid, Vec<&str>> = HashMap::new();
+    let mut hidden: HashMap<Uuid, usize> = HashMap::new();
     for d in input.dependencies {
+        if d.blocker_id.is_nil() {
+            *hidden.entry(d.blocked_id).or_default() += 1;
+            continue;
+        }
         if let (Some(status), Some(key)) = (status_of.get(&d.blocker_id), task_key.get(&d.blocker_id))
             && !status.is_closed()
         {
@@ -290,7 +287,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::STATUS_INFO),
+                tone: Some(token::FACTORY),
                 hint: None,
             });
         }
@@ -312,7 +309,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         if let Some(holder) = holder_of.get(&t.id) {
             badges.push(Badge {
                 kind: BadgeKind::Holder,
-                label: holder_badge(&holder_label(t.id, *holder)),
+                label: holder_badge(&holder_label(*holder)),
                 tone: None,
                 hint: None,
             });
@@ -325,16 +322,20 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                 hint: None,
             });
         }
-        if !t.status.is_closed()
-            && let Some(keys) = unfinished.get(&t.id)
-        {
-            let mut keys = keys.clone();
-            keys.sort_unstable();
+        let out_of_view = hidden.get(&t.id).copied().unwrap_or(0);
+        let mut keys = unfinished.get(&t.id).cloned().unwrap_or_default();
+        if !t.status.is_closed() && (!keys.is_empty() || out_of_view > 0) {
+            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
+            let mut named = keys.join(", ");
+            if out_of_view > 0 {
+                let more = format!("{out_of_view} outside this token's view");
+                named = if named.is_empty() { more } else { format!("{named} and {more}") };
+            }
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
-                label: format!("blocked · {}", keys.len()),
+                label: format!("blocked · {}", keys.len() + out_of_view),
                 tone: Some(token::STATUS_WARN),
-                hint: Some(format!("Blocked by {}", keys.join(", "))),
+                hint: Some(format!("Blocked by {named}")),
             });
         }
         if !open.is_empty() {
@@ -358,6 +359,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges,
             actions,
             found: found(t),
+            pr: pr_link(t),
         }
     };
 
@@ -401,13 +403,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     };
     // Likewise only the holders of its tasks.
     let holders = {
-        let ids: BTreeMap<Uuid, Uuid> = input
-            .tasks
-            .iter()
-            .filter(|t| in_project(t))
-            .filter_map(|t| holder_of.get(&t.id).map(|h| (*h, t.id)))
-            .collect();
-        let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
+        let ids: BTreeSet<Uuid> =
+            input.tasks.iter().filter(|t| in_project(t)).filter_map(|t| holder_of.get(&t.id).copied()).collect();
+        let mut v: Vec<Choice> = ids.into_iter().map(|id| choice(&id.to_string(), holder_label(id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
     };
@@ -502,12 +500,15 @@ mod tests {
         // OPS-1 is finished, so it blocks nothing any more, and being done it shows no badge of its own.
         tasks[4]["status"] = json!("done");
         let dep = |blocker: &str, blocked: &str| json!({"workspace_id": sid("w1"), "blocker_id": sid(blocker), "blocked_id": sid(blocked), "created_at": at(1)});
+        let dep_nil = |blocked: &str| json!({"workspace_id": sid("w1"), "blocker_id": "00000000-0000-0000-0000-000000000000", "blocked_id": sid(blocked), "created_at": at(1)});
         let dependencies = typed::<Dependency>(vec![
             dep("t104", "t105"),
             dep("t103", "t105"),
             dep("t200", "t105"),
             dep("t104", "t200"),
             dep("t999", "t102"),
+            dep_nil("t103"),
+            dep_nil("t105"),
         ]);
         let (projects, tasks, claims, comments, agents) = (
             typed::<Project>(projects),
@@ -531,13 +532,16 @@ mod tests {
         );
         let blocked = |key: &str| card(&view, key).badges.iter().find(|b| b.kind == BadgeKind::Blocked).cloned();
         let badge = blocked("TRAIL-105").unwrap();
-        assert_eq!(badge.label, "blocked · 2");
-        assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104"));
+        assert_eq!(badge.label, "blocked · 3");
+        assert_eq!(badge.hint.as_deref(), Some("Blocked by TRAIL-103, TRAIL-104 and 1 outside this token's view"));
+        // A blocker outside the token's view is all the card can say about TRAIL-103.
+        let only_hidden = blocked("TRAIL-103").unwrap();
+        assert_eq!(only_hidden.label, "blocked · 1");
+        assert_eq!(only_hidden.hint.as_deref(), Some("Blocked by 1 outside this token's view"));
         assert_eq!(badge.tone, Some(token::STATUS_WARN));
         // Done, or blocked only by a task the mirror doesn't have: nothing to say.
         assert_eq!(blocked("OPS-1"), None);
         assert_eq!(blocked("TRAIL-102"), None);
-        assert_eq!(blocked("TRAIL-103"), None);
     }
 
     #[test]
@@ -567,28 +571,6 @@ mod tests {
         assert_eq!(keys(&view, Status::InReview), [("TRAIL-1".into(), 0), ("TRAIL-2".into(), 0)]);
         assert!(flagged("TRAIL-1") && !flagged("TRAIL-2") && !flagged("TRAIL-3"));
     }
-    #[test]
-    fn a_holder_the_agent_list_lacks_is_named_for_its_run() {
-        use trailhead_factory::{RunPhase, RunStatus, TaskKey, Usd};
-        let runs = [Run {
-            repo: "o/r".into(),
-            status: RunStatus {
-                task: TaskKey("OPS-1".into()),
-                phase: RunPhase::Agent,
-                sandbox: None,
-                steps: 1,
-                tool_calls: 1,
-                spend: Usd::dollars(0.0),
-                last_tool: None,
-                started: 0,
-            },
-        }];
-        let view = run_with(&Filter::default(), &runs);
-        assert_eq!(badges(card(&view, "OPS-1")), [(BadgeKind::Priority, "P2"), (BadgeKind::Holder, "ops-1")]);
-        let holders: Vec<&str> = view.options.holders.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(holders, ["factory/ops-1", "factory/trail-103-a1"]);
-    }
-
     #[test]
     fn badges_show_priority_grade_holder_and_the_open_question_count() {
         let view = run(&Filter::default());
@@ -638,6 +620,14 @@ mod tests {
         assert_eq!(holder_badge("factory/trail-103-a1"), "trail-103-a1");
         assert_eq!(holder_badge("a-very-long-agent-name"), "a-very-long…");
         assert_eq!(holder_badge("claude"), "claude");
+    }
+
+    #[test]
+    fn a_card_with_a_pr_links_to_it() {
+        let view = run(&Filter::default());
+        let pr = card(&view, "TRAIL-104").pr.clone().unwrap();
+        assert_eq!((pr.label.as_str(), pr.url.as_str()), ("o/r#9", "https://host/o/r/pull/9"));
+        assert!(card(&view, "TRAIL-102").pr.is_none());
     }
 
     #[test]
@@ -787,6 +777,7 @@ mod tests {
                 badges: vec![],
                 actions: vec![],
                 found: None,
+                pr: None,
             })
             .collect()
     }
@@ -824,6 +815,38 @@ mod tests {
         let (shown, hidden) = visible(&cards, PAGE - 1);
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
+
+    #[test]
+    fn a_very_long_run_of_subtasks_is_cut_at_a_page() {
+        let mut cards = many(4 * PAGE);
+        for card in &mut cards[PAGE..] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (2 * PAGE, 2 * PAGE));
+        // Asking for more carries on through the run.
+        let (shown, hidden) = visible(&cards, 2 * PAGE);
+        assert_eq!((shown.len(), hidden), (3 * PAGE, PAGE));
+    }
+
+    #[test]
+    fn show_more_counts_what_the_next_page_adds() {
+        let mut cards = many(3 * PAGE);
+        // A parent ends the first page, so it already shows its 3 subtasks.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        // The second page would cut inside a run of 4 subtasks, so it runs on to the last.
+        for card in &mut cards[2 * PAGE..2 * PAGE + 4] {
+            card.depth = 1;
+        }
+        assert_eq!(visible(&cards, PAGE).0.len(), PAGE + 3);
+        assert_eq!(next_page(&cards, PAGE), PAGE + 1);
+        assert_eq!(visible(&cards, 2 * PAGE).0.len(), 2 * PAGE + 4);
+        // Nothing past the end is promised.
+        assert_eq!(next_page(&many(PAGE + 5), PAGE), 5);
+    }
+
     #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {

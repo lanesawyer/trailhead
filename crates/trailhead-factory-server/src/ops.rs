@@ -14,14 +14,24 @@ use trailhead_factory::{
     Credential, FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
 };
 
-use crate::{Opts, computes, load_config, resolve_opts, saved_endpoint_id, surface};
+use crate::{Opts, computes, config_dir, load_config, resolve_opts, saved_endpoint_id, surface};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
 /// How often `logs --follow` asks for more.
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
-/// How many of a printed log's last lines `--follow` looks for again in the next fetch.
-const OVERLAP_LINES: usize = 5;
+
+/// How many finished (done or cancelled) tasks `status` lists unless given `--all`.
+const FINISHED_SHOWN: usize = 10;
+
+#[derive(clap::Args, Clone)]
+pub struct StatusOpts {
+    /// List every finished task, not just the most recent few.
+    #[arg(long)]
+    all: bool,
+    #[command(flatten)]
+    opts: Opts,
+}
 
 #[derive(clap::Args, Clone)]
 pub struct LogsOpts {
@@ -34,10 +44,11 @@ pub struct LogsOpts {
     opts: Opts,
 }
 
-pub async fn status(opts: &Opts) -> Result<()> {
+pub async fn status(status: &StatusOpts) -> Result<()> {
+    let opts = &status.opts;
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
-    let (opts, fnox) = resolve_opts(opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
-    let (_, _, config) = load_config(&opts)?;
+    let (config_path, _, config) = load_config(opts)?;
+    let (opts, fnox) = resolve_opts(opts, &paths, &config_dir(&config_path))?;
     let tracker = api_tracker(&opts, &paths)?;
 
     // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
@@ -76,10 +87,16 @@ pub async fn status(opts: &Opts) -> Result<()> {
     if !queue.is_empty() {
         waiting.retain(|t| t.grade.is_some());
     }
+    if let Some(why) = runs.and_then(|live| live.stopped.as_ref()) {
+        println!(
+            "WARNING: this repo's loop has stopped and takes no new runs: {}\nRestart the server to start it again.\n",
+            why.lines().next().unwrap_or_default()
+        );
+    }
     if let Some(live) = runs {
         print!("{}", render_live(&live.snapshot));
     }
-    print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes));
+    print!("{}", render_status(&rows, &tasks, &waiting, config.repo.max_sandboxes, status.all));
     println!("\nlog file: {} (written by the server's control plane)", crate::logfile::path(&paths.data_dir).display());
     match saved_endpoint_id(&paths.creds()) {
         Some(id) => println!("\nUI endpoint id: {id}  (allow a UI with `trailhead factory allow <its endpoint id>`)"),
@@ -90,8 +107,8 @@ pub async fn status(opts: &Opts) -> Result<()> {
 
 pub async fn logs(logs: &LogsOpts) -> Result<()> {
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
-    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &std::env::current_dir().map_err(Error::backend)?)?;
-    let (_, _, config) = load_config(&opts)?;
+    let (config_path, _, config) = load_config(&logs.opts)?;
+    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &config_dir(&config_path))?;
 
     let tracker = api_tracker(&opts, &paths)?;
     let key = TaskKey(logs.task.to_ascii_uppercase());
@@ -140,7 +157,7 @@ pub(crate) fn api_tracker(opts: &Opts, paths: &trailhead_client::paths::Paths) -
 
 /// `e`, with a hint when the server didn't answer.
 pub(crate) fn reach(e: trailhead_factory::Error) -> Error {
-    if e.to_string().contains("error sending request") { Error::ServerDown(e.into()) } else { Error::backend(e) }
+    if matches!(e, trailhead_factory::Error::Unreachable(_)) { Error::ServerDown(e.into()) } else { Error::backend(e) }
 }
 
 /// The local server's `/v1/factory`, when there is a user token to ask it with.
@@ -170,45 +187,45 @@ async fn log_source(
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
     let sandboxes: Vec<Sandbox> = found.iter().map(|(_, s)| s.clone()).collect();
-    let sandbox = find_sandbox(task, &sandboxes).ok_or_else(|| {
-        let unknown = if unreachable.is_empty() {
-            String::new()
-        } else {
-            format!("; target(s) {} couldn't be reached, so it may be there", unreachable.join(", "))
-        };
-        Error::NoSandbox(format!(
-            "{} has no sandbox right now (it isn't running, or its sandbox was released or destroyed){unknown}",
-            task.key.0
-        ))
-    })?;
+    let sandbox = find_sandbox(task, &sandboxes)
+        .ok_or_else(|| Error::NoSandbox { task: task.key.0.clone(), unreachable: unreachable.clone() })?;
     let compute = computes[found.iter().find(|(_, s)| s.name == sandbox.name).map_or(0, |(i, _)| *i)].0.clone();
     Ok((compute, sandbox.clone()))
 }
 
 /// The sandbox a task is on: the one its run recorded (a pooled sandbox's name, else the run's own), else one labelled
-/// with the task.
+/// with the task. A recorded name is ignored once the run released its sandbox, or when the sandbox is labelled for
+/// another task: the pool has reused it since.
 fn find_sandbox<'a>(task: &Task, sandboxes: &'a [Sandbox]) -> Option<&'a Sandbox> {
-    let recorded = task.run.host.as_ref().or(task.run.sandbox.as_ref());
+    let released = task.run.released.is_some_and(|at| at > 0);
+    let recorded = task.run.host.as_ref().or(task.run.sandbox.as_ref()).filter(|_| !released);
     recorded
         .and_then(|name| sandboxes.iter().find(|s| &s.name == name))
+        .filter(|s| s.labels.get(label::TASK).is_none_or(|t| t == &task.key.0))
         .or_else(|| sandboxes.iter().find(|s| s.labels.get(label::TASK) == Some(&task.key.0)))
 }
 
-/// What `log` adds to `printed`. The log is a window of its last lines, so the part already printed may have scrolled
-/// off its start: find the printed log's last few lines in the new one and take what follows them.
+/// What `log` adds to `printed`. The log is a window of its last events, so the start of what was printed may have
+/// scrolled off, and the window can start partway through a line (an event is whatever one pipe read returned). If the
+/// new log still begins with everything printed, the window hasn't scrolled and the rest is new, however repetitive the
+/// lines. Otherwise take the smallest scroll that makes the rest of the printed log the start of the new one, so
+/// repeated lines never make a whole copy of them look already printed. In a full window of identical lines the
+/// smallest scroll reads as "nothing new": that can't be told from a real "nothing new" without a cursor, and
+/// under-printing heartbeats beats duplicating them.
 fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
-    if printed.is_empty() {
-        return log;
+    if let Some(rest) = log.strip_prefix(printed) {
+        return rest;
     }
-    let lines: Vec<&str> = printed.split_inclusive('\n').collect();
-    // Fewer lines when the window has already scrolled past the older ones.
-    for n in (1..=OVERLAP_LINES.min(lines.len())).rev() {
-        let tail = lines[lines.len() - n..].concat();
-        if let Some(at) = log.rfind(&tail) {
-            return &log[at + tail.len()..];
+    for at in 1..printed.len() {
+        if !printed.is_char_boundary(at) {
+            continue;
+        }
+        if let Some(new) = log.strip_prefix(&printed[at..]) {
+            return new;
         }
     }
-    if log == printed { "" } else { log }
+    // Nothing in common (the log was restarted): print it all.
+    log
 }
 
 /// A sandbox as `status` lists it, whether read from compute labels or from the control plane.
@@ -262,9 +279,10 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
         let last = r.last_tool.as_ref().map_or(String::new(), |t| format!(", last tool {t}"));
         let _ = writeln!(
             out,
-            "  {} {:<16} on {}, step {}, {} tool calls, spend {}{last}",
+            "  {} {:<16} for {} on {}, step {}, {} tool calls, spend {}{last}",
             r.task.0,
             r.phase.label(),
+            since(r.phase_started),
             r.sandbox.as_deref().unwrap_or("-"),
             r.steps,
             r.tool_calls,
@@ -275,8 +293,28 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
     out
 }
 
+/// How long ago `unix` was, as `42s`, `7m` or `1h05m`; `?` when the server didn't say (zero).
+fn since(unix: i64) -> String {
+    if unix <= 0 {
+        return "?".into();
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let secs = (now - unix).max(0);
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 /// `waiting` is the ready tasks the factory could start; `max_sandboxes` the repo's cap.
-fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandboxes: usize) -> String {
+fn render_status(
+    sandboxes: &[Row],
+    tasks: &[Task],
+    waiting: &[Task],
+    max_sandboxes: usize,
+    all_finished: bool,
+) -> String {
     use std::fmt::Write;
     let mut out = String::new();
 
@@ -299,8 +337,9 @@ fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandbo
     if !waiting.is_empty() && parked > 0 && parked >= max_sandboxes {
         let _ = writeln!(
             out,
-            "\n{} ready tasks waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
-            waiting.len()
+            "\n{} ready {} waiting; all {max_sandboxes} sandboxes held by parked tasks (answer or cancel them)",
+            waiting.len(),
+            if waiting.len() == 1 { "task" } else { "tasks" }
         );
     }
 
@@ -310,13 +349,32 @@ fn render_status(sandboxes: &[Row], tasks: &[Task], waiting: &[Task], max_sandbo
         let _ = writeln!(out, "  {}", task_line(t));
     }
 
-    let mut others: Vec<&Task> = tasks.iter().filter(|t| t.status != Status::InProgress).collect();
+    let (mut finished, mut others): (Vec<&Task>, Vec<&Task>) =
+        tasks.iter().filter(|t| t.status != Status::InProgress).partition(|t| t.status.is_closed());
     others.sort_by(|a, b| a.key.cmp(&b.key));
     let _ = writeln!(out, "\nTasks ({})", others.len());
     for t in others {
         let _ = writeln!(out, "  {}", task_line(t));
     }
+
+    // Finished tasks pile up, so only the newest (highest numbered) are listed unless asked for all.
+    if !finished.is_empty() {
+        finished.sort_by_key(|t| std::cmp::Reverse(key_number(&t.key)));
+        let shown = if all_finished { finished.len() } else { finished.len().min(FINISHED_SHOWN) };
+        let _ = writeln!(out, "\nFinished ({})", finished.len());
+        for t in &finished[..shown] {
+            let _ = writeln!(out, "  {}", task_line(t));
+        }
+        if shown < finished.len() {
+            let _ = writeln!(out, "  ... and {} older (`--all` lists them)", finished.len() - shown);
+        }
+    }
     out
+}
+
+/// The number in a key like TRAIL-42, to order by age.
+fn key_number(key: &TaskKey) -> u64 {
+    key.0.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 fn task_line(t: &Task) -> String {
@@ -402,6 +460,14 @@ mod tests {
         assert_eq!(new_output(printed, "3\n4\n5\n6\n7\n8\n"), "7\n8\n");
         // Nothing in common (the log was restarted): print it all.
         assert_eq!(new_output("old\n", "fresh\n"), "fresh\n");
+        // Repeated lines: a growing window's new copies are new, and an unchanged one prints nothing.
+        assert_eq!(new_output("hb\nhb\n", "hb\nhb\nhb\n"), "hb\n");
+        assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\nhb\nhb\n"), "hb\nhb\n");
+        assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\n"), "");
+        // A scrolled window ending in repeats still finds the smallest scroll.
+        assert_eq!(new_output("a\nb\nhb\n", "b\nhb\nhb\n"), "hb\n");
+        // The window starts partway through a line.
+        assert_eq!(new_output("abc\nd\n", "c\nd\ne\n"), "e\n");
     }
 
     #[test]
@@ -412,8 +478,18 @@ mod tests {
             sandbox("trail-3-a1", &[]),
         ];
         let on_host =
-            task("TRAIL-2", Status::InProgress, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+            task("TRAIL-1", Status::InProgress, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&on_host, &boxes).unwrap().name, "trailhead-w1");
+        // The pool reused it for another task, or the run released it: don't show that task's log.
+        let reused =
+            task("TRAIL-5", Status::InReview, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+        assert!(find_sandbox(&reused, &boxes).is_none());
+        let released = task(
+            "TRAIL-2",
+            Status::InProgress,
+            RunUpdate { host: Some("trailhead-w1".into()), released: Some(1), ..Default::default() },
+        );
+        assert_eq!(find_sandbox(&released, &boxes).unwrap().name, "trailhead-w2");
         let own =
             task("TRAIL-3", Status::InProgress, RunUpdate { sandbox: Some("trail-3-a1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&own, &boxes).unwrap().name, "trail-3-a1");
@@ -450,6 +526,7 @@ mod tests {
             &[task("TRAIL-7", Status::InProgress, running), task("TRAIL-5", Status::InReview, reviewed)],
             &[],
             2,
+            false,
         );
         let w1 = out.find("trailhead-w1 ").unwrap();
         assert!(w1 < out.find("trailhead-w2 ").unwrap(), "{out}");
@@ -459,6 +536,30 @@ mod tests {
         assert!(out.contains("TRAIL-7 [in progress] attempt 2, spend $1.5000, on trailhead-w1"), "{out}");
         assert!(out.contains("TRAIL-5 [in review] attempt 1, spend $0.2500, PR #12 https://x/12"), "{out}");
         assert!(out.contains("last note: checks failed\n"), "{out}");
+    }
+
+    #[test]
+    fn status_lists_only_the_latest_finished_tasks_unless_asked_for_all() {
+        let tasks: Vec<Task> = (1..=12)
+            .map(|n| {
+                task(
+                    &format!("TRAIL-{n}"),
+                    if n % 2 == 0 { Status::Done } else { Status::Cancelled },
+                    Default::default(),
+                )
+            })
+            .chain([task("TRAIL-20", Status::Open, Default::default())])
+            .collect();
+        let out = render_status(&[], &tasks, &[], 2, false);
+        assert!(out.contains("Tasks (1)"), "{out}");
+        assert!(out.contains("Finished (12)"), "{out}");
+        assert!(out.contains("TRAIL-12 ["), "{out}");
+        assert!(out.contains("TRAIL-3 ["), "{out}");
+        assert!(!out.contains("TRAIL-2 ["), "{out}");
+        assert!(out.contains("... and 2 older"), "{out}");
+        let all = render_status(&[], &tasks, &[], 2, true);
+        assert!(all.contains("TRAIL-1 ["), "{all}");
+        assert!(!all.contains("older"), "{all}");
     }
 
     #[test]
@@ -472,10 +573,13 @@ mod tests {
             task("TRAIL-2", Status::NeedsInput, Default::default()),
         ];
         let waiting = [task("TRAIL-3", Status::Open, Default::default())];
-        let out = render_status(&rows(&boxes), &parked, &waiting, 2);
-        assert!(out.contains("1 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
-        assert!(!render_status(&rows(&boxes), &parked, &[], 2).contains("waiting;"));
-        assert!(!render_status(&rows(&boxes), &parked, &waiting, 3).contains("waiting;"));
+        let out = render_status(&rows(&boxes), &parked, &waiting, 2, false);
+        assert!(out.contains("1 ready task waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        let several = [waiting[0].clone(), task("TRAIL-4", Status::Open, Default::default())];
+        let out = render_status(&rows(&boxes), &parked, &several, 2, false);
+        assert!(out.contains("2 ready tasks waiting; all 2 sandboxes held by parked tasks"), "{out}");
+        assert!(!render_status(&rows(&boxes), &parked, &[], 2, false).contains("waiting;"));
+        assert!(!render_status(&rows(&boxes), &parked, &waiting, 3, false).contains("waiting;"));
     }
 
     #[test]
@@ -502,6 +606,7 @@ mod tests {
                 spend: Usd::dollars(1.5),
                 last_tool: Some("Bash".into()),
                 started: 0,
+                phase_started: 0,
             }],
             holding: Some("#306 has auto-merge on".into()),
             targets: vec![TargetSpend {
@@ -512,6 +617,7 @@ mod tests {
             }],
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 12,
         };
         let out = render_live(&snapshot);
@@ -521,21 +627,31 @@ mod tests {
         assert!(out.contains("last error ("), "{out}");
         assert!(out.contains(": reconcile failed: boom\n"), "{out}");
         assert!(out.contains("TRAIL-7 preparing (cold)"), "{out}");
+        assert!(out.contains("for ? on trailhead-w1"), "{out}");
         assert!(out.contains("step 3, 9 tool calls, spend $1.5000, last tool Bash"), "{out}");
         let row = Row::from_status(&snapshot.sandboxes[0]);
         assert_eq!((row.state.as_str(), row.warm.as_str(), row.task.as_str()), ("paused", "yes", "TRAIL-7"));
     }
 
     #[test]
+    fn since_reads_as_a_short_age() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(since(0), "?");
+        assert_eq!(since(now + 5), "0s");
+        assert_eq!(since(now - 7 * 60 - 3), "7m");
+        assert_eq!(since(now - 3600 - 5 * 60), "1h05m");
+    }
+
+    #[test]
     fn an_unanswered_server_gets_a_hint() {
-        let down = trailhead_factory::Error::Other("trailhead: error sending request for url (http://x)".into());
+        let down = trailhead_factory::Error::Unreachable("trailhead: connection refused".into());
         assert!(reach(down).to_string().contains("is the server running?"));
         let refused = trailhead_factory::Error::NotFound("trailhead 404 not_found: no such task".into());
         assert!(!reach(refused).to_string().contains("is the server running?"));
     }
     #[test]
     fn an_empty_factory_says_so() {
-        let out = render_status(&[], &[], &[], 2);
+        let out = render_status(&[], &[], &[], 2, false);
         assert!(out.contains("Sandboxes (0)\n  none"), "{out}");
     }
 }

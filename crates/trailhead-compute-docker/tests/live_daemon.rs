@@ -19,6 +19,7 @@ fn request() -> PrepareRequest {
         base_branch: "main".into(),
         branch: None,
         merge_base: false,
+        branch_if_present: false,
         setup: None,
         tools: Default::default(),
         tool_hosts: Default::default(),
