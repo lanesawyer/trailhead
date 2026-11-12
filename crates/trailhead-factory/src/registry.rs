@@ -19,11 +19,14 @@ pub struct HarnessSetup {
     pub secrets: HarnessSecrets,
 }
 
+/// Builds a harness in the sandbox from what the daemon hands it.
+pub type BuildHarness = Arc<dyn Fn(&HarnessSetup) -> Arc<dyn Harness> + Send + Sync>;
+
 /// A harness implementation the daemon can build by name.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct HarnessKind {
-    /// Builds the harness in the sandbox.
-    pub build: fn(&HarnessSetup) -> Arc<dyn Harness>,
+    /// Builds the harness in the sandbox. A closure, so a test's entry can hand out a harness it keeps hold of.
+    pub build: BuildHarness,
     /// The hosts a sandbox must reach for this harness with these secrets, besides the gateway.
     pub egress: fn(&HarnessSecrets) -> Vec<String>,
 }

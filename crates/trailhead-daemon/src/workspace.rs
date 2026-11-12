@@ -33,8 +33,30 @@ pub struct GitWorkspace {
 }
 
 impl GitWorkspace {
+    async fn is_ancestor(&self, commit: &str, of: &str) -> Result<bool> {
+        let status = Command::new("git")
+            .args(["merge-base", "--is-ancestor", commit, of])
+            .envs(self.git_env.clone())
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
+            .status;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} {of} failed"))),
+        }
+    }
+
     pub fn new(dir: impl Into<PathBuf>) -> GitWorkspace {
         GitWorkspace::with_remote(dir, "https://github.com")
+    }
+
+    /// Where repos are cloned from.
+    pub fn remote_base(&self) -> &str {
+        &self.remote_base
     }
 
     pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
@@ -171,8 +193,13 @@ impl Workspace for GitWorkspace {
         if let Some(branch) = &req.branch {
             // A rework builds on the PR branch's head, so what it publishes lands on top of it; a
             // reviewer checks out the same head, so it reads the code the PR proposes.
-            self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await?;
-            self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")]).await?;
+            let fetched = self.git(&self.dir, &["fetch", "--quiet", "origin", branch]).await;
+            // A branch that was never pushed isn't an error when the request allows it: the work starts at the base.
+            if fetched.is_ok() || !req.branch_if_present {
+                fetched?;
+                self.git(&self.dir, &["checkout", "--quiet", "--force", "-B", branch, &format!("origin/{branch}")])
+                    .await?;
+            }
         }
         // Before setup, so the repo's own build runs with the pinned tools.
         self.mise.bootstrap(&req.tools).await?;
@@ -243,28 +270,18 @@ impl Workspace for GitWorkspace {
         let Ok(tip) = self.git_output(&self.dir, &["rev-parse", "--verify", "--quiet", &tip]).await else {
             return Ok(None);
         };
-        let range = format!("{start}..HEAD");
-        let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
-        // Each line is a commit followed by its parents.
-        let merged = merges.lines().any(|line| line.split_whitespace().skip(1).any(|parent| parent == tip));
-        Ok(merged.then_some(tip))
+        // The newest commit of the base that HEAD has. If `start` has it too, nothing of the base came in. Otherwise
+        // the agent merged the base, whether as a merge commit, a fast-forward, or before fetching again moved
+        // `origin/<base>` on.
+        let Ok(have) = self.git_output(&self.dir, &["merge-base", "HEAD", &tip]).await else {
+            return Ok(None);
+        };
+        let have = have.trim().to_string();
+        Ok((!self.is_ancestor(&have, start).await?).then_some(have))
     }
 
     async fn contains(&self, commit: &str) -> Result<bool> {
-        let status = Command::new("git")
-            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
-            .envs(self.git_env.clone())
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|e| Error::Other(format!("git merge-base: {e}")))?
-            .status;
-        match status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(Error::Other(format!("git merge-base --is-ancestor {commit} HEAD failed"))),
-        }
+        self.is_ancestor(commit, "HEAD").await
     }
 
     async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
@@ -306,7 +323,13 @@ impl Workspace for GitWorkspace {
         // New files count, as in conflict_markers.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let remote = format!("origin/{base}");
-        let from = self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?;
+        // While the rework's merge of the base is in progress, diff against the base tip itself: against the
+        // merge-base, every base change since the branch point would count as the PR's and trigger scoped checks.
+        let from = if self.merge_head().await?.is_some() {
+            remote
+        } else {
+            self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?
+        };
         let names =
             self.git_output(&self.dir, &["diff", "--name-only", "--no-renames", "--no-ext-diff", "-z", &from]).await?;
         Ok(names.split('\0').filter(|f| !f.is_empty()).map(str::to_string).collect())
@@ -317,9 +340,17 @@ impl Workspace for GitWorkspace {
         if !self.git_output(&self.dir, &["status", "--porcelain"]).await?.trim().is_empty() {
             return Ok(true);
         }
+        // The factory publishes through the GitHub API, which makes new commits for the same content: the ref may not
+        // be here yet and the local commits may not be its ancestors. Fetch it, then compare content as well. A branch
+        // the remote lacks fails the fetch.
+        self.git(&self.dir, &["fetch", "--quiet", "origin", remote_branch]).await?;
         let remote = format!("origin/{remote_branch}");
         let ahead = self.git_output(&self.dir, &["rev-list", "-n1", "HEAD", "--not", &remote]).await?;
-        Ok(!ahead.trim().is_empty())
+        if ahead.is_empty() {
+            return Ok(false);
+        }
+        let differs = self.git_output(&self.dir, &["diff", "--name-only", "--no-ext-diff", &remote, "HEAD"]).await?;
+        Ok(!differs.is_empty())
     }
 
     async fn head(&self) -> Result<String> {

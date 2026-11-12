@@ -293,7 +293,8 @@ impl Tracker for CoreTracker {
     async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
         let tasks = match queue {
-            [] => self.store.ready(&ctx, Some(project), Some(limit as i64), GradeFilter::Any).await.map_err(map_err)?,
+            // Unlimited: a blocker's raised priority can move it up the list, so the cut waits until after the raise.
+            [] => self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?,
             queue => {
                 // The store orders ready tasks by priority, so filtering its one list orders across every queue and
                 // lists a task once even if it is under two of them.
@@ -308,16 +309,17 @@ impl Tracker for CoreTracker {
                 }
                 // Unlimited: a cap here would hide queued tasks behind other ready ones.
                 let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
-                ready.into_iter().filter(|t| queued.contains(&t.id)).take(limit).collect()
+                ready.into_iter().filter(|t| queued.contains(&t.id)).collect()
             }
         };
         let mut tasks = self.tasks(&ctx, tasks).await?;
         // Reworks wait in review with changes requested: within a priority they are listed ahead of new work, and the
-        // merge happens before the cut so a pile of low-priority reworks can't hide a higher-priority new task.
+        // merge and the raise both happen before the cut so a pile of low-priority reworks can't hide a higher-priority
+        // new task, nor a low-priority blocker of urgent work.
         tasks.extend(self.reworks(&ctx, project, queue).await?);
+        self.raise_to_blocked_priority(&ctx, &mut tasks).await;
         tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
         tasks.truncate(limit);
-        self.raise_to_blocked_priority(&ctx, &mut tasks).await;
         Ok(tasks)
     }
 
@@ -393,10 +395,15 @@ impl Tracker for CoreTracker {
         let mut tasks = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for parent in parents {
-            let filter = TaskFilter { project: Some(project.to_string()), parent, ..TaskFilter::default() };
+            let filter = TaskFilter {
+                project: Some(project.to_string()),
+                parent,
+                metadata_exists: vec![METADATA_KEY.to_string()],
+                ..TaskFilter::default()
+            };
             tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
         }
-        self.tasks(&ctx, tasks.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some())).await
+        self.tasks(&ctx, tasks).await
     }
 
     async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {
@@ -456,11 +463,7 @@ impl Tracker for CoreTracker {
             // Core's `ReviewRequired` here means the caller is neither a human nor a delegated reviewer. A reviewer
             // that did the work in review is refused with its own `Forbidden`, which passes through.
             Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
-                Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(
-                    &self.agent.to_string(),
-                    &task.0,
-                    task.0.rsplit_once('-').map_or(task.0.as_str(), |(project, _)| project),
-                )))
+                Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(&self.agent, &task.0, task.project())))
             }
             result => result,
         }
