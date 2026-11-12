@@ -88,6 +88,7 @@ mod tests {
     fn the_scrollbar_sits_centered_in_the_shell_padding_so_the_body_has_none_of_its_own() {
         const { assert!(SCROLLBAR_GAP + SCROLLBAR_WIDTH + SCROLLBAR_GAP == space::PANEL_INSET) };
         assert_eq!(node_of(column_shell(Status::Open)).padding.right, px(space::PANEL_INSET));
+        assert!(crate::widgets::has_scrollbar_room(&node_of(column_shell(Status::Open))));
         assert_eq!(node_of(column_body()).padding, UiRect::ZERO);
     }
 
