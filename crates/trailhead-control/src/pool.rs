@@ -122,6 +122,10 @@ impl Factory {
         let pick = self.pool_pick.lock().await;
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
+        // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
+        let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
+        idle.sort_by_key(|s| Some(s.name.as_str()) != recorded);
+        let held = idle.clone();
         idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);
         let stack = self.config.stack.tag();
         let mut current = Vec::new();
@@ -133,8 +137,9 @@ impl Factory {
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
             if let Err(e) = p.compute.destroy(&s.id).await {
-                // Left idle it would count toward `max_sandboxes` and be retried on every acquire; broken, it counts
-                // for nothing and reconcile destroys it.
+                // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
+                // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
+                // is the task's own busy sandbox it did count, so this also frees that place.
                 tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
                 self.mark_broken(&s).await;
             }
@@ -158,6 +163,12 @@ impl Factory {
         if let Err(e) = p.compute.set_labels(&sandbox.id, &busy).await {
             self.give_back(&sandbox, &busy).await;
             return Err(e);
+        }
+        // A task holds one pooled sandbox: another still labelled for it would fill the cap for nothing (TRAIL-1185).
+        for stale in held.iter().filter(|s| s.name != sandbox.name) {
+            if let Err(e) = self.release_worker(stale).await {
+                tracing::warn!(sandbox = %stale.name, task = %task.key.0, error = %e, "couldn't release a stale sandbox held for the task; reconcile will");
+            }
         }
         self.status.phase(&task.key, RunPhase::Preparing { cold: warm.is_none() }, Some(&sandbox.name));
         self.status.sandbox(&Sandbox { labels: busy.clone(), ..sandbox.clone() });

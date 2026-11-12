@@ -38,7 +38,7 @@ pub(crate) async fn task_history(
     Query(p): Query<HistoryQuery>,
 ) -> ApiResult<Json<Value>> {
     let filter = EventFilter {
-        task: Some(t),
+        task: Some(t.into()),
         after_id: p.after,
         limit: p.limit,
         include_archived: p.archived,
@@ -78,7 +78,7 @@ pub(crate) async fn list_events(State(s): S, Auth(ctx): Auth, Query(q): Query<Ev
     let filter = EventFilter {
         after_id: q.after,
         before_id: q.before,
-        task: q.task,
+        task: q.task.map(Into::into),
         project: q.project,
         actor_id: q.actor,
         batch_id: q.batch,

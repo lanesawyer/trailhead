@@ -140,6 +140,17 @@ impl FactoryStatus {
         Grade::ALL.into_iter().filter(|g| said.iter().any(|r| r.contains(g))).collect()
     }
 
+    /// [`Self::human_grades`] for a task in `project`: the repos whose queue tasks are in that project say, since its
+    /// tasks go to those repos' gates. When no repo works the project (or it isn't known), every repo's.
+    pub fn human_grades_for(&self, project: Option<&str>) -> Vec<Grade> {
+        let in_project = |key: &String| key.rsplit_once('-').is_some_and(|(p, _)| Some(p) == project);
+        let own: Vec<&RepoState> = self.repos.values().filter(|r| r.queue.iter().any(in_project)).collect();
+        if own.is_empty() {
+            return self.human_grades();
+        }
+        Grade::ALL.into_iter().filter(|g| own.iter().any(|r| r.human_grades.contains(g))).collect()
+    }
+
     /// The queue tasks the factory works, as its repos report them, each once.
     pub fn queues(&self) -> Vec<String> {
         let mut keys: Vec<String> = Vec::new();
@@ -363,16 +374,6 @@ pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
         .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })
 }
 
-/// What to call the holder of a claim on the task keyed `task_key`: its name in the agent list if `known`, else, for a
-/// task that has a run, `factory/<key>`. The agent list only changes with a sync snapshot, so a sub-agent made for a run
-/// after it isn't known yet; a holder of a task that has a run is a factory agent all the same. Board and map share it.
-pub fn holder_name(known: Option<&str>, task_key: &str, has_run: bool) -> Option<String> {
-    match known {
-        Some(n) => Some(n.to_string()),
-        None => has_run.then(|| format!("factory/{}", task_key.to_lowercase())),
-    }
-}
-
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -453,13 +454,6 @@ mod tests {
         assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });
         let merged = with(serde_json::json!({"pr": pr(4), "merged": {"by": "merger", "pr": pr(5)}}));
         assert_eq!(pr_link(&merged).unwrap().label, "o/r#5");
-    }
-
-    #[test]
-    fn a_holder_is_named_by_the_list_else_for_its_run() {
-        assert_eq!(super::holder_name(Some("claude"), "TRAIL-7", true).as_deref(), Some("claude"));
-        assert_eq!(super::holder_name(None, "TRAIL-7", true).as_deref(), Some("factory/trail-7"));
-        assert_eq!(super::holder_name(None, "TRAIL-7", false), None);
     }
 
     fn app() -> App {
@@ -599,6 +593,28 @@ mod tests {
         repos[0].snapshot.human_grades = Some(Vec::new());
         send(&mut app, [FactoryUpdate::Snapshot(repos)]);
         assert!(app.world().resource::<FactoryStatus>().human_grades().is_empty());
+    }
+
+    #[test]
+    fn a_task_is_labelled_from_the_gates_of_the_repo_that_works_its_project() {
+        let g = |n| Grade::new(n).unwrap();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: human,
+            usage: Vec::new(),
+            seq: 1,
+        };
+        let mut status = FactoryStatus::default();
+        status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+        status.repos.insert("o/b".into(), repo("OTHER-1", vec![g(2), g(4)]));
+        assert_eq!(status.human_grades_for(Some("TRAIL")), [g(3), g(4)]);
+        assert_eq!(status.human_grades_for(Some("OTHER")), [g(2), g(4)]);
+        // A project no repo works gets every repo's.
+        assert_eq!(status.human_grades_for(Some("NONE")), [g(2), g(3), g(4)]);
+        assert_eq!(status.human_grades_for(None), [g(2), g(3), g(4)]);
     }
 
     #[test]

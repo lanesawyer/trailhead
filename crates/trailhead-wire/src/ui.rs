@@ -20,7 +20,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, FactoryState, Result, Sequenced};
 
@@ -118,6 +118,12 @@ pub trait StatusFeed: Send + Sync + 'static {
 
     /// Whether the control plane is running at all, sent with the snapshot.
     fn state(&self) -> Option<FactoryState> {
+        None
+    }
+
+    /// Notified whenever the state or the set of repos changes. A stream with no repos to forward ends on it, so the
+    /// UI redials for a fresh snapshot; without one such a stream never learns of a change.
+    fn changed(&self) -> Option<watch::Receiver<()>> {
         None
     }
 }
@@ -308,9 +314,32 @@ impl UiProtocol {
 
 /// Sends the snapshot, then every event, until the UI goes away or the feed ends.
 async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
+    // Taken before the snapshot, so a change after it is never missed.
+    let mut changed = feed.changed();
     let feeds = feed.subscribe();
     let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
     if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
+        return;
+    }
+    // No repos (yet): there is nothing to forward from this subscription, but ending the stream would have the UI
+    // redial every couple of seconds and read the control plane as stopped. Hold it open until the UI goes away, or
+    // until the state or the repos change, when it ends so the UI redials for the snapshot that shows it.
+    if feeds.is_empty() {
+        match changed.as_mut() {
+            Some(changed) => {
+                tokio::select! {
+                    changed = changed.changed() => {
+                        if changed.is_ok() {
+                            let _ = send.finish();
+                        }
+                    }
+                    _ = send.stopped() => {}
+                }
+            }
+            None => {
+                let _ = send.stopped().await;
+            }
+        }
         return;
     }
     let (tx, mut rx) = mpsc::channel(256);
@@ -535,15 +564,44 @@ impl LogStream {
 }
 
 /// A UI's end of the API forwarding: a loopback port whose connections reach the Trailhead server through the control
-/// plane, each as a stream on one long-lived connection, redialed if it drops.
-pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<SocketAddr> {
+/// plane, each as a stream on one long-lived connection, redialed if it drops. Dropping the tunnel closes the port, the
+/// forwarded connections and the cached connection to the control plane.
+pub struct UiTunnel {
+    addr: SocketAddr,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl UiTunnel {
+    /// The loopback address the tunnel listens on.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl std::fmt::Display for UiTunnel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.addr.fmt(f)
+    }
+}
+
+impl Drop for UiTunnel {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Opens a [`UiTunnel`] to `control_plane`.
+pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Result<UiTunnel> {
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let conn: Arc<tokio::sync::Mutex<Option<Connection>>> = Arc::default();
-    tokio::spawn(async move {
+    // The forwarders live in a JoinSet the accept task owns, so aborting that task ends them too.
+    let task = tokio::spawn(async move {
+        let mut forwards = tokio::task::JoinSet::new();
         while let Ok((tcp, _)) = listener.accept().await {
             let (endpoint, conn) = (endpoint.clone(), conn.clone());
-            tokio::spawn(async move {
+            while forwards.try_join_next().is_some() {}
+            forwards.spawn(async move {
                 let streams = async {
                     let mut guard = conn.lock().await;
                     let live = guard.as_ref().filter(|c| c.close_reason().is_none()).cloned();
@@ -575,7 +633,7 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
             });
         }
     });
-    Ok(addr)
+    Ok(UiTunnel { addr, task })
 }
 
 #[cfg(test)]

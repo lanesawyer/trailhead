@@ -8,8 +8,6 @@
 
 use std::collections::HashMap;
 
-use bevy::input::keyboard::KeyboardInput;
-use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
@@ -101,7 +99,6 @@ impl Plugin for SidebarUiPlugin {
             .init_resource::<UsageMeterEntities>()
             .add_systems(Startup, spawn_sidebar)
             .add_observer(on_nav)
-            .add_observer(clear_search_on_escape)
             .add_systems(
                 Update,
                 (read_search_box, sync_projects, mark_current, update_chip, gate_new_task, sync_usage).chain(),
@@ -176,17 +173,6 @@ fn read_search_box(
     filter.query = typed;
     if !filter.query.trim().is_empty() && *view.get() != View::Board {
         next.set(View::Board);
-    }
-}
-
-/// Escape in the search box empties it.
-fn clear_search_on_escape(key: On<FocusedInput<KeyboardInput>>, mut boxes: Query<&mut EditableText, With<SearchBox>>) {
-    let pressed = &key.input;
-    if pressed.key_code != KeyCode::Escape || !pressed.state.is_pressed() {
-        return;
-    }
-    if let Ok(mut text) = boxes.get_mut(key.original_event_target()) {
-        text.clear();
     }
 }
 
@@ -367,6 +353,9 @@ pub fn connection_chip(
 mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
+
+    use bevy::input::keyboard::KeyboardInput;
+    use bevy::input_focus::FocusedInput;
 
     use super::*;
     use crate::board::BoardPlugin;

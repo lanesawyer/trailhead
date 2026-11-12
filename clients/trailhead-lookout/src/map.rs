@@ -165,9 +165,7 @@ pub fn build(input: Input) -> MapModel {
     let user_name: HashMap<Uuid, &str> = input.users.iter().map(|u| (u.id, u.name.as_str())).collect();
     let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
     let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
-    let holder_name = |holder: Uuid, key: &str| {
-        crate::factory::holder_name(agent_name.get(&holder).copied(), key, run_of.contains_key(key))
-    };
+    let holder_name = |holder: Uuid| agent_name.get(&holder).map(|n| n.to_string());
     let mut questions: HashMap<Uuid, usize> = HashMap::new();
     let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
     for c in input.comments {
@@ -200,7 +198,7 @@ pub fn build(input: Input) -> MapModel {
                     format!("an agent ({id})")
                 }
             };
-            let name = holder_name(*holder, key).or_else(|| user_name.get(holder).map(|n| n.to_string()));
+            let name = holder_name(*holder).or_else(|| user_name.get(holder).map(|n| n.to_string()));
             markers.push(Marker::Claim(name.unwrap_or_else(label)));
         }
         if let Some(n) = questions.get(&t.id) {
@@ -237,7 +235,7 @@ pub fn build(input: Input) -> MapModel {
         let Some(wp) = waypoints.iter().zip(&tasks).find(|(_, t)| t.id == task_id).map(|(w, _)| w) else {
             continue;
         };
-        let Some(name) = holder_name(holder, &wp.key) else { continue };
+        let Some(name) = holder_name(holder) else { continue };
         let camp = run_of
             .get(wp.key.as_str())
             .and_then(|r| r.status.sandbox.as_deref().map(|sb| (&r.repo, sb)))
@@ -701,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_made_after_the_snapshot_still_walks_to_its_camp() {
+    fn an_agent_made_after_the_snapshot_walks_to_its_camp_once_its_event_arrives() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
         use crate::mirror::MirrorPlugin;
         use crate::sync::{Snapshot, SyncItem};
@@ -749,6 +747,15 @@ mod tests {
         for _ in 0..3 {
             app.update();
         }
+        // Until the agent.created event arrives it has no name, so no walker.
+        assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
+        app.world_mut().write_message(SyncItem::Event(json!({
+            "id": 3, "entity": "agent", "entity_id": sid("a-new"), "kind": "agent.created",
+            "after": crate::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
+        })));
+        for _ in 0..3 {
+            app.update();
+        }
         let map = &app.world().resource::<TrailMap>().0;
         let walker = map.walkers.iter().find(|k| k.id == sid("a-new")).expect("a walker for the new holder");
         assert_eq!(walker.name, "factory/trail-42");
@@ -782,6 +789,47 @@ mod tests {
         let zs: Vec<i32> = q.iter(app.world()).map(|(_, z)| z.0).collect();
         assert_eq!(zs.len(), walkers.len());
         assert!(zs.iter().all(|z| *z > 0));
+    }
+
+    #[test]
+    fn the_mergers_hold_is_drawn_in_warn_and_gone_once_cleared() {
+        use crate::factory::{FactoryStatus, RepoState};
+        use trailhead_factory::ControlState;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_resource::<FactoryStatus>()
+            .init_asset::<bevy::text::Font>()
+            .add_systems(Update, redraw);
+        app.world_mut().spawn(MapPanel);
+        app.insert_resource(TrailMap(world().model()));
+        let repo = RepoState {
+            control: ControlState::Up,
+            queue: Vec::new(),
+            last_error: None,
+            human_grades: Vec::new(),
+            holding: Some("#306 has auto-merge on but CI failed".into()),
+            usage: Vec::new(),
+            seq: 1,
+        };
+        app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
+        let line = "o/r: holding merges: #306 has auto-merge on but CI failed";
+        let hold_tones = |app: &mut App| {
+            let mut q = app.world_mut().query::<(&Text, &widgets::TextTone)>();
+            q.iter(app.world()).filter(|(t, _)| t.0 == line).map(|(_, tone)| tone.0.clone()).collect::<Vec<_>>()
+        };
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(hold_tones(&mut app), [token::STATUS_WARN]);
+
+        // Clearing the hold redraws the map without it, though nothing else changed.
+        app.world_mut().resource_mut::<FactoryStatus>().repos.get_mut("o/r").unwrap().holding = None;
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(hold_tones(&mut app).is_empty());
     }
 
     #[test]

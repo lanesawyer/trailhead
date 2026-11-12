@@ -1,3 +1,5 @@
+//! The inspector's data: what a view holds, the actions it offers, and building it from fetched facts.
+
 use super::*;
 
 /// One thing the inspector can do.
@@ -617,7 +619,7 @@ mod tests {
         let mut view = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert!(!view.lines.iter().any(|l| l.starts_with("status:")));
         let shows_status = |view: &InspectorView, live: bool| -> bool {
-            let plan = layout(view, live, "offline", 0, &|_| None);
+            let plan = layout(view, live, "offline", 0, &[], &|_| None);
             plan.iter()
                 .flat_map(|(_, items)| items)
                 .any(|(_, b)| matches!(b, Block::Text { text, .. } if text.starts_with("status:")))
@@ -640,7 +642,7 @@ mod tests {
         assert_eq!(view.pr.as_ref().unwrap().grade, Some(g));
         let facts = view.task.clone().unwrap();
         let (main, side) = layout_task(&view, &facts, true, "offline", &[], None, &|_| None);
-        let plans = [layout(&view, true, "offline", 0, &|_| None), main, side];
+        let plans = [layout(&view, true, "offline", 0, &[], &|_| None), main, side];
         let mut seen = 0;
         for plan in &plans {
             let items: Vec<&(String, Block)> =

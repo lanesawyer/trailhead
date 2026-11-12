@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use trailhead_model::{Agent, Claim, Comment, Dependency, Project, Task, User};
+use uuid::Uuid;
 
 use crate::sync::{Snapshot, SyncItem};
 
@@ -193,13 +194,13 @@ impl Mirror {
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");
             let extras = task.as_object_mut().map(|o| {
-                ["claim", "open_questions", "last_handoff", "last_review", "blocked_by"]
+                ["claim", "open_questions", "last_handoff", "last_review", "blocked_by", "blocked_by_hidden"]
                     .map(|k| o.remove(k).unwrap_or(Value::Null))
             });
             let (workspace, created) = (task["workspace_id"].clone(), task["created_at"].clone());
             let rev = version(&task);
             self.put(commands, Kind::Task, &id, rev, task, true);
-            let Some([claim, questions, handoff, review, blockers]) = extras else { continue };
+            let Some([claim, questions, handoff, review, blockers, hidden]) = extras else { continue };
             // The list carries no edge records, so each is made from its task: a task created at the same time as the
             // edge is as good a stamp as any, and an event for the edge replaces it.
             for blocker in blockers.as_array().into_iter().flatten().filter_map(Value::as_str) {
@@ -210,6 +211,17 @@ impl Mirror {
                     "created_at": created,
                 });
                 self.put(commands, Kind::Dependency, &format!("{blocker}:{id}"), Rev(0), edge, true);
+            }
+            // Blockers outside the token's scope arrive as a count. Each is an edge from the nil id, which no task has,
+            // so the board counts it as unfinished with nothing to name.
+            for n in 0..hidden.as_u64().unwrap_or(0) {
+                let edge = json!({
+                    "workspace_id": workspace,
+                    "blocker_id": Uuid::nil(),
+                    "blocked_id": id,
+                    "created_at": created,
+                });
+                self.put(commands, Kind::Dependency, &format!("{}#{n}:{id}", Uuid::nil()), Rev(0), edge, true);
             }
             if !claim.is_null() {
                 self.put(commands, Kind::Claim, &id, Rev(0), claim, true);
@@ -240,6 +252,7 @@ impl Mirror {
             Some("task") => Kind::Task,
             Some("comment") => Kind::Comment,
             Some("claim") => Kind::Claim,
+            Some("agent") => Kind::Agent,
             Some("dependency") => Kind::Dependency,
             _ => return,
         };
@@ -383,11 +396,7 @@ mod tests {
     fn deleted_entities_are_despawned_and_undo_restores_them() {
         let mut app = app();
         send(&mut app, [snapshot(10, 1, "a"), comment_event(11, false, false)]);
-        let after = task_json(json!({"id": "t1", "title": "a", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"}));
-        let gone = SyncItem::Event(
-            json!({"id": 12, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
-        );
-        send(&mut app, [gone]);
+        send(&mut app, [deleted_task_event(12, 2)]);
         assert!(data_of::<Task>(&mut app).is_empty());
         assert!(data_of::<Comment>(&mut app).is_empty(), "the task's comments go with it");
         send(&mut app, [task_event(14, 3, "back"), comment_event(15, false, false)]);
@@ -478,12 +487,17 @@ mod tests {
         let mut app = app();
         let SyncItem::Snapshot(mut snap) = snapshot(10, 1, "a") else { unreachable!() };
         snap.tasks[0]["blocked_by"] = json!([sid("t2"), sid("t3")]);
+        snap.tasks[0]["blocked_by_hidden"] = json!(2);
         send(&mut app, [SyncItem::Snapshot(snap)]);
-        assert_eq!(edges(&mut app), [(sid("t2"), sid("t1")), (sid("t3"), sid("t1"))]);
+        let nil = Uuid::nil().to_string();
+        assert_eq!(
+            edges(&mut app),
+            [(nil.clone(), sid("t1")), (nil, sid("t1")), (sid("t2"), sid("t1")), (sid("t3"), sid("t1"))]
+        );
         send(&mut app, [edge_event(11, "dependency.removed")]);
-        assert_eq!(edges(&mut app), [(sid("t3"), sid("t1"))]);
+        assert_eq!(edges(&mut app).len(), 3);
         send(&mut app, [edge_event(12, "dependency.added")]);
-        assert_eq!(edges(&mut app).len(), 2);
+        assert_eq!(edges(&mut app).len(), 4);
         // A resync forgets edges the new snapshot lacks.
         send(&mut app, [snapshot(20, 1, "a")]);
         assert!(edges(&mut app).is_empty());
