@@ -147,6 +147,8 @@ pub enum LogUpdate {
     /// The lines the control plane has kept, replacing what was shown; first on every connection.
     Backlog(Vec<LogLine>),
     Line(LogLine),
+    /// This many lines were missed because Lookout fell behind.
+    Skipped(u64),
     /// The stream dropped; it is being retried.
     Dropped,
     /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
@@ -300,6 +302,9 @@ pub const STATUS_RETRY: Duration = Duration::from_secs(2);
 /// again until something changes, so asking at the probe rate only fills the factory's logs; a factory that is
 /// reinstalled is still found within the minute.
 pub const STATUS_BACKOFF_STEPS: u32 = 5;
+/// While `Live`, the token is checked with `/v1/me` on every this-many-th probe (30 s by default): a revoked token
+/// doesn't need noticing within one, and the health request is all the other probes send.
+const TOKEN_CHECK_EVERY: u32 = 15;
 
 /// Why the factory won't serve the status stream.
 enum Refusal {
@@ -365,6 +370,8 @@ struct Net {
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
     token: Option<String>,
+    /// The `Live` probes since the token was last checked.
+    live_probes: u32,
     state: Option<(Link, Option<Reason>)>,
     /// The gaps between probes of a refusal that will be repeated until something changes.
     probe_backoff: Backoff,
@@ -407,6 +414,7 @@ async fn run(
         logs_wanted: false,
         pasted: None,
         token: None,
+        live_probes: 0,
         state: None,
         probe_hold: None,
         sync: None,
@@ -545,6 +553,7 @@ async fn follow_logs(
         let update = match frame {
             LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
             LogFrame::Line(line) => LogUpdate::Line(line),
+            LogFrame::Skipped { count } => LogUpdate::Skipped(count),
             LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
         };
         if events.send(NetEvent::Logs(update)).is_err() {
@@ -573,10 +582,16 @@ fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Erro
 
 /// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
 fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
+    // Only the op: a request that carries parameters would make the label long.
+    let asked = u
+        .got
+        .get("op")
+        .and_then(|op| op.as_str())
+        .map_or_else(|| "an unreadable request".to_string(), |op| format!("\"{op}\""));
     format!(
         "the factory is older than this Lookout: reinstall trailhead and restart its server (it was asked {}, and \
          serves {}; version {}, build {})",
-        u.got,
+        asked,
         u.known.join(", "),
         u.version,
         u.build
@@ -694,6 +709,7 @@ impl Net {
             _ => None,
         };
         if !live {
+            self.live_probes = 0;
             self.set(Link::Syncing, Some(Reason::Dialing));
         }
 
@@ -720,6 +736,11 @@ impl Net {
         let base = tunnel;
         if live {
             self.release_probe();
+            self.live_probes += 1;
+            if self.live_probes < TOKEN_CHECK_EVERY {
+                return;
+            }
+            self.live_probes = 0;
             // /v1/health is open to anyone, so a token revoked since sign-in shows only on an authenticated call.
             // Anything but a refusal is left to the sync, which has its own way of coping.
             if let Some(token) = &self.token
@@ -763,7 +784,7 @@ impl Net {
             Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
         };
         // The user token only: an agent's would let Lookout act as one.
-        if me["agent"]["name"].as_str().is_some() {
+        if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
             return match pasted {
@@ -890,7 +911,7 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err("not connected".into()));
+            return reply(Err(commands::NOT_CONNECTED.into()));
         };
         let (http, token) = (self.http.clone(), token.clone());
         tokio::spawn(async move { reply(commands::execute(&http, &base, &token, &request).await) });
@@ -976,6 +997,19 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn too_old_message_names_only_the_op() {
+        let u = trailhead_wire::ui::Unsupported {
+            got: serde_json::json!({"op": "logs", "task": "x".repeat(500)}),
+            known: vec!["status".into()],
+            version: "1".into(),
+            build: "b".into(),
+        };
+        let message = too_old_message(&u);
+        assert!(message.contains("asked \"logs\","), "{message}");
+        assert!(message.len() < 300, "{message}");
+    }
 
     #[test]
     fn refusals_back_off_to_a_cap_and_reset() {

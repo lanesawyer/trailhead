@@ -66,7 +66,7 @@ struct Sandbox {
 #[derive(Default)]
 struct Inner {
     sandboxes: BTreeMap<String, Sandbox>,
-    unregistered: BTreeMap<String, u64>,
+    unregistered: BTreeMap<String, BTreeMap<String, u64>>,
     next_tunnel: u64,
     /// By provider and id. Held in memory only; `Debug` redacts the credentials.
     connections: BTreeMap<(String, String), GatewayConnection>,
@@ -128,10 +128,11 @@ impl Gateway {
     fn admit(self: &Arc<Self>, local: IpAddr, host: &str) -> Verdict {
         let mut inner = self.inner();
         let Some((name, sb)) = inner.sandboxes.iter_mut().find(|(_, s)| s.address == local) else {
-            let seen = inner.unregistered.entry(local.to_string()).or_insert(0);
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            let seen = inner.unregistered.entry(local.to_string()).or_default().entry(host.clone()).or_insert(0);
             *seen += 1;
             if *seen == 1 {
-                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox");
+                tracing::warn!(%local, host, "refused a request from a network with no registered sandbox; further refusals of this host are counted, not logged");
             }
             return Verdict::Refused;
         };
@@ -301,9 +302,9 @@ impl Gateway {
             if line.trim().is_empty() {
                 continue;
             }
-            let resp = match serde_json::from_str::<GatewayRequest>(&line) {
+            let resp = match parse_request(&line) {
                 Ok(req) => self.handle(req).await,
-                Err(e) => GatewayResponse::Error { message: format!("bad request: {e}") },
+                Err(message) => GatewayResponse::Error { message: message.into() },
             };
             let mut out = serde_json::to_vec(&resp).map_err(std::io::Error::other)?;
             out.push(b'\n');
@@ -699,6 +700,12 @@ pub async fn run(listen: SocketAddr, socket: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Parses a control-socket request. The error is generic on purpose: serde's can quote the
+/// input, and the input may hold a credential.
+pub fn parse_request(line: &str) -> Result<GatewayRequest, &'static str> {
+    serde_json::from_str(line).map_err(|_| "bad request")
+}
+
 /// `gateway-ctl`: sends one request to the control socket and returns the response.
 pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<GatewayResponse> {
     let stream = UnixStream::connect(socket).await?;
@@ -711,13 +718,32 @@ pub async fn ctl(socket: &Path, req: &GatewayRequest) -> std::io::Result<Gateway
         .next_line()
         .await?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the gateway closed the socket"))?;
-    serde_json::from_str(&resp).map_err(std::io::Error::other)
+    // Not serde's error: it can quote the input, which could carry a secret if a response ever did.
+    serde_json::from_str(&resp)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad response from the gateway"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn ctl_does_not_echo_an_unparsable_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gw.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            BufReader::new(read).lines().next_line().await.unwrap();
+            write.write_all(b"{\"secret\":\"hunter2\"}\n").await.unwrap();
+        });
+        let req = GatewayRequest::Unregister { name: "a".into() };
+        let err = ctl(&socket, &req).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!err.to_string().contains("hunter2"), "{err}");
+    }
 
     #[tokio::test]
     async fn control_socket_is_bound_private() {
@@ -966,7 +992,7 @@ mod tests {
         let (_s, status) = connect_via(proxy, "example.com:443").await;
         assert!(status.contains("403"), "{status}");
         let state = gw.state();
-        assert_eq!(state.unregistered_refusals["127.0.0.1"], 1);
+        assert_eq!(state.unregistered_refusals["127.0.0.1"]["example.com"], 1);
         assert_eq!(state.sandboxes[0].refused["127.0.0.1"], 2);
     }
 
@@ -1059,5 +1085,46 @@ mod tests {
         assert_eq!(ctl(&socket, &GatewayRequest::Unregister { name: "sb".into() }).await.unwrap(), GatewayResponse::Ok);
         let GatewayResponse::State(state) = ctl(&socket, &GatewayRequest::State).await.unwrap() else { panic!() };
         assert!(state.sandboxes.is_empty());
+    }
+
+    #[test]
+    fn parse_request_errors_do_not_echo_input() {
+        let secret = "sk-ant-hunter2-credential";
+        let lines = [
+            format!(r#"{{"type":"{secret}"}}"#),
+            format!(r#"{{"type":"register","name":{{"{secret}":1}}}}"#),
+            format!(
+                r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","auth":"{secret}","credential":["{secret}"]}}"#
+            ),
+        ];
+        for line in lines {
+            assert_eq!(parse_request(&line), Err("bad request"), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn control_parse_errors_do_not_echo_input() {
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("gw.sock");
+        tokio::spawn(Gateway::new().serve_control(UnixListener::bind(&socket).unwrap()));
+        let secret = "sk-ant-hunter2-credential";
+        // An unknown variant, an unknown field, and a wrong-typed credential, each carrying the secret.
+        let lines = [
+            format!(r#"{{"type":"{secret}"}}"#),
+            format!(r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","{secret}":1}}"#),
+            format!(
+                r#"{{"type":"set_connection","provider":"github","id":"a","upstream":"u","auth":"{secret}","credential":["{secret}"]}}"#
+            ),
+        ];
+        for line in lines {
+            let mut stream = UnixStream::connect(&socket).await.unwrap();
+            stream.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut out = String::new();
+            stream.read_to_string(&mut out).await.unwrap();
+            assert!(out.contains("bad request"), "{out}");
+            assert!(!out.contains(secret), "{out}");
+        }
     }
 }

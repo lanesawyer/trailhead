@@ -7,10 +7,16 @@ struct Rule {
     methods: &'static [&'static str],
     /// A path prefix, matched by whole segments; a `*` segment matches any one segment.
     prefix: String,
+    /// Whether the path must be exactly the prefix, with nothing after it.
+    exact: bool,
 }
 
 fn rule(methods: &'static [&'static str], prefix: impl Into<String>) -> Rule {
-    Rule { methods, prefix: prefix.into() }
+    Rule { methods, prefix: prefix.into(), exact: false }
+}
+
+fn exact(methods: &'static [&'static str], path: impl Into<String>) -> Rule {
+    Rule { methods, prefix: path.into(), exact: true }
 }
 
 const READ: &[&str] = &["GET", "HEAD"];
@@ -62,7 +68,7 @@ fn rules(provider: &str, labels: &Labels) -> Vec<Rule> {
             let Some(repo) = labels.get(label::REPO).filter(|r| valid_repo(r)) else {
                 return Vec::new();
             };
-            vec![rule(READ, format!("{repo}.git/info/refs")), rule(&["POST"], format!("{repo}.git/git-upload-pack"))]
+            vec![exact(READ, format!("{repo}.git/info/refs")), exact(&["POST"], format!("{repo}.git/git-upload-pack"))]
         }
         // The Messages API (with token counting and batches) and the model list. Files, skills and admin paths
         // aren't here.
@@ -78,9 +84,10 @@ pub fn grants(provider: &str, labels: &Labels) -> bool {
     !rules(provider, labels).is_empty()
 }
 
-fn matches_prefix(prefix: &str, path: &[&str]) -> bool {
-    let want: Vec<&str> = prefix.trim_start_matches('/').split('/').collect();
-    want.len() <= path.len() && want.iter().zip(path).all(|(w, p)| *w == "*" || w == p)
+fn matches_rule(rule: &Rule, path: &[&str]) -> bool {
+    let want: Vec<&str> = rule.prefix.trim_start_matches('/').split('/').collect();
+    (if rule.exact { want.len() == path.len() } else { want.len() <= path.len() })
+        && want.iter().zip(path).all(|(w, p)| *w == "*" || w == p)
 }
 
 /// Allows or refuses `method` on `path` (no query), with the reason for a refusal.
@@ -107,7 +114,7 @@ pub fn check(provider: &str, labels: &Labels, method: &str, path: &str) -> Resul
     let segments: Vec<&str> = segments.into_iter().filter(|s| !s.is_empty()).collect();
     let method = method.to_ascii_uppercase();
     let role = labels.get(label::ROLE).map(String::as_str).unwrap_or_default();
-    if rules.iter().any(|r| r.methods.contains(&method.as_str()) && matches_prefix(&r.prefix, &segments)) {
+    if rules.iter().any(|r| r.methods.contains(&method.as_str()) && matches_rule(r, &segments)) {
         Ok(())
     } else {
         Err(format!("role {role:?} may not {method} {path} through {provider}"))

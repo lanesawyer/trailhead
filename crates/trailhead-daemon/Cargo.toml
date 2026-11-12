@@ -16,12 +16,12 @@ workspace = true
 [features]
 default = ["net"]
 # The iroh transport. The testkit turns it off to reuse the runner in-process.
-net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-plugins", "dep:trailhead-codehost-github", "dep:reqwest", "dep:trailhead-client"]
+net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-log", "dep:trailhead-plugins", "dep:trailhead-codehost-github", "dep:reqwest", "dep:trailhead-client"]
 
 [dependencies]
 base64.workspace = true
 trailhead-factory.workspace = true
-trailhead-log.workspace = true
+trailhead-log = { workspace = true, optional = true }
 trailhead-model.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true

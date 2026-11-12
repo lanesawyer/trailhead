@@ -1,3 +1,5 @@
+//! The comment composer: the box a comment or an answer is typed into, its kind, and sending it.
+
 use super::*;
 
 /// How many lines the comment box's input shows.
