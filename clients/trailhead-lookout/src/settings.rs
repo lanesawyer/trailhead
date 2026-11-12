@@ -14,7 +14,7 @@ use trailhead_model::Task;
 use crate::author::Authoring;
 use crate::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use crate::factory::FactoryStatus;
-use crate::logs::{LogsUiPlugin, logs_page};
+use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
 use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
@@ -173,6 +173,29 @@ fn value(which: Value, label: &str) -> impl Scene {
     field(label.to_string(), bsn_list! { @text("", size::BODY) Shows({ which }) })
 }
 
+/// Show the settings Logs tab filtered to a task, given by key; sent from the inspector.
+#[derive(Event, Debug, Clone)]
+pub struct OpenLogs(pub String);
+
+/// The page the next settings modal opens on, when it isn't the first.
+#[derive(Resource, Default)]
+struct StartPage(Option<Page>);
+
+/// Filters the log to the task and opens the modal on its Logs tab.
+fn on_open_logs(
+    open: On<OpenLogs>,
+    modals: Query<(), With<SettingsModal>>,
+    mut filter: ResMut<LogFilter>,
+    mut start: ResMut<StartPage>,
+    mut commands: Commands,
+) {
+    filter.task = Some(open.0.clone());
+    if modals.is_empty() {
+        start.0 = Some(Page::Logs);
+        open_modal(&mut commands, SettingsModal);
+    }
+}
+
 /// Opens the modal from the gear, unless one is open already.
 fn on_gear(
     activate: On<Activate>,
@@ -189,9 +212,11 @@ fn on_gear(
 fn fill(
     new: Query<&ModalSlots, (With<SettingsModal>, Added<ModalSlots>)>,
     appearance: Res<Appearance>,
+    mut start: ResMut<StartPage>,
     mut commands: Commands,
 ) {
     for slots in &new {
+        let first = start.0.take().unwrap_or(Page::ALL[0]);
         let strip = commands
             .spawn_scene(tab_strip(ControlOrientation::Horizontal))
             .insert((SettingsStrip, ChildOf(slots.body)))
@@ -202,7 +227,9 @@ fn fill(
                 .spawn_scene(tab(page.label(), ControlOrientation::Horizontal))
                 .insert((SettingsTab(page), ChildOf(strip)))
                 .id();
-            picked.get_or_insert(entity);
+            if page == first {
+                picked = Some(entity);
+            }
         }
         commands.entity(strip).insert(SelectedTab(picked));
 
@@ -210,7 +237,7 @@ fn fill(
             let node = Node {
                 flex_direction: FlexDirection::Column,
                 row_gap: px(space::ROWS),
-                display: if page == Page::ALL[0] { Display::Flex } else { Display::None },
+                display: if page == first { Display::Flex } else { Display::None },
                 ..default()
             };
             let holder = commands.spawn((Name::new(page.label()), SettingsPage(page), node, ChildOf(slots.body))).id();
@@ -378,7 +405,9 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_gear)
+        app.init_resource::<StartPage>()
+            .add_observer(on_gear)
+            .add_observer(on_open_logs)
             .add_observer(on_tab)
             .add_observer(on_disconnect)
             .add_observer(on_theme_pick)
@@ -472,6 +501,19 @@ mod tests {
         assert_eq!(modals(&mut app), 1);
     }
 
+    #[test]
+    fn opening_the_logs_of_a_task_shows_the_logs_page_filtered_to_it() {
+        let mut app = app();
+        app.world_mut().trigger(OpenLogs("TRAIL-7".into()));
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 1);
+        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-7"));
+        let world = app.world_mut();
+        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
+        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
+        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+    }
     #[test]
     fn escape_closes_it() {
         let mut app = app();
