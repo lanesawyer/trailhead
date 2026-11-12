@@ -56,13 +56,20 @@ pub(super) fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<Bo
 }
 
 /// What the cards of one column build now: the first `limit` of them, and how many are left out. A page that ends
-/// partway through a parent's subtasks runs on to the last of them, so a parent is never split from its children.
+/// partway through a parent's subtasks runs on to the last of them, so a parent is not split from its children,
+/// unless that run is longer than [`PAGE`]: then it is cut there and the rest waits behind the column's "Show more".
 pub fn visible(cards: &[Card], limit: usize) -> (&[Card], usize) {
     let mut shown = limit.min(cards.len());
-    while shown > 0 && shown < cards.len() && cards[shown].depth > 0 {
+    let most = shown + PAGE;
+    while shown > 0 && shown < cards.len().min(most) && cards[shown].depth > 0 {
         shown += 1;
     }
     (&cards[..shown], cards.len() - shown)
+}
+
+/// How many cards "Show more" adds to a column showing `limit`: what [`visible`] builds for a page more, less what is shown.
+pub fn next_page(cards: &[Card], limit: usize) -> usize {
+    visible(cards, limit + PAGE).0.len() - visible(cards, limit).0.len()
 }
 
 /// Where the board was scrolled to when the view last left it. The panel's nodes stay as they are while the board is
@@ -163,6 +170,13 @@ pub(super) fn dress_cards(
             if !live {
                 tool.insert(InteractionDisabled);
             }
+        }
+        // A page in the browser, so it opens offline too.
+        if let Some(pr) = &card.pr {
+            let hint = format!("Open pull request {}", pr.label);
+            commands
+                .queue_spawn_scene(link_tool_button(Icon::PullRequest, hint, pr.url.clone(), ButtonKind::Plain))
+                .insert(ChildOf(tools));
         }
     }
 }

@@ -74,7 +74,7 @@ async fn ready_queue_orders_and_filters() {
     assert_eq!(env.ready_keys().await, [undated.key.clone(), low.key.clone()]);
 
     let err = env.store.claim(&agent, &urgent.key, None).await.unwrap_err();
-    assert!(matches!(err, Error::BlockedBy(ref k) if k == std::slice::from_ref(&low.key.0)));
+    assert!(matches!(err, Error::BlockedBy(ref k) if k == std::slice::from_ref(&low.key)));
     env.store.update_task(&env.human, &low.key, status(Status::Cancelled), None).await.unwrap();
     assert_eq!(env.ready_keys().await, [urgent.key.clone(), undated.key.clone()]);
 }
@@ -105,7 +105,7 @@ async fn expired_claims_free_the_task() {
     assert_eq!(env.ready_keys().await, vec![t.key.clone()]);
     let events = env
         .store
-        .list_events(&env.human, EventFilter { task: Some(t.key.0.clone()), ..Default::default() })
+        .list_events(&env.human, EventFilter { task: Some(t.key.clone()), ..Default::default() })
         .await
         .unwrap();
     let expired = events.iter().find(|e| e.kind == "claim.expired").unwrap();
@@ -322,7 +322,7 @@ async fn subtask_blocking_parent_unblocks_on_done() {
             NewTask {
                 project: "AUTH".into(),
                 title: "sub".into(),
-                parent: Some(parent.key.0.clone()),
+                parent: Some(parent.key.clone()),
                 ..Default::default()
             },
         )
@@ -344,7 +344,7 @@ async fn parent_cycles_are_rejected() {
     let a = env.task("a").await;
     let b = env.task("b").await;
     let c = env.task("c").await;
-    let under = |p: &str| TaskPatch { parent: Some(Some(p.to_string())), ..Default::default() };
+    let under = |p: &str| TaskPatch { parent: Some(Some(p.into())), ..Default::default() };
     env.store.update_task(&env.human, &a.key, under(&b.key), None).await.unwrap();
     env.store.update_task(&env.human, &b.key, under(&c.key), None).await.unwrap();
     // Direct and indirect ancestors can't become the parent.
@@ -361,7 +361,7 @@ async fn undo_refuses_to_restore_a_parent_cycle() {
     let env = Env::new().await;
     let a = env.task("a").await;
     let b = env.task("b").await;
-    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(Into::into)), ..Default::default() };
     env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
     let unparent = env.human.next_batch();
     env.store.update_task(&unparent, &a.key, under(None), None).await.unwrap();
@@ -387,7 +387,7 @@ async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
         .await
         .unwrap();
     }
-    let under_a = TaskPatch { parent: Some(Some(a.key.0.clone())), ..Default::default() };
+    let under_a = TaskPatch { parent: Some(Some(a.key.clone())), ..Default::default() };
     // Local queries can finish without yielding, so a looping walk would never let a
     // `tokio::time::timeout` fire. Run the update on its own thread and wait with a deadline.
     let env = std::sync::Arc::new(env);
@@ -598,8 +598,11 @@ async fn every_write_is_attributed() {
         .create_task(&a, NewTask { project: "AUTH".into(), title: "x".into(), ..Default::default() })
         .await
         .unwrap();
-    let events =
-        env.store.list_events(&env.human, EventFilter { task: Some(t.key.0), ..Default::default() }).await.unwrap();
+    let events = env
+        .store
+        .list_events(&env.human, EventFilter { task: Some(t.key.clone()), ..Default::default() })
+        .await
+        .unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].actor_id, a.actor_id());
     assert_eq!(events[0].on_behalf_of, env.human.user_id);
@@ -856,6 +859,40 @@ async fn agent_names_are_unique() {
     env.store.create_agent(&env.human, "bot").await.unwrap();
     assert!(matches!(env.store.create_agent(&env.human, "bot").await, Err(Error::AlreadyExists(_))));
     assert!(matches!(env.store.create_agent(&env.human, " bot ").await, Err(Error::AlreadyExists(_))));
+}
+
+#[tokio::test]
+async fn creating_an_agent_emits_an_event_that_undo_leaves_alone() {
+    let env = Env::new().await;
+    let bot = env.store.create_agent(&env.human, "bot").await.unwrap();
+    let filter = EventFilter { kinds: vec!["agent.".into()], ..Default::default() };
+    let events = env.store.list_events(&env.human, filter).await.unwrap();
+    assert_eq!(events.len(), 1);
+    let e = &events[0];
+    assert_eq!((e.kind.as_str(), e.entity_id.as_str()), ("agent.created", bot.id.to_string().as_str()));
+    assert_eq!(e.after.as_ref().unwrap()["name"], "bot");
+    let report = env.store.undo_event(&env.human, e.id).await.unwrap();
+    assert!(report.reverted.is_empty() && report.skipped.is_empty());
+    assert!(env.store.list_agents(&env.human).await.unwrap().iter().any(|a| a.id == bot.id));
+}
+
+#[tokio::test]
+async fn changes_only_skips_agent_creation_so_undo_last_reaches_the_real_change() {
+    let env = Env::new().await;
+    let t = env.task("before the agent").await;
+    env.store.create_agent(&env.human, "worker").await.unwrap();
+    let filter = EventFilter {
+        actor_id: Some(env.human.actor_id()),
+        newest_first: true,
+        changes_only: true,
+        limit: Some(1),
+        ..Default::default()
+    };
+    let last = env.store.list_events(&env.human, filter).await.unwrap().pop().unwrap();
+    assert_eq!((last.kind.as_str(), last.entity.as_str()), ("task.created", "task"));
+    assert_eq!(last.task_id.as_ref().map(|i| i.to_string()), Some(t.id.to_string()));
+    let report = env.store.undo_batch(&env.human, last.batch_id).await.unwrap();
+    assert!(!report.reverted.is_empty());
 }
 
 #[tokio::test]
@@ -1274,7 +1311,7 @@ async fn only_humans_can_set_lower_or_clear_a_grade() {
 
     // The event log records the change.
     let log =
-        env.store.list_events(&env.human, EventFilter { task: Some(task.key.0.clone()), ..Default::default() }).await;
+        env.store.list_events(&env.human, EventFilter { task: Some(task.key.clone()), ..Default::default() }).await;
     assert!(log.unwrap().iter().any(|e| e.kind == "task.updated" && e.after.as_ref().is_some_and(|t| t["grade"] == 3)));
 }
 
@@ -1359,11 +1396,8 @@ async fn a_cancelled_task_records_what_it_duplicates() {
     let env = Env::new().await;
     let orig = env.task("CI is red on main").await;
     let dup = env.task("main CI broken").await;
-    let dup_of = |key: Option<&str>, status| TaskPatch {
-        status,
-        duplicate_of: Some(key.map(String::from)),
-        ..Default::default()
-    };
+    let dup_of =
+        |key: Option<&str>, status| TaskPatch { status, duplicate_of: Some(key.map(Into::into)), ..Default::default() };
 
     // Only a cancelled task can be a duplicate, and not of itself.
     let open = dup_of(Some(&orig.key), None);
@@ -1390,11 +1424,8 @@ async fn undoing_a_duplicate_cancel_restores_the_task() {
     let env = Env::new().await;
     let orig = env.task("CI is red on main").await;
     let dup = env.task("main CI broken").await;
-    let patch = TaskPatch {
-        status: Some(Status::Cancelled),
-        duplicate_of: Some(Some(orig.key.0.clone())),
-        ..Default::default()
-    };
+    let patch =
+        TaskPatch { status: Some(Status::Cancelled), duplicate_of: Some(Some(orig.key.clone())), ..Default::default() };
     let batch = env.human.next_batch();
     env.store.update_task(&batch, &dup.key, patch, None).await.unwrap();
     env.store.undo_batch(&env.human, batch.batch_id).await.unwrap();
@@ -1426,6 +1457,17 @@ async fn similar_tasks_counts_capitalized_two_letter_acronyms() {
     assert_eq!(similar.into_iter().map(|t| t.key).collect::<Vec<_>>(), vec![ui.key]);
     // Lowercase two-letter words are still noise.
     assert!(env.store.similar_tasks(&env.human, "AUTH", "ci ui", None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn similar_tasks_ignores_two_letter_function_words_in_all_caps_titles() {
+    let env = Env::new().await;
+    env.task("MOVE DB TO PG").await;
+    // Shared function words (TO) are not enough to match.
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "SEND IT TO OR IN ON", None).await.unwrap().is_empty());
+    assert!(env.store.similar_tasks(&env.human, "AUTH", "FIX BUG TO ON PG", None).await.unwrap().is_empty());
+    // Acronyms still count.
+    assert_eq!(env.store.similar_tasks(&env.human, "AUTH", "DB PG", None).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1498,7 +1540,7 @@ async fn revert_actor_skips_a_parent_cycle_and_still_reverts_the_rest() {
     let a = env.task("a").await;
     let b = env.task("b").await;
     let other = env.task("other").await;
-    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(str::to_string)), ..Default::default() };
+    let under = |p: Option<&str>| TaskPatch { parent: Some(p.map(Into::into)), ..Default::default() };
     env.store.update_task(&env.human, &a.key, under(Some(&b.key)), None).await.unwrap();
     let agent = env.agent("rogue").await;
     let since = env.now();
@@ -1584,4 +1626,37 @@ async fn a_lapsing_claim_ignores_an_undone_claim_from_review() {
     env.advance(120);
     s.reap_expired_claims(&env.human).await.unwrap();
     assert_eq!(s.get_task(&env.human, &t.key).await.unwrap().status, Status::Open);
+}
+
+#[tokio::test]
+async fn blocks_and_duplicates_sort_by_key_number() {
+    let env = Env::new().await;
+    let root = env.task("root").await;
+    let late = env.task("late").await;
+    let early = env.task("early").await;
+    // Keys only reach four digits after a long time, so rewrite them.
+    let prefix = root.key.0.rsplit_once('-').unwrap().0.to_string();
+    let conn = env.raw_conn().await;
+    for (task, n) in [(&late, 1000), (&early, 999)] {
+        conn.execute(
+            "UPDATE tasks SET key = ?1 WHERE id = ?2",
+            libsql::params![format!("{prefix}-{n}"), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let keys = [format!("{prefix}-999"), format!("{prefix}-1000")];
+    for key in &keys {
+        env.store.add_dependency(&env.human, &root.key, key).await.unwrap();
+        let cancel = TaskPatch {
+            status: Some(Status::Cancelled),
+            duplicate_of: Some(Some(root.key.clone())),
+            ..Default::default()
+        };
+        env.store.update_task(&env.human, key, cancel, None).await.unwrap();
+    }
+    let d = env.store.task_detail(&env.human, &root.key).await.unwrap();
+    let got = |v: &[trailhead_core::TaskKey]| v.iter().map(|k| k.0.clone()).collect::<Vec<_>>();
+    assert_eq!(got(&d.blocks), keys);
+    assert_eq!(got(&d.duplicates), keys);
 }

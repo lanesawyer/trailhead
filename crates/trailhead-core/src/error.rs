@@ -1,4 +1,4 @@
-use trailhead_model::{ParseError, Status};
+use trailhead_model::{ParseError, Status, TaskKey};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -14,8 +14,8 @@ pub enum Error {
     ClaimLost(String),
     #[error("version conflict: expected {expected}, current is {current}")]
     VersionConflict { expected: i64, current: i64 },
-    #[error("blocked by {}", .0.join(", "))]
-    BlockedBy(Vec<String>),
+    #[error("blocked by {}", .0.iter().map(TaskKey::as_str).collect::<Vec<_>>().join(", "))]
+    BlockedBy(Vec<TaskKey>),
     #[error("cannot move from {from} to {to}")]
     InvalidTransition { from: Status, to: Status },
     #[error("this needs human review before it can be approved or done")]

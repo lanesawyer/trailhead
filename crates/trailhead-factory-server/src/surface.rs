@@ -19,6 +19,7 @@ use axum::routing::get;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::watch;
 use trailhead_control::StatusBoard;
 use trailhead_factory::{FactorySnapshot, FactoryState, Sequenced};
 use trailhead_wire::ui::{RepoFeed, StatusFeed};
@@ -31,6 +32,10 @@ pub struct Feed(Arc<Inner>);
 struct Inner {
     state: Mutex<FactoryState>,
     boards: Mutex<Boards>,
+    /// Repos whose loop stopped on an error, with the error.
+    stopped: Mutex<Vec<(String, String)>>,
+    /// Notified when the state, the boards or a stopped repo change.
+    changed: watch::Sender<()>,
 }
 
 /// A repo's slug and its board.
@@ -38,11 +43,17 @@ type Boards = Vec<(String, Arc<StatusBoard>)>;
 
 impl Feed {
     pub fn new(state: FactoryState) -> Feed {
-        Feed(Arc::new(Inner { state: Mutex::new(state), boards: Mutex::default() }))
+        Feed(Arc::new(Inner {
+            state: Mutex::new(state),
+            boards: Mutex::default(),
+            stopped: Mutex::default(),
+            changed: watch::channel(()).0,
+        }))
     }
 
     pub fn set_state(&self, state: FactoryState) {
         *self.0.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
+        self.0.changed.send_modify(|_| {});
     }
 
     pub fn state(&self) -> FactoryState {
@@ -51,10 +62,25 @@ impl Feed {
 
     pub fn set_boards(&self, boards: Boards) {
         *self.0.boards.lock().unwrap_or_else(|e| e.into_inner()) = boards;
+        self.0.changed.send_modify(|_| {});
     }
 
     pub fn boards(&self) -> Boards {
         self.0.boards.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Records that `repo`'s loop stopped on `error`, so `status` can show it while the other repos carry on.
+    pub fn set_stopped(&self, repo: &str, error: String) {
+        let mut stopped = self.0.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        stopped.retain(|(r, _)| r != repo);
+        stopped.push((repo.to_string(), error));
+        drop(stopped);
+        self.0.changed.send_modify(|_| {});
+    }
+
+    fn stopped(&self, repo: &str) -> Option<String> {
+        let stopped = self.0.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        stopped.iter().find(|(r, _)| r == repo).map(|(_, e)| e.clone())
     }
 
     /// The state and every repo's snapshot.
@@ -62,7 +88,11 @@ impl Feed {
         let repos = self
             .boards()
             .iter()
-            .map(|(repo, board)| RepoStatus { repo: repo.clone(), snapshot: board.snapshot() })
+            .map(|(repo, board)| RepoStatus {
+                repo: repo.clone(),
+                snapshot: board.snapshot(),
+                stopped: self.stopped(repo),
+            })
             .collect();
         StatusReply { control: Some(self.state()), repos }
     }
@@ -82,6 +112,10 @@ impl StatusFeed for Feed {
     fn state(&self) -> Option<FactoryState> {
         Some(Feed::state(self))
     }
+
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        Some(self.0.changed.subscribe())
+    }
 }
 
 /// How long a client waits to connect and to hear a snapshot.
@@ -93,6 +127,9 @@ pub struct RepoStatus {
     pub repo: String,
     #[serde(flatten)]
     pub snapshot: FactorySnapshot,
+    /// The error this repo's loop stopped on; the other repos carry on. A server from before this was added sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
 }
 
 /// The reply to `GET /status`.
@@ -258,6 +295,18 @@ mod tests {
         let app = Router::new().nest("/v1/factory", routes(feed));
         tokio::spawn(async move { axum::serve(listener, app).await });
         Remote::server(addr, "t".into())
+    }
+
+    #[test]
+    fn a_stopped_loop_shows_in_that_repos_status_only() {
+        let feed = Feed::new(FactoryState::Running);
+        feed.set_boards(vec![("a/b".into(), StatusBoard::new()), ("c/d".into(), StatusBoard::new())]);
+        assert!(feed.reply().repos.iter().all(|r| r.stopped.is_none()));
+        feed.set_stopped("a/b", "boom".into());
+        feed.set_stopped("a/b", "bang".into());
+        let reply = feed.reply();
+        assert_eq!(reply.repos[0].stopped.as_deref(), Some("bang"));
+        assert_eq!(reply.repos[1].stopped, None);
     }
 
     #[tokio::test]

@@ -103,3 +103,42 @@ async fn tokens_expire_and_never_outlive_their_issuer() {
     env.advance(50 * 60);
     assert!(matches!(env.store.authenticate(&secret).await, Err(Error::Unauthorized)));
 }
+
+#[tokio::test]
+async fn an_agent_releases_its_revoked_sub_agents_claim_but_not_a_strangers() {
+    let env = Env::new().await;
+    env.store
+        .create_project(&env.human, NewProject { key: "WEB".into(), name: "Web".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let parent = env.store.create_agent(&env.human, "boss").await.unwrap();
+    let (_, secret) = env
+        .store
+        .create_token_with(&env.human, Principal::Agent(parent.id), "b", TokenOptions::default())
+        .await
+        .unwrap();
+    let (boss, _) = env.store.authenticate_token(&secret).await.unwrap();
+    let kid = env.store.create_agent(&boss, "kid").await.unwrap();
+    let (_, kid_secret) =
+        env.store.create_token_with(&boss, Principal::Agent(kid.id), "k", TokenOptions::default()).await.unwrap();
+    let (kid_ctx, _) = env.store.authenticate_token(&kid_secret).await.unwrap();
+    let task = env
+        .store
+        .create_task(&boss, NewTask { project: "WEB".into(), title: "t".into(), ..Default::default() })
+        .await
+        .unwrap();
+    env.store.claim(&kid_ctx, &task.key, None).await.unwrap();
+    env.store.revoke_agent(&boss, "boss/kid").await.unwrap();
+
+    let stranger = env.store.create_agent(&env.human, "stranger").await.unwrap();
+    let (_, s_secret) = env
+        .store
+        .create_token_with(&env.human, Principal::Agent(stranger.id), "s", TokenOptions::default())
+        .await
+        .unwrap();
+    let (stranger_ctx, _) = env.store.authenticate_token(&s_secret).await.unwrap();
+    assert!(matches!(env.store.release(&stranger_ctx, &task.key).await, Err(Error::NotClaimHolder)));
+
+    env.store.release(&boss, &task.key).await.unwrap();
+    env.store.claim(&boss, &task.key, None).await.unwrap();
+}
