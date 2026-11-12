@@ -422,6 +422,12 @@ fn a_reviewer_with_no_check_results_is_still_told_not_to_build() {
 }
 
 #[test]
+fn worker_prompt_forbids_nested_repositories() {
+    let r = rig();
+    assert!(prompt(&ctx(&r, Role::Worker, 0), None).contains("nested git repositories"));
+}
+
+#[test]
 fn prompt_carries_answers_and_notes_and_stays_bounded() {
     use trailhead_factory::{Answered, TaskNote};
     let r = rig();

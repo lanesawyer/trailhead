@@ -14,7 +14,7 @@ description = "The Trailhead factory's control plane as a library: setup, creden
 workspace = true
 
 [features]
-# The Docker Compute (`[compute] kind = "docker"`).
+# The Docker Compute (`[factory.compute] kind = "docker"`).
 docker = ["dep:trailhead-compute-docker"]
 
 [dependencies]

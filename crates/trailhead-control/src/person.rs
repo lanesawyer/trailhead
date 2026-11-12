@@ -15,6 +15,8 @@ pub(crate) struct Held {
     pub number: u64,
     /// The head the merger asked the host to update the branch on, and when (as `Factory::updating`).
     updating: Option<(String, Instant)>,
+    /// The head the host said conflicts when asked to update the branch, so the warning is logged once per head.
+    conflicted: Option<String>,
 }
 
 impl Factory {
@@ -63,8 +65,13 @@ impl Factory {
             tracing::info!("holding merges: {said}");
         }
         // The hold stays as it is until every fallible call has answered: an error returns with it untouched.
-        let mut updating =
-            self.held.lock().unwrap().as_ref().filter(|h| h.number == number).and_then(|h| h.updating.clone());
+        let (mut updating, mut conflicted) = self
+            .held
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|h| h.number == number)
+            .map_or((None, None), |h| (h.updating.clone(), h.conflicted.clone()));
         if blocked.is_none() && codehost.behind(pr).await? {
             let head = codehost.head(pr).await?;
             let waiting =
@@ -74,24 +81,28 @@ impl Factory {
                     Ok(BranchUpdate::Updated) => {
                         tracing::info!(pr = %pr.url, "updated the branch of the PR merges are held for");
                         updating = Some((head, Instant::now()));
+                        conflicted = None;
                     }
-                    Ok(BranchUpdate::UpToDate) => {}
+                    Ok(BranchUpdate::UpToDate) => conflicted = None,
                     Ok(BranchUpdate::Conflict) => {
-                        tracing::warn!(pr = %pr.url, "the PR merges are held for conflicts with its base; auto-merge stays on, so the hold stays");
+                        if conflicted.as_ref() != Some(&head) {
+                            tracing::warn!(pr = %pr.url, "the PR merges are held for conflicts with its base; auto-merge stays on, so the hold stays");
+                            conflicted = Some(head);
+                        }
                     }
                     Err(e) => {
-                        self.set_hold(number, updating);
+                        self.set_hold(number, updating, conflicted);
                         return Err(e);
                     }
                 }
             }
         }
-        self.set_hold(number, updating);
+        self.set_hold(number, updating, conflicted);
         Ok(())
     }
 
-    fn set_hold(&self, number: u64, updating: Option<(String, Instant)>) {
-        *self.held.lock().unwrap() = Some(Held { number, updating });
+    fn set_hold(&self, number: u64, updating: Option<(String, Instant)>, conflicted: Option<String>) {
+        *self.held.lock().unwrap() = Some(Held { number, updating, conflicted });
     }
 
     fn clear_hold(&self) {

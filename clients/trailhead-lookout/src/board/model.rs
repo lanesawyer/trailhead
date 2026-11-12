@@ -162,6 +162,8 @@ pub struct Card {
     pub actions: Vec<CardAction>,
     /// Where a search matched this task when its key and title did not: "in description: …".
     pub found: Option<String>,
+    /// Its pull request, which a tool button opens in the browser.
+    pub pr: Option<PrLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,14 +229,10 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     let holder_of: HashMap<Uuid, Uuid> =
         input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
     let running: HashSet<&str> = input.runs.iter().map(|r| r.status.task.0.as_str()).collect();
-    // The agent list only changes with a sync snapshot, so a sub-agent made for a run after it isn't known yet. A
-    // holder of a task that has a run is a factory agent all the same: name it for the task until the list has it.
-    let holder_label = |task: Uuid, id: Uuid| match holder_name.get(&id) {
-        Some(n) => n.to_string(),
-        None => match task_key.get(&task) {
-            Some(k) if running.contains(k) => format!("factory/{}", k.to_lowercase()),
-            _ => short(id),
-        },
+    let holder_label = |task: Uuid, id: Uuid| {
+        let key = task_key.get(&task).copied().unwrap_or_default();
+        crate::factory::holder_name(holder_name.get(&id).copied(), key, running.contains(key))
+            .unwrap_or_else(|| short(id))
     };
     // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
     // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted, out of scope) doesn't count.
@@ -290,7 +288,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges.push(Badge {
                 kind: BadgeKind::Factory,
                 label: "factory".into(),
-                tone: Some(token::STATUS_INFO),
+                tone: Some(token::FACTORY),
                 hint: None,
             });
         }
@@ -329,7 +327,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             && let Some(keys) = unfinished.get(&t.id)
         {
             let mut keys = keys.clone();
-            keys.sort_unstable();
+            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
             badges.push(Badge {
                 kind: BadgeKind::Blocked,
                 label: format!("blocked · {}", keys.len()),
@@ -358,6 +356,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             badges,
             actions,
             found: found(t),
+            pr: pr_link(t),
         }
     };
 
@@ -401,12 +400,13 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     };
     // Likewise only the holders of its tasks.
     let holders = {
-        let ids: BTreeMap<Uuid, Uuid> = input
-            .tasks
-            .iter()
-            .filter(|t| in_project(t))
-            .filter_map(|t| holder_of.get(&t.id).map(|h| (*h, t.id)))
-            .collect();
+        // A holder of several tasks is labelled for the lowest id, not whichever comes last.
+        let mut ids: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+        for t in input.tasks.iter().filter(|t| in_project(t)) {
+            if let Some(h) = holder_of.get(&t.id) {
+                ids.entry(*h).and_modify(|first| *first = (*first).min(t.id)).or_insert(t.id);
+            }
+        }
         let mut v: Vec<Choice> = ids.into_iter().map(|(id, t)| choice(&id.to_string(), holder_label(t, id))).collect();
         v.sort_by(|a, b| a.label.cmp(&b.label));
         v
@@ -581,6 +581,7 @@ mod tests {
                 spend: Usd::dollars(0.0),
                 last_tool: None,
                 started: 0,
+                phase_started: 0,
             },
         }];
         let view = run_with(&Filter::default(), &runs);
@@ -638,6 +639,14 @@ mod tests {
         assert_eq!(holder_badge("factory/trail-103-a1"), "trail-103-a1");
         assert_eq!(holder_badge("a-very-long-agent-name"), "a-very-long…");
         assert_eq!(holder_badge("claude"), "claude");
+    }
+
+    #[test]
+    fn a_card_with_a_pr_links_to_it() {
+        let view = run(&Filter::default());
+        let pr = card(&view, "TRAIL-104").pr.clone().unwrap();
+        assert_eq!((pr.label.as_str(), pr.url.as_str()), ("o/r#9", "https://host/o/r/pull/9"));
+        assert!(card(&view, "TRAIL-102").pr.is_none());
     }
 
     #[test]
@@ -787,6 +796,7 @@ mod tests {
                 badges: vec![],
                 actions: vec![],
                 found: None,
+                pr: None,
             })
             .collect()
     }
@@ -824,6 +834,38 @@ mod tests {
         let (shown, hidden) = visible(&cards, PAGE - 1);
         assert_eq!((shown.len(), hidden), (PAGE - 1, 6));
     }
+
+    #[test]
+    fn a_very_long_run_of_subtasks_is_cut_at_a_page() {
+        let mut cards = many(4 * PAGE);
+        for card in &mut cards[PAGE..] {
+            card.depth = 1;
+        }
+        let (shown, hidden) = visible(&cards, PAGE);
+        assert_eq!((shown.len(), hidden), (2 * PAGE, 2 * PAGE));
+        // Asking for more carries on through the run.
+        let (shown, hidden) = visible(&cards, 2 * PAGE);
+        assert_eq!((shown.len(), hidden), (3 * PAGE, PAGE));
+    }
+
+    #[test]
+    fn show_more_counts_what_the_next_page_adds() {
+        let mut cards = many(3 * PAGE);
+        // A parent ends the first page, so it already shows its 3 subtasks.
+        for card in &mut cards[PAGE..PAGE + 3] {
+            card.depth = 1;
+        }
+        // The second page would cut inside a run of 4 subtasks, so it runs on to the last.
+        for card in &mut cards[2 * PAGE..2 * PAGE + 4] {
+            card.depth = 1;
+        }
+        assert_eq!(visible(&cards, PAGE).0.len(), PAGE + 3);
+        assert_eq!(next_page(&cards, PAGE), PAGE + 1);
+        assert_eq!(visible(&cards, 2 * PAGE).0.len(), 2 * PAGE + 4);
+        // Nothing past the end is promised.
+        assert_eq!(next_page(&many(PAGE + 5), PAGE), 5);
+    }
+
     #[test]
     fn filters_narrow_the_board() {
         let by = |f: Filter| -> Vec<String> {
