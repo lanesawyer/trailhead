@@ -124,6 +124,9 @@ pub enum NetEvent {
     /// Lookout's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
     State(Link, Option<Reason>),
+    /// The control plane the net thread is holding, as its parsed endpoint id; `None` once it has none (a failed
+    /// Connect, or a disconnect). Sent on every Connect that parses and opens, so it never depends on a state change.
+    Dialed(Option<String>),
     /// Signed in: where the forwarded API listens and who the user is. The token is the user's.
     Access(ApiAccess),
     /// The snapshot and then each event, for the mirror.
@@ -268,6 +271,14 @@ impl NetHandle {
     pub fn send(&self, command: NetCommand) {
         // The thread only goes away with the handle (or if it failed to start, which it reported).
         let _ = self.commands.send(command);
+    }
+
+    /// A handle with no thread, whose events the test sends itself.
+    #[cfg(test)]
+    pub fn detached() -> (NetHandle, mpsc::Sender<NetEvent>) {
+        let (commands, _) = tokio_mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel();
+        (NetHandle { commands, events: Mutex::new(rx), thread: None }, tx)
     }
 
     /// Everything the net thread has reported since the last call.
@@ -634,6 +645,7 @@ impl Net {
             self.stop_sync();
             self.resume.clear();
         }
+        let _ = self.events.send(NetEvent::Dialed(Some(id.to_string())));
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
             && let Err(e) = std::fs::write(self.config.target_file(), format!("{id}\n"))
         {
@@ -678,6 +690,7 @@ impl Net {
     /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
     /// the error.
     fn drop_target(&mut self) {
+        let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
         self.stop_sync();
