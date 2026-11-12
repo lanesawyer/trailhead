@@ -41,9 +41,11 @@ install = ["crates.io", "index.crates.io", "static.crates.io", "static.rust-lang
 
 [factory.grades]
 # Path globs that raise a PR to at least this grade (docs/factory/review.md#grades); the task's own grade is the floor.
-2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml"]
-# clients/** stays at grade 3 so every UI PR gets a person's look (Lane, 2026-11-03), though the sandbox checks it now.
-3 = ["**/Cargo.toml", "**/migrations/**", "clients/**"]
+# clients/** outside src (tests, the in_place and design_system guards, assets) is grade 2: it changes nothing a person
+# sees, and the sandbox runs the UI checks (TRAIL-1390).
+2 = ["crates/*/src/**", "crates/*/build.rs", "crates/*/benches/**", "crates/*/examples/**", "cliff.toml", "rustfmt.toml", "clients/**"]
+# clients/*/src/** stays at grade 3 so every change to what the UI does gets a person's look (Lane, 2026-11-03).
+3 = ["**/Cargo.toml", "**/migrations/**", "clients/*/src/**"]
 4 = [".github/**", "fnox.toml", "mise.toml", "AGENTS.md", ".claude/**", ".mcp.json", "skills/**", ".trailhead.toml", "LICENSE", "**/Cargo.lock", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/uv.lock", "**/poetry.lock", "**/go.sum", "**/Gemfile.lock"]
 max_lines = 600          # bigger diffs are at least grade 3
 
