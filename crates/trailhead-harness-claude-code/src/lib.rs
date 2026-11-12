@@ -49,7 +49,7 @@ pub fn kind() -> trailhead_factory::HarnessKind {
         build: std::sync::Arc::new(|setup| {
             let claude = ClaudeCode::new(setup.executable.clone());
             std::sync::Arc::new(match setup.secrets.get(OAUTH_TOKEN) {
-                Some(token) => claude.with_oauth_token(token.clone()),
+                Some(token) => claude.with_oauth_token(token.expose().to_string()),
                 None => claude,
             })
         }),

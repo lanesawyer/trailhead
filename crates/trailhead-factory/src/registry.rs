@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::{Error, FactoryConfig, Harness, ModelProvider, Result};
+use crate::{Error, FactoryConfig, Harness, ModelProvider, Result, Secret};
 
 /// Credentials and settings a harness needs in the sandbox, by name. Each harness defines its own keys; the
-/// control plane carries them to the daemon without reading them.
-pub type HarnessSecrets = BTreeMap<String, String>;
+/// control plane carries them to the daemon without reading them. The values never print.
+pub type HarnessSecrets = BTreeMap<String, Secret>;
 
 /// What the daemon hands a harness when it builds one.
 #[derive(Debug, Clone)]

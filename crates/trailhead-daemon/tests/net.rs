@@ -15,8 +15,8 @@ use trailhead_daemon::net::DaemonProtocol;
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
-    RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Status, TaskKey, ToDaemon, Tracker, Usd,
-    VerdictKind,
+    RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Secret, Status, TaskKey, ToDaemon, Tracker,
+    Usd, VerdictKind,
 };
 use trailhead_plugins::CLAUDE_CODE;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
@@ -452,14 +452,14 @@ async fn daemons_refuse_other_peers() {
 async fn subscription_token_goes_in_the_secrets_file_only() {
     let control = endpoint(SecretKey::generate(), None).await;
     let launch = Launch {
-        harness_secrets: [("oauth_token".to_string(), "sk-ant-oat-test".to_string())].into(),
+        harness_secrets: [("oauth_token".to_string(), Secret::new("sk-ant-oat-test"))].into(),
         ..Launch::new(b"daemon".to_vec(), &target(), CLAUDE_CODE)
     };
     let remote = RemoteDaemon::new(control, MASTER, Arc::new(FakeCompute::new()), launch);
     let program = remote.program(&SandboxId("s".into()));
     let secrets: DaemonSecrets = serde_json::from_slice(&program.files[1].contents).unwrap();
     assert_eq!(secrets.harness, "claude-code");
-    assert_eq!(secrets.harness_secrets.get("oauth_token").map(String::as_str), Some("sk-ant-oat-test"));
+    assert_eq!(secrets.harness_secrets.get("oauth_token").map(Secret::expose), Some("sk-ant-oat-test"));
     assert_eq!(program.files[1].mode, 0o600);
     assert!(!format!("{secrets:?} {program:?}").contains("sk-ant-oat-test"), "never in debug output");
     assert!(!program.args.iter().any(|a| a.contains("sk-ant")), "never on the command line");
