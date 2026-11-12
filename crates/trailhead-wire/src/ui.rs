@@ -20,7 +20,7 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use trailhead_factory::logs::LogLine;
 use trailhead_factory::{Error, FactorySnapshot, FactoryState, Result, Sequenced};
 
@@ -120,6 +120,12 @@ pub trait StatusFeed: Send + Sync + 'static {
     fn state(&self) -> Option<FactoryState> {
         None
     }
+
+    /// Notified whenever the state or the set of repos changes. A stream with no repos to forward ends on it, so the
+    /// UI redials for a fresh snapshot; without one such a stream never learns of a change.
+    fn changed(&self) -> Option<watch::Receiver<()>> {
+        None
+    }
 }
 
 impl std::fmt::Debug for dyn StatusFeed {
@@ -136,6 +142,9 @@ pub enum LogFrame {
     Backlog { lines: Vec<LogLine> },
     /// One new line.
     Line(LogLine),
+    /// The reader fell behind and `count` lines were never sent: a gap between the line before this frame and
+    /// the one after it.
+    Skipped { count: u64 },
     /// What a control plane that doesn't know the request answers with (see [`StatusFrame::Unsupported`]).
     Unsupported(Unsupported),
 }
@@ -164,7 +173,7 @@ pub const SERVER_UNREACHABLE: u32 = 3;
 const RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The endpoint ids allowed to use `trailhead/ui/0`, one per line in a file. It is read on every connection and
-/// stream, and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
+/// stream (on the blocking pool), and an open connection is rechecked every second, so `trailhead factory allow` and `disallow` take
 /// effect without restarting the control plane.
 #[derive(Debug, Clone)]
 pub struct UiAllowlist {
@@ -189,8 +198,13 @@ impl UiAllowlist {
         }
     }
 
-    pub fn contains(&self, id: &EndpointId) -> bool {
-        match self.list() {
+    /// Whether `id` is listed. The file is read on the blocking pool so it never stalls an async worker; a list
+    /// that can't be read allows no one.
+    pub async fn contains(&self, id: &EndpointId) -> bool {
+        let this = self.clone();
+        let listed =
+            tokio::task::spawn_blocking(move || this.list()).await.unwrap_or_else(|e| Err(Error::Other(e.to_string())));
+        match listed {
             Ok(ids) => ids.contains(id),
             Err(e) => {
                 tracing::error!(error = %e, "can't read the UI allowlist; refusing");
@@ -300,9 +314,32 @@ impl UiProtocol {
 
 /// Sends the snapshot, then every event, until the UI goes away or the feed ends.
 async fn serve_status(feed: &dyn StatusFeed, mut send: iroh::endpoint::SendStream) {
+    // Taken before the snapshot, so a change after it is never missed.
+    let mut changed = feed.changed();
     let feeds = feed.subscribe();
     let repos = feeds.iter().map(|f| RepoSnapshot { repo: f.repo.clone(), snapshot: f.snapshot.clone() }).collect();
     if write_frame(&mut send, &StatusFrame::Snapshot { control: feed.state(), repos }).await.is_err() {
+        return;
+    }
+    // No repos (yet): there is nothing to forward from this subscription, but ending the stream would have the UI
+    // redial every couple of seconds and read the control plane as stopped. Hold it open until the UI goes away, or
+    // until the state or the repos change, when it ends so the UI redials for the snapshot that shows it.
+    if feeds.is_empty() {
+        match changed.as_mut() {
+            Some(changed) => {
+                tokio::select! {
+                    changed = changed.changed() => {
+                        if changed.is_ok() {
+                            let _ = send.finish();
+                        }
+                    }
+                    _ = send.stopped() => {}
+                }
+            }
+            None => {
+                let _ = send.stopped().await;
+            }
+        }
         return;
     }
     let (tx, mut rx) = mpsc::channel(256);
@@ -361,8 +398,12 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
                         return;
                     }
                 }
-                // Too slow to keep up: it misses some lines.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                // Too slow to keep up: say how many lines it missed, so the page can mark the gap.
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    if write_frame(&mut send, &LogFrame::Skipped { count }).await.is_err() {
+                        return;
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = send.stopped() => return,
@@ -371,9 +412,21 @@ async fn serve_logs(feed: &dyn LogFeed, mut send: iroh::endpoint::SendStream) {
     let _ = send.finish();
 }
 
+impl UiProtocol {
+    /// Closes `conn` if its peer has left the allowlist since it connected; says whether it did.
+    async fn close_if_disallowed(&self, conn: &Connection) -> bool {
+        if self.allowed.contains(&conn.remote_id()).await {
+            return false;
+        }
+        tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
+        conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+        true
+    }
+}
+
 impl ProtocolHandler for UiProtocol {
     async fn accept(&self, conn: Connection) -> std::result::Result<(), AcceptError> {
-        if !self.allowed.contains(&conn.remote_id()) {
+        if !self.allowed.contains(&conn.remote_id()).await {
             tracing::warn!(peer = %conn.remote_id(), "refusing a UI connection from an endpoint that isn't allowed");
             conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
             return Ok(());
@@ -386,17 +439,13 @@ impl ProtocolHandler for UiProtocol {
                     Err(_) => break,
                 },
                 _ = recheck.tick() => {
-                    if self.allowed.contains(&conn.remote_id()) {
-                        continue;
+                    if self.close_if_disallowed(&conn).await {
+                        return Ok(());
                     }
-                    tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
-                    return Ok(());
+                    continue;
                 }
             };
-            if !self.allowed.contains(&conn.remote_id()) {
-                tracing::warn!(peer = %conn.remote_id(), "closing a UI connection from an endpoint that was disallowed");
-                conn.close(CLOSE_NOT_ALLOWED.into(), b"not allowed");
+            if self.close_if_disallowed(&conn).await {
                 return Ok(());
             }
             let (server, status, logs) = (self.server, self.status.clone(), self.logs.clone());
@@ -564,8 +613,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn the_allowlist_persists_and_dedupes() {
+    #[tokio::test]
+    async fn the_allowlist_persists_and_dedupes() {
         let dir = tempfile::tempdir().unwrap();
         let list = UiAllowlist::new(dir.path().join("factory").join("ui-allowed"));
         let (a, b) = (SecretKey::generate().public(), SecretKey::generate().public());
@@ -577,7 +626,7 @@ mod tests {
         assert_eq!(reread.list().unwrap(), vec![a, b]);
         assert!(reread.remove(&a).unwrap());
         assert!(!reread.remove(&a).unwrap());
-        assert!(!reread.contains(&a) && reread.contains(&b));
+        assert!(!reread.contains(&a).await && reread.contains(&b).await);
     }
 
     #[test]
@@ -630,6 +679,7 @@ mod tests {
             targets: Vec::new(),
             human_grades: Vec::new(),
             queue: Vec::new(),
+            usage: Vec::new(),
             seq: 4,
         };
         let frames = [

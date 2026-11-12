@@ -200,6 +200,11 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
+/// The directory of the repo whose config is at `config_path`.
+fn config_dir(config_path: &Path) -> PathBuf {
+    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
+}
+
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
     let config_path = match &opts.config {
@@ -207,13 +212,13 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
         None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
     let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf();
+    let repo_dir = config_dir(&config_path);
     let remote = find::remote(&repo_dir);
     let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok((config_path, remote, config))
 }
 
-/// Whether `now` differs from the `started` config (whose `[merge]` is blanked, as it is re-read live) in a way that
+/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
 /// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
 fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
     let now = FactoryConfig { merge: Default::default(), ..now };
@@ -228,7 +233,7 @@ fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: 
     true
 }
 
-/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[merge]` blanked
+/// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
 /// as it is re-read live. Take it before `wire` adds anything at runtime, which a re-read of the file never has.
 fn started_baseline(config: &FactoryConfig) -> FactoryConfig {
     FactoryConfig { merge: Default::default(), ..config.clone() }
@@ -292,7 +297,7 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
 }
 
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
-/// computes. Fnox runs in `fnox_dir`. `store` is the server's own: the only process that opens the database.
+/// computes. Fnox runs in `fnox_dir`, the first repo's directory. `store` is the server's own: the only process that opens the database.
 async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
@@ -407,7 +412,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
                     tracing::warn!(
                         path = %config_path.display(),
-                        "the factory settings changed in the file, but only [merge] mode is re-read live; restart the server to apply them"
+                        "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
                 Ok(mode)
@@ -573,8 +578,7 @@ fn check_result(failed: usize) -> Result<()> {
 pub async fn check(run: &RunOpts) -> Result<()> {
     let paths = Paths::from_env().ok_or(Error::NoDirs)?;
     let plan = plan(run, read_host_config(&paths)?)?;
-    let cwd = std::env::current_dir().map_err(Error::backend)?;
-    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &cwd)?;
+    let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
     for spec in &plan.specs {
@@ -632,6 +636,18 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     check_result(failed)
 }
 
+/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+fn loop_panicked(
+    e: &tokio::task::JoinError,
+    boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
+) {
+    let repo = boards.get(&e.id()).map(|(slug, board)| {
+        board.control(trailhead_factory::ControlState::Stopped);
+        slug.as_str()
+    });
+    tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
+}
+
 /// Runs every repo's loop until `drain` lets the runs finish or `cancel` stops them.
 async fn run_loops(
     setup: Setup,
@@ -641,10 +657,14 @@ async fn run_loops(
 ) -> Result<()> {
     let Setup { repos, tunnel, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
+    let mut boards = std::collections::HashMap::new();
     for entry in repos {
         let span = tracing::info_span!("repo", repo = %entry.slug);
         let (store, ctx, drain, cancel) = (store.clone(), ctx.clone(), drain.clone(), cancel.clone());
-        loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span));
+        let board = entry.factory.status().clone();
+        let slug = entry.slug.clone();
+        let id = loops.spawn(run_repo(entry, store, ctx, poll, drain, cancel).instrument(span)).id();
+        boards.insert(id, (slug, board));
     }
     let mut failed = 0;
     while let Some(joined) = loops.join_next().await {
@@ -653,7 +673,7 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                tracing::error!(error = %e, "a repo's loop panicked; the other repos carry on");
+                loop_panicked(&e, &boards);
             }
         }
     }
@@ -967,6 +987,24 @@ mod tests {
         let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
         assert!(!super::changed_without_restart(&started, reread, &mut None));
         assert_ne!(started.egress, config.egress);
+    }
+
+    #[tokio::test]
+    async fn a_panicked_loop_is_marked_stopped_on_its_board() {
+        use trailhead_factory::ControlState;
+        let (up, other) = (trailhead_control::StatusBoard::new(), trailhead_control::StatusBoard::new());
+        up.control(ControlState::Up);
+        other.control(ControlState::Up);
+        let mut loops = tokio::task::JoinSet::new();
+        let mut boards = std::collections::HashMap::new();
+        let id = loops.spawn(async { panic!("boom") }).id();
+        boards.insert(id, ("o/n".to_string(), up.clone()));
+        let id = loops.spawn(std::future::pending::<()>()).id();
+        boards.insert(id, ("o/m".to_string(), other.clone()));
+        let e = loops.join_next().await.unwrap().unwrap_err();
+        super::loop_panicked(&e, &boards);
+        assert_eq!(up.snapshot().control, ControlState::Stopped);
+        assert_eq!(other.snapshot().control, ControlState::Up);
     }
 
     /// Paths under `dir`, and a store in it.

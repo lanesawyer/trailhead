@@ -439,9 +439,10 @@ pub fn setup_failed_question(failures: u32, error: &str) -> String {
 /// Why a task is parked at once when a service refused a request for good, so retrying is no use.
 pub fn rejected_question(error: &str) -> String {
     format!(
-        "The infrastructure refused a request and won't answer differently on a retry, so the task is parked \
-         at once; it's not the task. The error: {error}\n\nFix the cause (the compute settings, the sandbox or \
-         the credentials), then reopen the task."
+        "A service refused a request and won't answer differently on a retry, so the task is parked at once; \
+         it's not the task. The service is named in the error (the compute API, the Trailhead server, or the \
+         code host): {error}\n\nFix the cause (that service's settings or credentials, or the sandbox), then \
+         reopen the task."
     )
 }
 
@@ -747,6 +748,9 @@ mod tests {
         assert!(budget_breach_question("r", "sb", BreachedSandbox::Destroyed).contains("was destroyed"));
         let stuck = budget_breach_question("r", "sb", BreachedSandbox::Stuck);
         assert!(stuck.contains("being torn down") && !stuck.contains("was destroyed"), "{stuck}");
+        let rejected = rejected_question("trailhead 400 bad_request: no");
+        assert!(rejected.contains("trailhead 400 bad_request: no") && rejected.contains("the code host"));
+        assert!(!rejected.contains("compute settings"));
         assert!(infra_question(3, 3, "boom").contains("`max_infra_failures`"));
         assert!(review_infra_question(3, 3, "boom").contains("count together"));
         let q = review_no_verdict_question(3, 3, "boom");
@@ -762,5 +766,18 @@ mod tests {
             budget_breach_question("took more than 5 steps", "trail-1-a1", BreachedSandbox::Suspended),
             "Budget breached: took more than 5 steps. The sandbox trail-1-a1 is suspended; raise the budget or cancel."
         );
+    }
+
+    #[test]
+    fn status_comment_lists_a_history_only_once_the_status_has_changed() {
+        let said = |at: &str, message: &str| Said { at: at.into(), message: message.into() };
+        assert_eq!(status_comment("now", &[]), "now");
+        assert_eq!(status_comment("now", &[said("2026-01-01 10:00 UTC", "now")]), "now");
+        assert_eq!(
+            status_comment("now", &[said("2026-01-01 10:00 UTC", "first"), said("2026-01-01 10:05 UTC", "now")]),
+            "now\n\nHistory:\n- 2026-01-01 10:00 UTC: first\n- 2026-01-01 10:05 UTC: now"
+        );
+        let three: Vec<Said> = (1..=3).map(|n| said("t", &format!("m{n}"))).collect();
+        assert_eq!(status_comment("m3", &three), "m3\n\nHistory:\n- t: m1\n- t: m2\n- t: m3");
     }
 }

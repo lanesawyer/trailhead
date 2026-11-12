@@ -1,3 +1,5 @@
+//! Laying the inspector out: the blocks a view is made of, and spawning and dressing them.
+
 use super::*;
 use crate::widgets::Size;
 
@@ -23,7 +25,7 @@ pub(super) enum Block {
     Gates,
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
-    /// The grade dropdown (live only); the offline grade is a [`Block::Text`].
+    /// The grade dropdown (live only); the offline grade is a [`Block::GradeBadge`].
     Grade { grade: Option<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
     Move { statuses: Vec<Status>, note: Option<Control> },
@@ -53,6 +55,8 @@ pub(super) enum Block {
     },
     /// The button that opens the new-task form under this task.
     AddSubtask { key: String, live: bool },
+    /// A page in the browser (a PR), with its icon. Its key holds both, so a change is a new link.
+    Link { caption: String, url: String },
 }
 
 /// One of a PR's gates: its key holds the state, so a gate that changes state is a new badge.
@@ -160,8 +164,8 @@ pub(super) fn layout(
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
-            items
-                .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
+            let link = Block::Link { caption: pr.label.clone(), url: pr.url.clone() };
+            items.push((format!("pr/link/{}/{}", pr.label, pr.url), link));
             items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
             if let Some(g) = pr.grade {
                 items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
@@ -262,8 +266,8 @@ pub(super) fn layout_task(
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
-            items
-                .push(("pr/url".to_string(), text_block(format!("#{} {}", pr.number, pr.url), size::BODY, Tone::Body)));
+            let link = Block::Link { caption: pr.label.clone(), url: pr.url.clone() };
+            items.push((format!("pr/link/{}/{}", pr.label, pr.url), link));
             items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
             if let Some(g) = pr.grade {
                 items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
@@ -354,8 +358,9 @@ pub(super) fn layout_task(
         if let Some(p) = view.priority {
             fields.push((format!("s/fields/priority/{p}"), Block::Priority(p)));
         }
-        let words = view.grade.map_or_else(|| "none".to_string(), |g| format!("G{g}"));
-        fields.push(("s/fields/grade/text".to_string(), text_block(format!("Grade: {words}"), size::BODY, Tone::Body)));
+        if let Some(g) = view.grade {
+            fields.push((format!("s/fields/grade/{g}"), Block::GradeBadge(g)));
+        }
     }
     if let Some(g) = view.grade {
         let words = if human.contains(&g) {
@@ -629,6 +634,9 @@ pub(super) fn spawn_block(
                 .insert(OpensTask(parent.id.clone()))
                 .id()
         }
+        Block::Link { caption, url } => {
+            commands.spawn_scene(link_button(Icon::PullRequest, caption.clone(), url.clone(), ButtonKind::Plain)).id()
+        }
         Block::Project(key) => commands
             .spawn_scene(bsn! { @button(key.clone(), None, ButtonKind::Plain) })
             .insert(OpensProject(key.clone()))
@@ -707,7 +715,7 @@ pub(super) fn dress_note(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(super) fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
-    every: Query<Entity, With<Shown>>,
+    every: Query<(Entity, &Shown)>,
     factory: Res<FactoryStatus>,
     changed: Query<Entity, Changed<Shown>>,
     mut texts: Query<&mut Text>,
@@ -715,14 +723,20 @@ pub(super) fn dress(
     mut moves: Query<&mut StatusMove>,
     mut edit: SelectEdit,
     (mut inline, mut fields, mut edits): (Query<&mut InlineText>, Query<&mut InlineField>, Query<&mut Edits>),
-    mut again: Local<Vec<Entity>>,
+    (mut again, mut graded): (Local<Vec<Entity>>, Local<Option<Vec<Grade>>>),
     mut commands: Commands,
 ) {
     let mut todo: Vec<Entity> = std::mem::take(&mut *again);
     todo.extend(changed.iter());
+    // Only the grade pickers read the factory, and only the grades a human may give.
     if factory.is_changed() {
-        todo.extend(every.iter());
+        let grades = factory.human_grades();
+        if graded.as_ref() != Some(&grades) {
+            todo.extend(every.iter().filter(|(_, s)| matches!(s.0, Block::Grade { .. })).map(|(e, _)| e));
+            *graded = Some(grades);
+        }
     }
+    todo.sort();
     todo.dedup();
     for entity in todo {
         let Ok((Shown(block), parts)) = shown.get(entity) else { continue };
@@ -853,6 +867,7 @@ pub(super) fn dress(
             | Block::Gates
             | Block::Subtask(_)
             | Block::Project(_)
+            | Block::Link { .. }
             | Block::Parent(_)
             | Block::Inline { .. }
             | Block::Choice { .. }
