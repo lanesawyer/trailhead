@@ -463,3 +463,20 @@ async fn disallowing_drops_a_connection_that_is_already_open() {
     let result = tokio::time::timeout(Duration::from_secs(10), get).await.unwrap();
     assert!(result.is_err(), "a disallowed endpoint still got an answer: {result:?}");
 }
+
+#[tokio::test]
+async fn dropping_a_tunnel_closes_its_port() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let tunnel = open_ui_tunnel(r.client(key).await, r.control.id).await.unwrap();
+    let addr = tunnel.addr();
+    assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
+    drop(tunnel);
+    let closed = async {
+        while tokio::net::TcpStream::connect(addr).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), closed).await.expect("the port is still listening");
+}
