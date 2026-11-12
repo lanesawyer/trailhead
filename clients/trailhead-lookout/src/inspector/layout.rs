@@ -26,7 +26,7 @@ pub(super) enum Block {
     /// An open question, with its answer and resolve buttons and what became of the last resolve.
     Question { key: String, id: String, body: String, live: bool, note: Option<Control> },
     /// The grade dropdown (live only); the offline grade is a [`Block::GradeBadge`].
-    Grade { grade: Option<Grade>, note: Option<Control> },
+    Grade { grade: Option<Grade>, human: Vec<Grade>, note: Option<Control> },
     /// The status dropdown: the task's own status first.
     Move { statuses: Vec<Status>, note: Option<Control> },
     /// A button for `action` (a revert has its window's dropdown, `window` hours).
@@ -35,6 +35,8 @@ pub(super) enum Block {
     Subtask(Subtask),
     /// The parent's key and title, which open it. Its key holds what it shows, so a change is a new button.
     Parent(Subtask),
+    /// The "Logs for this task" button, which opens the settings Logs tab on the task's key.
+    Logs(String),
     /// The project, by key, which opens its page.
     Project(String),
     /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
@@ -98,6 +100,7 @@ pub(super) fn layout(
     live: bool,
     offline: &str,
     window: i64,
+    human: &[Grade],
     note: &dyn Fn(&Action) -> Option<Control>,
 ) -> Plan {
     let mut plan: Plan = Vec::new();
@@ -131,7 +134,10 @@ pub(super) fn layout(
         if key == "status" && view.status.is_some() {
             if live {
                 let note = note(&Action::Grade(None));
-                items.push(("status/grade".to_string(), Block::Grade { grade: view.grade, note }));
+                items.push((
+                    "status/grade".to_string(),
+                    Block::Grade { grade: view.grade, human: human.to_vec(), note },
+                ));
             } else {
                 let grade = view.grade.map_or_else(|| "none".to_string(), |g| g.to_string());
                 items.push((
@@ -318,6 +324,9 @@ pub(super) fn layout_task(
         let row = (format!("s/parent/{}/{}", parent.id, parent.title), Block::Parent(parent.clone()));
         add(&mut side, "s/parent", "Parent", vec![row]);
     }
+    if !key.is_empty() {
+        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key.clone()))]);
+    }
     let status = view.status.unwrap_or(Status::Open);
     let mut fields = Vec::new();
     if live {
@@ -443,7 +452,6 @@ pub(super) fn spawn_block(
     controls: &mut Controls,
     subject: &Subject,
     block: &Block,
-    human: &[Grade],
 ) -> Entity {
     let item = match block {
         Block::Text { text: words, size, tone } => {
@@ -495,7 +503,7 @@ pub(super) fn spawn_block(
             });
             item
         }
-        Block::Grade { grade, note } => {
+        Block::Grade { grade, human, note } => {
             let line = commands.spawn_scene(bsn! { @row() }).id();
             commands.spawn_scene(text_dim("Grade", size::SECONDARY)).insert(ChildOf(line));
             let source = control(controls, commands, subject, &Action::Grade(None));
@@ -634,6 +642,10 @@ pub(super) fn spawn_block(
                 .insert(OpensTask(parent.id.clone()))
                 .id()
         }
+        Block::Logs(key) => commands
+            .spawn_scene(bsn! { @button("Logs for this task", None, ButtonKind::Normal) })
+            .insert(OpensLogs(key.clone()))
+            .id(),
         Block::Link { caption, url } => {
             commands.spawn_scene(link_button(Icon::PullRequest, caption.clone(), url.clone(), ButtonKind::Plain)).id()
         }
@@ -795,9 +807,9 @@ pub(super) fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Grade { grade, note } => {
+            Block::Grade { grade, human, note } => {
                 if let Some(picker) = parts.select
-                    && !edit.set(picker, &grade_options(&factory.human_grades()), grade_index(*grade))
+                    && !edit.set(picker, &grade_options(human), grade_index(*grade))
                 {
                     again.push(entity);
                 }
@@ -867,6 +879,7 @@ pub(super) fn dress(
             | Block::Gates
             | Block::Subtask(_)
             | Block::Project(_)
+            | Block::Logs(_)
             | Block::Link { .. }
             | Block::Parent(_)
             | Block::Inline { .. }

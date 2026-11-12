@@ -135,6 +135,48 @@ fn a_stale_no_answer_does_not_resend_a_later_attempt() {
 }
 
 #[test]
+fn a_rate_limited_command_is_sent_again_with_its_key_until_attempts_run_out() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::ZERO), message: "slow".into() };
+    let mut keys = Vec::new();
+    let mut finished = None;
+    for _ in 0..20 {
+        let (sent, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        if let Some((id, n, request)) = sent.first() {
+            keys.push(request.key.clone());
+            reply(&mut app, *id, *n, Ok(limited.clone()));
+        }
+    }
+    assert_eq!(keys.len() as u32, MAX_ATTEMPTS);
+    assert!(keys.iter().all(|k| *k == keys[0]));
+    let done = finished.expect("handed back, not dropped");
+    assert_eq!(done.source, control);
+    assert_eq!(done.outcome, limited);
+    assert!(app.world().resource::<Outbox>().is_empty());
+}
+
+#[test]
+fn a_rate_limited_command_waits_for_retry_after() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let (sent, _) = step(&mut app);
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::from_secs(600)), message: "slow".into() };
+    reply(&mut app, sent[0].0, 1, Ok(limited));
+    let (sent, done) = step(&mut app);
+    assert!(sent.is_empty() && done.is_empty(), "held until Retry-After");
+    assert_eq!(app.world().resource::<Outbox>().len(), 1);
+}
+
+#[test]
 fn a_command_that_never_gets_an_answer_is_reported_failed() {
     let mut app = app();
     let control = app.world_mut().spawn_empty().id();

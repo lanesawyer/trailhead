@@ -26,26 +26,32 @@ use super::space;
 /// The node that holds a panel's scrolling body and its scrollbar, so the bar runs along the body only. It takes the
 /// height the panel has left and may shrink below its content, so the body scrolls (TRAIL-836).
 pub fn scroll_frame() -> impl Bundle {
-    (
-        Name::new("scroll frame"),
-        Node { flex_direction: FlexDirection::Column, flex_grow: 1.0, min_height: px(0), ..default() },
-    )
+    (Name::new("scroll frame"), scroll_frame_node(1.0))
+}
+
+/// The [`Node`] of a [`scroll_frame`] that grows by `grow` into the height its parent has left, for a frame that sets
+/// its own growth (a board column's, whose height is its cards') or is spawned in a scene (the modal's).
+pub fn scroll_frame_node(grow: f32) -> Node {
+    Node { flex_direction: FlexDirection::Column, flex_grow: grow, min_height: px(0), ..default() }
 }
 
 /// The body of a panel that scrolls down on its own, wheel and touchpad, for [`super::scrollbar`] to sit beside: a
 /// column of rows. The bar lies in the padding of the frame's parent, outside the body. Put it in a [`scroll_frame`].
 pub fn scroll_body() -> impl Bundle {
-    (
-        Name::new("scroll body"),
-        Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: px(space::ROWS),
-            min_height: px(0),
-            overflow: Overflow::scroll_y(),
-            ..default()
-        },
-        ScrollDown,
-    )
+    (Name::new("scroll body"), scroll_body_node(space::ROWS, 0.0), ScrollDown)
+}
+
+/// The [`Node`] of a [`scroll_body`] with `gap` between its rows, growing by `grow` into its frame. The gutter and the
+/// minimum size, which lets a body shrink below its content and scroll, live here for every scrolling body.
+pub fn scroll_body_node(gap: f32, grow: f32) -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        flex_grow: grow,
+        row_gap: px(gap),
+        min_height: px(0),
+        overflow: Overflow::scroll_y(),
+        ..default()
+    }
 }
 
 /// Marks an area that scrolls both ways.
@@ -135,6 +141,15 @@ mod tests {
         let node = world.get::<Node>(body).unwrap();
         assert_eq!((node.min_height, node.overflow), (px(0), Overflow::scroll_y()));
         assert!(world.get::<ScrollDown>(body).is_some());
+    }
+
+    #[test]
+    fn the_nodes_take_the_gap_and_growth_and_keep_the_minimum_size() {
+        let body = scroll_body_node(7.0, 1.0);
+        assert_eq!((body.row_gap, body.flex_grow, body.min_height), (px(7.0), 1.0, px(0)));
+        assert_eq!(body.overflow, Overflow::scroll_y());
+        let frame = scroll_frame_node(0.0);
+        assert_eq!((frame.flex_grow, frame.min_height), (0.0, px(0)));
     }
 
     #[test]
