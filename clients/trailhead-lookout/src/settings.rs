@@ -633,7 +633,7 @@ mod tests {
                 control: trailhead_factory::status::ControlState::Up,
                 queue: vec!["TRAIL-102".into(), "TRAIL-9".into()],
                 last_error: None,
-                human_grades: vec![],
+                human_grades: None,
                 holding: None,
                 usage: Vec::new(),
                 seq: 0,

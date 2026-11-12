@@ -717,7 +717,7 @@ mod tests {
                 queue: Vec::new(),
                 last_error: None,
                 holding: None,
-                human_grades: Vec::new(),
+                human_grades: None,
                 usage,
                 seq: 1,
             };

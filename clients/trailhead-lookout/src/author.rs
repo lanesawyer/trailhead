@@ -1001,8 +1001,8 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: vec!["TRAIL-102".into(), "TRAIL-685".into(), "OPS-3".into()],
             last_error: None,
+            human_grades: None,
             holding: None,
-            human_grades: Vec::new(),
             usage: Vec::new(),
             seq: 1,
         };
@@ -1294,8 +1294,8 @@ mod tests {
             control: trailhead_factory::status::ControlState::Up,
             queue: queues.iter().map(|q| q.to_string()).collect(),
             last_error: None,
+            human_grades: None,
             holding: None,
-            human_grades: Vec::new(),
             usage: Vec::new(),
             seq: 1,
         };
