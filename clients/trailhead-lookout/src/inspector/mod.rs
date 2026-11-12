@@ -43,6 +43,7 @@ use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
 use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::project::OpenProject;
+use crate::settings::OpenLogs;
 use crate::sync::SyncItem;
 use crate::widgets::{
     ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
@@ -279,6 +280,7 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_modal_closed)
             .add_observer(on_open_task)
             .add_observer(on_open_project)
+            .add_observer(on_open_logs)
             .add_observer(on_open_composer)
             .add_observer(on_compose_press)
             .add_observer(on_step)

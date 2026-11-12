@@ -35,6 +35,8 @@ pub(super) enum Block {
     Subtask(Subtask),
     /// The parent's key and title, which open it. Its key holds what it shows, so a change is a new button.
     Parent(Subtask),
+    /// The "Logs for this task" button, which opens the settings Logs tab on the task's key.
+    Logs(String),
     /// The project, by key, which opens its page.
     Project(String),
     /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
@@ -321,6 +323,9 @@ pub(super) fn layout_task(
     if let Some(parent) = &facts.parent {
         let row = (format!("s/parent/{}/{}", parent.id, parent.title), Block::Parent(parent.clone()));
         add(&mut side, "s/parent", "Parent", vec![row]);
+    }
+    if !key.is_empty() {
+        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key.clone()))]);
     }
     let status = view.status.unwrap_or(Status::Open);
     let mut fields = Vec::new();
@@ -637,6 +642,10 @@ pub(super) fn spawn_block(
                 .insert(OpensTask(parent.id.clone()))
                 .id()
         }
+        Block::Logs(key) => commands
+            .spawn_scene(bsn! { @button("Logs for this task", None, ButtonKind::Normal) })
+            .insert(OpensLogs(key.clone()))
+            .id(),
         Block::Link { caption, url } => {
             commands.spawn_scene(link_button(Icon::PullRequest, caption.clone(), url.clone(), ButtonKind::Plain)).id()
         }
@@ -870,6 +879,7 @@ pub(super) fn dress(
             | Block::Gates
             | Block::Subtask(_)
             | Block::Project(_)
+            | Block::Logs(_)
             | Block::Link { .. }
             | Block::Parent(_)
             | Block::Inline { .. }
