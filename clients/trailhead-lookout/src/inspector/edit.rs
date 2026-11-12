@@ -56,16 +56,17 @@ pub fn edit_request(
     change: &Change,
     statuses: &[Status],
 ) -> Result<Request, String> {
-    let body = match (field, change) {
+    let mut update = TaskUpdate::default();
+    match (field, change) {
         (Field::Title, Change::Text(t)) if t.trim().is_empty() => return Err("a task needs a title".into()),
-        (Field::Title, Change::Text(t)) => json!({"title": t.trim()}),
-        (Field::Description, Change::Text(t)) => json!({"description": t}),
-        (Field::Status, Change::Pick(i)) => json!({"status": statuses.get(*i).ok_or("no such status")?}),
-        (Field::Priority, Change::Pick(i)) => json!({"priority": Priority::ALL.get(*i).ok_or("no such priority")?}),
-        (Field::Grade, Change::Pick(i)) => json!({"grade": grade_choices().nth(*i).ok_or("no such grade")?}),
+        (Field::Title, Change::Text(t)) => update.title = Some(t.trim().to_string()),
+        (Field::Description, Change::Text(t)) => update.description = Some(t.clone()),
+        (Field::Status, Change::Pick(i)) => update.status = Some(*statuses.get(*i).ok_or("no such status")?),
+        (Field::Priority, Change::Pick(i)) => update.priority = Some(*Priority::ALL.get(*i).ok_or("no such priority")?),
+        (Field::Grade, Change::Pick(i)) => update.grade = Some(grade_choices().nth(*i).ok_or("no such grade")?),
         _ => return Err("that field isn't edited that way".into()),
     };
-    Ok(Request::new(Method::PATCH, format!("/v1/tasks/{key}"), Some(body), Some(version)))
+    Ok(Request::new(Call::UpdateTask { key: TaskKey(key.into()), update }, Some(version)))
 }
 
 /// How many lines the description's input is while it is edited.
@@ -204,15 +205,15 @@ mod tests {
         let r = |field, change| edit_request("TRAIL-7", 4, field, &change, &st).unwrap();
         let title = r(Field::Title, Change::Text("  New title ".into()));
         assert_eq!(
-            (title.method.clone(), title.path.as_str(), title.if_match),
+            (title.call.method(), title.call.path().as_str(), title.if_match),
             (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
         );
-        assert_eq!(title.body, Some(json!({"title": "New title"})));
-        assert_eq!(r(Field::Description, Change::Text("why".into())).body, Some(json!({"description": "why"})));
-        assert_eq!(r(Field::Status, Change::Pick(1)).body, Some(json!({"status": "in_review"})));
-        assert_eq!(r(Field::Priority, Change::Pick(0)).body, Some(json!({"priority": 1})));
-        assert_eq!(r(Field::Grade, Change::Pick(2)).body, Some(json!({"grade": 2})));
-        assert_eq!(r(Field::Grade, Change::Pick(0)).body, Some(json!({"grade": null})), "none clears it");
+        assert_eq!(title.call.body(), Some(json!({"title": "New title"})));
+        assert_eq!(r(Field::Description, Change::Text("why".into())).call.body(), Some(json!({"description": "why"})));
+        assert_eq!(r(Field::Status, Change::Pick(1)).call.body(), Some(json!({"status": "in_review"})));
+        assert_eq!(r(Field::Priority, Change::Pick(0)).call.body(), Some(json!({"priority": 1})));
+        assert_eq!(r(Field::Grade, Change::Pick(2)).call.body(), Some(json!({"grade": 2})));
+        assert_eq!(r(Field::Grade, Change::Pick(0)).call.body(), Some(json!({"grade": null})), "none clears it");
         assert!(edit_request("TRAIL-7", 4, Field::Title, &Change::Text(" ".into()), &st).is_err());
     }
 
@@ -224,7 +225,7 @@ mod tests {
         let sent = sent(&mut app);
         assert_eq!(sent.len(), 1);
         assert_eq!((sent[0].source, sent[0].request.if_match), (title, Some(4)));
-        assert_eq!(sent[0].request.body, Some(json!({"title": "do it well"})));
+        assert_eq!(sent[0].request.call.body(), Some(json!({"title": "do it well"})));
         answer(&mut app, title, Outcome::Ok { version: Some(5) });
         assert!(app.world().get::<Edits>(title).unwrap().pending.is_none());
         assert!(app.world().get::<InlineText>(title).unwrap().error().is_empty());
@@ -262,7 +263,7 @@ mod tests {
         let to = statuses.iter().position(|s| *s == Status::NeedsInput).unwrap();
         app.world_mut().trigger(InlineChosen { entity: status, old: Some(0), new: to });
         let sent = sent(&mut app);
-        assert_eq!(sent[0].request.body, Some(json!({"status": "needs_input"})));
+        assert_eq!(sent[0].request.call.body(), Some(json!({"status": "needs_input"})));
         answer(&mut app, status, Outcome::Failed("say why it's blocked".into()));
         let f = app.world().get::<InlineField>(status).unwrap();
         assert_eq!((f.selected(), f.error()), (Some(0), "say why it's blocked"));

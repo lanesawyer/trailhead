@@ -15,8 +15,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::text::{EditableText, LineBreak};
 use bevy::ui_widgets::{Activate, ValueChange};
-use reqwest::Method;
-use serde_json::json;
+use trailhead_client::http::{Call, NewTask};
 use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
 
 use crate::board::View;
@@ -195,21 +194,15 @@ pub fn request(open: &Open) -> Result<Request, String> {
     if !parent.is_empty() && project_of(parent) != Some(project) {
         return Err(format!("the parent has to be a task in {project}"));
     }
-    let mut body = json!({
-        "project": project,
-        "title": title,
-        "description": d.description,
-        "priority": d.priority,
-    });
-    if !parent.is_empty() {
-        body["parent"] = json!(parent);
-    }
-    if d.queued
-        && let Some(grade) = d.grade
-    {
-        body["grade"] = json!(grade);
-    }
-    Ok(Request::new(Method::POST, "/v1/tasks", Some(body), None))
+    let new = NewTask {
+        project: project.into(),
+        title: title.into(),
+        description: d.description.clone(),
+        priority: Some(d.priority),
+        parent: (!parent.is_empty()).then(|| parent.into()),
+        grade: if d.queued { d.grade } else { None },
+    };
+    Ok(Request::new(Call::CreateTask(new), None))
 }
 
 /// The open tasks of `project` whose key or title has every word of `query`, by key, at most `limit` of them.
@@ -939,21 +932,21 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
 
-    use serde_json::Value;
-
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
     use crate::fixture::{sid, task_json};
     use crate::mirror::MirrorPlugin;
     use crate::sync::SyncItem;
+    use reqwest::Method;
+    use serde_json::{Value, json};
 
     fn task() -> Value {
         task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
                "status": "open", "version": 4}))
     }
 
-    fn body(r: &Request) -> &Value {
-        r.body.as_ref().unwrap()
+    fn body(r: &Request) -> Value {
+        r.call.body().unwrap()
     }
 
     #[test]
@@ -964,10 +957,10 @@ mod tests {
         open.draft.description = "line 1\nline 2".into();
         open.draft.priority = Priority::ALL[0];
         let r = request(&open).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
+        assert_eq!((r.call.method(), r.call.path().as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
         assert_eq!(
             body(&r),
-            &json!({"project": "TRAIL", "title": "Do it", "description": "line 1\nline 2", "priority": 1})
+            json!({"project": "TRAIL", "title": "Do it", "description": "line 1\nline 2", "priority": 1})
         );
         open.draft.parent = "TRAIL-7".into();
         assert_eq!(body(&request(&open).unwrap())["parent"], json!("TRAIL-7"));
@@ -1037,13 +1030,13 @@ mod tests {
         use crate::inspector::compose_request;
         use trailhead_model::CommentKind;
         let r = compose_request("TRAIL-7", CommentKind::Handoff, None, "hello\nthere");
-        assert_eq!(r.path, "/v1/tasks/TRAIL-7/comments");
-        assert_eq!(body(&r), &json!({"kind": "handoff", "body": "hello\nthere"}));
+        assert_eq!(r.call.path(), "/v1/tasks/TRAIL-7/comments");
+        assert_eq!(body(&r), json!({"kind": "handoff", "body": "hello\nthere"}));
 
         let question = ("c9".to_string(), "which db?".to_string());
         let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite");
-        assert_eq!((r.method.clone(), r.path.as_str()), (Method::POST, "/v1/comments/c9/resolve"));
-        assert_eq!(body(&r), &json!({"answer": "sqlite"}));
+        assert_eq!((r.call.method(), r.call.path().as_str()), (Method::POST, "/v1/comments/c9/resolve"));
+        assert_eq!(body(&r), json!({"answer": "sqlite"}));
     }
 
     #[test]

@@ -145,15 +145,8 @@ pub(super) fn on_compose_press(
 pub fn compose_request(key: &str, kind: CommentKind, answering: Option<&(String, String)>, body: &str) -> Request {
     let body = body.trim();
     match answering {
-        Some((id, _)) => {
-            Request::new(Method::POST, format!("/v1/comments/{id}/resolve"), Some(json!({"answer": body})), None)
-        }
-        None => Request::new(
-            Method::POST,
-            format!("/v1/tasks/{key}/comments"),
-            Some(json!({"kind": kind, "body": body})),
-            None,
-        ),
+        Some((id, _)) => Request::new(Call::ResolveComment { id: id.clone(), answer: Some(body.into()) }, None),
+        None => Request::new(Call::AddComment { key: TaskKey(key.into()), comment: NewComment::new(kind, body) }, None),
     }
 }
 
@@ -226,8 +219,8 @@ mod tests {
         app.world_mut().trigger(Activate { entity: send });
         let sent = sent(&mut app);
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].request.path, "/v1/tasks/TRAIL-7/comments");
-        assert_eq!(sent[0].request.body, Some(json!({"kind": "decision", "body": "looks good"})));
+        assert_eq!(sent[0].request.call.path(), "/v1/tasks/TRAIL-7/comments");
+        assert_eq!(sent[0].request.call.body(), Some(json!({"kind": "decision", "body": "looks good"})));
         assert_eq!(app.world().get::<Control>(sent[0].source), Some(&Control::Busy));
         // The server took it.
         *app.world_mut().get_mut::<Control>(sent[0].source).unwrap() = Control::Done;
@@ -302,8 +295,8 @@ mod tests {
         let send = compose_button(&mut app, ComposePart::Send);
         app.world_mut().trigger(Activate { entity: send });
         let sent = sent(&mut app);
-        assert_eq!(sent[0].request.path, format!("/v1/comments/{c1}/resolve"));
-        assert_eq!(sent[0].request.body, Some(json!({"answer": "sqlite"})));
+        assert_eq!(sent[0].request.call.path(), format!("/v1/comments/{c1}/resolve"));
+        assert_eq!(sent[0].request.call.body(), Some(json!({"answer": "sqlite"})));
         // Stopping answering goes back to a comment.
         let stop = compose_button(&mut app, ComposePart::StopAnswering);
         app.world_mut().trigger(Activate { entity: stop });

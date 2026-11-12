@@ -26,11 +26,16 @@ use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
+#[cfg(test)]
 use reqwest::Method;
+#[cfg(test)]
 use serde_json::json;
+use trailhead_client::http::{Call, NewComment, Revert, TaskUpdate, Undo};
 use trailhead_client::text::Text as Wording;
 use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, User};
+use trailhead_model::{
+    Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
+};
 use uuid::Uuid;
 
 use crate::author::{

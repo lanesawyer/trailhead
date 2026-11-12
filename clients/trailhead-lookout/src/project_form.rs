@@ -10,8 +10,7 @@
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
-use reqwest::Method;
-use serde_json::{Map, Value, json};
+use trailhead_client::http::{self as client, Call, ProjectUpdate};
 
 use trailhead_model::{Project, ProjectStatus};
 
@@ -154,37 +153,36 @@ pub fn request(open: &ProjectOpen) -> Result<Request, String> {
             if !valid_key(&key) {
                 return Err("the key is 2 to 10 letters or digits, starting with a letter, e.g. TRAIL".into());
             }
-            let mut body = Map::new();
-            body.insert("key".into(), json!(key));
-            body.insert("name".into(), json!(d.name.trim()));
-            body.insert("brief".into(), json!(d.brief));
-            body.insert("require_review".into(), json!(d.require_review));
-            if let Some(seconds) = lease_seconds(&d.claim_minutes)? {
-                body.insert("claim_ttl".into(), json!(seconds));
-            }
-            Ok(Request::new(Method::POST, "/v1/projects", Some(Value::Object(body)), None))
+            let new = client::NewProject {
+                key,
+                name: d.name.trim().into(),
+                brief: d.brief.clone(),
+                require_review: d.require_review,
+                claim_ttl: lease_seconds(&d.claim_minutes)?.map(i64::from),
+            };
+            Ok(Request::new(Call::CreateProject(new), None))
         }
         Target::Edit { key, version, .. } => {
             let o = &open.original;
-            let mut patch = Map::new();
+            let mut patch = ProjectUpdate::default();
             if d.name.trim() != o.name {
-                patch.insert("name".into(), json!(d.name.trim()));
+                patch.name = Some(d.name.trim().into());
             }
             if d.brief != o.brief {
-                patch.insert("brief".into(), json!(d.brief));
+                patch.brief = Some(d.brief.clone());
             }
             if d.require_review != o.require_review {
-                patch.insert("require_review".into(), json!(d.require_review));
+                patch.require_review = Some(d.require_review);
             }
             // Compared as typed: a lease the form shows rounded to minutes isn't sent back unless it was changed.
             if d.claim_minutes.trim() != o.claim_minutes {
                 // `null` goes back to the workspace's default.
-                patch.insert("claim_ttl".into(), json!(lease_seconds(&d.claim_minutes)?));
+                patch.claim_ttl = Some(lease_seconds(&d.claim_minutes)?.map(i64::from));
             }
-            if patch.is_empty() {
+            if patch == ProjectUpdate::default() {
                 return Err("nothing changed".into());
             }
-            Ok(Request::new(Method::PATCH, format!("/v1/projects/{key}"), Some(Value::Object(patch)), Some(*version)))
+            Ok(Request::new(Call::UpdateProject { key: key.clone(), update: patch }, Some(*version)))
         }
     }
 }
@@ -193,7 +191,8 @@ pub fn request(open: &ProjectOpen) -> Result<Request, String> {
 pub fn archive_request(open: &ProjectOpen) -> Option<Request> {
     let Target::Edit { key, version, archived } = &open.target else { return None };
     let status = if *archived { ProjectStatus::Active } else { ProjectStatus::Archived };
-    Some(Request::new(Method::PATCH, format!("/v1/projects/{key}"), Some(json!({"status": status})), Some(*version)))
+    let update = ProjectUpdate { status: Some(status), ..Default::default() };
+    Some(Request::new(Call::UpdateProject { key: key.clone(), update }, Some(*version)))
 }
 
 /// The sidebar's button that opens the form on a new project.
@@ -535,6 +534,8 @@ fn update_message(form: Res<ProjectForm>, mut messages: Query<&mut Text, With<Pr
 #[cfg(test)]
 mod tests {
     use bevy::state::app::StatesPlugin;
+    use reqwest::Method;
+    use serde_json::json;
 
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
@@ -566,28 +567,37 @@ mod tests {
         open.draft.name = "Trailhead engine ".into();
         open.draft.require_review = true;
         let r = request(&open).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/projects/TRAIL", Some(7)));
-        assert_eq!(r.body, Some(json!({"name": "Trailhead engine", "require_review": true})));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::PATCH, "/v1/projects/TRAIL", Some(7))
+        );
+        assert_eq!(r.call.body(), Some(json!({"name": "Trailhead engine", "require_review": true})));
     }
 
     #[test]
     fn archive_flips_the_status_with_the_version_it_saw() {
         assert!(archive_request(&ProjectOpen::create()).is_none(), "a new project has nothing to archive");
         let r = archive_request(&ProjectOpen::edit(&trail())).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::PATCH, "/v1/projects/TRAIL", Some(7)));
-        assert_eq!(r.body, Some(json!({"status": "archived"})));
+        assert_eq!(
+            (r.call.method(), r.call.path().as_str(), r.if_match),
+            (Method::PATCH, "/v1/projects/TRAIL", Some(7))
+        );
+        assert_eq!(r.call.body(), Some(json!({"status": "archived"})));
         let mut shelved = trail();
         shelved.status = ProjectStatus::Archived;
-        assert_eq!(archive_request(&ProjectOpen::edit(&shelved)).unwrap().body, Some(json!({"status": "active"})));
+        assert_eq!(
+            archive_request(&ProjectOpen::edit(&shelved)).unwrap().call.body(),
+            Some(json!({"status": "active"}))
+        );
     }
 
     #[test]
     fn emptying_the_lease_goes_back_to_the_default() {
         let mut open = ProjectOpen::edit(&trail());
         open.draft.claim_minutes = "".into();
-        assert_eq!(request(&open).unwrap().body, Some(json!({"claim_ttl": null})));
+        assert_eq!(request(&open).unwrap().call.body(), Some(json!({"claim_ttl": null})));
         open.draft.claim_minutes = "60".into();
-        assert_eq!(request(&open).unwrap().body, Some(json!({"claim_ttl": 3600})));
+        assert_eq!(request(&open).unwrap().call.body(), Some(json!({"claim_ttl": 3600})));
         open.draft.claim_minutes = "lots".into();
         assert!(request(&open).unwrap_err().contains("minutes"));
     }
@@ -604,9 +614,9 @@ mod tests {
     #[test]
     fn create_sends_the_key_in_capitals_and_the_rest_as_typed() {
         let r = create_request(&draft(" trail ")).unwrap();
-        assert_eq!((r.method.clone(), r.path.as_str(), r.if_match), (Method::POST, "/v1/projects", None));
+        assert_eq!((r.call.method(), r.call.path().as_str(), r.if_match), (Method::POST, "/v1/projects", None));
         assert_eq!(
-            r.body,
+            r.call.body(),
             Some(json!({"key": "TRAIL", "name": "Trailhead", "brief": "the task engine", "require_review": false}))
         );
     }
@@ -624,7 +634,7 @@ mod tests {
         let mut d = draft("OPS");
         d.claim_minutes = " 45 ".into();
         d.require_review = true;
-        let body = create_request(&d).unwrap().body.unwrap();
+        let body = create_request(&d).unwrap().call.body().unwrap();
         assert_eq!((body["claim_ttl"].clone(), body["require_review"].clone()), (json!(2700), json!(true)));
         for bad in ["0", "abc", "1441", "-5"] {
             d.claim_minutes = bad.into();
