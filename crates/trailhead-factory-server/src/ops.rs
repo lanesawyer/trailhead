@@ -197,7 +197,7 @@ async fn log_source(
 /// with the task. A recorded name is ignored once the run released its sandbox, or when the sandbox is labelled for
 /// another task: the pool has reused it since.
 fn find_sandbox<'a>(task: &Task, sandboxes: &'a [Sandbox]) -> Option<&'a Sandbox> {
-    let released = task.run.released.is_some_and(|at| at > 0);
+    let released = task.run.released.is_some();
     let recorded = task.run.host.as_ref().or(task.run.sandbox.as_ref()).filter(|_| !released);
     recorded
         .and_then(|name| sandboxes.iter().find(|s| &s.name == name))
@@ -415,7 +415,7 @@ async fn list_everywhere(computes: &[crate::Built], labels: &Labels) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use trailhead_factory::{Grade, PrRef, Priority, Repo, RunUpdate, SandboxId, Usd};
+    use trailhead_factory::{Grade, PrRef, Priority, Repo, RunRecord, SandboxId, Usd};
 
     use super::*;
 
@@ -431,7 +431,7 @@ mod tests {
         boxes.iter().map(Row::from_sandbox).collect()
     }
 
-    fn task(key: &str, status: Status, run: RunUpdate) -> Task {
+    fn task(key: &str, status: Status, run: RunRecord) -> Task {
         Task {
             key: TaskKey(key.into()),
             project: "TRAIL".into(),
@@ -474,24 +474,24 @@ mod tests {
             sandbox("trail-3-a1", &[]),
         ];
         let on_host =
-            task("TRAIL-1", Status::InProgress, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+            task("TRAIL-1", Status::InProgress, RunRecord { host: Some("trailhead-w1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&on_host, &boxes).unwrap().name, "trailhead-w1");
         // The pool reused it for another task, or the run released it: don't show that task's log.
         let reused =
-            task("TRAIL-5", Status::InReview, RunUpdate { host: Some("trailhead-w1".into()), ..Default::default() });
+            task("TRAIL-5", Status::InReview, RunRecord { host: Some("trailhead-w1".into()), ..Default::default() });
         assert!(find_sandbox(&reused, &boxes).is_none());
         let released = task(
             "TRAIL-2",
             Status::InProgress,
-            RunUpdate { host: Some("trailhead-w1".into()), released: Some(1), ..Default::default() },
+            RunRecord { host: Some("trailhead-w1".into()), released: Some(1), ..Default::default() },
         );
         assert_eq!(find_sandbox(&released, &boxes).unwrap().name, "trailhead-w2");
         let own =
-            task("TRAIL-3", Status::InProgress, RunUpdate { sandbox: Some("trail-3-a1".into()), ..Default::default() });
+            task("TRAIL-3", Status::InProgress, RunRecord { sandbox: Some("trail-3-a1".into()), ..Default::default() });
         assert_eq!(find_sandbox(&own, &boxes).unwrap().name, "trail-3-a1");
-        let labelled = task("TRAIL-2", Status::InReview, RunUpdate::default());
+        let labelled = task("TRAIL-2", Status::InReview, RunRecord::default());
         assert_eq!(find_sandbox(&labelled, &boxes).unwrap().name, "trailhead-w2");
-        assert!(find_sandbox(&task("TRAIL-9", Status::Open, RunUpdate::default()), &boxes).is_none());
+        assert!(find_sandbox(&task("TRAIL-9", Status::Open, RunRecord::default()), &boxes).is_none());
     }
 
     #[test]
@@ -500,13 +500,13 @@ mod tests {
             sandbox("trailhead-w2", &[("state", "idle"), ("warm", "cp-1")]),
             sandbox("trailhead-w1", &[("state", "busy"), ("task", "TRAIL-7"), ("role", "worker"), ("warm", "cp-2")]),
         ];
-        let running = RunUpdate {
+        let running = RunRecord {
             attempt: Some(2),
             host: Some("trailhead-w1".into()),
             spend: Some(Usd::dollars(1.5)),
             ..Default::default()
         };
-        let reviewed = RunUpdate {
+        let reviewed = RunRecord {
             attempt: Some(1),
             spend: Some(Usd::dollars(0.25)),
             failure: Some("checks failed\nmore".into()),

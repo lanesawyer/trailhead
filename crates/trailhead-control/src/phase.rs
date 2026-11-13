@@ -142,7 +142,7 @@ fn sub_agent(me: &str, run: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use trailhead_factory::{PrRef, Priority, Repo, RunUpdate, TaskKey};
+    use trailhead_factory::{PrRef, Priority, Repo, RunRecord, TaskKey};
 
     use super::*;
     use trailhead_factory::RequestKind;
@@ -150,15 +150,13 @@ mod tests {
     const ME: &str = "factory";
 
     /// A task on attempt 1, run `trail-7-a1`, on a pooled sandbox.
-    fn task(status: Status, holder: Option<&str>, run: RunUpdate) -> Task {
-        let base = RunUpdate {
-            attempt: Some(1),
-            sandbox: Some("trail-7-a1".into()),
-            host: Some("trailhead-w1".into()),
-            ..RunUpdate::default()
+    fn task(status: Status, holder: Option<&str>, run: RunRecord) -> Task {
+        let merged = RunRecord {
+            attempt: run.attempt.or(Some(1)),
+            sandbox: run.sandbox.clone().or(Some("trail-7-a1".into())),
+            host: run.host.clone().or(Some("trailhead-w1".into())),
+            ..run
         };
-        let mut merged = base;
-        merged.merge(run);
         Task {
             key: TaskKey("TRAIL-7".into()),
             project: "TRAIL".into(),
@@ -191,7 +189,7 @@ mod tests {
     #[test]
     fn a_task_the_factory_never_ran_is_untouched_whatever_its_status() {
         for status in [Status::Open, Status::InProgress, Status::InReview, Status::NeedsInput] {
-            let mut t = task(status, None, RunUpdate::default());
+            let mut t = task(status, None, RunRecord::default());
             t.run.sandbox = None;
             assert_eq!(phase(&t, ME, true), Phase::Untouched);
         }
@@ -199,38 +197,38 @@ mod tests {
 
     #[test]
     fn an_in_progress_task_is_running_only_under_its_current_runs_sub_agent_on_a_busy_sandbox() {
-        let running = task(Status::InProgress, Some("factory/trail-7-a1"), RunUpdate::default());
+        let running = task(Status::InProgress, Some("factory/trail-7-a1"), RunRecord::default());
         assert_eq!(phase(&running, ME, true), Phase::Running);
         assert_eq!(phase(&running, ME, false), Phase::Interrupted, "the sandbox has moved on");
 
-        let concluded = RunUpdate { concluded: Some("trail-7-a1".into()), ..RunUpdate::default() };
+        let concluded = RunRecord { concluded: Some("trail-7-a1".into()), ..RunRecord::default() };
         assert_eq!(
             phase(&task(Status::InProgress, Some("factory/trail-7-a1"), concluded), ME, true),
             Phase::Interrupted
         );
-        let retried = RunUpdate { retries: Some(1), ..RunUpdate::default() };
+        let retried = RunRecord { retries: Some(1), ..RunRecord::default() };
         let gave_back = task(Status::InProgress, Some("factory/trail-7-a1"), retried);
         assert_eq!(phase(&gave_back, ME, true), Phase::Interrupted, "the run gave its attempt back");
         assert_eq!(
-            phase(&task(Status::InProgress, Some("factory"), RunUpdate::default()), ME, true),
+            phase(&task(Status::InProgress, Some("factory"), RunRecord::default()), ME, true),
             Phase::Interrupted
         );
-        assert_eq!(phase(&task(Status::InProgress, None, RunUpdate::default()), ME, true), Phase::Interrupted);
+        assert_eq!(phase(&task(Status::InProgress, None, RunRecord::default()), ME, true), Phase::Interrupted);
     }
 
     #[test]
     fn a_workers_breach_not_yet_parked_is_finished_unless_the_run_is_still_going() {
         let breach = WorkerBreach { run: "trail-7-a1".into(), reason: "tokens".into(), parked: false, stuck: false };
-        let run = RunUpdate { worker_breach: Some(breach.clone()), ..RunUpdate::default() };
+        let run = RunRecord { worker_breach: Some(breach.clone()), ..RunRecord::default() };
         let t = task(Status::InProgress, Some("factory/trail-7-a1"), run.clone());
         assert_eq!(phase(&t, ME, false), Phase::WorkerBreachUnparked(&breach));
         assert_eq!(phase(&t, ME, true), Phase::Running, "a busy sandbox is followed first");
 
         let parked = WorkerBreach { parked: true, ..breach.clone() };
-        let run = RunUpdate { worker_breach: Some(parked), ..RunUpdate::default() };
+        let run = RunRecord { worker_breach: Some(parked), ..RunRecord::default() };
         assert_eq!(phase(&task(Status::InProgress, Some("factory/trail-7-a1"), run), ME, false), Phase::Interrupted);
         let earlier = WorkerBreach { run: "trail-7-a0".into(), ..breach };
-        let run = RunUpdate { worker_breach: Some(earlier), ..RunUpdate::default() };
+        let run = RunRecord { worker_breach: Some(earlier), ..RunRecord::default() };
         let t = task(Status::InProgress, Some("factory/trail-7-a1"), run);
         assert_eq!(phase(&t, ME, false), Phase::Interrupted, "an earlier run's breach is left behind");
     }
@@ -238,7 +236,7 @@ mod tests {
     #[test]
     fn a_reviewers_breach_not_yet_parked_is_finished_from_open_or_from_the_factorys_own_claim() {
         let breach = ReviewBreach { round: 1, attempt: 1, reason: "minutes".into(), parked: false };
-        let run = RunUpdate { review_breach: Some(breach.clone()), ..RunUpdate::default() };
+        let run = RunRecord { review_breach: Some(breach.clone()), ..RunRecord::default() };
         let open = task(Status::Open, None, run.clone());
         assert_eq!(phase(&open, ME, false), Phase::ReviewBreachUnparked { breach: &breach, claim: true });
         let mine = task(Status::InProgress, Some("factory"), run.clone());
@@ -247,50 +245,50 @@ mod tests {
         assert_eq!(phase(&workers, ME, true), Phase::Running, "a worker has started since");
         assert!(matches!(phase(&task(Status::InReview, None, run), ME, false), Phase::InReview(_)));
 
-        let next = RunUpdate {
+        let next = RunRecord {
             attempt: Some(2),
             sandbox: Some("trail-7-a2".into()),
             review_breach: Some(breach),
-            ..RunUpdate::default()
+            ..RunRecord::default()
         };
         assert_eq!(phase(&task(Status::Open, None, next), ME, false), Phase::Requeued, "left behind by attempt 2");
     }
 
     #[test]
     fn a_parked_task_says_what_reconcile_still_has_to_finish() {
-        let plain = task(Status::NeedsInput, Some("factory/trail-7-a1"), RunUpdate::default());
+        let plain = task(Status::NeedsInput, Some("factory/trail-7-a1"), RunRecord::default());
         assert_eq!(phase(&plain, ME, false), Phase::Parked(Parked { awaiting_done: false, unsettled: None }));
 
         let asked = request(RequestKind::Conflict);
         let run =
-            RunUpdate { unapproved_merge: Some(true), changes_requested: Some(asked.clone()), ..RunUpdate::default() };
+            RunRecord { unapproved_merge: Some(true), changes_requested: Some(asked.clone()), ..RunRecord::default() };
         let t = task(Status::NeedsInput, None, run);
         assert_eq!(phase(&t, ME, false), Phase::Parked(Parked { awaiting_done: true, unsettled: Some(&asked) }));
 
         let settled = ChangesRequested { settled: true, ..asked };
-        let run = RunUpdate { changes_requested: Some(settled), ..RunUpdate::default() };
+        let run = RunRecord { changes_requested: Some(settled), ..RunRecord::default() };
         let t = task(Status::NeedsInput, None, run);
         assert_eq!(phase(&t, ME, false), Phase::Parked(Parked { awaiting_done: false, unsettled: None }));
     }
 
     #[test]
     fn an_in_review_task_is_owed_a_review_until_its_attempt_has_one() {
-        let unreviewed = task(Status::InReview, None, RunUpdate { pr: Some(pr()), ..RunUpdate::default() });
+        let unreviewed = task(Status::InReview, None, RunRecord { pr: Some(pr()), ..RunRecord::default() });
         assert_eq!(phase(&unreviewed, ME, false), Phase::InReview(Review::Unreviewed));
-        let reviewed = RunUpdate { pr: Some(pr()), reviewed: Some(1), ..RunUpdate::default() };
+        let reviewed = RunRecord { pr: Some(pr()), reviewed: Some(1), ..RunRecord::default() };
         assert_eq!(phase(&task(Status::InReview, None, reviewed), ME, false), Phase::InReview(Review::AwaitingGates));
-        let no_pr = task(Status::InReview, None, RunUpdate::default());
+        let no_pr = task(Status::InReview, None, RunRecord::default());
         assert_eq!(phase(&no_pr, ME, false), Phase::InReview(Review::AwaitingGates), "nothing to review");
     }
 
     #[test]
     fn a_changes_request_waits_for_a_worker_or_was_cut_short_before_the_review_was_written() {
         let asked = request(RequestKind::Review);
-        let run = RunUpdate {
+        let run = RunRecord {
             pr: Some(pr()),
             review_rounds: Some(1),
             changes_requested: Some(asked.clone()),
-            ..RunUpdate::default()
+            ..RunRecord::default()
         };
         let cut_short = task(Status::InReview, None, run.clone());
         assert_eq!(phase(&cut_short, ME, false), Phase::InReview(Review::RequestCutShort(&asked)));
@@ -299,21 +297,21 @@ mod tests {
         assert_eq!(phase(&waiting, ME, false), Phase::InReview(Review::ReworkWaiting { request: Some(&asked) }));
 
         // Parked on (the count was reset) and then settled by a person: the request no longer stands.
-        let reset = RunUpdate { review_rounds: Some(0), ..run.clone() };
+        let reset = RunRecord { review_rounds: Some(0), ..run.clone() };
         let mut after_park = task(Status::InReview, None, reset);
         after_park.changes_requested = true;
         assert_eq!(phase(&after_park, ME, false), Phase::InReview(Review::ReworkWaiting { request: None }));
 
         // A request from an earlier attempt lingers until the next review.
-        let later = RunUpdate { attempt: Some(2), sandbox: Some("trail-7-a2".into()), ..run };
+        let later = RunRecord { attempt: Some(2), sandbox: Some("trail-7-a2".into()), ..run };
         assert_eq!(phase(&task(Status::InReview, None, later), ME, false), Phase::InReview(Review::Unreviewed));
     }
 
     #[test]
     fn the_rest_follow_the_status() {
-        assert_eq!(phase(&task(Status::Open, None, RunUpdate::default()), ME, false), Phase::Requeued);
-        assert_eq!(phase(&task(Status::Approved, None, RunUpdate::default()), ME, false), Phase::Approved);
-        assert_eq!(phase(&task(Status::Done, None, RunUpdate::default()), ME, false), Phase::Closed);
-        assert_eq!(phase(&task(Status::Cancelled, None, RunUpdate::default()), ME, false), Phase::Closed);
+        assert_eq!(phase(&task(Status::Open, None, RunRecord::default()), ME, false), Phase::Requeued);
+        assert_eq!(phase(&task(Status::Approved, None, RunRecord::default()), ME, false), Phase::Approved);
+        assert_eq!(phase(&task(Status::Done, None, RunRecord::default()), ME, false), Phase::Closed);
+        assert_eq!(phase(&task(Status::Cancelled, None, RunRecord::default()), ME, false), Phase::Closed);
     }
 }

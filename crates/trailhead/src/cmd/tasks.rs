@@ -211,7 +211,7 @@ fn meta_patch(pairs: &[String]) -> Result<Value> {
 }
 
 /// The JSON kind a scalar `factory.<field>` takes. The CLI can't depend on `trailhead-factory` (it isn't published),
-/// so a test checks this table against `RunUpdate`.
+/// so a test checks this table against `RunRecord`.
 const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("attempt", Kind::Unsigned),
     ("attempt_base", Kind::Unsigned),
@@ -394,7 +394,7 @@ pub(crate) async fn search(cx: &Ctx, query: &[String], limit: Option<i64>) -> Re
 mod tests {
     use super::*;
 
-    /// Keeps `FACTORY_FIELDS` in step with `RunUpdate`: a sample of each kind must set that field.
+    /// Keeps `FACTORY_FIELDS` in step with `RunRecord`: a sample of each kind must set that field.
     #[test]
     fn factory_fields_match_run_update() {
         for (field, kind) in FACTORY_FIELDS {
@@ -405,9 +405,9 @@ mod tests {
                 Kind::Object => unreachable!(),
             };
             assert!(kind.accepts(&sample), "{field}");
-            let run: trailhead_factory::RunUpdate = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
+            let run: trailhead_factory::RunRecord = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
             let back = serde_json::to_value(&run).unwrap();
-            assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunUpdate", kind.name());
+            assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunRecord", kind.name());
         }
     }
 
@@ -420,16 +420,16 @@ mod tests {
         assert_eq!(meta_patch(&["other.x=123".into()]).unwrap(), json!({ "other": { "x": 123 } }));
     }
 
-    /// Fields of `RunUpdate` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
+    /// Fields of `RunRecord` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
     const STRUCTURED: &[&str] =
         &["pr", "spend", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach"];
 
-    /// A new scalar field on `RunUpdate` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
+    /// A new scalar field on `RunRecord` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
     /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
     #[test]
     fn every_scalar_run_update_field_is_in_factory_fields() {
         let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 1, "url": "u" });
-        let full = trailhead_factory::RunUpdate {
+        let full = trailhead_factory::RunRecord {
             attempt: Some(1),
             sandbox: Some("x".into()),
             host: Some("x".into()),
@@ -479,13 +479,13 @@ mod tests {
             released: Some(1),
             unapproved_merge: Some(true),
         };
-        let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunUpdate isn't an object") };
+        let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunRecord isn't an object") };
         for key in map.keys() {
             let known = FACTORY_FIELDS.iter().any(|(f, _)| f == key) || STRUCTURED.contains(&key.as_str());
-            assert!(known, "RunUpdate.{key} is in neither FACTORY_FIELDS nor STRUCTURED");
+            assert!(known, "RunRecord.{key} is in neither FACTORY_FIELDS nor STRUCTURED");
         }
         for key in STRUCTURED {
-            assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunUpdate doesn't serialize");
+            assert!(map.contains_key(*key), "STRUCTURED lists {key}, which RunRecord doesn't serialize");
         }
     }
 

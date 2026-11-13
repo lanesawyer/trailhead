@@ -335,7 +335,7 @@ priority = 2
             Factory::with_targets(config, placed, Arc::new(tracker.clone()), Host::new(&HostConfig::default()));
 
         let key = tracker.add_task("TRAIL", "held", "");
-        tracker.set_run(&key, trailhead_factory::RunUpdate { target: Some("local".into()), ..Default::default() });
+        tracker.set_run(&key, trailhead_factory::RunRecord { target: Some("local".into()), ..Default::default() });
         let task = tracker.show(&key).await.unwrap();
         let mut survey = factory.survey().await;
         survey.holders.insert(key.clone(), "local".into());

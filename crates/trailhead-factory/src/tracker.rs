@@ -8,7 +8,7 @@ use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
 pub use trailhead_model::{Grade, Priority, Status, TaskKey, key_number};
 
-/// The key in task metadata that the factory's run fields ([`RunUpdate`]) live under.
+/// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = "factory";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,14 +29,14 @@ pub struct Task {
     /// since (`trailhead_model::changes_requested`). Computed by the tracker, never stored.
     #[serde(default)]
     pub changes_requested: bool,
-    /// The `factory` object in the task's metadata ([`RunUpdate`] fields).
-    pub run: RunUpdate,
+    /// The `factory` object in the task's metadata ([`RunRecord`] fields).
+    pub run: RunRecord,
 }
 
 impl Task {
     /// The factory's view of a Trailhead task. `holder` is the name of the agent holding its claim, if any.
     pub fn from_model(task: trailhead_model::Task, holder: Option<String>) -> Result<Task> {
-        let run = RunUpdate::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
+        let run = RunRecord::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
         let key = task.key;
         Ok(Task {
             project: key.project().to_string(),
@@ -53,122 +53,174 @@ impl Task {
     }
 }
 
-/// The factory's fields in task metadata. Writes merge: `None` leaves a field as it is.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RunUpdate {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<u32>,
+/// What a write does to one field of the run record.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Patch<T> {
+    /// Leave it as it is.
+    #[default]
+    Keep,
+    /// Remove it.
+    Clear,
+    Set(T),
+}
+
+impl<T> Patch<T> {
+    pub fn is_keep(&self) -> bool {
+        matches!(self, Patch::Keep)
+    }
+
+    /// Puts a field back to a value read earlier: set if there was one, cleared if there wasn't.
+    pub fn restore(was: Option<T>) -> Patch<T> {
+        was.map_or(Patch::Clear, Patch::Set)
+    }
+
+    fn apply(self, field: &mut Option<T>) {
+        match self {
+            Patch::Keep => {}
+            Patch::Clear => *field = None,
+            Patch::Set(value) => *field = Some(value),
+        }
+    }
+}
+
+/// Set when there is a value, otherwise kept: for a field a write only sometimes has something to say about.
+impl<T> From<Option<T>> for Patch<T> {
+    fn from(value: Option<T>) -> Patch<T> {
+        value.map_or(Patch::Keep, Patch::Set)
+    }
+}
+
+/// In the stored metadata's merge patch a cleared field is `null`, which removes the key, and a kept one is absent.
+impl<T: Serialize> Serialize for Patch<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Patch::Set(value) => value.serialize(serializer),
+            Patch::Keep | Patch::Clear => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Patch<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Patch<T>, D::Error> {
+        Ok(Option::<T>::deserialize(deserializer)?.map_or(Patch::Clear, Patch::Set))
+    }
+}
+
+/// Declares the factory's fields once, as the record that is read ([`RunRecord`]) and the write that changes it
+/// ([`RunPatch`]).
+macro_rules! run_fields {
+    ($($(#[$doc:meta])* $name:ident: $ty:ty,)*) => {
+        /// The factory's fields in task metadata, as they are read.
+        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+        pub struct RunRecord {
+            $(
+                $(#[$doc])*
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub $name: Option<$ty>,
+            )*
+        }
+
+        /// A write to a task's [`RunRecord`]: each field kept, cleared or set.
+        #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+        pub struct RunPatch {
+            $(
+                #[serde(default, skip_serializing_if = "Patch::is_keep")]
+                pub $name: Patch<$ty>,
+            )*
+        }
+
+        impl RunRecord {
+            /// The record after `patch`.
+            pub fn apply(&mut self, patch: RunPatch) {
+                $( patch.$name.apply(&mut self.$name); )*
+            }
+        }
+    };
+}
+
+run_fields! {
+    attempt: u32,
     /// The run's name, which its sub-agent shares (`trail-42-a1`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sandbox: Option<String>,
+    sandbox: String,
     /// The pooled sandbox the run is on, when it isn't one named after the run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
+    host: String,
     /// The target the run's sandbox is on (`docs/factory/targets.md`), beside `host`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<String>,
+    target: String,
     /// When the run's agent was started, in unix seconds, so a control plane that reattaches after a restart keeps
     /// the run's wall-clock budget honest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pr: Option<PrRef>,
+    started: i64,
+    profile: String,
+    pr: PrRef,
     /// Review rounds started on the current attempt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_rounds: Option<u32>,
+    review_rounds: u32,
     /// The attempt whose PR the agent review last finished on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reviewed: Option<u32>,
+    reviewed: u32,
     /// Total spend across attempts and reviews.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spend: Option<Usd>,
+    spend: Usd,
     /// The run whose report was handled and its spend counted, so a control plane that restarts before the run's
     /// sandbox is released doesn't reattach and count it again (TRAIL-255).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub concluded: Option<String>,
+    concluded: String,
     /// Why the last attempt failed, which the next attempt is told.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<String>,
+    failure: String,
     /// Runs that failed before their agent started (TRAIL-159). They don't count as attempts, but each revoked a
     /// sub-agent, so a retry's name carries this count to stay unique.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retries: Option<u32>,
+    retries: u32,
     /// Runs in a row that failed on the infrastructure, before or after the agent started (TRAIL-172). They don't
     /// count as attempts; `max_infra_failures` caps them. Reset when an agent ends a run, or when the cap parks the task.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub infra_failures: Option<u32>,
+    infra_failures: u32,
     /// The review that last asked for changes, which the rework on the PR branch is told.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub changes_requested: Option<ChangesRequested>,
+    changes_requested: ChangesRequested,
     /// A reviewer breach the task is to be parked for, written before the task is reopened so that reconcile can
     /// finish a park that was cut short (TRAIL-366).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_breach: Option<ReviewBreach>,
+    review_breach: ReviewBreach,
     /// A worker's budget breach the task is to be parked for, written with the run's spend so that reconcile can
     /// finish a park that was cut short instead of requeueing the task on a fresh budget (TRAIL-451).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worker_breach: Option<WorkerBreach>,
+    worker_breach: WorkerBreach,
     /// Conflict reworks of the task's PR (TRAIL-221). They don't count as review rounds; `max_conflict_reworks` caps them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conflict_reworks: Option<u32>,
+    conflict_reworks: u32,
     /// The attempt the last review asked to change. `max_attempts` counts the runs after it, so reworks don't use up
     /// the attempts of the task as a whole.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt_base: Option<u32>,
+    attempt_base: u32,
     /// The attempt at which the control plane parked the task for hitting `max_attempts`. A run that starts on the
     /// reopened task counts from it (see `attempt_floor`), so a human only has to reopen it (TRAIL-308).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gave_up: Option<u32>,
+    gave_up: u32,
     /// The attempt that ended in a question. A give-up recorded in `failure` from before it isn't "the attempt
     /// before" the next one for the backstop on repeated give-ups, though the next attempt is still told of it
     /// (TRAIL-805).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asked: Option<u32>,
+    asked: u32,
     /// How the task's PR was merged, once it has been.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merged: Option<Merged>,
+    merged: Merged,
     /// A person merged the PR without the approval core requires to finish the task, so the task is being parked for a
     /// person to mark it done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
     /// outside `needs_input` finishes the park rather than closing the task (TRAIL-729). `merged` alone can't say
     /// this: it is also recorded by a close that failed before the park.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unapproved_merge: Option<bool>,
+    unapproved_merge: bool,
     /// The PR's grade and what raised it above the task's.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grade: Option<PrGrade>,
+    grade: PrGrade,
     /// The task was skipped for having no grade, and said so (`set one to queue it`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ungraded: Option<bool>,
+    ungraded: bool,
     /// The PR head commit the agent review last ran on, so a verdict on an older head isn't counted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reviewed_head: Option<String>,
+    reviewed_head: String,
     /// The merger's last decision on the PR.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merge: Option<MergeDecision>,
+    merge: MergeDecision,
     /// The head the merger is about to merge, written before `CodeHost::merge` so that a merge whose close failed is
-    /// still attributed to the merger. Empty once the host said the merge didn't happen.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub merging: Option<String>,
+    /// still attributed to the merger. Cleared once the host said the merge didn't happen.
+    merging: String,
     /// The PR's head from before a conflict rework pushed (its request's `head`), until the host answers `mergeable`
     /// for another head (TRAIL-446). A reading while the PR still shows this head is the old head's, so it doesn't
-    /// count. Empty once settled; written empty to clear it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stale_head: Option<String>,
-    /// When the control plane gave up the parked task's pooled sandbox for waiting work (unix seconds; 0 once a new run
-    /// has started, since a null write leaves the field as it is), so reconcile and `factory status` don't look for
-    /// it (TRAIL-601).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub released: Option<i64>,
+    /// count. Cleared once settled.
+    stale_head: String,
+    /// When the control plane gave up the parked task's pooled sandbox for waiting work (unix seconds), so reconcile
+    /// and `factory status` don't look for it (TRAIL-601). Cleared when a new run starts.
+    released: i64,
 }
 
-impl RunUpdate {
+impl RunRecord {
     /// The factory's fields in `task`'s metadata; the defaults for a task it hasn't touched.
-    pub fn of(task: &trailhead_model::Task) -> serde_json::Result<RunUpdate> {
+    pub fn of(task: &trailhead_model::Task) -> serde_json::Result<RunRecord> {
         match task.metadata.get(METADATA_KEY) {
-            Some(v) => serde_json::from_value(v.clone()),
-            None => Ok(RunUpdate::default()),
+            Some(v) => serde_json::from_value(v.clone()).map(RunRecord::without_stand_ins),
+            None => Ok(RunRecord::default()),
         }
     }
 }
@@ -344,70 +396,16 @@ pub struct WorkerBreach {
     pub stuck: bool,
 }
 
-impl RunUpdate {
-    pub fn merge(&mut self, update: RunUpdate) {
-        let RunUpdate {
-            attempt,
-            sandbox,
-            host,
-            target,
-            started,
-            profile,
-            pr,
-            review_rounds,
-            conflict_reworks,
-            reviewed,
-            spend,
-            concluded,
-            failure,
-            retries,
-            infra_failures,
-            changes_requested,
-            review_breach,
-            worker_breach,
-            attempt_base,
-            gave_up,
-            asked,
-            merged,
-            unapproved_merge,
-            grade,
-            ungraded,
-            reviewed_head,
-            merge,
-            merging,
-            stale_head,
-            released,
-        } = update;
-        self.attempt = attempt.or(self.attempt.take());
-        self.sandbox = sandbox.or(self.sandbox.take());
-        self.host = host.or(self.host.take());
-        self.target = target.or(self.target.take());
-        self.started = started.or(self.started.take());
-        self.profile = profile.or(self.profile.take());
-        self.pr = pr.or(self.pr.take());
-        self.review_rounds = review_rounds.or(self.review_rounds.take());
-        self.conflict_reworks = conflict_reworks.or(self.conflict_reworks.take());
-        self.reviewed = reviewed.or(self.reviewed.take());
-        self.spend = spend.or(self.spend.take());
-        self.concluded = concluded.or(self.concluded.take());
-        self.failure = failure.or(self.failure.take());
-        self.retries = retries.or(self.retries.take());
-        self.infra_failures = infra_failures.or(self.infra_failures.take());
-        self.changes_requested = changes_requested.or(self.changes_requested.take());
-        self.review_breach = review_breach.or(self.review_breach.take());
-        self.worker_breach = worker_breach.or(self.worker_breach.take());
-        self.attempt_base = attempt_base.or(self.attempt_base.take());
-        self.gave_up = gave_up.or(self.gave_up.take());
-        self.asked = asked.or(self.asked.take());
-        self.merged = merged.or(self.merged.take());
-        self.unapproved_merge = unapproved_merge.or(self.unapproved_merge.take());
-        self.grade = grade.or(self.grade.take());
-        self.ungraded = ungraded.or(self.ungraded.take());
-        self.reviewed_head = reviewed_head.or(self.reviewed_head.take());
-        self.merge = merge.or(self.merge.take());
-        self.merging = merging.or(self.merging.take());
-        self.stale_head = stale_head.or(self.stale_head.take());
-        self.released = released.or(self.released.take());
+impl RunRecord {
+    /// Records from before a write could clear a field (TRAIL-1459) cleared one by writing a stand-in: an empty
+    /// string, or zero. A task still in flight may carry one, and it reads as the absence it stood for.
+    fn without_stand_ins(mut self) -> RunRecord {
+        self.merging = self.merging.filter(|head| !head.is_empty());
+        self.stale_head = self.stale_head.filter(|head| !head.is_empty());
+        self.released = self.released.filter(|at| *at > 0);
+        self.gave_up = self.gave_up.filter(|attempt| *attempt > 0);
+        self.failure = self.failure.filter(|failure| !failure.is_empty());
+        self
     }
 
     /// The last request for changes, unless a later review has since finished on another attempt. It may be settled:
@@ -428,7 +426,7 @@ impl RunUpdate {
     }
 
     pub fn is_empty(&self) -> bool {
-        *self == RunUpdate::default()
+        *self == RunRecord::default()
     }
 }
 
@@ -557,7 +555,7 @@ pub trait Tracker: Send + Sync {
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;
     async fn release(&self, task: &TaskKey) -> Result<()>;
-    async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()>;
+    async fn report(&self, task: &TaskKey, update: RunPatch) -> Result<()>;
     /// Moves a task to review, leaving `handoff` on it first. The handoff is what answers a review that asked for
     /// changes, so a task coming back from a rework stops being one waiting on it.
     async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()>;
@@ -604,6 +602,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_patch_writes_only_what_it_changes_and_a_clear_as_null() {
+        let patch = RunPatch { attempt: Patch::Set(2), merging: Patch::Clear, ..RunPatch::default() };
+        let written = serde_json::to_value(&patch).unwrap();
+        assert_eq!(written, serde_json::json!({"attempt": 2, "merging": null}));
+        assert_eq!(serde_json::from_value::<RunPatch>(written).unwrap(), patch);
+
+        let mut run = RunRecord { attempt: Some(1), merging: Some("abc".into()), ..RunRecord::default() };
+        run.host = Some("w1".into());
+        run.apply(patch);
+        assert_eq!((run.attempt, run.merging, run.host.as_deref()), (Some(2), None, Some("w1")));
+    }
+
+    #[test]
+    fn a_stand_in_from_before_clears_reads_as_absent() {
+        let task: trailhead_model::Task = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001", "workspace_id": "00000000-0000-0000-0000-000000000002",
+            "project_id": "00000000-0000-0000-0000-000000000003", "key": "TRAIL-7", "title": "t", "description": "",
+            "status": "open", "priority": 2, "version": 1, "created_by": "00000000-0000-0000-0000-000000000004",
+            "created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z",
+            "metadata": {"factory": {"attempt": 3, "merging": "", "stale_head": "", "released": 0, "gave_up": 0, "failure": ""}},
+        }))
+        .unwrap();
+        let run = RunRecord::of(&task).unwrap();
+        assert_eq!(run, RunRecord { attempt: Some(3), ..RunRecord::default() });
+    }
+
+    #[test]
     fn a_request_recorded_before_kinds_reads_its_kind_from_the_flag_and_the_reviewer() {
         let read = |v: serde_json::Value| serde_json::from_value::<ChangesRequested>(v).unwrap().kind;
         let old = |reviewer: &str, conflict: bool| serde_json::json!({"reviewer": reviewer, "body": "b", "attempt": 1, "conflict": conflict});
@@ -640,7 +665,7 @@ mod tests {
             priority: Priority::new(priority).unwrap(),
             holder: None,
             changes_requested,
-            run: RunUpdate::default(),
+            run: RunRecord::default(),
         }
     }
 

@@ -87,10 +87,12 @@ async fn going_on_target(t: &Two, compute: &FakeCompute, target: &str, host: &st
     tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = tracker.sub_agent(&name);
     sub.claim(&key).await.unwrap();
-    let report = trailhead_factory::RunUpdate {
-        host: Some(host.into()),
-        target: Some(target.into()),
-        started: Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64),
+    let report = trailhead_factory::RunPatch {
+        host: trailhead_factory::Patch::Set(host.into()),
+        target: trailhead_factory::Patch::Set(target.into()),
+        started: trailhead_factory::Patch::Set(
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64,
+        ),
         ..update(1, &name)
     };
     sub.report(&key, report).await.unwrap();
@@ -211,7 +213,12 @@ async fn a_run_on_a_reachable_target_is_still_requeued_when_another_is_down() {
     tracker.create_sub_agent(&name, "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = tracker.sub_agent(&name);
     sub.claim(&lost).await.unwrap();
-    sub.report(&lost, trailhead_factory::RunUpdate { target: Some("cloud".into()), ..update(1, &name) }).await.unwrap();
+    sub.report(
+        &lost,
+        trailhead_factory::RunPatch { target: trailhead_factory::Patch::Set("cloud".into()), ..update(1, &name) },
+    )
+    .await
+    .unwrap();
     t.local.compute.set_unreachable(true);
     let done = t.factory.reconcile().await.unwrap();
     assert_eq!(done.requeued, vec![lost.0.clone()], "the cloud answered and has no sandbox for it");

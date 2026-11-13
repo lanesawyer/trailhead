@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use bevy::prelude::*;
 use trailhead_factory::{
-    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunStatus, RunUpdate, SandboxStatus, Sequenced, TaskKey,
+    ControlState, FactoryEvent, FactoryState, Grade, RunPhase, RunRecord, RunStatus, SandboxStatus, Sequenced, TaskKey,
     UsageWindow, Usd,
 };
 use trailhead_wire::ui::RepoSnapshot;
@@ -378,7 +378,7 @@ impl FactoryMirror {
 /// opened its PR. Its metadata alone doesn't say so: the control plane also marks a queued task it skipped for having
 /// no grade, which is how work done by hand is filed under a queue task (TRAIL-1159).
 pub fn factory_ran(task: &trailhead_model::Task) -> bool {
-    RunUpdate::of(task)
+    RunRecord::of(task)
         .is_ok_and(|run| run.attempt.is_some() || run.sandbox.is_some() || run.retries.is_some() || run.pr.is_some())
 }
 
@@ -393,7 +393,7 @@ pub struct PrLink {
 
 /// The PR the factory opened for `task` (the merged one once it merged), if it has one with a page.
 pub fn pr_link(task: &trailhead_model::Task) -> Option<PrLink> {
-    let run = RunUpdate::of(task).ok()?;
+    let run = RunRecord::of(task).ok()?;
     let pr = run.merged.map(|m| m.pr).or(run.pr)?;
     (!pr.url.is_empty())
         .then(|| PrLink { label: format!("{}/{}#{}", pr.repo.owner, pr.repo.name, pr.number), url: pr.url })

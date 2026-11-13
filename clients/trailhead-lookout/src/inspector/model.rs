@@ -157,7 +157,7 @@ pub struct Subtask {
 }
 
 /// The PR panel from the task's run; none when it has no PR yet.
-pub fn pr_panel(run: &RunUpdate) -> Option<PrPanel> {
+pub fn pr_panel(run: &RunRecord) -> Option<PrPanel> {
     let merged = run.merged.as_ref();
     let pr = merged.map(|m| &m.pr).or(run.pr.as_ref())?;
     let state = match merged {
@@ -253,7 +253,7 @@ pub fn build(
                 .or_else(|| input.tasks.iter().find(|t| t.id.to_string() == *id))?;
             let status = task.status;
             let is_factory = crate::factory::factory_ran(task);
-            let run = RunUpdate::of(task).ok();
+            let run = RunRecord::of(task).ok();
             let holder = live_claims(input.claims, input.now).get(&task.id).map(|c| c.holder_id);
             let holder_agent = holder.and_then(agent_name);
 
@@ -340,7 +340,7 @@ pub(super) fn facts(
     input: &Input,
     task: &Task,
     fetched: Fetched,
-    run: Option<&RunUpdate>,
+    run: Option<&RunRecord>,
     agent_name: impl Fn(Uuid) -> Option<String>,
 ) -> TaskFacts {
     let text = clock();
@@ -756,9 +756,9 @@ mod tests {
     fn a_merged_pr_says_who_merged_it() {
         let factory = json!({"merged": {"by": "human", "commit": "abcdef0123",
                                          "pr": {"repo": {"owner": "o", "name": "r"}, "number": 3, "url": "https://x/pull/3"}}});
-        let run: RunUpdate = serde_json::from_value(factory).unwrap();
+        let run: RunRecord = serde_json::from_value(factory).unwrap();
         assert_eq!(pr_panel(&run).unwrap().state, "merged by a person as abcdef01");
-        assert!(pr_panel(&RunUpdate::default()).is_none());
+        assert!(pr_panel(&RunRecord::default()).is_none());
     }
 
     #[test]

@@ -164,9 +164,9 @@ async fn reconcile_does_not_reattach_to_a_run_whose_report_was_already_counted()
     let key = going(&r, Usd::dollars(0.5), 120).await;
     // The run ended and `conclude` counted its spend, then died before the sandbox was released.
     let sub = Arc::new(r.tracker.clone()).sub_agent("trail-1-a1");
-    let counted = trailhead_factory::RunUpdate {
-        spend: Some(Usd::dollars(1.5)),
-        concluded: Some("trail-1-a1".into()),
+    let counted = trailhead_factory::RunPatch {
+        spend: trailhead_factory::Patch::Set(Usd::dollars(1.5)),
+        concluded: trailhead_factory::Patch::Set("trail-1-a1".into()),
         ..Default::default()
     };
     sub.report(&key, counted).await.unwrap();
@@ -383,9 +383,9 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
     r.factory.tick().await.unwrap();
     // A conflict rework was requested in the task's metadata, but the control plane stopped before the factory's
     // request_changes review was recorded, so the task isn't yet waiting on a rework.
-    let cut_short = trailhead_factory::RunUpdate {
-        conflict_reworks: Some(1),
-        changes_requested: Some(trailhead_factory::ChangesRequested {
+    let cut_short = trailhead_factory::RunPatch {
+        conflict_reworks: trailhead_factory::Patch::Set(1),
+        changes_requested: trailhead_factory::Patch::Set(trailhead_factory::ChangesRequested {
             reviewer: "factory".into(),
             body: "Merge main.".into(),
             attempt: 1,

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, Result, RunUpdate, Status, Task, TaskKey,
-    TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, Result, RunPatch, RunRecord, Status,
+    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +140,7 @@ impl FakeTracker {
                 priority: Priority::default(),
                 holder: None,
                 changes_requested: false,
-                run: RunUpdate::default(),
+                run: RunRecord::default(),
             },
         );
         key
@@ -207,7 +207,7 @@ impl FakeTracker {
     }
 
     /// Sets the factory fields of a task as they stand: a PR and changes requested on it make a rework.
-    pub fn set_run(&self, key: &TaskKey, run: RunUpdate) {
+    pub fn set_run(&self, key: &TaskKey, run: RunRecord) {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().run = run;
     }
 
@@ -600,14 +600,14 @@ impl Tracker for FakeTracker {
         released
     }
 
-    async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
+    async fn report(&self, task: &TaskKey, update: RunPatch) -> Result<()> {
         *self.state.lock().unwrap().reports.entry(task.clone()).or_default() += 1;
         self.inject(TrackerOp::Report)?;
         self.write(task, |t, me| {
             if let Some(h) = t.holder.as_deref().filter(|h| *h != me) {
                 return Err(Error::Conflict(format!("{} is held by {h}", t.key.0)));
             }
-            t.run.merge(update);
+            t.run.apply(update);
             Ok(())
         })
     }
@@ -888,7 +888,7 @@ mod tests {
         let tracker = FakeTracker::new("factory");
         let key = tracker.add_task("TRAIL", "t", "d");
         tracker.state.lock().unwrap().tasks.get_mut(&key).unwrap().holder = Some("someone-else".into());
-        assert!(matches!(tracker.report(&key, RunUpdate::default()).await, Err(Error::Conflict(_))));
+        assert!(matches!(tracker.report(&key, RunPatch::default()).await, Err(Error::Conflict(_))));
     }
 
     #[tokio::test]

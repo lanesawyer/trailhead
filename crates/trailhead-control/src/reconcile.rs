@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
-    CI_REVIEWER, ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, RequestKind, Result, RunUpdate,
-    Sandbox, Status, Task, TaskKey, WorkerBreach, label,
+    CI_REVIEWER, ChangesRequested, CiState, Error, Merged, MergedBy, Patch, PrRef, PrState, RequestKind, Result,
+    RunPatch, Sandbox, Status, Task, TaskKey, WorkerBreach, label,
 };
 
 use crate::phase::{Parked, Phase, Review, may_be_running, phase, unreviewed};
@@ -120,7 +120,7 @@ impl Factory {
             for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
-                    && t.run.released.is_none_or(|at| at <= 0)
+                    && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             }) {
                 // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
@@ -268,7 +268,7 @@ impl Factory {
         let merged_by_human = merged.by == MergedBy::Human;
         let pr_url = merged.pr.url.clone();
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
-        self.tracker.report(&task.key, RunUpdate { merged: Some(merged), ..RunUpdate::default() }).await?;
+        self.tracker.report(&task.key, RunPatch { merged: Patch::Set(merged), ..RunPatch::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
         // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
@@ -285,7 +285,7 @@ impl Factory {
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
                 self.tracker
-                    .report(&task.key, RunUpdate { unapproved_merge: Some(true), ..RunUpdate::default() })
+                    .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
                     .await?;
                 return self.park_unapproved_merge(task, &pr_url).await;
             }
@@ -329,7 +329,7 @@ impl Factory {
     /// rounds, so a PR that keeps conflicting is parked for a human without using up its reviews (TRAIL-199, TRAIL-221).
     pub(crate) async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
-        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
+        self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
         let base = &self.config.repo.base_branch;
         let body = messages::conflict_feedback(&pr.url, base);
         tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
@@ -391,7 +391,7 @@ impl Factory {
             self.tracker.unapprove(&task.key).await?;
         }
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
-        self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
+        self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
         tracing::warn!(task = %task.key, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
         let requested = ChangesRequested {
@@ -433,13 +433,13 @@ impl Factory {
                 // the old head's. While the PR shows the head from before the push, or the host hasn't answered, the
                 // reading is unknown. An answer for any other head (the rework's, or one pushed since) settles the
                 // mark, so a head that moves on can't leave it stuck (TRAIL-446).
-                let Some(stale) = task.run.stale_head.as_deref().filter(|h| !h.is_empty()) else {
+                let Some(stale) = task.run.stale_head.as_deref() else {
                     return Ok(PrSettle::Open { mergeable, head });
                 };
                 if mergeable.is_none() || head.as_deref() == Some(stale) {
                     return Ok(PrSettle::Open { mergeable: None, head });
                 }
-                let settled = RunUpdate { stale_head: Some(String::new()), ..RunUpdate::default() };
+                let settled = RunPatch { stale_head: Patch::Clear, ..RunPatch::default() };
                 if let Err(e) = self.tracker.report(&task.key, settled).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't clear the stale head; reading it again");
                 }
@@ -639,7 +639,7 @@ impl Factory {
     /// (TRAIL-289), else a person. An intent for another head is stale: the host didn't merge it, and the PR was
     /// pushed to and merged by someone since (TRAIL-456).
     pub(crate) async fn merged_by(&self, task: &Task, pr: &PrRef) -> Result<MergedBy> {
-        let Some(intent) = task.run.merging.as_deref().filter(|h| !h.is_empty()) else { return Ok(MergedBy::Human) };
+        let Some(intent) = task.run.merging.as_deref() else { return Ok(MergedBy::Human) };
         let Some(codehost) = &self.codehost else { return Ok(MergedBy::Human) };
         Ok(if codehost.head(pr).await? == intent { MergedBy::Merger } else { MergedBy::Human })
     }

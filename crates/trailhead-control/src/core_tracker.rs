@@ -12,8 +12,8 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, Result, RunUpdate,
-    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, Result, RunPatch,
+    RunRecord, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -113,7 +113,7 @@ impl CoreTracker {
     async fn tasks(&self, ctx: &Ctx, tasks: impl IntoIterator<Item = trailhead_core::Task>) -> Result<Vec<Task>> {
         let mut good = Vec::new();
         for t in tasks {
-            if let Err(e) = RunUpdate::of(&t) {
+            if let Err(e) = RunRecord::of(&t) {
                 self.flag_bad_metadata(ctx, &t, &e.to_string()).await;
                 continue;
             }
@@ -249,7 +249,7 @@ impl CoreTracker {
 fn bad_fields(t: &trailhead_core::Task) -> Vec<String> {
     let Some(serde_json::Value::Object(map)) = t.metadata.get(METADATA_KEY) else { return Vec::new() };
     let bad =
-        |(k, v): &(&String, &serde_json::Value)| serde_json::from_value::<RunUpdate>(json!({ k.as_str(): v })).is_err();
+        |(k, v): &(&String, &serde_json::Value)| serde_json::from_value::<RunRecord>(json!({ k.as_str(): v })).is_err();
     map.iter().filter(bad).map(|(k, _)| format!("`{k}`")).collect()
 }
 
@@ -439,7 +439,7 @@ impl Tracker for CoreTracker {
         Ok(())
     }
 
-    async fn report(&self, task: &TaskKey, update: RunUpdate) -> Result<()> {
+    async fn report(&self, task: &TaskKey, update: RunPatch) -> Result<()> {
         let ctx = self.ctx().await?;
         let fields = serde_json::to_value(update).map_err(|e| Error::Other(e.to_string()))?;
         let patch = TaskPatch { metadata: Some(json!({ METADATA_KEY: fields })), ..TaskPatch::default() };
