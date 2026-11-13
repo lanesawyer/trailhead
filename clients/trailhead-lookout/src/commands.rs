@@ -239,7 +239,7 @@ fn dispatch(mut outbox: ResMut<Outbox>, mut net: MessageWriter<SendNet>) {
         }
         p.attempts += 1;
         p.stage = Stage::Sent;
-        net.write(SendNet(NetCommand::Request { id: p.id, attempt: p.attempts, request: p.request.clone() }));
+        net.write(SendNet(NetCommand::Request { id: p.id, attempt: p.attempts, request: Box::new(p.request.clone()) }));
     }
 }
 

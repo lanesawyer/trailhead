@@ -44,7 +44,7 @@ fn step(app: &mut App) -> (Vec<(CommandId, u32, Request)>, Vec<CommandDone>) {
         .resource_mut::<Messages<SendNet>>()
         .drain()
         .filter_map(|SendNet(c)| match c {
-            NetCommand::Request { id, attempt, request } => Some((id, attempt, request)),
+            NetCommand::Request { id, attempt, request } => Some((id, attempt, *request)),
             _ => None,
         })
         .collect();
