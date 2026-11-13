@@ -306,7 +306,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     let mut harness_secrets = HarnessSecrets::new();
     if let Some(token) = &opts.claude_oauth_token {
         if adapter == CLAUDE_CODE {
-            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), token.clone());
+            harness_secrets.insert(CLAUDE_CODE_OAUTH_TOKEN.into(), trailhead_factory::Secret::new(token.clone()));
         } else {
             tracing::warn!(harness = %adapter, "a Claude subscription token is set but this harness can't use it; ignoring it");
         }

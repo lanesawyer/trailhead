@@ -17,7 +17,7 @@ pub fn providers() -> Registry<ProviderKind> {
 
 #[cfg(test)]
 mod tests {
-    use trailhead_factory::HarnessSetup;
+    use trailhead_factory::{HarnessSetup, Secret};
 
     use super::*;
 
@@ -25,7 +25,7 @@ mod tests {
     fn claude_code_asks_for_egress_only_in_subscription_mode() {
         let kind = harnesses().get(CLAUDE_CODE).unwrap().clone();
         assert!((kind.egress)(&Default::default()).is_empty());
-        let secrets = [(CLAUDE_CODE_OAUTH_TOKEN.to_string(), "t".to_string())].into();
+        let secrets = [(CLAUDE_CODE_OAUTH_TOKEN.to_string(), Secret::new("t"))].into();
         assert_eq!((kind.egress)(&secrets), ["api.anthropic.com"]);
         let _ = (kind.build)(&HarnessSetup { executable: "claude".into(), secrets });
     }

@@ -437,11 +437,18 @@ pub fn is_factory_agent(name: &str) -> bool {
     name == "factory" || name.starts_with("factory/")
 }
 
-/// A Trailhead sub-agent and its bearer token, handed to a sandbox at start.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A Trailhead sub-agent and its bearer token, handed to a sandbox at start. `Debug` leaves the token out, since a
+/// credential rides in a [`RunRequest`](crate::RunRequest) that gets logged.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Credential {
     pub agent: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credential").field("agent", &self.agent).finish_non_exhaustive()
+    }
 }
 
 /// A task tracker, bound to one identity. The control plane holds one for its

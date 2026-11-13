@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Credential, Endpoint, Error, EventSink, Feedback, HarnessSecrets, ModelId, PrGrade, PrRef, Repo, Result, Role,
-    RunEvent, SandboxId, TaskSpec, Usage, Verdict,
+    RunEvent, SandboxId, Secret, TaskSpec, Usage, Verdict,
 };
 
 /// A named check and the shell command that runs it in the repo (`docs/factory/sandbox.md`).
@@ -251,7 +251,7 @@ impl From<RawSecrets> for DaemonSecrets {
     fn from(raw: RawSecrets) -> DaemonSecrets {
         let mut harness_secrets = raw.harness_secrets;
         if let Some(token) = raw.claude_oauth_token {
-            harness_secrets.entry(LEGACY_TOKEN_KEY.into()).or_insert(token);
+            harness_secrets.entry(LEGACY_TOKEN_KEY.into()).or_insert(Secret::new(token));
         }
         DaemonSecrets {
             secret_key: raw.secret_key,
@@ -385,6 +385,19 @@ pub fn install_host_allowed(req: &PrepareRequest, need: &InstallHost) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn secrets_stay_out_of_debug_output() {
+        let credential = Credential { agent: "factory/trail-1-a1".into(), token: "th_hunter2".into() };
+        let printed = format!("{credential:?}");
+        assert!(printed.contains("factory/trail-1-a1") && !printed.contains("th_hunter2"), "{printed}");
+        let setup = crate::HarnessSetup {
+            executable: "claude".into(),
+            secrets: [("oauth_token".to_string(), Secret::new("sk-ant-oat-hunter2"))].into(),
+        };
+        let printed = format!("{setup:?}");
+        assert!(printed.contains("oauth_token") && !printed.contains("hunter2"), "{printed}");
+    }
+
     fn request(tools: &[&str], hosts: &[(&str, &[&str])]) -> PrepareRequest {
         PrepareRequest {
             repo: Repo { owner: "o".into(), name: "r".into() },
@@ -440,7 +453,7 @@ mod tests {
         let old: DaemonSecrets =
             serde_json::from_str(r#"{"secret_key":"aa","control_plane":"bb","claude_oauth_token":"tok"}"#).unwrap();
         assert_eq!(old.harness, "claude-code");
-        assert_eq!(old.harness_secrets.get("oauth_token").map(String::as_str), Some("tok"));
+        assert_eq!(old.harness_secrets.get("oauth_token").map(Secret::expose), Some("tok"));
         let json = serde_json::to_string(&old).unwrap();
         assert!(!json.contains("claude_oauth_token"), "{json}");
         let back: DaemonSecrets = serde_json::from_str(&json).unwrap();
