@@ -135,25 +135,41 @@ fn error_code() -> utoipa::openapi::Object {
     ObjectBuilder::new().schema_type(Type::String).enum_values(Some(ERROR_CODES.iter().copied())).build()
 }
 
-/// `GET /v1/health`.
+/// `GET /v1/health`, built by the handler itself so the schema can't drift from what is sent.
 #[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct Health {
     /// False when the server is up but its store can't serve requests (see `store_error`).
-    ok: bool,
-    store_error: Option<String>,
-    version: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_error: Option<String>,
+    pub version: String,
     /// Identifies the server's data directory, so a client can tell its own
     /// machine's server from one reached through a tunnel.
-    instance: Option<String>,
+    pub instance: Option<String>,
     /// This and the paths below are only sent to callers with a token.
-    pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     /// The binary this server was started from.
-    exe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe: Option<String>,
     /// That binary's modification time when the server started, in Unix milliseconds.
-    exe_modified_ms: Option<u64>,
-    db: Option<String>,
-    started_at: jiff::Timestamp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exe_modified_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+    pub started_at: jiff::Timestamp,
+    /// Started at a terminal rather than by the CLI in the background.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub foreground: bool,
+    /// The factory's runs in flight, from a server that runs its control plane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runs_in_flight: Option<usize>,
+    /// Set while a stop signal has the server draining the factory before it exits.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
+    /// Whether the server restarts into a new binary once its runs finish. Always sent: a CLI only asks for the
+    /// upgrade restart when it sees this field, since a server from before it would die of the signal.
+    pub upgrade_pending: bool,
 }
 
 /// `GET /v1/me`: the caller.
