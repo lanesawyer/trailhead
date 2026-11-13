@@ -22,7 +22,7 @@ pub(crate) struct Held {
 impl Factory {
     /// Whether the merger is holding its merges for a person's PR.
     pub(crate) fn merges_held(&self) -> bool {
-        self.held.lock().unwrap().is_some()
+        self.merger.held.lock().unwrap().is_some()
     }
 
     /// One merger pass over the open PRs that aren't the factory's own (`factory_prs`, the numbers tasks name): finds
@@ -66,6 +66,7 @@ impl Factory {
         }
         // The hold stays as it is until every fallible call has answered: an error returns with it untouched.
         let (mut updating, mut conflicted) = self
+            .merger
             .held
             .lock()
             .unwrap()
@@ -102,11 +103,11 @@ impl Factory {
     }
 
     fn set_hold(&self, number: u64, updating: Option<(String, Instant)>, conflicted: Option<String>) {
-        *self.held.lock().unwrap() = Some(Held { number, updating, conflicted });
+        *self.merger.held.lock().unwrap() = Some(Held { number, updating, conflicted });
     }
 
     fn clear_hold(&self) {
-        *self.held.lock().unwrap() = None;
+        *self.merger.held.lock().unwrap() = None;
         if self.status.holding(None) {
             tracing::info!("no longer holding merges");
         }

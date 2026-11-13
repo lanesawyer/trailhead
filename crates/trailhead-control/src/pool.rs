@@ -38,13 +38,13 @@ impl Factory {
                 opened.push(need.host.clone());
             }
             p.compute.set_egress(&sandbox.id, &egress).await?;
-            self.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
+            self.pool.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
         }
         p.daemon.prepare(&sandbox.id, req).await
     }
 
     fn forget_install_opened(&self, sandbox: &Sandbox) {
-        self.install_opened.lock().unwrap().remove(&sandbox.id);
+        self.pool.install_opened.lock().unwrap().remove(&sandbox.id);
     }
 
     /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
@@ -119,7 +119,7 @@ impl Factory {
         branch_if_present: bool,
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
-        let pick = self.pool_pick.lock().await;
+        let pick = self.pool.pool_pick.lock().await;
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
         // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
@@ -224,7 +224,7 @@ impl Factory {
             // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
             // again and again means the sandbox itself is the problem, so it leaves the pool.
             let failures = {
-                let mut counts = self.prepare_failures.lock().unwrap();
+                let mut counts = self.pool.prepare_failures.lock().unwrap();
                 let n = counts.entry(sandbox.id.clone()).or_default();
                 *n += 1;
                 *n
@@ -235,18 +235,18 @@ impl Factory {
                 return Err(e);
             }
             tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
-            self.prepare_failures.lock().unwrap().remove(&sandbox.id);
+            self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
             if let Err(d) = p.compute.destroy(&sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
             return Err(e);
         }
-        self.prepare_failures.lock().unwrap().remove(&sandbox.id);
+        self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
         let prepare_took = preparing.elapsed();
         // A checkpoint pauses the sandbox while its whole filesystem is copied (minutes on Docker), and what it saves the
         // next prepare is mostly dependencies, which rarely change. So the warm point is kept while a prepare from it
         // takes no longer than taking a new one did; a slower prepare means it has gone stale.
-        let cost = self.warm_cost.lock().unwrap().get(&sandbox.id).copied();
+        let cost = self.pool.warm_cost.lock().unwrap().get(&sandbox.id).copied();
         let rewarm = warm.is_none() || cost.is_none_or(|cost| prepare_took > cost);
         let mut taken = None;
         let warmed = async {
@@ -255,7 +255,7 @@ impl Factory {
             if rewarm {
                 let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
                 taken = Some(cp.clone());
-                self.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
+                self.pool.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
                 labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
                 p.compute.set_labels(&sandbox.id, &labels).await?;
             }
@@ -290,7 +290,7 @@ impl Factory {
                 // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
                 // cost doesn't describe, and the next stale check would compare against the wrong figure.
                 if taken.is_some() {
-                    let mut costs = self.warm_cost.lock().unwrap();
+                    let mut costs = self.pool.warm_cost.lock().unwrap();
                     match cost {
                         Some(cost) => costs.insert(sandbox.id.clone(), cost),
                         None => costs.remove(&sandbox.id),
@@ -376,7 +376,7 @@ impl Factory {
             match self.destroy_pooled(p, sandbox).await {
                 Ok(()) => {
                     tracing::info!(sandbox = %name, "destroyed a broken pooled sandbox");
-                    self.troubled.lock().unwrap().remove(name);
+                    self.pool.troubled.lock().unwrap().remove(name);
                     done.destroyed.push(name.clone());
                 }
                 Err(e) => {
@@ -394,7 +394,7 @@ impl Factory {
         match self.release_worker(sandbox).await {
             Ok(()) => {
                 tracing::info!(sandbox = %name, took = ?started.elapsed(), "released a pooled sandbox");
-                self.troubled.lock().unwrap().remove(name);
+                self.pool.troubled.lock().unwrap().remove(name);
                 done.released.push(name.clone());
             }
             Err(e) if self.failed(name) => {
@@ -418,12 +418,12 @@ impl Factory {
             ?took,
             "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
         );
-        if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {
+        if let Some(t) = self.pool.troubled.lock().unwrap().get_mut(name) {
             t.abandoned = true;
         }
         if p.compute.destroy(&sandbox.id).await.is_ok() {
             self.status.sandbox_gone(name);
-            self.troubled.lock().unwrap().remove(name);
+            self.pool.troubled.lock().unwrap().remove(name);
             return;
         }
         self.mark_broken(sandbox).await;
@@ -446,18 +446,18 @@ impl Factory {
     }
 
     pub(crate) fn abandoned(&self, name: &str) -> bool {
-        self.troubled.lock().unwrap().get(name).is_some_and(|t| t.abandoned)
+        self.pool.troubled.lock().unwrap().get(name).is_some_and(|t| t.abandoned)
     }
 
     /// Whether a troubled sandbox's backoff has run out, or it isn't troubled.
     pub(crate) fn due(&self, name: &str) -> bool {
-        self.troubled.lock().unwrap().get(name).is_none_or(|t| Instant::now() >= t.next_try)
+        self.pool.troubled.lock().unwrap().get(name).is_none_or(|t| Instant::now() >= t.next_try)
     }
 
     /// Records a failure and backs off. True once the sandbox has used up its tries or its patience.
     fn failed(&self, name: &str) -> bool {
         let now = Instant::now();
-        let mut troubled = self.troubled.lock().unwrap();
+        let mut troubled = self.pool.troubled.lock().unwrap();
         let t = troubled.entry(name.to_string()).or_insert(Trouble {
             failures: 0,
             since: now,

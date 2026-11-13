@@ -111,11 +111,11 @@ impl Factory {
         let (now, today) = (Instant::now(), spend::today());
         let mut capped = HashSet::new();
         let mut board = Vec::new();
-        let mut logged = self.capped.lock().unwrap();
+        let mut logged = self.placing.capped.lock().unwrap();
         for p in &self.targets {
             let Some(spend) = &p.target.spend else { continue };
             let name = &p.target.name;
-            let spent = self.ledger.spent(name, now, &today);
+            let spent = self.placing.ledger.spent(name, now, &today);
             board.push(TargetSpend { target: name.clone(), spent, cap: spend.daily, capped: spent >= spend.daily });
             if spent >= spend.daily {
                 if logged.insert(name.clone()) {
@@ -132,7 +132,7 @@ impl Factory {
 
     /// How full each target is now.
     pub(crate) async fn survey(&self) -> Survey {
-        let placed = self.placed.lock().unwrap().clone();
+        let placed = self.placing.placed.lock().unwrap().clone();
         let mut loads: HashMap<String, usize> = HashMap::new();
         let mut down = HashSet::new();
         let mut holders = HashMap::new();
@@ -207,11 +207,11 @@ impl Factory {
     /// Holds `task`'s place as `role` on `target` until the guard drops.
     pub(crate) fn hold(&self, task: &TaskKey, role: Role, target: &Placed) -> Placement {
         let key = (task.clone(), role);
-        self.placed.lock().unwrap().insert(key.clone(), target.target.name.clone());
+        self.placing.placed.lock().unwrap().insert(key.clone(), target.target.name.clone());
         if let Some(spend) = &target.target.spend {
-            self.ledger.begin(key.clone(), &target.target.name, spend.hourly(), Instant::now());
+            self.placing.ledger.begin(key.clone(), &target.target.name, spend.hourly(), Instant::now());
         }
-        Placement { placed: self.placed.clone(), key, ledger: self.ledger.clone() }
+        Placement { placed: self.placing.placed.clone(), key, ledger: self.placing.ledger.clone() }
     }
 
     /// The target's name as a pooled sandbox's name carries it: nothing for the default target, whose sandboxes keep

@@ -265,7 +265,7 @@ impl Factory {
         }
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
-            let queued = self.updating.lock().unwrap().get(&task.key).cloned();
+            let queued = self.merger.updating.lock().unwrap().get(&task.key).cloned();
             let mut asked = 0;
             if let Some((head, since, times)) = queued
                 && head == decision.head
@@ -277,7 +277,7 @@ impl Factory {
                 // A host that keeps dropping the update has likely found a conflict it only reports by dropping it.
                 if times >= crate::UPDATE_ASKS {
                     tracing::warn!(task = %task.key, pr = %pr.url, times, "the branch update never landed; reworking");
-                    self.updating.lock().unwrap().remove(&task.key);
+                    self.merger.updating.lock().unwrap().remove(&task.key);
                     return self.rework_conflict(task, pr, attempt).await;
                 }
                 tracing::warn!(task = %task.key, pr = %pr.url, "the branch update never landed; asking again");
@@ -285,12 +285,13 @@ impl Factory {
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
-                    self.updating.lock().unwrap().remove(&task.key);
+                    self.merger.updating.lock().unwrap().remove(&task.key);
                     self.rework_conflict(task, pr, attempt).await?
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.updating
+                    self.merger
+                        .updating
                         .lock()
                         .unwrap()
                         .insert(task.key.clone(), (decision.head.clone(), Instant::now(), asked + 1));
@@ -299,7 +300,7 @@ impl Factory {
             }
             return Ok(());
         }
-        self.updating.lock().unwrap().remove(&task.key);
+        self.merger.updating.lock().unwrap().remove(&task.key);
         // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
         self.tracker
             .report(&task.key, RunPatch { merging: Patch::Set(decision.head.clone()), ..RunPatch::default() })
@@ -360,14 +361,14 @@ impl Factory {
             return Ok(task.grade.map(|g| PrGrade { grade: g, task: Some(g), reasons: Vec::new() }));
         };
         let cached = head.and_then(|h| {
-            self.listed.lock().unwrap().get(&task.key).filter(|(at, _)| at == h).map(|(_, files)| files.clone())
+            self.merger.listed.lock().unwrap().get(&task.key).filter(|(at, _)| at == h).map(|(_, files)| files.clone())
         });
         let files = match cached {
             Some(files) => files,
             None => {
                 let files = codehost.files(pr).await?;
                 if let Some(h) = head {
-                    self.listed.lock().unwrap().insert(task.key.clone(), (h.to_string(), files.clone()));
+                    self.merger.listed.lock().unwrap().insert(task.key.clone(), (h.to_string(), files.clone()));
                 }
                 files
             }
