@@ -11,6 +11,7 @@ use trailhead_factory::{
     WorkerBreach, run_name,
 };
 
+use crate::infra::{Park, Setback};
 use crate::place::Placement;
 use crate::review::CI_REVIEWER;
 use crate::timing::{backoff, unix_now, until};
@@ -502,20 +503,7 @@ impl Factory {
         prior: Option<u32>,
         failure: Option<String>,
     ) -> Error {
-        // The in-memory count too, so the backoff still grows when the tracker is what's failing and the persisted
-        // count didn't get written.
-        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
-        let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        // A host short of a resource (its disk) is waited out, not failed: the backoff grows but the task is never
-        // parked for it, and the count that parks isn't raised.
-        let waiting = matches!(error, Error::Unavailable(_));
-        // Waiting has no count that parks, so a host that never frees up would be waited on silently forever: after
-        // `MAX_RESOURCE_WAITS` waits in a row the task is parked once, so a person hears of it.
-        let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
-        // A request the remote refused for good (a 4xx that isn't a blip) fails the same way on every retry, so
-        // it's parked at once instead of burning the infra retries.
-        let rejected = matches!(error, Error::Rejected(_));
         // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
         // Counted apart from the other infrastructure failures, so it takes two `setup` failures in a row, not one
@@ -532,27 +520,17 @@ impl Factory {
             }
         };
         let broken_base = setup_failures >= SETUP_FAILURES_TO_PARK;
-        let park = rejected || broken_base || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        let setback = Setback::decide(&error, prior, self.held_setbacks(&task.key), max, broken_base);
+        let Setback { failures, waits, waiting, .. } = setback;
         tracing::warn!(task = %task.key, %error, failures, max, waiting, waits, "infrastructure failure; the attempt doesn't count");
-        if park {
-            // Parked below; the count starts again when Lane reopens it.
-        } else if waiting {
-            self.set_back_waiting(&task.key, failures - 1);
-        } else {
-            self.set_back(&task.key, failures);
+        if setback.park.is_none() {
+            self.back_off(&task.key, &setback);
         }
-        // Before the release: the run's sub-agent holds the claim, so only it can report. A parked task starts its
-        // count again when Lane reopens it.
+        // Before the release: the run's sub-agent holds the claim, so only it can report.
         let update = RunUpdate {
             attempt: Some(task.run.attempt.unwrap_or(0)),
             retries: Some(task.run.retries.unwrap_or(0) + 1),
-            infra_failures: Some(if park {
-                0
-            } else if waiting {
-                prior.unwrap_or(0)
-            } else {
-                failures
-            }),
+            infra_failures: Some(setback.recorded()),
             // Set only when this run's agent wrote text that isn't about the task (its API trouble): the failure the
             // task had before the run is put back, so the next attempt is still told what failed.
             failure,
@@ -561,15 +539,12 @@ impl Factory {
         if let Err(e) = sub.report(&task.key, update).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't give the attempt back");
         }
-        if park {
-            let question = if broken_base {
-                messages::setup_failed_question(setup_failures, &error.to_string())
-            } else if rejected {
-                messages::rejected_question(&error.to_string())
-            } else if waiting {
-                messages::resource_wait_question(waits, &error.to_string())
-            } else {
-                messages::infra_question(failures, max, &error.to_string())
+        if let Some(why) = setback.park {
+            let question = match why {
+                Park::BrokenBase => messages::setup_failed_question(setup_failures, &error.to_string()),
+                Park::Rejected => messages::rejected_question(&error.to_string()),
+                Park::Waited => messages::resource_wait_question(waits, &error.to_string()),
+                Park::Limit => messages::infra_question(failures, max, &error.to_string()),
             };
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
@@ -579,16 +554,9 @@ impl Factory {
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; reconcile will requeue it");
-                    // Not parked, so the count mustn't start again (the next failure tries to park once more), and
-                    // the task needs its backoff, or reconcile requeues it to retry at once.
-                    if waiting {
-                        self.set_back_waiting(&task.key, failures - 1);
-                    } else {
-                        self.set_back(&task.key, failures);
-                    }
-                    // A resource wait isn't an infrastructure failure, so it doesn't add to the count.
-                    let kept = if waiting { prior.unwrap_or(0) } else { failures };
-                    let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
+                    // The task needs its backoff, or reconcile requeues it to retry at once.
+                    self.back_off(&task.key, &setback);
+                    let keep = RunUpdate { infra_failures: Some(setback.unparked()), ..RunUpdate::default() };
                     if let Err(e) = sub.report(&task.key, keep).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
                     }
@@ -821,10 +789,6 @@ const MERGEABLE_WAITS: [Duration; 4] =
 
 /// The first wait before retrying a task after an infrastructure failure, doubling up to [`MAX_INFRA_BACKOFF`].
 const FIRST_INFRA_BACKOFF: Duration = Duration::from_secs(60);
-
-/// How many times in a row a task may wait for a host's resource (its disk) before it's parked for a person: about
-/// two and a half hours at the capped backoff.
-pub(crate) const MAX_RESOURCE_WAITS: u32 = 12;
 
 /// How many `setup` failures in a row on a fresh run park the task: the base branch is broken, not one sandbox.
 const SETUP_FAILURES_TO_PARK: u32 = 2;

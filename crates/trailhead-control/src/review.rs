@@ -6,7 +6,8 @@ use trailhead_factory::{
     RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
 };
 
-use crate::lifecycle::{Begin, MAX_RESOURCE_WAITS, Run, spec, token_ttl};
+use crate::infra::{Park, Setback};
+use crate::lifecycle::{Begin, Run, spec, token_ttl};
 use crate::{Factory, Outcome};
 
 /// A review run that ended on the reviewer's own account; a lost one is handled before this exists.
@@ -222,17 +223,10 @@ impl Factory {
     ) -> Error {
         // A deliberate stop gives the round back like a failure, but isn't one: no count, no backoff, no parking.
         let cancelled = matches!(error, Error::Cancelled);
-        // The persisted count survives a restart; the in-memory one covers a tracker that failed to write it.
-        let held = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
-        let failures = prior.unwrap_or(0).max(held) + 1;
         let max = self.config.repo.max_infra_failures.max(1);
-        // A host short of a resource is waited out, as for a worker: the backoff grows, but the count that parks isn't
-        // raised, and only `MAX_RESOURCE_WAITS` waits in a row park the task.
-        let waiting = matches!(error, Error::Unavailable(_));
-        let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
-        // A request refused for good fails the same way on every retry, so it's parked at once, as for a worker.
-        let rejected = matches!(error, Error::Rejected(_));
-        let park = !cancelled && (rejected || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max });
+        let setback = Setback::decide(&error, prior, self.held_setbacks(&task.key), max, false);
+        let Setback { failures, waits, waiting, .. } = setback;
+        let park = setback.park.filter(|_| !cancelled);
         if cancelled {
             tracing::info!(task = %task.key, "review cancelled; the round doesn't count");
         } else {
@@ -241,25 +235,15 @@ impl Factory {
             } else {
                 tracing::warn!(task = %task.key, %error, failures, max, waiting, waits, "reviewer failed on the infrastructure; the round doesn't count");
             }
-            if park {
-                // Parked below; the count starts again when Lane reopens it.
-            } else if waiting {
-                self.set_back_waiting(&task.key, failures - 1);
-            } else {
-                self.set_back(&task.key, failures);
+            if park.is_none() {
+                self.back_off(&task.key, &setback);
             }
         }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
         let give_back = RunUpdate {
             review_rounds: Some(rounds_before),
             retries: Some(retries + 1),
-            infra_failures: (!cancelled).then_some(if park {
-                0
-            } else if waiting {
-                prior.unwrap_or(0)
-            } else {
-                failures
-            }),
+            infra_failures: (!cancelled).then_some(setback.recorded()),
             ..RunUpdate::default()
         };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
@@ -268,15 +252,14 @@ impl Factory {
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
-        if park {
-            let question = if rejected {
-                messages::rejected_question(&error.to_string())
-            } else if waiting {
-                messages::resource_wait_question(waits, &error.to_string())
-            } else if no_verdict {
-                messages::review_no_verdict_question(failures, max, &error.to_string())
-            } else {
-                messages::review_infra_question(failures, max, &error.to_string())
+        if let Some(why) = park {
+            let question = match why {
+                Park::Rejected => messages::rejected_question(&error.to_string()),
+                Park::Waited => messages::resource_wait_question(waits, &error.to_string()),
+                Park::Limit | Park::BrokenBase if no_verdict => {
+                    messages::review_no_verdict_question(failures, max, &error.to_string())
+                }
+                Park::Limit | Park::BrokenBase => messages::review_infra_question(failures, max, &error.to_string()),
             };
             let parked = async {
                 self.tracker.reopen(&task.key).await?;
@@ -289,15 +272,9 @@ impl Factory {
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");
-                    // Not parked, so the count mustn't start again (the next failure tries to park once more), and
-                    // the task needs its backoff, or reconcile reviews it again at once.
-                    if waiting {
-                        self.set_back_waiting(&task.key, failures - 1);
-                    } else {
-                        self.set_back(&task.key, failures);
-                    }
-                    let kept = if waiting { prior.unwrap_or(0) } else { failures };
-                    let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
+                    // The task needs its backoff, or reconcile reviews it again at once.
+                    self.back_off(&task.key, &setback);
+                    let keep = RunUpdate { infra_failures: Some(setback.unparked()), ..RunUpdate::default() };
                     if let Err(e) = self.tracker.report(&task.key, keep).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
                     }
