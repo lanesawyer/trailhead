@@ -39,7 +39,7 @@ pub(crate) async fn undo(cx: &Ctx, event_id: Option<i64>, batch: Option<String>)
         }
         (None, None) => {
             let me = api.me().await.map_err(api_err)?;
-            let actor = me.agent.map_or(me.user.id, |a| a.id);
+            let actor = me.agent_id.unwrap_or(me.user.id);
             let q = EventQuery {
                 actor: Some(actor),
                 newest_first: true,
