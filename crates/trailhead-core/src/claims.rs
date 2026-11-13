@@ -381,6 +381,17 @@ impl Store {
     /// Frees every expired claim in the workspace. `ready` and `claim` do this lazily;
     /// a server can also call it on a timer so events fire promptly.
     pub async fn reap_expired_claims(&self, ctx: &Ctx) -> Result<usize> {
+        // Looked for with a read first: nearly every call finds nothing, and a write would queue behind the writer
+        // and wake every event stream for it.
+        let any = {
+            let conn = self.reader()?;
+            let sql = "SELECT 1 FROM claims WHERE workspace_id = ?1 AND expires_at <= ?2 LIMIT 1";
+            let mut found = conn.query(sql, libsql::params![ctx.workspace_id.to_string(), fmt_ts(self.now())]).await?;
+            found.next().await?.is_some()
+        };
+        if !any {
+            return Ok(0);
+        }
         self.write(ctx, async |tx| reap_expired(tx, None).await).await
     }
 }

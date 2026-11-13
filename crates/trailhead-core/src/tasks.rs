@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::claims::{drop_claim, live_claim, reap_expired};
+use crate::claims::{drop_claim, live_claim};
 use crate::comments::list_comments_for;
 use crate::db::{
     collect, first, fmt_ts, get_enum, get_json, get_opt_date, get_opt_scale, get_opt_ts, get_opt_uuid, get_scale,
@@ -815,8 +815,8 @@ impl Store {
         limit: Option<i64>,
         grade: GradeFilter,
     ) -> Result<Vec<Task>> {
+        self.reap_expired_claims(ctx).await?;
         let conn = self.reader()?;
-        self.write(ctx, async |tx| reap_expired(tx, None).await).await?;
         let project_id = match project {
             Some(p) => Some(find_project(&conn, ctx, p).await?.id),
             None => None,
