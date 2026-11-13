@@ -429,9 +429,7 @@ async fn held_reviews_land_after_the_window_resets(poll: std::time::Duration) {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the no-verdict backoff
 
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     let factory = Arc::new(r.factory);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -809,12 +807,38 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
     assert_eq!(r.tracker.task(&parked).run.released, None);
 }
 
+/// Log lines the current thread's test has asked to read back.
+///
+/// A scoped subscriber (`set_default`) can lose to the callsite interest cache when other tests log at the same
+/// callsites in parallel with no subscriber, so a test would miss its lines. One global subscriber keeps every
+/// callsite enabled; it writes to the `Logs` the thread installed, which is the test's, since these tests run on a
+/// current-thread runtime.
 #[derive(Clone, Default)]
 pub(crate) struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
 
-impl std::io::Write for Logs {
+thread_local! {
+    static CAPTURING: std::cell::RefCell<Option<Logs>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Stops the thread's capture when dropped.
+pub(crate) struct Capture;
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CAPTURING.with(|c| *c.borrow_mut() = None);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ThreadLogs;
+
+impl std::io::Write for ThreadLogs {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        CAPTURING.with(|c| {
+            if let Some(logs) = &*c.borrow() {
+                logs.0.lock().unwrap().extend_from_slice(buf);
+            }
+        });
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -822,14 +846,26 @@ impl std::io::Write for Logs {
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-    type Writer = Logs;
-    fn make_writer(&'a self) -> Logs {
-        self.clone()
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLogs {
+    type Writer = ThreadLogs;
+    fn make_writer(&'a self) -> ThreadLogs {
+        *self
     }
 }
 
 impl Logs {
+    /// Captures this thread's log lines until the returned guard drops.
+    pub(crate) fn capture() -> (Logs, Capture) {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let sub = tracing_subscriber::fmt().with_writer(ThreadLogs).with_ansi(false).finish();
+            tracing::subscriber::set_global_default(sub).expect("no other global subscriber in this test binary");
+        });
+        let logs = Logs::default();
+        CAPTURING.with(|c| *c.borrow_mut() = Some(logs.clone()));
+        (logs, Capture)
+    }
+
     pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
@@ -875,9 +911,7 @@ async fn a_host_cap_filled_by_another_repo_isnt_blamed_on_parked_tasks_but_the_r
     held_by_beta(&r.compute, "beta-1").await;
     held_by_beta(&r.compute, "beta-2").await;
     let waiting = r.tracker.add_task("TRAIL", "Waits", "");
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     let factory = Arc::new(r.factory);
     poll_a_while(&factory).await;

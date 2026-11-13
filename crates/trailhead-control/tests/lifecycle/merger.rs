@@ -1285,9 +1285,7 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     r.codehost.set_conflicts(true);
     r.codehost.set_ci(&mine, CiState::Passed);
     r.codehost.set_ci(&pr, CiState::Passed);
-    let logs = crate::run_loop::Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = crate::run_loop::Logs::capture();
 
     for _ in 0..3 {
         r.factory.reconcile().await.unwrap();

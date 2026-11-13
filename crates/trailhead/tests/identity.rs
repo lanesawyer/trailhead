@@ -56,3 +56,15 @@ fn repo_agent_without_a_saved_token_names_the_file() {
     assert!(err.contains(".trailhead.toml sets agent = \"ghost\""), "{err}");
     assert!(err.contains("--as-me"), "{err}");
 }
+
+#[test]
+fn token_add_agent_issues_a_token_for_the_agent_instead_of_acting_as_it() {
+    let th = Instance::new();
+    th.stdout(&["agent", "add", "bot"]);
+    let out = th.run(&["token", "add", "t", "--agent", "bot", "--json"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // The caller stayed the human, so a bad agent is the server's complaint, not a missing saved token.
+    let out = th.run(&["token", "add", "t2", "--agent", "nobody"]);
+    assert!(!out.status.success());
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("no saved token"));
+}
