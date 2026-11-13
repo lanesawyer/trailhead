@@ -101,7 +101,7 @@ async fn principal_exists(conn: &Connection, ws: Uuid, id: Uuid) -> Result<bool>
     Ok(rows.next().await?.is_some())
 }
 
-async fn insert_comment(tx: &Tx, task_id: Uuid, new: &NewComment, body: &str) -> Result<Comment> {
+pub(crate) async fn insert_comment(tx: &Tx, task_id: Uuid, new: &NewComment, body: &str) -> Result<Comment> {
     let id = Uuid::now_v7();
     let mut rows = tx
         .conn

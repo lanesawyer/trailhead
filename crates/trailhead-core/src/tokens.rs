@@ -97,6 +97,110 @@ async fn project_scope(tx: &Tx, ctx: &Ctx, refs: Option<&[String]>) -> Result<Op
     Ok(Some(serde_json::to_string(&ids)?))
 }
 
+/// Checks and stores a token for [`Store::create_token_with`], returning it with its secret.
+pub(crate) async fn issue_token(
+    tx: &Tx,
+    principal: Principal,
+    name: &str,
+    mut opts: TokenOptions,
+) -> Result<(Token, String)> {
+    let ctx = &tx.ctx;
+    if ctx.is_human() && ctx.is_scoped() {
+        return Err(Error::Forbidden("a token scoped to projects can't issue tokens".into()));
+    }
+    if let Some(n) = opts.rate_limit_per_minute
+        && n < 1
+    {
+        return Err(Error::Invalid("rate limit must be at least 1 request per minute".into()));
+    }
+    // A token never gets more than the caller has: an agent's sub-agent
+    // inherits its rate limit and projects unless it asks for less.
+    if let Some(cap) = ctx.rate_limit {
+        match opts.rate_limit_per_minute {
+            Some(n) if n > cap => {
+                return Err(Error::Forbidden(format!("rate limit can't exceed your own ({cap}/min)")));
+            }
+            None => opts.rate_limit_per_minute = Some(cap),
+            _ => {}
+        }
+    }
+    if opts.expires_in.is_some_and(|d| !d.is_positive()) {
+        return Err(Error::Invalid("a token must expire in the future".into()));
+    }
+    let mut expires_at = opts.expires_in.map(|d| tx.now + d);
+    if let Some(cap) = ctx.expires_at {
+        match expires_at {
+            Some(e) if e > cap => return Err(Error::Forbidden("a token can't outlive your own".into())),
+            None => expires_at = Some(cap),
+            _ => {}
+        }
+    }
+    if let Some(scope) = &ctx.projects
+        && opts.projects.as_ref().is_none_or(|p| p.is_empty())
+    {
+        opts.projects = Some(scope.iter().map(Uuid::to_string).collect());
+    }
+    let (kind, pid) = token_principal(tx, principal).await?;
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| Error::Corrupt(format!("no randomness: {e}")))?;
+    let secret = format!("{TOKEN_PREFIX}{}", hex::encode(bytes));
+    let projects = project_scope(tx, ctx, opts.projects.as_deref()).await?;
+    let mut rows = tx
+        .conn
+        .query(
+            &format!(
+                "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at,
+                 projects, rate_limit_per_minute, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING {TOKEN_COLS}"
+            ),
+            libsql::params![
+                Uuid::now_v7().to_string(),
+                tx.ws(),
+                kind,
+                pid.to_string(),
+                name,
+                hash(&secret),
+                tx.now_str(),
+                projects,
+                opts.rate_limit_per_minute,
+                expires_at.map(fmt_ts)
+            ],
+        )
+        .await?;
+    let token = token_from_row(&rows.next().await?.expect("RETURNING yields a row"))?;
+    Ok((token, secret))
+}
+
+/// Who a new token may be for: the caller, if a person, or one of their agents (for an agent, one under it).
+async fn token_principal(tx: &Tx, principal: Principal) -> Result<(&'static str, Uuid)> {
+    let ctx = &tx.ctx;
+    match principal {
+        Principal::User(id) if id == ctx.user_id && ctx.is_human() => Ok(("user", id)),
+        Principal::User(_) => Err(Error::Forbidden("you can only issue tokens for yourself".into())),
+        Principal::Agent(id) => {
+            let mut rows = tx
+                .conn
+                .query(
+                    "SELECT 1 FROM agents WHERE id = ?1 AND owner_user_id = ?2 AND workspace_id = ?3",
+                    [id.to_string(), ctx.user_id.to_string(), ctx.workspace_id.to_string()],
+                )
+                .await?;
+            if rows.next().await?.is_none() {
+                return Err(Error::NotFound(format!("agent {id}")));
+            }
+            if let Some(me) = ctx.agent_id
+                && !is_descendant(&tx.conn, me, id).await?
+            {
+                return Err(Error::Forbidden("an agent can only issue tokens for its own sub-agents".into()));
+            }
+            if lineage_revoked(&tx.conn, id).await? {
+                return Err(Error::Forbidden("that agent has been revoked".into()));
+            }
+            Ok(("agent", id))
+        }
+    }
+}
+
 impl Store {
     /// Issues a bearer token. Humans can issue tokens for themselves and for their own
     /// agents; agents can't issue tokens at all. The secret is only ever returned here.
@@ -112,100 +216,7 @@ impl Store {
         name: &str,
         opts: TokenOptions,
     ) -> Result<(Token, String)> {
-        if ctx.is_human() && ctx.is_scoped() {
-            return Err(Error::Forbidden("a token scoped to projects can't issue tokens".into()));
-        }
-        if let Some(n) = opts.rate_limit_per_minute
-            && n < 1
-        {
-            return Err(Error::Invalid("rate limit must be at least 1 request per minute".into()));
-        }
-        // A token never gets more than the caller has: an agent's sub-agent
-        // inherits its rate limit and projects unless it asks for less.
-        let mut opts = opts;
-        if let Some(cap) = ctx.rate_limit {
-            match opts.rate_limit_per_minute {
-                Some(n) if n > cap => {
-                    return Err(Error::Forbidden(format!("rate limit can't exceed your own ({cap}/min)")));
-                }
-                None => opts.rate_limit_per_minute = Some(cap),
-                _ => {}
-            }
-        }
-        if opts.expires_in.is_some_and(|d| !d.is_positive()) {
-            return Err(Error::Invalid("a token must expire in the future".into()));
-        }
-        let mut expires_at = opts.expires_in.map(|d| self.now() + d);
-        if let Some(cap) = ctx.expires_at {
-            match expires_at {
-                Some(e) if e > cap => return Err(Error::Forbidden("a token can't outlive your own".into())),
-                None => expires_at = Some(cap),
-                _ => {}
-            }
-        }
-        if let Some(scope) = &ctx.projects
-            && opts.projects.as_ref().is_none_or(|p| p.is_empty())
-        {
-            opts.projects = Some(scope.iter().map(Uuid::to_string).collect());
-        }
-        let conn = self.reader()?;
-        let (kind, pid) = match principal {
-            Principal::User(id) if id == ctx.user_id && ctx.is_human() => ("user", id),
-            Principal::User(_) => return Err(Error::Forbidden("you can only issue tokens for yourself".into())),
-            Principal::Agent(id) => {
-                let mut rows = conn
-                    .query(
-                        "SELECT 1 FROM agents WHERE id = ?1 AND owner_user_id = ?2 AND workspace_id = ?3",
-                        [id.to_string(), ctx.user_id.to_string(), ctx.workspace_id.to_string()],
-                    )
-                    .await?;
-                if rows.next().await?.is_none() {
-                    return Err(Error::NotFound(format!("agent {id}")));
-                }
-                if let Some(me) = ctx.agent_id
-                    && !is_descendant(&conn, me, id).await?
-                {
-                    return Err(Error::Forbidden("an agent can only issue tokens for its own sub-agents".into()));
-                }
-                if lineage_revoked(&conn, id).await? {
-                    return Err(Error::Forbidden("that agent has been revoked".into()));
-                }
-                ("agent", id)
-            }
-        };
-        let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).map_err(|e| Error::Corrupt(format!("no randomness: {e}")))?;
-        let secret = format!("{TOKEN_PREFIX}{}", hex::encode(bytes));
-        let id = Uuid::now_v7();
-        let token = self
-            .write(ctx, async |tx| {
-                let projects = project_scope(tx, ctx, opts.projects.as_deref()).await?;
-                let mut rows = tx
-                    .conn
-                    .query(
-                        &format!(
-                            "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at,
-                             projects, rate_limit_per_minute, expires_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING {TOKEN_COLS}"
-                        ),
-                        libsql::params![
-                            id.to_string(),
-                            tx.ws(),
-                            kind,
-                            pid.to_string(),
-                            name,
-                            hash(&secret),
-                            tx.now_str(),
-                            projects,
-                            opts.rate_limit_per_minute,
-                            expires_at.map(fmt_ts)
-                        ],
-                    )
-                    .await?;
-                token_from_row(&rows.next().await?.expect("RETURNING yields a row"))
-            })
-            .await?;
-        Ok((token, secret))
+        self.write(ctx, async |tx| issue_token(tx, principal, name, opts).await).await
     }
 
     /// Resolves a bearer secret to a context with a fresh batch.

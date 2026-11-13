@@ -3,7 +3,8 @@ use uuid::Uuid;
 
 use crate::db::{collect, first, fmt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
-use crate::store::{Ctx, Store};
+use crate::store::{Ctx, Store, Tx};
+use crate::tokens::{Principal, Token, TokenOptions, issue_token};
 use trailhead_model::{Agent, Entity, User, Workspace};
 
 fn workspace_from_row(row: &Row) -> Result<Workspace> {
@@ -88,6 +89,50 @@ fn validate_agent_name(name: &str) -> Result<()> {
     }
 }
 
+async fn insert_agent(tx: &Tx, name: &str) -> Result<Agent> {
+    let ctx = &tx.ctx;
+    let name = name.trim();
+    validate_agent_name(name)?;
+    let (full, parent) = match ctx.agent_id {
+        None if ctx.is_scoped() => {
+            return Err(Error::Forbidden("a token scoped to projects can't create agents".into()));
+        }
+        None => (name.to_string(), None),
+        Some(me) => {
+            (format!("{}/{name}", find_agent(&tx.conn, ctx.workspace_id, &me.to_string()).await?.name), Some(me))
+        }
+    };
+    // Names are how people and `--as` refer to agents, so they must be unambiguous.
+    if find_agent(&tx.conn, ctx.workspace_id, &full).await.is_ok() {
+        return Err(Error::AlreadyExists(format!("agent {full:?}")));
+    }
+    let agent = Agent {
+        id: Uuid::now_v7(),
+        workspace_id: ctx.workspace_id,
+        owner_user_id: ctx.user_id,
+        parent_agent_id: parent,
+        name: full,
+        created_at: tx.now,
+        revoked_at: None,
+    };
+    tx.conn
+        .execute(
+            "INSERT INTO agents (id, workspace_id, owner_user_id, name, created_at, parent_agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            libsql::params![
+                agent.id.to_string(),
+                tx.ws(),
+                agent.owner_user_id.to_string(),
+                agent.name.clone(),
+                tx.now_str(),
+                agent.parent_agent_id.map(|p| p.to_string()),
+            ],
+        )
+        .await?;
+    tx.emit_change(Entity::Agent, agent.id.to_string(), None, "agent.created", None, Some(&agent)).await?;
+    Ok(agent)
+}
+
 pub(crate) async fn load_workspace(conn: &Connection, id: Uuid) -> Result<Workspace> {
     let rows = conn
         .query("SELECT id, name, default_claim_ttl, created_at FROM workspaces WHERE id = ?1", [id.to_string()])
@@ -165,57 +210,28 @@ impl Store {
         first(rows, user_from_row).await?.ok_or_else(|| Error::NotFound(format!("user {id}")))
     }
 
-    /// Creates an agent owned by the context's user.
     /// Creates an agent. A human creates a top-level agent acting for them; an
     /// agent creates a sub-agent named `<its name>/<name>`, acting for the same
     /// human. Agents can't be created any other way, so no agent ever needs a
     /// human's credentials.
     pub async fn create_agent(&self, ctx: &Ctx, name: &str) -> Result<Agent> {
-        let name = name.trim();
-        validate_agent_name(name)?;
-        let conn = self.reader()?;
-        let (full, parent) = match ctx.agent_id {
-            None if ctx.is_scoped() => {
-                return Err(Error::Forbidden("a token scoped to projects can't create agents".into()));
-            }
-            None => (name.to_string(), None),
-            Some(me) => {
-                (format!("{}/{name}", find_agent(&conn, ctx.workspace_id, &me.to_string()).await?.name), Some(me))
-            }
-        };
-        // Names are how people and `--as` refer to agents, so they must be unambiguous.
-        if find_agent(&conn, ctx.workspace_id, &full).await.is_ok() {
-            return Err(Error::AlreadyExists(format!("agent {full:?}")));
-        }
-        let agent = Agent {
-            id: Uuid::now_v7(),
-            workspace_id: ctx.workspace_id,
-            owner_user_id: ctx.user_id,
-            parent_agent_id: parent,
-            name: full,
-            created_at: self.now(),
-            revoked_at: None,
-        };
+        self.write(ctx, async |tx| insert_agent(tx, name).await).await
+    }
+
+    /// [`Store::create_agent`] and its first token, named after it, in one transaction: if the token is refused, no
+    /// agent is created. The secret is only ever returned here.
+    pub async fn create_agent_with_token(
+        &self,
+        ctx: &Ctx,
+        name: &str,
+        opts: TokenOptions,
+    ) -> Result<(Agent, Token, String)> {
         self.write(ctx, async |tx| {
-            tx.conn
-                .execute(
-                    "INSERT INTO agents (id, workspace_id, owner_user_id, name, created_at, parent_agent_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    libsql::params![
-                        agent.id.to_string(),
-                        tx.ws(),
-                        agent.owner_user_id.to_string(),
-                        agent.name.clone(),
-                        tx.now_str(),
-                        agent.parent_agent_id.map(|p| p.to_string()),
-                    ],
-                )
-                .await?;
-            tx.emit_change(Entity::Agent, agent.id.to_string(), None, "agent.created", None, Some(&agent)).await?;
-            Ok(())
+            let agent = insert_agent(tx, name).await?;
+            let (token, secret) = issue_token(tx, Principal::Agent(agent.id), &agent.name, opts).await?;
+            Ok((agent, token, secret))
         })
-        .await?;
-        Ok(agent)
+        .await
     }
 
     /// A context for one of the caller's registered sub-agents, by full name or by

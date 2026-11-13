@@ -186,6 +186,37 @@ async fn batch_header_lets_a_request_be_undone() {
 }
 
 #[tokio::test]
+async fn composed_writes_are_all_or_nothing() {
+    let api = Api::new().await;
+    api.seed().await;
+    let r = api
+        .as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "orphan", "blocked_by": ["AUTH-9"]})))
+        .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.body);
+    assert_eq!(api.as_human("GET", "/v1/tasks", None).await.body, json!([]));
+
+    let r = api.as_human("POST", "/v1/agents", Some(json!({"name": "greedy", "rate_limit_per_minute": 0}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert_eq!(api.as_human("GET", "/v1/agents", None).await.body, json!([]));
+
+    let r = api.as_human("PATCH", "/v1/projects/AUTH", Some(json!({"require_review": true}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let r = api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "work"}))).await;
+    assert_eq!(r.body["key"], "AUTH-1");
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "worker"}))).await;
+    let secret = agent.body["secret"].as_str().unwrap().to_string();
+    api.call(Some(&secret), "POST", "/v1/tasks/AUTH-1/claim", None, &[]).await;
+    let finish = |status: &str| Some(json!({"status": status, "handoff": format!("sent to {status}")}));
+    let r = api.call(Some(&secret), "PATCH", "/v1/tasks/AUTH-1", finish("done"), &[]).await;
+    assert_eq!(r.body["error"]["code"], "review_required", "{}", r.body);
+    assert_eq!(api.as_human("GET", "/v1/tasks/AUTH-1/comments", None).await.body, json!([]));
+    let r = api.call(Some(&secret), "PATCH", "/v1/tasks/AUTH-1", finish("in_review"), &[]).await;
+    assert_eq!(r.body["status"], "in_review", "{}", r.body);
+    let comments = api.as_human("GET", "/v1/tasks/AUTH-1/comments", None).await.body;
+    assert_eq!((&comments[0]["kind"], &comments[0]["body"]), (&json!("handoff"), &json!("sent to in_review")));
+}
+
+#[tokio::test]
 async fn nullable_fields_clear_on_null() {
     let api = Api::new().await;
     api.seed().await;

@@ -191,7 +191,7 @@ pub struct CreateArgs {
     grade: Option<i64>,
     /// Parent task key, for subtasks.
     parent: Option<String>,
-    /// Task keys that must finish before this one.
+    /// Task keys that must finish before this one. If one is refused (not found, a cycle), no task is created.
     #[serde(default)]
     blocked_by: Vec<String>,
     /// Task keys this one blocks. To get help on your own task, create a subtask that blocks it.
@@ -253,7 +253,7 @@ pub struct UpdateArgs {
     metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// The version you last saw; the update fails if the task changed since.
     version: Option<i64>,
-    /// Posted as a `handoff` comment once the update succeeds: what changed, what's
+    /// A `handoff` comment written with the update, or not at all if the update is refused: what changed, what's
     /// left, gotchas. Use it when finishing or stepping away.
     handoff: Option<String>,
     /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
@@ -418,16 +418,12 @@ impl TrailheadMcp {
             scheduled_at,
             scheduled_tz: a.scheduled_tz,
             parent: a.parent.map(Into::into),
+            blocked_by: a.blocked_by.into_iter().map(Into::into).collect(),
+            blocks: a.blocks.into_iter().map(Into::into).collect(),
             ..Default::default()
         };
         let store = &self.state.store;
         let task = attempt!(store.create_task(ctx, new).await);
-        for blocker in &a.blocked_by {
-            attempt!(store.add_dependency(ctx, blocker, &task.key).await);
-        }
-        for blocked in &a.blocks {
-            attempt!(store.add_dependency(ctx, &task.key, blocked).await);
-        }
         let mut out = task_line(&task);
         let similar = store.similar_tasks(ctx, &task.project_id.to_string(), &task.title, Some(task.id)).await;
         let keys: Vec<_> = similar.unwrap_or_default().into_iter().map(|t| t.key.0).collect();
@@ -610,12 +606,9 @@ impl TrailheadMcp {
             scheduled_tz: a.scheduled_tz.map(Some),
             parent: attempt!(clearable(a.parent.as_deref(), |p| Ok(p.into()))),
             metadata: a.metadata.map(serde_json::Value::Object),
+            handoff: a.handoff.filter(|b| !b.trim().is_empty()),
         };
         let task = attempt!(self.state.store.update_task(&ctx, &a.task, patch, a.version).await);
-        if let Some(body) = a.handoff.filter(|b| !b.trim().is_empty()) {
-            let new = NewComment::new(CommentKind::Handoff, body);
-            attempt!(self.state.store.add_comment(&ctx, &task.key, new).await);
-        }
         text(task_line(&task))
     }
 
