@@ -12,8 +12,8 @@ use base64::Engine;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileStatus, MergeOutcome, NewPr, OpenPr, PrRef,
-    PrState, RateLimit, Repo, Result,
+    BranchUpdate, ChangedFile, Ci, CiState, CodeHost, Commit, Error, FileMode, FileStatus, MergeOutcome, NewPr, OpenPr,
+    PrRef, PrState, RateLimit, Repo, Result,
 };
 
 pub const API_URL: &str = "https://api.github.com";
@@ -292,17 +292,17 @@ impl GitHub {
             parent_commit["tree"]["sha"].as_str().ok_or_else(|| Error::Other("parent without a tree".into()))?;
         let mut entries = Vec::with_capacity(commit.changes.len());
         for change in &commit.changes {
-            let sha = match &change.contents {
+            let (sha, mode) = match &change.contents {
                 Some(bytes) => {
                     let content = base64::engine::general_purpose::STANDARD.encode(bytes);
                     let blob = json!({ "content": content, "encoding": "base64" });
                     let blob = self.call(self.request(Method::POST, &format!("{r}/git/blobs")).json(&blob)).await?;
-                    Value::String(blob["sha"].as_str().unwrap_or_default().to_string())
+                    (Value::String(blob["sha"].as_str().unwrap_or_default().to_string()), change.mode.git())
                 }
-                // A null sha deletes the path from the base tree.
-                None => Value::Null,
+                // A null sha deletes the path from the base tree, whatever mode it had.
+                None => (Value::Null, FileMode::Regular.git()),
             };
-            entries.push(json!({ "path": change.path, "mode": "100644", "type": "blob", "sha": sha }));
+            entries.push(json!({ "path": change.path, "mode": mode, "type": "blob", "sha": sha }));
         }
         let tree = json!({ "base_tree": base_tree, "tree": entries });
         let tree = self.call(self.request(Method::POST, &format!("{r}/git/trees")).json(&tree)).await?;

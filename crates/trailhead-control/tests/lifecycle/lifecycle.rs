@@ -905,7 +905,7 @@ async fn a_harness_that_publishes_an_unconventional_subject_still_gets_a_convent
     let outcome = RunOutcome::Changes {
         commits: vec![Commit {
             message: "added a greeting".into(),
-            changes: vec![FileChange { path: "src/greet.rs".into(), contents: Some(b"pub fn hi() {}".to_vec()) }],
+            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
             merges: vec![],
         }],
         summary: "Adds a greeting.".into(),
