@@ -824,6 +824,95 @@ async fn a_verdict_reconcile_takes_up_records_its_head_so_a_push_since_is_review
     assert_eq!(task.run.reviewed_head, Some(CodeHost::head(&r.codehost, &pr).await.unwrap()));
 }
 
+async fn approve_as_lane(r: &Rig, key: &TaskKey) {
+    let approved = TaskPatch { status: Some(trailhead_core::Status::Approved), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, approved, None).await.unwrap();
+}
+
+/// A person approves while a review's request for changes stands. Only a task in review is listed for a rework, and
+/// the gate still wants the review to approve, so the task would sit approved forever: the request outranks the
+/// approval and the task goes back to review (TRAIL-1469).
+#[tokio::test]
+async fn an_approval_over_a_request_for_changes_goes_back_to_review_for_the_rework() {
+    let r = rig().await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = r.task("Add a greeting").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    approve_as_lane(&r, &key).await;
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.show(&key).await.run.attempt, Some(2));
+}
+
+/// The request needn't be one the factory recorded: a person's own, left just before they approved, counts the
+/// same. And a conflict found on the same pass waits its turn: its request would replace this one, and clearing
+/// it would answer both (TRAIL-1469).
+#[tokio::test]
+async fn an_approval_over_a_persons_request_goes_back_to_review_before_any_conflict_is_looked_at() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    reviewer_requests_changes(&r, &key, "Add a test.").await;
+    approve_as_lane(&r, &key).await;
+    r.codehost.set_mergeable(&pr, Some(false));
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.conflicted.is_empty(), "{done:?}");
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
+
+    // In review again, the verdict is taken up as the request.
+    assert_eq!(r.factory.reconcile().await.unwrap().reworked, std::slice::from_ref(&key.0));
+    let asked = r.show(&key).await.run.pending_changes().cloned().expect("a request");
+    assert_eq!((asked.kind, asked.body.as_str()), (trailhead_factory::RequestKind::Review, "Add a test."));
+}
+
+/// A person approves before the attempt's review has run. Reviews were only started for tasks in review, so the
+/// merger waited on one forever. It runs, and the approval stays, so an approving review merges (TRAIL-1469).
+#[tokio::test(start_paused = true)]
+async fn a_review_still_owed_when_a_person_approves_runs_and_the_approval_stays() {
+    let config = format!("{CONFIG}\n[merge]\nmode = \"on\"\n");
+    let r = rig_with(&config).await;
+    let (key, pr) = awaiting_review(&r, "Add a greeting").await;
+    let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
+    approve_as_lane(&r, &key).await;
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.reconcile().await.unwrap().reviewed, std::slice::from_ref(&key.0));
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done, "{:?}", task.run.merge);
+    assert!(r.codehost.prs()[0].merged, "merged on Lane's approval once the review approved");
+}
+
+/// A person pushes to a reviewed PR and then approves it, before the factory has seen the push. The approval is of
+/// the new head, which no review has read, so the review is owed while the task is approved (TRAIL-1469).
+#[tokio::test]
+async fn a_head_a_person_pushed_and_then_approved_is_still_reviewed() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.push_to(&pr);
+    approve_as_lane(&r, &key).await;
+
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.reconcile().await.unwrap().reviewed, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Approved, "Lane's approval stays");
+    assert_eq!(task.run.reviewed_head, Some(CodeHost::head(&r.codehost, &pr).await.unwrap()));
+}
+
 /// TRAIL-1418: a settled conflict request isn't a live conflict rework, so a reopened task isn't dropped again
 /// by the check that sends a rework back to review when the host reports no conflict.
 #[tokio::test]
