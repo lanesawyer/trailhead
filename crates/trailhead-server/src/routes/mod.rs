@@ -116,36 +116,36 @@ fn created(body: impl Serialize) -> Response {
     get, path = "/v1/health", tag = "meta", security(()),
     responses((status = 200, description = "The server is up", body = Health))
 )]
-async fn health(State(s): S, headers: HeaderMap) -> Json<Value> {
-    let mut v = json!(s.info);
+async fn health(State(s): S, headers: HeaderMap) -> Json<Health> {
     // A store that is locked or stuck can't serve claims, so say so rather than reporting up. The status stays 200:
     // the CLI reads any other as no server running. The bound stays well under the CLI's 2s health timeout, or a slow
     // store would read as no server. The ping takes the writer lock and an immediate transaction, so it queues behind
     // real writes; this is unauthenticated and polled often, which a liveness check of the write path can afford.
     let store = tokio::time::timeout(std::time::Duration::from_millis(750), s.store.ping()).await;
-    v["ok"] = json!(matches!(store, Ok(Ok(()))));
-    match store {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => v["store_error"] = json!(e.to_string()),
-        Err(_) => v["store_error"] = json!("the store did not answer in time"),
-    }
-    if let Some(runs) = s.runs_in_flight.get() {
-        v["runs_in_flight"] = json!(runs());
-    }
-    if s.draining.load(std::sync::atomic::Ordering::SeqCst) {
-        v["draining"] = json!(true);
-    }
-    // Always sent, false included: a CLI only asks for the upgrade restart (SIGUSR1) when it sees this field, since
-    // a server from before it would die of the signal.
-    v["upgrade_pending"] = json!(s.upgrade_pending.load(std::sync::atomic::Ordering::SeqCst));
+    let store_error = match &store {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some("the store did not answer in time".to_string()),
+    };
     // Paths name the local user, so over a tunnel only token holders see them.
     let authed = headers.contains_key(header::AUTHORIZATION) && crate::auth::authenticate(&s, &headers).await.is_ok();
-    if !authed && let Some(o) = v.as_object_mut() {
-        for k in ["pid", "exe", "exe_modified_ms", "db"] {
-            o.remove(k);
-        }
-    }
-    Json(v)
+    let info = &s.info;
+    let path = |p: &Option<std::path::PathBuf>| p.as_ref().filter(|_| authed).map(|p| p.to_string_lossy().into_owned());
+    Json(Health {
+        ok: store_error.is_none(),
+        store_error,
+        version: info.version.clone(),
+        instance: info.instance.clone(),
+        pid: authed.then_some(info.pid),
+        exe: path(&info.exe),
+        exe_modified_ms: info.exe_modified_ms.filter(|_| authed),
+        db: path(&info.db),
+        started_at: info.started_at,
+        foreground: info.foreground,
+        runs_in_flight: s.runs_in_flight.get().map(|runs| runs()),
+        draining: s.draining.load(std::sync::atomic::Ordering::SeqCst),
+        upgrade_pending: s.upgrade_pending.load(std::sync::atomic::Ordering::SeqCst),
+    })
 }
 
 #[utoipa::path(

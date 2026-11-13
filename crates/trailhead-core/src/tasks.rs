@@ -1,7 +1,6 @@
 use jiff::civil::Date;
 use jiff::{Timestamp, Zoned};
 use libsql::{Connection, Row};
-use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -17,7 +16,9 @@ use crate::metadata::{merge_patch, validate_path};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
-use trailhead_model::{Claim, Entity, Grade, Priority, Status, Task, TaskDetail, TaskKey};
+use trailhead_model::{
+    Claim, Entity, Grade, MatchField, Priority, SearchHit, SearchMatch, Status, Task, TaskDetail, TaskKey,
+};
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
@@ -419,36 +420,6 @@ pub struct SearchFilter {
     /// Empty means every status.
     pub statuses: Vec<Status>,
     pub limit: Option<i64>,
-}
-
-/// A search result: the task and where the query matched it.
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SearchHit {
-    #[serde(flatten)]
-    pub task: Task,
-    #[serde(rename = "match")]
-    pub matched: SearchMatch,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct SearchMatch {
-    /// The first of title, description or a comment that matched.
-    pub field: MatchField,
-    /// A short excerpt around the match, `…` where text was cut.
-    pub snippet: String,
-    /// The newest matching comment, when `field` is `comment`.
-    pub comment_id: Option<Uuid>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MatchField {
-    Title,
-    Description,
-    Comment,
 }
 
 impl Store {

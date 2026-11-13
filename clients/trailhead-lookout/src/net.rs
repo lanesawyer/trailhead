@@ -940,9 +940,9 @@ impl Net {
             let _ = events.send(NetEvent::Search(SearchReply { seq, result: Err("not connected".into()) }));
             return;
         };
-        let (http, token) = (self.http.clone(), token.clone());
+        let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
         tokio::spawn(async move {
-            let result = search::fetch(&http, &base, &token, &query).await;
+            let result = search::fetch(&api, &query).await;
             let _ = events.send(NetEvent::Search(SearchReply { seq, result }));
         });
     }
@@ -953,9 +953,9 @@ impl Net {
             let _ = events.send(NetEvent::Detail(DetailReply { seq, result: Err("not connected".into()) }));
             return;
         };
-        let (http, token) = (self.http.clone(), token.clone());
+        let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
         tokio::spawn(async move {
-            let result = detail::fetch(&http, &base, &token, &key).await;
+            let result = detail::fetch(&api, &key).await;
             let _ = events.send(NetEvent::Detail(DetailReply { seq, result }));
         });
     }
