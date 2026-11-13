@@ -31,6 +31,7 @@
   - [The control plane inside the server](factory/server-control-plane.md)
   - [Engine changes](factory/engine-changes.md)
   - [Order within a priority](factory/ordering.md)
+  - [The factory for users](factory/for-users.md)
 
 # History and undecided
 
