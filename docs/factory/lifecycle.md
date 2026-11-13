@@ -83,24 +83,23 @@ A factory task's state is its Trailhead `status` plus about 35 optional fields i
 
 **1. A `Phase` enum, computed, never stored.** `phase(task, me) -> Phase` is a pure function of the task record (`status`, `holder`, the run fields) and the control plane's own agent name. It is the one place that says which state a task is in. Nothing new is persisted, so there is no migration and a task written by today's build reads the same.
 
-| Phase | Today's condition | What reconcile does |
+| Phase | The record says | What reconcile does |
 | --- | --- | --- |
 | `Untouched` | No `sandbox` in the run fields | Nothing: the queue's business |
 | `ReviewBreachUnparked` | A reviewer breach for this attempt, not parked; task `open`, or `in_progress` held by the factory | Finishes the park |
-| `WorkerBreachUnparked` | A worker breach, not parked; `in_progress` under the run that breached | Finishes the park |
-| `Running` | `in_progress` under the current run's sub-agent, report not handled | Follows the run if its sandbox is still busy, else requeues |
+| `Running` | `in_progress` under the current run's sub-agent, report not handled, and its sandbox still busy | Follows the run |
+| `WorkerBreachUnparked` | A worker breach for the current run, not parked; `in_progress` under that run | Finishes the park |
 | `Interrupted` | `in_progress` otherwise | Releases and requeues |
 | `Requeued` | `open` with a run | Settles a merged or closed PR, else leaves it to the queue |
-| `Parked(why)` | `needs_input`: `MergedUnapproved`, `RequestUnsettled`, or `Asked` | Finishes a merge, settles the request, or waits |
-| `ReworkWaiting(kind)` | `in_review`, changes requested, the request still applies | Leaves it to the queue |
-| `ReworkStale` | `in_review`, changes requested, but the request is settled or the PR moved | Answers the request, looks at the PR as it is |
-| `RequestCutShort(kind)` | `in_review`, a pending request never recorded as a review | Records it |
-| `ReviewOwed` | `in_review`, the attempt's PR not reviewed (or pushed to since) | Starts a review once any backoff is over |
-| `AwaitingGates` | `in_review`, reviewed | Evaluates the gates |
+| `Parked` | `needs_input`; with whether a person was asked to mark a merged task done, and any unsettled changes request | Finishes a merge, settles the request, or waits |
+| `InReview(ReworkWaiting)` | `in_review`, changes requested | Leaves it to the queue; answers a request that no longer stands |
+| `InReview(RequestCutShort)` | `in_review`, a standing request never written as a review | Writes it |
+| `InReview(Unreviewed)` | `in_review`, the attempt's PR not reviewed | Starts a review once any backoff is over |
+| `InReview(AwaitingGates)` | `in_review`, reviewed | Evaluates the gates |
 | `Approved` | `approved` | Checks for a conflict, evaluates the gates |
 | `Closed` | `done`, `cancelled` | Nothing |
 
-Two things the record can't say stay inputs to reconcile, beside the phase: what the code host says of the PR (open, merged, closed, mergeable, its head), and whether the run's sandbox is still busy. `ReworkStale` and `ReviewOwed` each need the PR's head, so `phase` returns the candidate and reconcile confirms it against the host, as it does now.
+Two things the record can't say stay outside it. Whether the run's sandbox is still busy is an input to `phase`. What the code host says of the PR (open, merged, closed, mergeable, its head) is asked by the phases that need it, and can overrule the record in two places: a changes request made on a head that has since moved no longer stands, and a PR the record calls reviewed is owed a review again if it was pushed to since.
 
 **2. `reconcile_task` becomes a `match` on `Phase`**, one arm per row, each arm a function. No behaviour changes; the lifecycle suite, which since TRAIL-1435 drives the production start path, is the check.
 
