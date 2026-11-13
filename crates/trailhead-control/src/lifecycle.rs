@@ -750,12 +750,24 @@ impl Factory {
     /// back to review, where the gates look at the PR as it is. A CI failure's rework isn't one of these, since it
     /// wants the base merged in whether or not the PR conflicts.
     ///
-    /// The task is read again first: a review may have asked for changes since `task` was read, and its request, not
-    /// the conflict's, is the one standing then. A handoff would count as answering it and the request would be lost
-    /// (TRAIL-1418), so nothing is written and the request is left for reconcile to start. False when it was left.
+    /// The task is read again first, and so is its newest review: a review may have asked for changes since `task`
+    /// was read, and its request, not the conflict's, is the one standing then. A handoff would count as answering
+    /// it and the request would be lost (TRAIL-1418), so nothing is written and the next tick's rework (or
+    /// reconcile, for a verdict whose request was never recorded) starts it. The verdict is the check because the
+    /// reviewer's request is recorded on the task only after the verdict, the sandbox's teardown and the gates.
+    /// False when the settle was skipped.
     async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<bool> {
         let task = &self.tracker.show(&task.key).await?;
-        if !task.run.pending_changes().is_some_and(|c| c.kind == RequestKind::Conflict) {
+        let Some(conflict) = task.run.pending_changes().filter(|c| c.kind == RequestKind::Conflict) else {
+            return Ok(false);
+        };
+        // The conflict request's own verdict is the factory's, with the request's body.
+        let superseded = self
+            .tracker
+            .last_review(&task.key)
+            .await?
+            .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body != conflict.body);
+        if superseded {
             return Ok(false);
         }
         // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
     CI_REVIEWER, ChangesRequested, CiState, Error, Merged, MergedBy, Patch, PrRef, PrState, RequestKind, Result,
-    RunPatch, Sandbox, Status, Task, TaskKey, WorkerBreach, label,
+    RunPatch, Sandbox, Status, Task, TaskKey, VerdictKind, WorkerBreach, label,
 };
 
 use crate::phase::{Parked, Phase, Review, may_be_running, phase, unreviewed};
@@ -576,6 +576,28 @@ impl Factory {
             if current != *recorded {
                 standing = None;
             }
+        }
+        // A request for changes newer than the recorded request: a person's, or a reviewer's that a settled or dropped
+        // conflict request overtook. The recorded one no longer says what the task waits on, and answering the verdict
+        // as stale, or reworking the conflict, would lose it (TRAIL-1418). It is taken up as the request.
+        if matches!(review, Review::ReworkWaiting { .. })
+            && task.changes_requested
+            && let Some(verdict) = self.tracker.last_review(&task.key).await?
+            && verdict.kind == VerdictKind::RequestChanges
+            && task.run.last_changes().is_none_or(|c| c.body != verdict.body)
+        {
+            let requested = ChangesRequested {
+                reviewer: verdict.reviewer,
+                body: verdict.body,
+                attempt,
+                kind: RequestKind::Review,
+                head,
+                settled: false,
+            };
+            let round = task.run.review_rounds.unwrap_or(0) + 1;
+            self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
+            done.reworked.push(task.key.0.clone());
+            return Ok(false);
         }
         if matches!(review, Review::ReworkWaiting { .. }) {
             // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request. One
