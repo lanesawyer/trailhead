@@ -454,7 +454,8 @@ pub(crate) enum TokenCmd {
         /// What the token is for, e.g. the machine it goes to.
         name: String,
         /// Issue it for this agent of yours instead.
-        #[arg(long)]
+        // Its own id: `agent` is the global `--as`'s, and sharing it made this flag act as that agent.
+        #[arg(long = "agent", id = "token_agent")]
         agent: Option<String>,
         /// Limit the token to these projects (comma-separated keys).
         #[arg(long, value_delimiter = ',')]
