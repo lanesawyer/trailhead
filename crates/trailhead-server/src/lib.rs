@@ -239,6 +239,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
         }
     });
     spawn_archiver(state.clone());
+    spawn_heap_trim();
     webhooks::spawn(state.clone());
     let reminders = state.clone();
     tokio::spawn(async move {
@@ -379,6 +380,34 @@ pub enum Exit {
     Restart,
 }
 
+/// Every minute, hands the heap's free memory back to the system. glibc keeps what a burst of work freed, so the
+/// server's size only ever rises to its busiest moment: after 240 large reads, 16 at a time, a server held 321 MB
+/// with 34 MB in use. A trim took that to 138 MB; the rest is free memory in pages that still hold something
+/// (TRAIL-287). Other allocators and platforms are left to themselves.
+fn spawn_heap_trim() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            // Off the runtime's threads: a trim walks every arena under its lock.
+            let _ = tokio::task::spawn_blocking(trim_heap).await;
+        }
+    });
+}
+
+/// Whether the allocator gave anything back.
+fn trim_heap() -> bool {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` takes glibc's own locks and releases only pages no allocation uses.
+        unsafe { libc::malloc_trim(0) == 1 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        false
+    }
+}
+
 /// Hourly, moves events older than the undo window to `events_archive`.
 fn spawn_archiver(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -440,5 +469,17 @@ impl Signals {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),
             _ = self.term.recv() => tracing::info!("received SIGTERM; shutting down"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_trim_gives_back_what_a_burst_of_small_allocations_freed() {
+        // Many small blocks, freed all at once, as a large response's rows are: glibc keeps them until it is asked.
+        let burst: Vec<Vec<u8>> = (0..200_000).map(|i| vec![i as u8; 256]).collect();
+        drop(burst);
+        assert!(super::trim_heap(), "about 50 MB was free to give back");
     }
 }
