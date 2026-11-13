@@ -13,7 +13,7 @@ use trailhead_core::{
 use trailhead_factory::messages;
 use trailhead_factory::{
     Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, Result, RunUpdate,
-    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -314,14 +314,10 @@ impl Tracker for CoreTracker {
             }
         };
         let mut tasks = self.tasks(&ctx, tasks).await?;
-        // Reworks wait in review with changes requested: within a priority they are listed ahead of new work, and the
-        // merge and the raise both happen before the cut so a pile of low-priority reworks can't hide a higher-priority
-        // new task, nor a low-priority blocker of urgent work.
+        // Reworks wait in review with changes requested. They and the raise go in before the cut ([`in_ready_order`]).
         tasks.extend(self.reworks(&ctx, project, queue).await?);
         self.raise_to_blocked_priority(&ctx, &mut tasks).await;
-        tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
-        tasks.truncate(limit);
-        Ok(tasks)
+        Ok(in_ready_order(tasks, limit))
     }
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {

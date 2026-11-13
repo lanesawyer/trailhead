@@ -55,7 +55,7 @@ jobs:
       # The engine alone: no factory crates at all (iroh may move into the plain server, TRAIL-71, so it isn't checked).
       - run: cargo clippy --profile ci -p trailhead --no-default-features --all-targets --locked -- -D warnings
       - run: |
-          if cargo tree -p trailhead --no-default-features -e normal --prefix none --locked | grep -E '^trailhead-(factory|control|daemon|wire|plugins|compute|harness|provider|codehost|testkit)'; then
+          if cargo tree -p trailhead --no-default-features -e normal --prefix none --locked | grep -E '^trailhead-(factory|control|daemon|wire|plugins|compute|harness|provider|codehost|tracker|testkit)'; then
             echo "::error::trailhead --no-default-features depends on factory crates"; exit 1
           fi
 

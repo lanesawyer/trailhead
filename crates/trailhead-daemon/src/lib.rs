@@ -16,11 +16,6 @@ pub mod awake;
 pub mod gateway;
 #[cfg(feature = "net")]
 pub mod net;
-#[cfg(feature = "net")]
-mod rest;
-
-#[cfg(feature = "net")]
-pub use rest::RestTracker;
 
 pub use mise::{Mise, install_hosts_for};
 pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};

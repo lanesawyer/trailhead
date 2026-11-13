@@ -11,8 +11,9 @@ use iroh::protocol::Router;
 use trailhead_codehost_github::Identity;
 use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{DaemonProtocol, watch_network};
-use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
+use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
 use trailhead_factory::{DaemonSecrets, HarnessSetup, Tracker};
+use trailhead_tracker_rest::RestTracker;
 use trailhead_wire::api::open_api_tunnel;
 use trailhead_wire::{ALPN, build_id, parse_endpoint_id, parse_secret_key};
 

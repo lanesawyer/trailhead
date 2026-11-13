@@ -7,12 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use trailhead_control::FACTORY_LABEL;
-use trailhead_daemon::RestTracker;
 use trailhead_factory::compute::label;
 use trailhead_factory::status::control_label;
 use trailhead_factory::{
     Credential, FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
 };
+use trailhead_tracker_rest::RestTracker;
 
 use crate::{Opts, computes, config_dir, load_config, resolve_opts, saved_endpoint_id, surface};
 

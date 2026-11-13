@@ -1,6 +1,6 @@
 //! [`Tracker`] over Trailhead's REST API, as a daemon reaches it through the control plane's tunnel with its
-//! sandbox's sub-agent token. It does what a daemon needs; managing agents stays with the control plane, which
-//! uses the in-process tracker.
+//! sandbox's sub-agent token, and as `trailhead factory check`, `status` and `logs` read tasks with the user's token.
+//! It does what those need; managing agents stays with the control plane, which uses the in-process tracker.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use serde_json::json;
 use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, TaskQuery, TaskUpdate};
 use trailhead_factory::{
     Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
-    TaskKey, Tracker, Verdict, VerdictKind,
+    TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -137,7 +137,7 @@ impl Tracker for RestTracker {
     }
 
     async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
-        // Never just `limit`: the cut comes after the reworks are merged in and the blockers raised, as below.
+        // Never just `limit`: the cut comes after the reworks are merged in and the blockers raised ([`in_ready_order`]).
         let ready = self.client.ready(project, 1000).await.map_err(error)?;
         let mut queued = HashSet::new();
         for q in queue {
@@ -154,14 +154,9 @@ impl Tracker for RestTracker {
             .filter(|t| queue.is_empty() || queued.contains(&t.key))
             .map(|t| Task::from_model(t, None))
             .collect::<Result<Vec<_>>>()?;
-        // As `CoreTracker::ready` does: reworks are listed ahead of new work within a priority, and the merge and the
-        // raise both happen before the cut so a pile of low-priority reworks can't hide a higher-priority new task,
-        // nor a low-priority blocker of urgent work.
         tasks.extend(self.reworks(project, queue).await?);
         self.raise_to_blocked_priority(&mut tasks).await;
-        tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
-        tasks.truncate(limit);
-        Ok(tasks)
+        Ok(in_ready_order(tasks, limit))
     }
 
     async fn show(&self, key: &TaskKey) -> Result<Task> {
