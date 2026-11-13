@@ -706,6 +706,66 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     assert_eq!(task.run.conflict_reworks, Some(1));
 }
 
+/// A conflict that clears before its rework starts must leave the PR where it was: reviewed and approved on this
+/// head. The gate reads the reviewer's verdict, not the factory's own conflict request, and the factory hasn't
+/// become the one who did the work, so it can still approve (TRAIL-1468).
+#[tokio::test]
+async fn a_conflict_that_clears_leaves_the_reviewers_approval_standing_and_the_factory_able_to_approve() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"on\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new =
+        NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(true));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.holder, task.changes_requested), (Status::InReview, None, false));
+
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done, "merged on the review that stood: {:?}", task.run.merge);
+    assert!(r.codehost.prs()[0].merged);
+    assert_eq!(task.run.merged.expect("recorded").by, trailhead_factory::MergedBy::Merger);
+}
+
+/// A person who takes the task out of review while a conflict request stands gets the run they asked for once the
+/// conflict clears: the request is dropped, and nothing sends the task back to review in the factory's name.
+#[tokio::test]
+async fn a_conflict_that_clears_on_a_task_a_person_reopened_is_dropped_and_the_task_runs() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
+
+    r.codehost.set_mergeable(&pr, Some(true));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.holder), (Status::Open, None), "left for the next tick, not sent to review");
+    assert!(task.run.pending_changes().is_none(), "the conflict request is dropped");
+
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.show(&key).await.run.attempt, Some(2));
+}
+
 /// TRAIL-1418: a settled conflict request isn't a live conflict rework, so a reopened task isn't dropped again
 /// by the check that sends a rework back to review when the host reports no conflict.
 #[tokio::test]

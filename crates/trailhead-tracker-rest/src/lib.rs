@@ -175,6 +175,10 @@ impl Tracker for RestTracker {
         Err(unsupported("read a task's comments"))
     }
 
+    async fn last_review_by_others(&self, _: &TaskKey) -> Result<Option<Verdict>> {
+        Err(unsupported("read a task's comments"))
+    }
+
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let parents: Vec<Option<&TaskKey>> =
             if queue.is_empty() { vec![None] } else { queue.iter().map(Some).collect() };

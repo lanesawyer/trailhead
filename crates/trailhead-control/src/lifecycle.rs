@@ -761,12 +761,17 @@ impl Factory {
         let Some(conflict) = task.run.pending_changes().filter(|c| c.kind == RequestKind::Conflict) else {
             return Ok(false);
         };
+        // A task a person took out of review has no request to answer: dropping the conflict is all there is to do,
+        // and the next tick gives them the run they asked for. Sending it to review from here would make the factory
+        // the one who did the work, which core then lets it neither approve nor finish (TRAIL-1468).
+        let in_review = task.status == Status::InReview;
         // The conflict request's own verdict is the factory's, with the request's body.
-        let superseded = self
-            .tracker
-            .last_review(&task.key)
-            .await?
-            .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim());
+        let superseded = in_review
+            && self
+                .tracker
+                .last_review(&task.key)
+                .await?
+                .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim());
         if superseded {
             return Ok(false);
         }
@@ -779,10 +784,12 @@ impl Factory {
             };
             self.tracker.report(&task.key, settled).await?;
         }
-        self.tracker.claim(&task.key).await?;
-        // The handoff answers the conflict request, so the task is no longer waiting on a rework.
-        let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
-        self.tracker.request_review(&task.key, &handoff).await?;
+        // The handoff answers the conflict request, so the task is no longer waiting on a rework. It stays in
+        // review, as it was, for the same reason (TRAIL-1468).
+        if in_review {
+            let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
+            self.tracker.handoff(&task.key, &handoff).await?;
+        }
         Ok(true)
     }
 

@@ -151,6 +151,23 @@ impl FakeTracker {
         self.state.lock().unwrap().context_fails = fails;
     }
 
+    /// The task's newest `review` comment, or the newest one someone else left when `by_others`.
+    fn newest_review(&self, task: &TaskKey, by_others: bool) -> Result<Option<Verdict>> {
+        self.check_live()?;
+        let s = self.state.lock().unwrap();
+        let comments = s.comments.get(task).map(Vec::as_slice).unwrap_or_default();
+        let newest = comments.iter().rev().find(|c| c.kind == "review" && !(by_others && c.author == self.agent));
+        Ok(newest.and_then(|c| {
+            let (kind, body) = c.body.split_once(": ")?;
+            let kind = match kind {
+                "approve" => VerdictKind::Approve,
+                "request_changes" => VerdictKind::RequestChanges,
+                _ => return None,
+            };
+            Some(Verdict { kind, body: body.to_string(), reviewer: c.author.clone(), model: None, raise_grade: None })
+        }))
+    }
+
     /// Makes the next `times` calls `agent` makes to `op` fail, as a tracker outage would.
     pub fn fail_next(&self, agent: &str, op: TrackerOp, times: usize) {
         self.fail_after(agent, op, 0, times);
@@ -500,18 +517,11 @@ impl Tracker for FakeTracker {
     }
 
     async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>> {
-        self.check_live()?;
-        let s = self.state.lock().unwrap();
-        let comments = s.comments.get(task).map(Vec::as_slice).unwrap_or_default();
-        Ok(comments.iter().rev().find(|c| c.kind == "review").and_then(|c| {
-            let (kind, body) = c.body.split_once(": ")?;
-            let kind = match kind {
-                "approve" => VerdictKind::Approve,
-                "request_changes" => VerdictKind::RequestChanges,
-                _ => return None,
-            };
-            Some(Verdict { kind, body: body.to_string(), reviewer: c.author.clone(), model: None, raise_grade: None })
-        }))
+        self.newest_review(task, false)
+    }
+
+    async fn last_review_by_others(&self, task: &TaskKey) -> Result<Option<Verdict>> {
+        self.newest_review(task, true)
     }
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
