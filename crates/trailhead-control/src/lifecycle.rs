@@ -33,7 +33,7 @@ impl Factory {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
-            let conflict_rework = task.run.last_changes().is_some_and(|c| c.kind == RequestKind::Conflict);
+            let conflict_rework = task.run.pending_changes().is_some_and(|c| c.kind == RequestKind::Conflict);
             let mut state = codehost.pr_state(pr).await?;
             // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
             // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
@@ -49,7 +49,9 @@ impl Factory {
             match state {
                 PrState::Open { mergeable: Some(true), .. } if conflict_rework => {
                     tracing::info!(task = %task.key, pr = %pr.url, "the host no longer reports a conflict; back to review");
-                    self.settle_gone_conflict(task, pr).await?;
+                    if !self.settle_gone_conflict(task, pr).await? {
+                        return Ok(Outcome::Settled { reason: messages::settled_conflict_superseded(&pr.url) });
+                    }
                     return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
                 }
                 PrState::Merged { commit } => {
@@ -747,7 +749,15 @@ impl Factory {
     /// fail as 'changed nothing', using up an attempt, so no worker runs: the request is dropped and the task goes
     /// back to review, where the gates look at the PR as it is. A CI failure's rework isn't one of these, since it
     /// wants the base merged in whether or not the PR conflicts.
-    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<()> {
+    ///
+    /// The task is read again first: a review may have asked for changes since `task` was read, and its request, not
+    /// the conflict's, is the one standing then. A handoff would count as answering it and the request would be lost
+    /// (TRAIL-1418), so nothing is written and the request is left for reconcile to start. False when it was left.
+    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<bool> {
+        let task = &self.tracker.show(&task.key).await?;
+        if !task.run.pending_changes().is_some_and(|c| c.kind == RequestKind::Conflict) {
+            return Ok(false);
+        }
         // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
         // stays as it was, so reworks that really ran still count toward `max_conflict_reworks`.
         if let Some(requested) = task.run.last_changes() {
@@ -761,7 +771,7 @@ impl Factory {
         // The handoff answers the conflict request, so the task is no longer waiting on a rework.
         let handoff = messages::conflict_gone_note(&pr.url, &self.config.repo.base_branch);
         self.tracker.request_review(&task.key, &handoff).await?;
-        Ok(())
+        Ok(true)
     }
 
     /// Whether the PR a worker just pushed already conflicts with the base branch, which moved while the run worked

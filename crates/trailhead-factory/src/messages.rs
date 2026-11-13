@@ -248,6 +248,11 @@ pub fn settled_conflict_gone(pr_url: &str) -> String {
     format!("{pr_url} no longer conflicts with its base branch")
 }
 
+/// Why a run settled without work when its conflict is gone but a later request for changes stands.
+pub fn settled_conflict_superseded(pr_url: &str) -> String {
+    format!("{pr_url} no longer conflicts with its base branch, but a later request for changes stands")
+}
+
 /// The handoff on a task whose worker pushed its PR for review, which answers the changes a review asked for.
 pub fn pushed_for_review_handoff(pr_url: &str) -> String {
     format!("Pushed {pr_url} for review.")

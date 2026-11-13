@@ -706,6 +706,26 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     assert_eq!(task.run.conflict_reworks, Some(1));
 }
 
+/// TRAIL-1418: a settled conflict request isn't a live conflict rework, so a reopened task isn't dropped again
+/// by the check that sends a rework back to review when the host reports no conflict.
+#[tokio::test]
+async fn a_reopened_task_with_a_settled_conflict_request_is_not_dropped_as_a_gone_conflict() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.factory.tick().await.unwrap();
+    assert!(r.show(&key).await.run.changes_requested.is_some_and(|c| c.settled));
+
+    r.tracker.reopen(&key).await.unwrap();
+    let sandboxes = r.daemon.prepared().len();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(!matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert!(r.daemon.prepared().len() > sandboxes, "a worker ran");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_conflict_the_host_has_not_worked_out_yet_is_asked_again_before_a_worker_runs() {
     let r = rig().await;
