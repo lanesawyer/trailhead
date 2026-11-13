@@ -3,6 +3,10 @@
 
 use std::sync::Arc;
 
+#[path = "support/logs.rs"]
+mod logs;
+use logs::Logs;
+
 use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, Grade, NewProject, NewTask, Priority, ProjectPatch, Store, TaskPatch};
 
@@ -1602,39 +1606,13 @@ fn factory_for(r: &Rig, name: &str, queue: &TaskKey, host: Arc<Host>) -> Factory
     )
 }
 
-#[derive(Clone, Default)]
-struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for Logs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-    type Writer = Logs;
-    fn make_writer(&'a self) -> Logs {
-        self.clone()
-    }
-}
-
-impl Logs {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-
-    /// How many log lines carry `task=<key>` as a whole key, so `TRAIL-4` doesn't count `TRAIL-40`.
-    fn warnings_for(&self, key: &TaskKey) -> usize {
-        let field = format!("task={}", key.0);
-        let text = self.text();
-        text.match_indices(&field)
-            .filter(|(i, _)| !text[i + field.len()..].starts_with(|c: char| c.is_ascii_digit()))
-            .count()
-    }
+/// How many log lines carry `task=<key>` as a whole key, so `TRAIL-4` doesn't count `TRAIL-40`.
+fn warnings_for(logs: &Logs, key: &TaskKey) -> usize {
+    let field = format!("task={}", key.0);
+    let text = logs.text();
+    text.match_indices(&field)
+        .filter(|(i, _)| !text[i + field.len()..].starts_with(|c: char| c.is_ascii_digit()))
+        .count()
 }
 
 #[tokio::test]
@@ -1677,20 +1655,18 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
     // Beta's run is live under beta's queue; alpha sees the shared queues, so it isn't a stray.
     let beta_task = subtask(&r, &q2, "Beta's task").await;
     with_run(&r, &beta_task).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.warnings_for(&beta_task), 0, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &beta_task), 0, "{}", logs.text());
 
     let stray = r.task("Moved out of every queue").await;
     with_run(&r, &stray).await;
     alpha.reconcile().await.unwrap();
     alpha.reconcile().await.unwrap();
     let text = logs.text();
-    assert_eq!(logs.warnings_for(&stray), 1, "{text}");
-    assert_eq!(logs.warnings_for(&beta_task), 0, "{text}");
+    assert_eq!(warnings_for(&logs, &stray), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &beta_task), 0, "{text}");
 }
 
 #[tokio::test]
@@ -1700,9 +1676,7 @@ async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again(
     let alpha = factory_for(&r, "alpha", &queue, Host::new(&HostConfig::default()));
     let task = subtask(&r, &queue, "Moves around").await;
     with_run(&r, &task).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
     let reparent = |parent: Option<TaskKey>| TaskPatch { parent: Some(parent), ..Default::default() };
 
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
@@ -1741,17 +1715,15 @@ async fn strays_in_different_projects_on_one_host_are_each_warned_about_once() {
     let stray_b = r.store.create_task(&r.human, in_other("Beta's stray")).await.unwrap().key;
     with_run(&r, &stray_a).await;
     with_run(&r, &stray_b).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     for _ in 0..3 {
         alpha.reconcile().await.unwrap();
         beta.reconcile().await.unwrap();
     }
     let text = logs.text();
-    assert_eq!(logs.warnings_for(&stray_a), 1, "{text}");
-    assert_eq!(logs.warnings_for(&stray_b), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &stray_a), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &stray_b), 1, "{text}");
 }
 
 #[tokio::test]
@@ -1820,9 +1792,7 @@ async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_
     // The queueless repo's run sits under no queue, but it is that repo's own, not a stray.
     let theirs = r.task("Alpha's task").await;
     with_run(&r, &theirs).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     beta.reconcile().await.unwrap();
     assert!(!logs.text().contains(&theirs.0), "{}", logs.text());
