@@ -474,10 +474,7 @@ impl Factory {
                 self.reconcile_parked(task, parked, done).await?;
                 Ok(false)
             }
-            Phase::Approved => {
-                self.reconcile_approved(task, done).await?;
-                Ok(false)
-            }
+            Phase::Approved => self.reconcile_approved(task, done).await,
             Phase::InReview(review) => self.reconcile_in_review(task, review, done).await,
         }
     }
@@ -537,8 +534,24 @@ impl Factory {
         Ok(())
     }
 
-    async fn reconcile_approved(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
-        let PrSettle::Open { mergeable, .. } = self.pr_settled(task, done).await? else { return Ok(()) };
+    /// True when the PR is due a review.
+    async fn reconcile_approved(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        let PrSettle::Open { mergeable, head } = self.pr_settled(task, done).await? else { return Ok(false) };
+        // A person approved a head whose newest review, a reviewer's or a person's, asks for changes. The gate
+        // still wants a review to approve, which takes a rework, and only a task in review is listed for one: so the
+        // request outranks the approval, as the rework's push would have anyway (TRAIL-1469). Before the conflict
+        // check, whose own request would replace this one and, were the conflict to clear, answer it.
+        if !self.review_owed(task, head.as_ref()).await?
+            && self
+                .tracker
+                .last_review_by_others(&task.key)
+                .await?
+                .is_some_and(|v| v.kind == VerdictKind::RequestChanges)
+        {
+            tracing::info!(task = %task.key, "approved over a request for changes; back to review for the rework");
+            self.tracker.unapprove(&task.key).await?;
+            return Ok(false);
+        }
         // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which would
         // otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that doesn't auto-merge).
         if let Some(pr) = &task.run.pr
@@ -548,9 +561,31 @@ impl Factory {
             let attempt = task.run.attempt.unwrap_or(1);
             self.rework_conflict(task, pr, attempt).await?;
             done.conflicted.push(task.key.0.clone());
-            return Ok(());
+            return Ok(false);
         }
-        self.evaluate_gates(&task.key).await
+        // First, since an approval given on an older head goes back to review here, where the review is started.
+        self.evaluate_gates(&task.key).await?;
+        // Still approved, on a head no review has read: a person approved before the attempt's review ran, or pushed
+        // and then approved. The review is owed, and nothing else would start it. The approval stays, so a review
+        // that approves merges without asking again (TRAIL-1469).
+        let now = self.tracker.show(&task.key).await?;
+        Ok(now.status == Status::Approved
+            && self.review_owed(&now, head.as_ref()).await?
+            && self.setback_over(&task.key))
+    }
+
+    /// Whether the PR's head is owed a review: the attempt's hasn't run, or a push from outside the factory moved
+    /// the head past the one last reviewed by more than a clean merge of the base, which the merger's agent_review
+    /// gate would otherwise wait on forever (TRAIL-298). `head` is the PR's head when the host has just shown it.
+    async fn review_owed(&self, task: &Task, head: Option<&String>) -> Result<bool> {
+        if unreviewed(task) {
+            return Ok(true);
+        }
+        let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head) else {
+            return Ok(false);
+        };
+        // The head the host showed is the one reviewed: nothing to ask.
+        Ok(head != Some(reviewed) && !codehost.carries_verdict(pr, reviewed).await?)
     }
 
     /// True when the PR is due a review.
@@ -629,16 +664,7 @@ impl Factory {
             done.conflicted.push(task.key.0.clone());
             return Ok(false);
         }
-        // A push from outside the factory leaves the head differing from the one last reviewed; that wants a review
-        // like a rework does, or the merger's agent_review gate would wait on it forever (TRAIL-298).
-        let mut owed = unreviewed(task);
-        if let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head)
-            && !owed
-            // The head the host showed above is the one reviewed: nothing to ask.
-            && head.as_ref() != Some(reviewed)
-        {
-            owed = !codehost.carries_verdict(pr, reviewed).await?;
-        }
+        let owed = self.review_owed(task, head.as_ref()).await?;
         let due = owed && self.setback_over(&task.key);
         // A review backed off after an infrastructure failure is still owed: approving now could pass a grade whose
         // gate doesn't ask for agent_review, and nothing would schedule the review afterwards (TRAIL-263).
