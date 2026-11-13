@@ -55,9 +55,9 @@ pub use status::{
 };
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
-    Answered, ChangesRequested, Credential, FollowUpTask, Grade, HISTORY_LIMIT, HumanContext, METADATA_KEY,
-    MergeDecision, Merged, MergedBy, Priority, ReviewBreach, RunUpdate, Said, Status, Task, TaskKey, TaskNote, Tracker,
-    WorkerBreach, in_ready_order, is_factory_agent, is_raised_by, key_number, raised_by,
+    Answered, CI_REVIEWER, ChangesRequested, Credential, FollowUpTask, Grade, HISTORY_LIMIT, HumanContext,
+    METADATA_KEY, MergeDecision, Merged, MergedBy, Priority, RequestKind, ReviewBreach, RunUpdate, Said, Status, Task,
+    TaskKey, TaskNote, Tracker, WorkerBreach, in_ready_order, is_factory_agent, is_raised_by, key_number, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

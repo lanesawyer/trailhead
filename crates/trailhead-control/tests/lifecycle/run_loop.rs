@@ -715,7 +715,7 @@ async fn reworks_that_hold_their_own_sandboxes_start_with_the_cap_full() {
     }
     r.factory.reconcile().await.unwrap();
     for key in &keys {
-        assert!(r.tracker.task(key).run.pending_changes().is_some_and(|c| c.conflict));
+        assert!(r.tracker.task(key).run.pending_changes().is_some_and(|c| !c.kind.is_review()));
     }
     // The run before the restart left each task's pooled sandbox held for it, as a parked task's is.
     let mut labels = r.compute.get("trailhead-w1").unwrap().labels;

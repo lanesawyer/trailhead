@@ -645,7 +645,7 @@ async fn a_pr_that_no_longer_merges_cleanly_is_reworked_with_the_base_merged_in(
     assert_eq!(task.run.review_rounds, Some(1), "a conflict leaves the review rounds alone");
     assert_eq!(task.run.conflict_reworks, Some(1));
     let wanted = task.run.changes_requested.expect("the rework is told why");
-    assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
+    assert!(wanted.kind == trailhead_factory::RequestKind::Conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
@@ -1104,7 +1104,7 @@ async fn an_approved_pr_that_starts_conflicting_is_unapproved_and_reworked() {
     let task = r.show(&key).await;
     assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "waiting in review for a rework");
     let wanted = task.run.changes_requested.expect("the rework is told why");
-    assert!(wanted.conflict && wanted.body.contains(&pr.url), "{wanted:?}");
+    assert!(wanted.kind == trailhead_factory::RequestKind::Conflict && wanted.body.contains(&pr.url), "{wanted:?}");
 }
 
 #[tokio::test]

@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, Error, PrRef, Result, ReviewBreach, Role, RunPhase, RunReport, RunRequest,
-    RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
+    ChangesRequested, CheckResult, Error, PrRef, RequestKind, Result, ReviewBreach, Role, RunPhase, RunReport,
+    RunRequest, RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
 };
 
 use crate::infra::{Park, Setback};
@@ -50,7 +50,7 @@ impl Factory {
         let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: true });
         let before = shown.run.review_rounds.unwrap_or(0);
         // The re-review after a conflict rework doesn't use a round (TRAIL-221); it does if it asks for changes.
-        let after_conflict = shown.run.last_changes().is_some_and(|c| c.conflict);
+        let after_conflict = shown.run.last_changes().is_some_and(|c| !c.kind.is_review());
         let round = if after_conflict { before } else { before + 1 };
         let retries = shown.run.retries.unwrap_or(0);
         let infra_prior = shown.run.infra_failures;
@@ -160,7 +160,7 @@ impl Factory {
                         reviewer: verdict.reviewer.clone(),
                         body: verdict.body.clone(),
                         attempt,
-                        conflict: false,
+                        kind: RequestKind::Review,
                         head: reviewed_head_at_request,
                         settled: false,
                     };
@@ -351,13 +351,16 @@ impl Factory {
         retries: u32,
     ) -> Result<()> {
         // `round` counts what the request is: review rounds, or conflict reworks for a conflict (TRAIL-221).
-        let max =
-            if requested.conflict { self.config.repo.max_conflict_reworks } else { self.config.repo.max_review_rounds };
-        let (reviewer, body, conflict) = (requested.reviewer.clone(), requested.body.clone(), requested.conflict);
+        let max = if requested.kind.is_review() {
+            self.config.repo.max_review_rounds
+        } else {
+            self.config.repo.max_conflict_reworks
+        };
+        let (reviewer, body, kind) = (requested.reviewer.clone(), requested.body.clone(), requested.kind);
         // Recorded before the request is made visible, so the run that picks it up can't miss the review.
         // A review's round goes in the same write, so a stop between the two can't count it twice (TRAIL-322).
         let update = RunUpdate {
-            review_rounds: (!conflict).then_some(round),
+            review_rounds: kind.is_review().then_some(round),
             reviewed: Some(requested.attempt),
             attempt_base: Some(requested.attempt),
             changes_requested: Some(requested.clone()),
@@ -368,12 +371,10 @@ impl Factory {
             tracing::warn!(task = %task.key, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;
             self.tracker.claim(&task.key).await?;
-            let question = if conflict && reviewer == CI_REVIEWER {
-                messages::ci_rework_limit_question(round, max, &body)
-            } else if conflict {
-                messages::conflict_rework_limit_question(round, max)
-            } else {
-                messages::review_rework_limit_question(round, max, &reviewer, &body)
+            let question = match kind {
+                RequestKind::Ci => messages::ci_rework_limit_question(round, max, &body),
+                RequestKind::Conflict => messages::conflict_rework_limit_question(round, max),
+                RequestKind::Review => messages::review_rework_limit_question(round, max, &reviewer, &body),
             };
             self.tracker.ask(&task.key, &question).await?;
             // Last, so a reconcile that finishes a park cut short still sees the round that hit the limit. If the
@@ -384,7 +385,7 @@ impl Factory {
         // The task stays in review: a reviewer's verdict is already its newest review comment, and a conflict or
         // CI failure gets one from the factory, so it is listed as having changes requested until a worker's
         // handoff answers it (TRAIL-963).
-        if conflict {
+        if !kind.is_review() {
             // An approval doesn't survive the request. `task` may be older than the merger's own approval, or newer
             // than a caller's unapprove, so the tracker is asked.
             if self.tracker.show(&task.key).await?.status == Status::Approved {
@@ -397,9 +398,6 @@ impl Factory {
         Ok(())
     }
 }
-
-/// Who a rework asked for by failing CI is attributed to, in the worker's feedback and the park question.
-pub(crate) const CI_REVIEWER: &str = "CI";
 
 /// A reviewer's name: the round's, with the count of infrastructure retries so a retried round gets a fresh one.
 pub(crate) fn reviewer_name(task: &TaskKey, attempt: u32, round: u32, retries: u32) -> String {

@@ -103,7 +103,7 @@ Two things the record can't say stay outside it. Whether the run's sandbox is st
 
 **2. `reconcile_task` becomes a `match` on `Phase`**, one arm per row, each arm a function. No behaviour changes; the lifecycle suite, which since TRAIL-1435 drives the production start path, is the check.
 
-**3. A request kind.** A changes request is a review's, a conflict's or CI's. Today that is `conflict: bool` plus `reviewer == "CI"`, read at nine sites. It becomes `kind: Review | Conflict | Ci` on `ChangesRequested`. The two old fields are no longer written. A record from before has no `kind`, so for a task already in flight it is read from `conflict` and `reviewer`.
+**3. A request kind.** A changes request is a review's, a conflict's or CI's. It was `conflict: bool` plus `reviewer == "CI"`, read at nine sites; it is `kind: review | conflict | ci` on `ChangesRequested` (built, TRAIL-1458). The two old fields are no longer written. A record from before has no `kind`, so for a task already in flight it is read from `conflict` and `reviewer`.
 
 **4. Clears that say so.** A write merges, so a field is cleared today by writing a stand-in: an empty string for `merging` and `stale_head`, zero for `released` and `gave_up`. The stored metadata is merged as a JSON merge patch, where `null` already removes a key. The proposal is to split the one struct in two: `Run` (what is read: plain optional fields) and `RunPatch` (what is written: each field `Keep`, `Clear` or `Set`). `Clear` writes `null`. Reads treat the old stand-ins as absent, so existing records need no rewrite.
 
