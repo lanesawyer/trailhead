@@ -150,3 +150,19 @@ fn a_conflict_rework_that_cant_start_doesnt_make_the_factory_its_worker() {
         ],
     );
 }
+
+/// TRAIL-1474: a sandbox left busy by a cut-short rework was kept forever for another task, parked long after its
+/// own run had given that sandbox back.
+#[test]
+fn a_sandbox_left_busy_isnt_kept_for_a_parked_task_that_gave_it_back() {
+    replay(
+        &[3, 2],
+        &[
+            Tick(11677261679818106694),
+            Tick(15995362618438969218),
+            Fault(TrackerFailsWrite(8)),
+            PersonRequestsChanges(0),
+            Tick(8242041107249138301),
+        ],
+    );
+}

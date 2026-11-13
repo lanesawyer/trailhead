@@ -115,13 +115,17 @@ impl Factory {
                 continue;
             }
             // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox, unless the
-            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
+            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone. Only the
+            // task the sandbox is labelled for keeps it: a parked task's record goes on naming a host its run gave
+            // back long ago, and a later task's cut-short run there would never be released (TRAIL-1474).
+            let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
+                    && labelled.is_none_or(|task| *task == t.key.0)
             }) {
                 // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
                 if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
