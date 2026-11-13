@@ -351,7 +351,7 @@ impl Runner {
         let mut waited = Duration::ZERO;
         loop {
             match call().await {
-                Err(Error::Other(e)) if waited < PUBLISH_RETRY_FOR => {
+                Err(e) if e.is_transient() && waited < PUBLISH_RETRY_FOR => {
                     tracing::warn!(task = %req.task.key, error = %e, ?wait, "{what} failed; retrying");
                     tokio::time::sleep(wait).await;
                     waited += wait;
