@@ -11,7 +11,7 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Priority, Store, TaskFilter};
 use trailhead_daemon::net::DaemonProtocol;
-use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
+use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, SandboxId, Status,
@@ -19,6 +19,7 @@ use trailhead_factory::{
 };
 use trailhead_plugins::CLAUDE_CODE;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeWorkspace, Script, ScriptedHarness};
+use trailhead_tracker_rest::RestTracker;
 use trailhead_wire::api::{ApiTunnel, open_api_tunnel};
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 use trailhead_wire::{ALPN, API_ALPN, build_id, parse_endpoint_id, parse_secret_key};

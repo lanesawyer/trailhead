@@ -9,7 +9,7 @@ Decided: the factory core is agnostic to compute, agent harness, model provider,
 | `Compute` | Control plane | Fly.io Sprites (`trailhead-compute-sprites`), Docker (`trailhead-compute-docker`) | Other microVM hosts, local VMs |
 | `Harness` | Daemon, in the sandbox | Claude Code (`trailhead-harness-claude-code`) | Codex, an own agent loop |
 | `ModelProvider` | Both | Anthropic (`trailhead-provider-anthropic`) | OpenAI, OpenRouter, local models ([local-models.md](local-models.md)); TRAIL-125 |
-| `Tracker` | Both | Trailhead: in-process over `trailhead-core` in the control plane (`CoreTracker`), REST from the daemon (`RestTracker`) | Jira and others |
+| `Tracker` | Both | Trailhead: in-process over `trailhead-core` in the control plane (`CoreTracker`), REST from the daemon (`RestTracker` in `trailhead-tracker-rest`) | Jira and others |
 | `CodeHost` | Daemon, and the control plane for merges | GitHub's REST API (`trailhead-codehost-github`) | GitLab, Forgejo |
 
 ## The traits
@@ -40,7 +40,8 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings, and `messages`: every PR comment, task note and park question, as pure functions the control plane and the daemon share (no i18n framework; logs and prompts stay out) |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, usage-window pauses, reviews, reconcile; `CoreTracker` |
 | `trailhead-factory-server` | The control plane's setup as a library: credentials, keys, the iroh endpoint and its protocols, the status surface, `check` and `run`, and the `trailhead factory` commands. The server runs it in-process (TRAIL-164) |
-| `trailhead-daemon` | In-sandbox daemon: harness host, checks, publishing; its side of the iroh transport (`DaemonProtocol`) and `RestTracker` |
+| `trailhead-daemon` | In-sandbox daemon: harness host, checks, publishing; its side of the iroh transport (`DaemonProtocol`) |
+| `trailhead-tracker-rest` | `Tracker` over Trailhead's REST API (`RestTracker`): the daemon's, through the API tunnel, and `trailhead factory check`, `status` and `logs`, with the user's token |
 | `trailhead-wire` | The iroh protocols shared by the control plane, the daemon and Lookout: framing and keys, `RemoteDaemon`, the API tunnel, `trailhead/ui/0`. No harness or code host dependency |
 | `trailhead-compute-sprites` | `Compute` for Fly.io Sprites (own thin API wrapper) |
 | `trailhead-compute-docker` | `Compute` for Docker or Podman's Docker API, through bollard; behind the host's `docker` feature |

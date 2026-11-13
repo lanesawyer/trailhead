@@ -1,0 +1,29 @@
+[package]
+name = "trailhead-tracker-rest"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+publish = false
+description = "Trailhead factory Tracker over Trailhead's REST API, as a sandbox's daemon reaches it"
+
+[lints]
+workspace = true
+
+[dependencies]
+trailhead-factory.workspace = true
+trailhead-model.workspace = true
+trailhead-client = { workspace = true, features = ["http"] }
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+trailhead-control.workspace = true
+trailhead-core.workspace = true
+trailhead-server.workspace = true
+axum.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net"] }

@@ -437,6 +437,17 @@ pub fn is_factory_agent(name: &str) -> bool {
     name == "factory" || name.starts_with("factory/")
 }
 
+/// The last step of [`Tracker::ready`]: puts the tasks in order, by priority and within a priority reworks
+/// ([`Task::changes_requested`]) ahead of new work, then cuts the list to `limit`. A tracker merges its reworks in and
+/// raises each task to the priority of what it blocks before this, so a pile of low-priority reworks can't hide a
+/// higher-priority new task, nor the cut a low-priority blocker of urgent work. The sort is stable, so the order the
+/// tasks came in holds among equals.
+pub fn in_ready_order(mut tasks: Vec<Task>, limit: usize) -> Vec<Task> {
+    tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
+    tasks.truncate(limit);
+    tasks
+}
+
 /// A Trailhead sub-agent and its bearer token, handed to a sandbox at start. `Debug` leaves the token out, since a
 /// credential rides in a [`RunRequest`](crate::RunRequest) that gets logged.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,4 +539,38 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(key: &str, priority: u8, changes_requested: bool) -> Task {
+        Task {
+            key: TaskKey(key.into()),
+            project: "TRAIL".into(),
+            title: key.into(),
+            description: String::new(),
+            status: if changes_requested { Status::InReview } else { Status::Open },
+            grade: None,
+            priority: Priority::new(priority).unwrap(),
+            holder: None,
+            changes_requested,
+            run: RunUpdate::default(),
+        }
+    }
+
+    #[test]
+    fn ready_order_is_priority_then_reworks_first_then_arrival_and_cut_last() {
+        let tasks = vec![
+            task("TRAIL-1", 3, false),
+            task("TRAIL-2", 2, false),
+            task("TRAIL-3", 2, true),
+            task("TRAIL-4", 2, false),
+            task("TRAIL-5", 3, true),
+        ];
+        let keys = |tasks: Vec<Task>| tasks.into_iter().map(|t| t.key.0).collect::<Vec<_>>();
+        assert_eq!(keys(in_ready_order(tasks.clone(), 10)), ["TRAIL-3", "TRAIL-2", "TRAIL-4", "TRAIL-5", "TRAIL-1"]);
+        assert_eq!(keys(in_ready_order(tasks, 2)), ["TRAIL-3", "TRAIL-2"]);
+    }
 }

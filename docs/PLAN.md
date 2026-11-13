@@ -76,7 +76,7 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead-plugins` | The harnesses and model providers a build carries, by the names config gives them | |
 | `trailhead-testkit` | In-memory fakes for every seam and an in-process daemon | |
 
-The vendor implementations (Sprites compute, the Claude Code harness, Anthropic, GitHub) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` while the factory is built from this repo; shipping it in the `trailhead` CLI is TRAIL-116.
+The vendor implementations (Sprites compute, the Claude Code harness, Anthropic, GitHub, the REST tracker) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` while the factory is built from this repo; shipping it in the `trailhead` CLI is TRAIL-116.
 
 | Interface | Best for |
 | --- | --- |

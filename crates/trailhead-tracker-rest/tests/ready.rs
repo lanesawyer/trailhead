@@ -6,8 +6,8 @@ use trailhead_control::CoreTracker;
 use trailhead_core::{
     CommentKind, Ctx, NewComment, NewProject, NewTask, Principal, Priority, Status, Store, TaskPatch, Verdict,
 };
-use trailhead_daemon::RestTracker;
 use trailhead_factory::{Credential, TaskKey, Tracker};
+use trailhead_tracker_rest::RestTracker;
 
 async fn add(s: &Store, h: &Ctx, title: &str, priority: u8) -> TaskKey {
     let new = NewTask {
