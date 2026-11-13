@@ -706,6 +706,90 @@ async fn a_conflict_the_host_no_longer_reports_goes_back_to_review_without_a_wor
     assert_eq!(task.run.conflict_reworks, Some(1));
 }
 
+/// TRAIL-1418: a settled conflict request isn't a live conflict rework, so a reopened task isn't dropped again
+/// by the check that sends a rework back to review when the host reports no conflict.
+#[tokio::test]
+async fn a_reopened_task_with_a_settled_conflict_request_is_not_dropped_as_a_gone_conflict() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.factory.tick().await.unwrap();
+    assert!(r.show(&key).await.run.changes_requested.is_some_and(|c| c.settled));
+
+    r.tracker.reopen(&key).await.unwrap();
+    let sandboxes = r.daemon.prepared().len();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(!matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert!(r.daemon.prepared().len() > sandboxes, "a worker ran");
+}
+
+/// A reviewer's request for changes that lands after the conflict request but before it is recorded on the task
+/// (TRAIL-1418): settling the dropped conflict would post a handoff that answers the verdict.
+async fn reviewer_requests_changes(r: &Rig, key: &TaskKey, body: &str) {
+    let cred =
+        r.tracker.create_sub_agent("person-review", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
+    let reviewer = CoreTracker::authenticate(r.store.clone(), &cred).await.unwrap();
+    let verdict = Verdict {
+        kind: VerdictKind::RequestChanges,
+        body: body.into(),
+        reviewer: String::new(),
+        model: None,
+        raise_grade: None,
+    };
+    reviewer.record_verdict(key, &verdict).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_review_that_asks_for_changes_before_it_is_recorded_survives_a_dropped_conflict_rework() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert!(
+        r.show(&key).await.run.pending_changes().is_some_and(|c| c.kind == trailhead_factory::RequestKind::Conflict)
+    );
+
+    // The verdict is the newest review comment, but `changes_requested` still holds the conflict request.
+    reviewer_requests_changes(&r, &key, "The diff against main is empty.").await;
+    r.codehost.set_mergeable(&pr, Some(true));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    let task = r.show(&key).await;
+    assert!(task.changes_requested, "still waiting on a rework: no handoff answered the verdict");
+    assert!(task.run.pending_changes().is_some_and(|c| !c.settled), "the request wasn't settled");
+
+    // Reconcile takes the verdict up as the request, so the rework starts.
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    let asked = task.run.pending_changes().expect("a request");
+    assert_eq!(asked.kind, trailhead_factory::RequestKind::Review);
+    assert_eq!(asked.body, "The diff against main is empty.");
+    assert!(task.changes_requested);
+}
+
+#[tokio::test]
+async fn a_review_that_asks_for_changes_after_a_settled_conflict_request_is_taken_up() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_mergeable(&pr, Some(true));
+    r.factory.tick().await.unwrap();
+    assert!(r.show(&key).await.run.changes_requested.is_some_and(|c| c.settled));
+
+    // A person's verdict after the settled request isn't answered as stale.
+    reviewer_requests_changes(&r, &key, "Add a test.").await;
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert!(task.changes_requested, "the verdict still waits for a rework");
+    // Taken up as the request (here it hit the round limit, so it is parked on), not answered with a handoff.
+    let asked = task.run.last_changes().expect("a request");
+    assert_eq!((asked.kind, asked.body.as_str()), (trailhead_factory::RequestKind::Review, "Add a test."));
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_conflict_the_host_has_not_worked_out_yet_is_asked_again_before_a_worker_runs() {
     let r = rig().await;
@@ -1557,4 +1641,18 @@ async fn a_pr_a_person_merges_in_review_finishes_the_task_though_nobody_approved
     assert_eq!(task.status, Status::Done, "merging settles it");
     assert_eq!(task.run.merged.expect("the merge is recorded").by, trailhead_factory::MergedBy::Human);
     assert_eq!(task.run.unapproved_merge, None);
+}
+
+#[tokio::test]
+async fn a_reviewers_summary_with_trailing_whitespace_counts_one_round() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.\n")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.show(&key).await.run.review_rounds, Some(1));
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.run.review_rounds, Some(1), "the stored comment is trimmed; it is still the recorded request");
+    assert!(task.changes_requested);
 }
