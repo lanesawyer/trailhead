@@ -1642,3 +1642,17 @@ async fn a_pr_a_person_merges_in_review_finishes_the_task_though_nobody_approved
     assert_eq!(task.run.merged.expect("the merge is recorded").by, trailhead_factory::MergedBy::Human);
     assert_eq!(task.run.unapproved_merge, None);
 }
+
+#[tokio::test]
+async fn a_reviewers_summary_with_trailing_whitespace_counts_one_round() {
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.\n")));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.show(&key).await.run.review_rounds, Some(1));
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.run.review_rounds, Some(1), "the stored comment is trimmed; it is still the recorded request");
+    assert!(task.changes_requested);
+}

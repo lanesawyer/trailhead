@@ -579,12 +579,13 @@ impl Factory {
         }
         // A request for changes newer than the recorded request: a person's, or a reviewer's that a settled or dropped
         // conflict request overtook. The recorded one no longer says what the task waits on, and answering the verdict
-        // as stale, or reworking the conflict, would lose it (TRAIL-1418). It is taken up as the request.
+        // as stale, or reworking the conflict, would lose it (TRAIL-1418). It is taken up as the request. Any such verdict on
+        // an in-review task with no recorded request counts too. Bodies compare trimmed, as the store trims comments.
         if matches!(review, Review::ReworkWaiting { .. })
             && task.changes_requested
             && let Some(verdict) = self.tracker.last_review(&task.key).await?
             && verdict.kind == VerdictKind::RequestChanges
-            && task.run.last_changes().is_none_or(|c| c.body != verdict.body)
+            && task.run.last_changes().is_none_or(|c| c.body.trim() != verdict.body.trim())
         {
             let requested = ChangesRequested {
                 reviewer: verdict.reviewer,

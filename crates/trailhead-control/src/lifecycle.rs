@@ -766,7 +766,7 @@ impl Factory {
             .tracker
             .last_review(&task.key)
             .await?
-            .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body != conflict.body);
+            .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim());
         if superseded {
             return Ok(false);
         }
