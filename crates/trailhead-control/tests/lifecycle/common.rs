@@ -148,10 +148,10 @@ pub async fn going_on(r: &Rig, before: Usd, ago: i64, host: &str) -> TaskKey {
     let sub = tracker.sub_agent(&name);
     sub.claim(&key).await.unwrap();
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - ago;
-    let report = trailhead_factory::RunUpdate {
-        host: Some(host.into()),
-        started: Some(started),
-        spend: Some(before),
+    let report = trailhead_factory::RunPatch {
+        host: trailhead_factory::Patch::Set(host.into()),
+        started: trailhead_factory::Patch::Set(started),
+        spend: trailhead_factory::Patch::Set(before),
         ..update(1, &name)
     };
     sub.report(&key, report).await.unwrap();
@@ -182,8 +182,9 @@ pub fn busy(compute: &FakeCompute) -> Vec<String> {
         .collect()
 }
 
-pub fn update(attempt: u32, sandbox: &str) -> trailhead_factory::RunUpdate {
-    trailhead_factory::RunUpdate { attempt: Some(attempt), sandbox: Some(sandbox.into()), ..Default::default() }
+pub fn update(attempt: u32, sandbox: &str) -> trailhead_factory::RunPatch {
+    use trailhead_factory::Patch::Set;
+    trailhead_factory::RunPatch { attempt: Set(attempt), sandbox: Set(sandbox.into()), ..Default::default() }
 }
 
 pub async fn live(compute: &FakeCompute, name: &str, task: &TaskKey, role: &str) {

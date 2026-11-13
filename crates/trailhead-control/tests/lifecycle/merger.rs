@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
+    CiState, CodeHost, Commit, MergedBy, NewPr, Patch, PrRef, RateLimit, Role, RunOutcome, RunPatch, Status, Tracker,
 };
 use trailhead_testkit::{Script, TrackerOp};
 
@@ -75,7 +75,8 @@ async fn a_merge_the_merger_started_but_didnt_close_is_still_the_mergers() {
 
     // The merger recorded its intent and the host merged, but closing the task failed.
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
-    let intent = trailhead_factory::RunUpdate { merging: Some(head.clone()), ..Default::default() };
+    let intent =
+        trailhead_factory::RunPatch { merging: trailhead_factory::Patch::Set(head.clone()), ..Default::default() };
     Tracker::report(&r.tracker, &key, intent).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     r.factory.reconcile().await.unwrap();
@@ -113,9 +114,13 @@ async fn the_pr_says_the_rework_has_pushed_before_the_new_head_is_reviewed() {
     let ran = r.factory.tick().await.unwrap();
     let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
     // The rework pushes and the task is back in review, its new head not yet reviewed.
-    Tracker::report(&r.tracker, &key, trailhead_factory::RunUpdate { attempt: Some(2), ..Default::default() })
-        .await
-        .unwrap();
+    Tracker::report(
+        &r.tracker,
+        &key,
+        trailhead_factory::RunPatch { attempt: trailhead_factory::Patch::Set(2), ..Default::default() },
+    )
+    .await
+    .unwrap();
     r.codehost.push_to(pr);
     r.tracker.set_status(&key, Status::InReview);
     Tracker::handoff(&r.tracker, &key, "Pushed the rework.").await.unwrap();
@@ -155,9 +160,13 @@ async fn a_push_by_a_person_during_a_running_rework_is_not_credited_to_the_rewor
     let ran = r.factory.tick().await.unwrap();
     let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
     // The rework's attempt has started, but it hasn't handed off when a person pushes.
-    Tracker::report(&r.tracker, &key, trailhead_factory::RunUpdate { attempt: Some(2), ..Default::default() })
-        .await
-        .unwrap();
+    Tracker::report(
+        &r.tracker,
+        &key,
+        trailhead_factory::RunPatch { attempt: trailhead_factory::Patch::Set(2), ..Default::default() },
+    )
+    .await
+    .unwrap();
     r.codehost.push_to(pr);
     r.tracker.set_status(&key, Status::InReview);
     r.factory.reconcile().await.unwrap();
@@ -343,7 +352,7 @@ async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.tracker
-        .report(&key, trailhead_factory::RunUpdate { conflict_reworks: Some(4), ..Default::default() })
+        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
         .await
         .unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
@@ -364,7 +373,7 @@ async fn an_answered_ci_park_is_reworked_with_the_base_merged_in() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.tracker
-        .report(&key, trailhead_factory::RunUpdate { conflict_reworks: Some(4), ..Default::default() })
+        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
         .await
         .unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
@@ -581,7 +590,7 @@ async fn a_merge_the_host_refused_is_not_the_mergers_when_a_person_merges_it_lat
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(!r.codehost.prs()[0].merged);
-    assert_eq!(r.tracker.task(&key).run.merging.as_deref(), Some(""), "the intent is cleared");
+    assert_eq!(r.tracker.task(&key).run.merging.as_deref(), None, "the intent is cleared");
 
     r.codehost.refuse_merge(None);
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
@@ -971,7 +980,7 @@ async fn a_stale_merge_intent_does_not_make_a_persons_merge_the_mergers() {
 
     // The merger recorded its intent, `merge` errored without merging, then the PR was pushed to.
     let old = CodeHost::head(&r.codehost, &pr).await.unwrap();
-    let intent = trailhead_factory::RunUpdate { merging: Some(old), ..Default::default() };
+    let intent = trailhead_factory::RunPatch { merging: trailhead_factory::Patch::Set(old), ..Default::default() };
     Tracker::report(&r.tracker, &key, intent).await.unwrap();
     r.codehost.push_to(&pr);
     // A person merges the new head.

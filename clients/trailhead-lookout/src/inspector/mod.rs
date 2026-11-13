@@ -32,7 +32,7 @@ use reqwest::Method;
 use serde_json::json;
 use trailhead_client::http::{Call, NewComment, Revert, TaskUpdate, Undo};
 use trailhead_client::text::Text as Wording;
-use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunUpdate};
+use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
     Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
 };

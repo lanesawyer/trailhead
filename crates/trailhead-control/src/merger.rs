@@ -1,6 +1,6 @@
 use trailhead_factory::{
-    BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, PrGrade,
-    PrRef, PrState, Result, RunUpdate, Said, Status, Task, TaskKey, VerdictKind,
+    BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, Patch,
+    PrGrade, PrRef, PrState, Result, RunPatch, Said, Status, Task, TaskKey, VerdictKind,
 };
 
 use tokio::time::Instant;
@@ -130,7 +130,7 @@ impl Factory {
         // An intent to merge another head is stale (`merged_by` ignores it), and so is any once the approval is gone;
         // clearing it keeps the record from passing for a live merge.
         if task.run.merging.as_deref().is_some_and(|m| !m.is_empty() && (unapproved || m != head)) {
-            self.tracker.report(key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
+            self.tracker.report(key, RunPatch { merging: Patch::Clear, ..RunPatch::default() }).await?;
         }
         let mut decision = MergeDecision {
             grade: grade.grade,
@@ -152,7 +152,9 @@ impl Factory {
             // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
             // to fail, which would write the task every pass.
             if prev.as_ref().is_none_or(|d| d.problem.is_none()) {
-                self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
+                self.tracker
+                    .report(key, RunPatch { merge: Patch::Set(decision.clone()), ..RunPatch::default() })
+                    .await?;
             }
             match self.tracker.approve(key).await {
                 Ok(()) => {
@@ -196,7 +198,7 @@ impl Factory {
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
                 self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
             }
-            self.tracker.report(key, RunUpdate { merge: Some(decision.clone()), ..RunUpdate::default() }).await?;
+            self.tracker.report(key, RunPatch { merge: Patch::Set(decision.clone()), ..RunPatch::default() }).await?;
         }
         if let Some(message) = merged_message {
             self.merge(&task, pr, &decision, &message).await?;
@@ -300,12 +302,12 @@ impl Factory {
         self.updating.lock().unwrap().remove(&task.key);
         // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
         self.tracker
-            .report(&task.key, RunUpdate { merging: Some(decision.head.clone()), ..RunUpdate::default() })
+            .report(&task.key, RunPatch { merging: Patch::Set(decision.head.clone()), ..RunPatch::default() })
             .await?;
         let outcome = codehost.merge(pr, &decision.head).await;
         // An error may follow a merge the host accepted, so it keeps the intent and reconcile's `pr_state` decides.
         if matches!(outcome, Ok(MergeOutcome::Conflict | MergeOutcome::HeadMoved | MergeOutcome::Refused(_))) {
-            self.tracker.report(&task.key, RunUpdate { merging: Some(String::new()), ..RunUpdate::default() }).await?;
+            self.tracker.report(&task.key, RunPatch { merging: Patch::Clear, ..RunPatch::default() }).await?;
         }
         match outcome? {
             MergeOutcome::Merged => {
@@ -314,7 +316,7 @@ impl Factory {
                 push_said(&mut merged.history, merged_message);
                 let body = messages::status_comment(&merged.message, &merged.history);
                 if let Err(e) =
-                    self.tracker.report(&task.key, RunUpdate { merge: Some(merged), ..RunUpdate::default() }).await
+                    self.tracker.report(&task.key, RunPatch { merge: Patch::Set(merged), ..RunPatch::default() }).await
                 {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
                 }
@@ -345,7 +347,7 @@ impl Factory {
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
                 let decision = MergeDecision { refused: Some(why), ..decision.clone() };
-                self.tracker.report(&task.key, RunUpdate { merge: Some(decision), ..RunUpdate::default() }).await
+                self.tracker.report(&task.key, RunPatch { merge: Patch::Set(decision), ..RunPatch::default() }).await
             }
         }
     }
@@ -397,7 +399,9 @@ impl Factory {
             self.tracker.note(&task.key, &note).await?;
         }
         if current.run.grade.as_ref() != Some(grade) {
-            self.tracker.report(&task.key, RunUpdate { grade: Some(grade.clone()), ..RunUpdate::default() }).await?;
+            self.tracker
+                .report(&task.key, RunPatch { grade: Patch::Set(grade.clone()), ..RunPatch::default() })
+                .await?;
         }
         Ok(())
     }

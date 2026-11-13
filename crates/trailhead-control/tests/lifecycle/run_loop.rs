@@ -641,7 +641,7 @@ async fn a_parked_task_with_an_open_pr_gives_up_its_sandbox_and_resumes_on_its_b
     let answered =
         r.harness.contexts().iter().any(|c| c.task.context.answers.iter().any(|a| a.answer == "Table-driven."));
     assert!(answered, "the answer reached the agent");
-    assert_eq!(r.tracker.task(&key).run.released, Some(0), "the new run clears the release");
+    assert_eq!(r.tracker.task(&key).run.released, None, "the new run clears the release");
 }
 const GATED: &str = "
 [gates.1]

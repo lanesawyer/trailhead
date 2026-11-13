@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use trailhead_control::{Factory, Host};
 use trailhead_factory::HostConfig;
-use trailhead_factory::{Compute, FactoryConfig, Labels, Role, RunOutcome, SandboxSpec, TaskKey, VerdictKind, label};
+use trailhead_factory::{
+    Compute, FactoryConfig, Labels, Patch, Role, RunOutcome, RunPatch, SandboxSpec, TaskKey, VerdictKind, label,
+};
 use trailhead_testkit::{
     FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
 };
@@ -207,7 +209,7 @@ async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
 
 #[tokio::test]
 async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_flight_tasks_alone() {
-    use trailhead_factory::{RunUpdate, Status, Tracker};
+    use trailhead_factory::{Status, Tracker};
 
     let compute = FakeCompute::new();
     let host = Host::new(&HostConfig::default());
@@ -234,11 +236,11 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
     tracker
         .report(
             &task,
-            RunUpdate {
-                sandbox: Some("beta-run".into()),
-                host: Some("beta-w1".into()),
-                attempt: Some(1),
-                ..RunUpdate::default()
+            RunPatch {
+                sandbox: Patch::Set("beta-run".into()),
+                host: Patch::Set("beta-w1".into()),
+                attempt: Patch::Set(1),
+                ..RunPatch::default()
             },
         )
         .await
@@ -256,7 +258,7 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
 
 #[tokio::test]
 async fn a_run_re_parented_out_of_every_queue_is_a_stray_not_an_in_flight_task() {
-    use trailhead_factory::{RunUpdate, Status, Tracker};
+    use trailhead_factory::{Status, Tracker};
 
     let tracker = FakeTracker::new("factory");
     let queue = tracker.add_task("TRAIL", "The queue", "");
@@ -265,7 +267,7 @@ async fn a_run_re_parented_out_of_every_queue_is_a_stray_not_an_in_flight_task()
     for key in [&inside, &outside] {
         tracker.set_status(key, Status::InProgress);
         tracker
-            .report(key, RunUpdate { sandbox: Some("run".into()), attempt: Some(1), ..RunUpdate::default() })
+            .report(key, RunPatch { sandbox: Patch::Set("run".into()), attempt: Patch::Set(1), ..RunPatch::default() })
             .await
             .unwrap();
     }

@@ -77,7 +77,7 @@ Agreed 2026-11-12 and being built in the steps under Order. It changes how the c
 
 ### The problem
 
-A factory task's state is its Trailhead `status` plus about 35 optional fields in its `factory` metadata (`RunUpdate`). The real states (a run interrupted, a park cut short, a review owed, a rework waiting for a worker) exist only as conditions spread over `reconcile.rs`, `lifecycle.rs`, `review.rs` and `merger.rs`. `reconcile_task` is about 160 lines of them. Each fix adds a field or a condition, and nothing lists the states, so nothing says when two conditions overlap or a case is missing. 59% of this repo's commits have been in the control plane, and 36% of all commits are fixes.
+A factory task's state is its Trailhead `status` plus about 35 optional fields in its `factory` metadata (`RunRecord`, then called `RunUpdate`). The real states (a run interrupted, a park cut short, a review owed, a rework waiting for a worker) exist only as conditions spread over `reconcile.rs`, `lifecycle.rs`, `review.rs` and `merger.rs`. `reconcile_task` is about 160 lines of them. Each fix adds a field or a condition, and nothing lists the states, so nothing says when two conditions overlap or a case is missing. 59% of this repo's commits have been in the control plane, and 36% of all commits are fixes.
 
 ### What is proposed
 
@@ -105,7 +105,7 @@ Two things the record can't say stay outside it. Whether the run's sandbox is st
 
 **3. A request kind.** A changes request is a review's, a conflict's or CI's. It was `conflict: bool` plus `reviewer == "CI"`, read at nine sites; it is `kind: review | conflict | ci` on `ChangesRequested` (built, TRAIL-1458). The two old fields are no longer written. A record from before has no `kind`, so for a task already in flight it is read from `conflict` and `reviewer`.
 
-**4. Clears that say so.** A write merges, so a field is cleared today by writing a stand-in: an empty string for `merging` and `stale_head`, zero for `released` and `gave_up`. The stored metadata is merged as a JSON merge patch, where `null` already removes a key. The proposal is to split the one struct in two: `Run` (what is read: plain optional fields) and `RunPatch` (what is written: each field `Keep`, `Clear` or `Set`). `Clear` writes `null`. Reads treat the old stand-ins as absent, so existing records need no rewrite.
+**4. Clears that say so.** A write merges, so a field is cleared today by writing a stand-in: an empty string for `merging` and `stale_head`, zero for `released` and `gave_up`. The stored metadata is merged as a JSON merge patch, where `null` already removes a key. The one struct is now two (built, TRAIL-1459): `RunRecord` (what is read: plain optional fields) and `RunPatch` (what is written: each field `Keep`, `Clear` or `Set`), declared from one field list. `Clear` writes `null`. Reads treat the old stand-ins as absent, so existing records need no rewrite.
 
 **5. Usage-pause readings on disk.** The subscription usage readings that pause new runs are held in memory only, so a restart forgets a pause until the next reading. They go in a file beside the spend ledger and are reloaded at start. The claim that the control plane "keeps no state" is corrected for what stays in memory (backoff deadlines, setup-failure counts), which a restart may safely forget.
 

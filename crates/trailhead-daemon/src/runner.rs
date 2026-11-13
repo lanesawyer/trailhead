@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::messages::{self, Filed};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr, PrRef,
-    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunReport, RunRequest, RunResult, RunUpdate,
+    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr, Patch, PrRef,
+    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunPatch, RunReport, RunRequest, RunResult,
     TaskKey, Tracker, Usage, Verdict, VerdictKind,
 };
 
@@ -453,7 +453,7 @@ impl Runner {
                 if let Merge::Lost(base) = &merge {
                     let (reason, note) = messages::merge_abandoned(base);
                     tracker.note(key, &note).await?;
-                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                    tracker.report(key, RunPatch { failure: Patch::Set(note), ..RunPatch::default() }).await?;
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), vec![]));
                 }
@@ -462,7 +462,7 @@ impl Runner {
                 if !self.workspace.contains(start).await? {
                     let (reason, note) = messages::branch_rewritten(start);
                     tracker.note(key, &note).await?;
-                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                    tracker.report(key, RunPatch { failure: Patch::Set(note), ..RunPatch::default() }).await?;
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), vec![]));
                 }
@@ -472,7 +472,7 @@ impl Runner {
                     if !files.is_empty() {
                         let (reason, note) = messages::conflict_markers_left(&files);
                         tracker.note(key, &note).await?;
-                        tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                        tracker.report(key, RunPatch { failure: Patch::Set(note), ..RunPatch::default() }).await?;
                         tracker.release(key).await?;
                         return Ok((RunResult::Failed(reason), vec![]));
                     }
@@ -488,7 +488,7 @@ impl Runner {
                     let reason = messages::check_failed_reason(&failed.name);
                     let note = messages::checks_failed_note(&checks);
                     tracker.note(key, &note).await?;
-                    tracker.report(key, RunUpdate { failure: Some(note), ..Default::default() }).await?;
+                    tracker.report(key, RunPatch { failure: Patch::Set(note), ..RunPatch::default() }).await?;
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
@@ -515,7 +515,8 @@ impl Runner {
                         tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
                     }
                     if !reported {
-                        match tracker.report(key, RunUpdate { pr: Some(pr.clone()), ..Default::default() }).await {
+                        match tracker.report(key, RunPatch { pr: Patch::Set(pr.clone()), ..RunPatch::default() }).await
+                        {
                             Ok(()) => reported = true,
                             Err(e) => {
                                 tracing::warn!(task = %key, attempt, error = %e, "couldn't record the opened PR");
@@ -577,7 +578,7 @@ impl Runner {
             RunOutcome::Failed { reason } => {
                 if req.role == Role::Worker {
                     let failure = Some(messages::agent_gave_up(&reason));
-                    tracker.report(key, RunUpdate { failure, ..Default::default() }).await?;
+                    tracker.report(key, RunPatch { failure: failure.into(), ..RunPatch::default() }).await?;
                     tracker.release(key).await?;
                 }
                 Ok((RunResult::Failed(reason), Vec::new()))

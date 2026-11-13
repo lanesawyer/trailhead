@@ -15,7 +15,7 @@ fn pr(n: u8) -> Priority {
 }
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Role, RunOutcome, RunUpdate, Status, TaskKey,
+    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Status, TaskKey,
     Tracker, Usd, Verdict, VerdictKind, label,
 };
 use trailhead_testkit::{
@@ -218,7 +218,7 @@ async fn breach_parks_with_the_claim_held_by_the_sandbox() {
     assert_eq!(questions.values().flatten().count(), 1);
 
     // The control plane itself can't touch it; only the sub-agent can.
-    let update = RunUpdate { attempt: Some(9), ..Default::default() };
+    let update = trailhead_factory::RunPatch { attempt: trailhead_factory::Patch::Set(9), ..Default::default() };
     assert!(r.tracker.report(&key, update).await.is_err());
 }
 
@@ -253,9 +253,12 @@ async fn reconcile_reaches_a_factory_task_past_the_first_page_of_tasks() {
     r.tracker.create_sub_agent("trail-6-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = r.tracker.sub_agent("trail-6-a1");
     sub.claim(&key).await.unwrap();
-    sub.report(&key, RunUpdate { attempt: Some(1), sandbox: Some("trail-6-a1".into()), ..Default::default() })
-        .await
-        .unwrap();
+    sub.report(
+        &key,
+        RunPatch { attempt: Patch::Set(1), sandbox: Patch::Set("trail-6-a1".into()), ..RunPatch::default() },
+    )
+    .await
+    .unwrap();
 
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.requeued, std::slice::from_ref(&key.0));
@@ -268,9 +271,12 @@ async fn reconcile_requeues_an_interrupted_run() {
     r.tracker.create_sub_agent("trail-1-a1", "TRAIL", std::time::Duration::from_secs(3600)).await.unwrap();
     let sub = r.tracker.sub_agent("trail-1-a1");
     sub.claim(&key).await.unwrap();
-    sub.report(&key, RunUpdate { attempt: Some(1), sandbox: Some("trail-1-a1".into()), ..Default::default() })
-        .await
-        .unwrap();
+    sub.report(
+        &key,
+        RunPatch { attempt: Patch::Set(1), sandbox: Patch::Set("trail-1-a1".into()), ..RunPatch::default() },
+    )
+    .await
+    .unwrap();
 
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.requeued, std::slice::from_ref(&key.0));
@@ -1192,7 +1198,7 @@ async fn the_stale_head_is_in_the_run_record_so_a_restart_keeps_ignoring_stale_c
     r.codehost.set_mergeable(&pr, Some(true));
     assert!(r.factory.reconcile().await.unwrap().conflicted.is_empty());
     // A settled reading clears the mark, so a later conflict is read as it comes.
-    assert_eq!(r.show(&key).await.run.stale_head.as_deref(), Some(""));
+    assert_eq!(r.show(&key).await.run.stale_head.as_deref(), None);
     r.codehost.set_mergeable(&pr, Some(false));
     assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
 }
@@ -1248,7 +1254,11 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
 
 /// Gives `key` factory run metadata, as a run leaves on its task.
 async fn with_run(r: &Rig, key: &TaskKey) {
-    let run = RunUpdate { attempt: Some(1), sandbox: Some("run".into()), ..Default::default() };
+    let run = trailhead_factory::RunPatch {
+        attempt: trailhead_factory::Patch::Set(1),
+        sandbox: trailhead_factory::Patch::Set("run".into()),
+        ..Default::default()
+    };
     r.tracker.report(key, run).await.unwrap();
 }
 
@@ -1463,12 +1473,12 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     assert_eq!(r.show(&key).await.status, Status::Approved);
 
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
-    r.tracker.report(&key, RunUpdate { merging: Some(head), ..Default::default() }).await.unwrap();
+    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
     r.codehost.push_to(&pr);
     r.factory.reconcile().await.unwrap();
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
-    assert_eq!(task.run.merging.as_deref(), Some(""));
+    assert_eq!(task.run.merging.as_deref(), None);
 }
 
 #[tokio::test]

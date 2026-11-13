@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
-    ChangesRequested, CheckResult, Error, PrRef, RequestKind, Result, ReviewBreach, Role, RunPhase, RunReport,
-    RunRequest, RunResult, RunUpdate, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
+    ChangesRequested, CheckResult, Error, Patch, PrRef, RequestKind, Result, ReviewBreach, Role, RunPatch, RunPhase,
+    RunReport, RunRequest, RunResult, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
 };
 
 use crate::infra::{Park, Setback};
@@ -55,7 +55,7 @@ impl Factory {
         let retries = shown.run.retries.unwrap_or(0);
         let infra_prior = shown.run.infra_failures;
         let name = reviewer_name(&task.key, attempt, before + 1, retries);
-        self.tracker.report(&task.key, RunUpdate { review_rounds: Some(round), ..RunUpdate::default() }).await?;
+        self.tracker.report(&task.key, RunPatch { review_rounds: Patch::Set(round), ..RunPatch::default() }).await?;
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
@@ -101,7 +101,9 @@ impl Factory {
         let run = match run {
             Ok(Run::Lost(e, spend)) => {
                 // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
-                if let Err(re) = sub.report(&task.key, RunUpdate { spend: Some(spend), ..RunUpdate::default() }).await {
+                if let Err(re) =
+                    sub.report(&task.key, RunPatch { spend: Patch::Set(spend), ..RunPatch::default() }).await
+                {
                     tracing::warn!(task = %task.key, error = %re, "couldn't record the failed review's spend");
                 }
                 return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await);
@@ -131,13 +133,13 @@ impl Factory {
             .as_ref()
             .filter(|b| !b.parked && !matches!(run, Finished::Breach(..)))
             .map(|b| ReviewBreach { parked: true, ..b.clone() });
-        let record = RunUpdate {
-            spend: Some(spend),
-            reviewed,
-            reviewed_head,
-            infra_failures,
-            review_breach: settled,
-            ..RunUpdate::default()
+        let record = RunPatch {
+            spend: Patch::Set(spend),
+            reviewed: reviewed.into(),
+            reviewed_head: reviewed_head.into(),
+            infra_failures: infra_failures.into(),
+            review_breach: Patch::from(settled),
+            ..RunPatch::default()
         };
         // A review that can't be recorded didn't happen: the round is given back and the task reviewed again, rather
         // than acting on a verdict the task doesn't carry.
@@ -194,7 +196,7 @@ impl Factory {
                 tracing::warn!(task = %task.key, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
                 let breach = ReviewBreach { round, attempt, reason: reason.clone(), parked: false };
-                let pending = RunUpdate { review_breach: Some(breach.clone()), ..RunUpdate::default() };
+                let pending = RunPatch { review_breach: Patch::Set(breach.clone()), ..RunPatch::default() };
                 if let Err(e) = self.tracker.report(&task.key, pending).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the reviewer's breach before parking");
                 }
@@ -240,11 +242,11 @@ impl Factory {
             }
         }
         // The retry's sub-agent and sandbox names carry the retry count: this one's sub-agent is revoked for good.
-        let give_back = RunUpdate {
-            review_rounds: Some(rounds_before),
-            retries: Some(retries + 1),
-            infra_failures: (!cancelled).then_some(setback.recorded()),
-            ..RunUpdate::default()
+        let give_back = RunPatch {
+            review_rounds: Patch::Set(rounds_before),
+            retries: Patch::Set(retries + 1),
+            infra_failures: Patch::from((!cancelled).then_some(setback.recorded())),
+            ..RunPatch::default()
         };
         if let Err(e) = self.tracker.report(&task.key, give_back).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't give the review round back");
@@ -274,7 +276,7 @@ impl Factory {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");
                     // The task needs its backoff, or reconcile reviews it again at once.
                     self.back_off(&task.key, &setback);
-                    let keep = RunUpdate { infra_failures: Some(setback.unparked()), ..RunUpdate::default() };
+                    let keep = RunPatch { infra_failures: Patch::Set(setback.unparked()), ..RunPatch::default() };
                     if let Err(e) = self.tracker.report(&task.key, keep).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
                     }
@@ -298,19 +300,19 @@ impl Factory {
             self.tracker.claim(key).await?;
         }
         let question = messages::review_breach_question(breach.round, &breach.reason);
-        let parked = RunUpdate {
-            review_breach: Some(ReviewBreach { parked: true, ..breach.clone() }),
-            review_rounds: Some(0),
-            retries: Some(retries + 1),
-            ..RunUpdate::default()
+        let parked = RunPatch {
+            review_breach: Patch::Set(ReviewBreach { parked: true, ..breach.clone() }),
+            review_rounds: Patch::Set(0),
+            retries: Patch::Set(retries + 1),
+            ..RunPatch::default()
         };
         self.tracker.report(key, parked).await?;
         if let Err(e) = self.tracker.ask(key, &question).await {
-            let undo = RunUpdate {
-                review_breach: Some(ReviewBreach { parked: false, ..breach.clone() }),
-                review_rounds: Some(breach.round),
-                retries: Some(retries),
-                ..RunUpdate::default()
+            let undo = RunPatch {
+                review_breach: Patch::Set(ReviewBreach { parked: false, ..breach.clone() }),
+                review_rounds: Patch::Set(breach.round),
+                retries: Patch::Set(retries),
+                ..RunPatch::default()
             };
             if let Err(re) = self.tracker.report(key, undo).await {
                 tracing::warn!(task = %key, error = %re, "couldn't take back the breach's park mark");
@@ -327,12 +329,12 @@ impl Factory {
     /// for a task still parked with its request unsettled at the limit, which is why it must be idempotent.
     /// `retries` is the count the run's names were last taken from, so the bump can't land on a revoked name.
     pub(crate) async fn settle_parked_request(&self, task: &Task, requested: &ChangesRequested, retries: u32) {
-        let fresh = RunUpdate {
-            changes_requested: Some(ChangesRequested { settled: true, ..requested.clone() }),
-            review_rounds: Some(0),
-            conflict_reworks: Some(0),
-            retries: Some(retries + 1),
-            ..RunUpdate::default()
+        let fresh = RunPatch {
+            changes_requested: Patch::Set(ChangesRequested { settled: true, ..requested.clone() }),
+            review_rounds: Patch::Set(0),
+            conflict_reworks: Patch::Set(0),
+            retries: Patch::Set(retries + 1),
+            ..RunPatch::default()
         };
         if let Err(e) = self.tracker.report(&task.key, fresh).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't settle the parked request and reset the counts");
@@ -359,12 +361,12 @@ impl Factory {
         let (reviewer, body, kind) = (requested.reviewer.clone(), requested.body.clone(), requested.kind);
         // Recorded before the request is made visible, so the run that picks it up can't miss the review.
         // A review's round goes in the same write, so a stop between the two can't count it twice (TRAIL-322).
-        let update = RunUpdate {
-            review_rounds: kind.is_review().then_some(round),
-            reviewed: Some(requested.attempt),
-            attempt_base: Some(requested.attempt),
-            changes_requested: Some(requested.clone()),
-            ..RunUpdate::default()
+        let update = RunPatch {
+            review_rounds: Patch::from(kind.is_review().then_some(round)),
+            reviewed: Patch::Set(requested.attempt),
+            attempt_base: Patch::Set(requested.attempt),
+            changes_requested: Patch::Set(requested.clone()),
+            ..RunPatch::default()
         };
         self.tracker.report(&task.key, update).await?;
         if round >= max {

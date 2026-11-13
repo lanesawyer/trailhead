@@ -1084,7 +1084,7 @@ async fn a_breach_park_bumps_the_retries_the_reviewer_was_named_from_not_the_cal
     let (r, key, pr) = breaching_rig().await;
     // The caller's snapshot is older than the tracker's: the reviewer is named from the tracker's count.
     let stale = r.tracker.task(&key);
-    let update = trailhead_factory::RunUpdate { retries: Some(2), ..Default::default() };
+    let update = trailhead_factory::RunPatch { retries: trailhead_factory::Patch::Set(2), ..Default::default() };
     r.tracker.report(&key, update).await.unwrap();
 
     let attempt = stale.run.attempt.unwrap_or(1);

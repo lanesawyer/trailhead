@@ -1003,7 +1003,7 @@ async fn a_rework_whose_setup_fails_starts_the_agent_and_keeps_the_sandbox() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test for `hi()`.")));
     r.factory.tick().await.unwrap();
 
-    r.daemon.fail_setups(1, "error[E0063]: missing field `spend` in initializer of `RunUpdate`");
+    r.daemon.fail_setups(1, "error[E0063]: missing field `spend` in initializer of `RunRecord`");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();

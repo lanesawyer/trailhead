@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use serde_json::json;
 use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate};
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunPatch, Status, Task,
     TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
@@ -212,7 +212,7 @@ impl Tracker for RestTracker {
         self.client.release(key).await.map(drop).map_err(error)
     }
 
-    async fn report(&self, key: &TaskKey, update: RunUpdate) -> Result<()> {
+    async fn report(&self, key: &TaskKey, update: RunPatch) -> Result<()> {
         let metadata = json!({ METADATA_KEY: update });
         self.patch(key, TaskUpdate { metadata: Some(metadata), ..TaskUpdate::default() }).await
     }
