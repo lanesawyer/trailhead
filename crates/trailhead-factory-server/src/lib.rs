@@ -461,6 +461,7 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            entry.factory.status().control(trailhead_factory::ControlState::Stopped);
             feed.set_stopped(&entry.slug, e.to_string());
             true
         }
@@ -638,13 +639,16 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     check_result(failed)
 }
 
-/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+/// Logs a repo loop that panicked and marks it stopped on its status board and in the feed, since the loop never got
+/// to say so itself.
 fn loop_panicked(
     e: &tokio::task::JoinError,
+    feed: &surface::Feed,
     boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
 ) {
     let repo = boards.get(&e.id()).map(|(slug, board)| {
         board.control(trailhead_factory::ControlState::Stopped);
+        feed.set_stopped(slug, e.to_string());
         slug.as_str()
     });
     tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
@@ -676,7 +680,7 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                loop_panicked(&e, &boards);
+                loop_panicked(&e, &feed, &boards);
             }
         }
     }
@@ -1005,7 +1009,12 @@ mod tests {
         let id = loops.spawn(std::future::pending::<()>()).id();
         boards.insert(id, ("o/m".to_string(), other.clone()));
         let e = loops.join_next().await.unwrap().unwrap_err();
-        super::loop_panicked(&e, &boards);
+        let feed = super::surface::Feed::new(trailhead_factory::FactoryState::Running);
+        feed.set_boards(vec![("o/n".to_string(), up.clone()), ("o/m".to_string(), other.clone())]);
+        super::loop_panicked(&e, &feed, &boards);
+        let reply = feed.reply();
+        assert!(reply.repos[0].stopped.as_ref().is_some_and(|m| m.contains("panic")));
+        assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(up.snapshot().control, ControlState::Stopped);
         assert_eq!(other.snapshot().control, ControlState::Up);
     }
