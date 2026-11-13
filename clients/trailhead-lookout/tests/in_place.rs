@@ -32,6 +32,29 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     ("map.rs", "redraw", "the trail map's terrain is respawned on every model change; in place is a follow-up"),
 ];
 
+/// The text after `fn ` when the line starts a function, past any visibility
+/// (`pub`, `pub(crate)`, `pub(in path)`) and qualifiers (`const`, `async`, `unsafe`, `extern "C"`).
+fn fn_name_start(line: &str) -> Option<&str> {
+    let mut rest = line;
+    if let Some(after) = rest.strip_prefix("pub") {
+        rest = after;
+        if let Some(inner) = rest.strip_prefix('(') {
+            rest = &inner[inner.find(')')? + 1..];
+        }
+        rest = rest.strip_prefix(' ')?;
+    }
+    loop {
+        if let Some(after) = rest.strip_prefix("fn ") {
+            return Some(after);
+        }
+        if let Some(after) = rest.strip_prefix("extern \"") {
+            rest = after.split_once("\" ")?.1;
+            continue;
+        }
+        rest = ["const ", "async ", "unsafe "].iter().find_map(|q| rest.strip_prefix(q))?;
+    }
+}
+
 fn flagged(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut current = String::new();
@@ -42,11 +65,7 @@ fn flagged(source: &str) -> Vec<String> {
         if trimmed.starts_with("//") {
             continue;
         }
-        if let Some(rest) = trimmed
-            .strip_prefix("pub fn ")
-            .or_else(|| trimmed.strip_prefix("pub(super) fn "))
-            .or_else(|| trimmed.strip_prefix("fn "))
-        {
+        if let Some(rest) = fn_name_start(trimmed) {
             current = rest.split(['(', '<']).next().unwrap_or_default().to_string();
             loop_indent = None;
             loop_despawn = false;
@@ -118,4 +137,11 @@ fn the_scan_sees_a_wholesale_redraw() {
     assert_eq!(flagged(marker), ["refresh"]);
     let close_only = "fn close(terrain: Query<Entity>) {\n    for e in &terrain {\n        commands.entity(e).despawn();\n    }\n}\nfn open() {\n    commands.spawn(Node::default());\n}\n";
     assert!(flagged(close_only).is_empty());
+    for qualifier in ["pub(crate) fn", "async fn", "pub const fn", "pub(crate) async fn", "pub(in crate::a) unsafe fn"]
+    {
+        let next = format!(
+            "fn close(terrain: Query<Entity>) {{\n    for e in &terrain {{\n        commands.entity(e).despawn();\n    }}\n}}\n{qualifier} open() {{\n    commands.spawn(Node::default());\n}}\n"
+        );
+        assert!(flagged(&next).is_empty(), "{qualifier}");
+    }
 }

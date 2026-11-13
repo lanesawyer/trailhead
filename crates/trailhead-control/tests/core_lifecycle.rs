@@ -1156,6 +1156,32 @@ async fn conflict_reworks_up_to_the_cap_park_the_task() {
     assert!(question.body.contains("max_conflict_reworks") && question.body.contains('5'), "{}", question.body);
 }
 
+/// A conflict that goes away before its rework runs doesn't reset the count: alternating those with reworks that
+/// run still reaches the cap.
+#[tokio::test]
+async fn vanished_conflicts_between_conflict_reworks_still_park_at_the_cap() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    for round in 0..2 {
+        conflict_and_rework(&r, &key, &pr, 1).await;
+        assert_eq!(r.show(&key).await.run.conflict_reworks, Some(2 * round + 1));
+        // A conflict that clears before the tick has nothing to rework.
+        r.codehost.set_mergeable(&pr, Some(false));
+        assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+        r.codehost.set_mergeable(&pr, Some(true));
+        r.factory.tick().await.unwrap();
+        let task = r.show(&key).await;
+        assert_eq!(task.status, Status::InReview);
+        assert_eq!(task.run.conflict_reworks, Some(2 * round + 2), "a vanished conflict keeps the count");
+    }
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("max_conflict_reworks"), "{}", question.body);
+}
+
 #[tokio::test]
 async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
     let r = rig().await;
