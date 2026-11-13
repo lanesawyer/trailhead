@@ -752,8 +752,8 @@ impl Factory {
     ///
     /// The task is read again first, and so is its newest review: a review may have asked for changes since `task`
     /// was read, and its request, not the conflict's, is the one standing then. A handoff would count as answering
-    /// it and the request would be lost (TRAIL-1418), so nothing is written and the next tick's rework (or
-    /// reconcile, for a verdict whose request was never recorded) starts it. The verdict is the check because the
+    /// it and the request would be lost (TRAIL-1418), so nothing is written. The next tick's `reworks()` starts
+    /// it once it is recorded, and reconcile takes it up if it never was. The verdict is the check because the
     /// reviewer's request is recorded on the task only after the verdict, the sandbox's teardown and the gates.
     /// False when the settle was skipped.
     async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<bool> {
