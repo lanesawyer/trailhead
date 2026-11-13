@@ -415,6 +415,6 @@ impl Factory {
     }
 
     fn branch(task: &Task) -> String {
-        format!("factory/{}", task.key.to_ascii_lowercase())
+        trailhead_factory::task_branch(&task.key)
     }
 }

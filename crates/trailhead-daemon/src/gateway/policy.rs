@@ -1,7 +1,8 @@
 //! Which requests a sandbox's role may make through a connection: method plus path-prefix allowlists, taken from
-//! the sandbox's registered labels.
+//! the sandbox's registered labels. A worker's ref writes are held to its own task's branch, by path for an update
+//! and by body for a create ([`check_body`]).
 
-use trailhead_factory::{Labels, label};
+use trailhead_factory::{Labels, TaskKey, label, task_branch};
 
 struct Rule {
     methods: &'static [&'static str],
@@ -33,6 +34,14 @@ fn valid_repo(repo: &str) -> bool {
     matches!(repo.split_once('/'), Some((o, n)) if ok(o) && ok(n))
 }
 
+/// The ref a worker may write: its task's branch. None without a task label that reads as a task key, so a
+/// sandbox between tasks, or with a label that could smuggle path syntax, writes no ref at all.
+fn own_ref(labels: &Labels) -> Option<String> {
+    let task = labels.get(label::TASK)?;
+    let ok = !task.is_empty() && task.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    ok.then(|| format!("refs/heads/{}", task_branch(&TaskKey(task.clone()))))
+}
+
 /// The rules `labels` earn for `provider`. A sandbox without a role, or with one we don't know, gets none.
 fn rules(provider: &str, labels: &Labels) -> Vec<Rule> {
     let Some(role) = labels.get(label::ROLE).map(String::as_str) else {
@@ -48,11 +57,21 @@ fn rules(provider: &str, labels: &Labels) -> Vec<Rule> {
             };
             let r = format!("/repos/{repo}");
             if role == "worker" {
-                vec![
-                    rule(WRITE, format!("{r}/git")),
+                // Git Data: reads anywhere, new objects anywhere (an object nothing points at changes nothing), but
+                // only its own branch moved or created. The writer token could move any ref, the base branch included.
+                let mut rules = vec![
+                    rule(READ, format!("{r}/git")),
+                    exact(&["POST"], format!("{r}/git/blobs")),
+                    exact(&["POST"], format!("{r}/git/trees")),
+                    exact(&["POST"], format!("{r}/git/commits")),
                     rule(WRITE, format!("{r}/pulls")),
                     rule(WRITE, format!("{r}/issues")),
-                ]
+                ];
+                if let Some(own) = own_ref(labels) {
+                    rules.push(exact(&["PATCH"], format!("{r}/git/{own}")));
+                    rules.push(exact(&["POST"], format!("{r}/git/refs")));
+                }
+                rules
             } else {
                 vec![
                     rule(READ, r.clone()),
@@ -118,5 +137,25 @@ pub fn check(provider: &str, labels: &Labels, method: &str, path: &str) -> Resul
         Ok(())
     } else {
         Err(format!("role {role:?} may not {method} {path} through {provider}"))
+    }
+}
+
+/// Refuses a request whose path [`check`] allows but whose body asks for more: creating a ref names it in the
+/// body, so a worker's `POST .../git/refs` must name its own branch.
+pub fn check_body(provider: &str, labels: &Labels, method: &str, path: &str, body: &[u8]) -> Result<(), String> {
+    // Segments as `check` reads them, so an empty one (`git//refs`, a trailing slash) doesn't slip past.
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let creates_ref = provider == "github"
+        && method.eq_ignore_ascii_case("POST")
+        && labels.get(label::REPO).is_some_and(|repo| segments.join("/") == format!("repos/{repo}/git/refs"));
+    if !creates_ref {
+        return Ok(());
+    }
+    let named = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let named = named.as_ref().and_then(|v| v["ref"].as_str());
+    match (named, own_ref(labels)) {
+        (Some(named), Some(own)) if named == own => Ok(()),
+        (_, Some(own)) => Err(format!("this sandbox may only create {own}")),
+        (_, None) => Err("this sandbox has no task, so it may not create a ref".to_string()),
     }
 }
