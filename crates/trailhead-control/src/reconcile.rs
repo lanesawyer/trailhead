@@ -2,12 +2,12 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task,
-    TaskKey, WorkerBreach, label,
+    CI_REVIEWER, ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, RequestKind, Result, RunUpdate,
+    Sandbox, Status, Task, TaskKey, WorkerBreach, label,
 };
 
 use crate::phase::{Parked, Phase, Review, may_be_running, phase, unreviewed};
-use crate::review::{CI_REVIEWER, reviewer_name};
+use crate::review::reviewer_name;
 use crate::run_loop::Due;
 use crate::timing::until;
 use crate::{Factory, Outcome, Reconciled};
@@ -233,7 +233,7 @@ impl Factory {
         let attempt = task.run.attempt.unwrap_or(1);
         let pr = task.run.pr.as_ref().ok_or_else(|| Error::Other(format!("{} has no PR to review", task.key)))?;
         // The round the interrupted review was named for: one past the rounds counted before it, whether or not it counted.
-        let after_conflict = task.run.last_changes().is_some_and(|c| c.conflict);
+        let after_conflict = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
         let rounds = task.run.review_rounds.unwrap_or(0);
         if let Some(round) = Some(rounds + u32::from(after_conflict)).filter(|r| *r > 0) {
             let retries = task.run.retries.unwrap_or(0);
@@ -337,8 +337,14 @@ impl Factory {
             Some(codehost) => codehost.head(pr).await.ok(),
             None => None,
         };
-        let requested =
-            ChangesRequested { reviewer: "factory".into(), body, attempt, conflict: true, head, settled: false };
+        let requested = ChangesRequested {
+            reviewer: "factory".into(),
+            body,
+            attempt,
+            kind: RequestKind::Conflict,
+            head,
+            settled: false,
+        };
         self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await
     }
 
@@ -388,8 +394,14 @@ impl Factory {
         self.tracker.report(&task.key, RunUpdate { conflict_reworks: Some(round), ..RunUpdate::default() }).await?;
         tracing::warn!(task = %task.key, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
-        let requested =
-            ChangesRequested { reviewer: CI_REVIEWER.into(), body, attempt, conflict: true, head, settled: false };
+        let requested = ChangesRequested {
+            reviewer: CI_REVIEWER.into(),
+            body,
+            attempt,
+            kind: RequestKind::Ci,
+            head,
+            settled: false,
+        };
         self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
         Ok(true)
     }
@@ -512,10 +524,10 @@ impl Factory {
         // A park whose settling write was lost: the request still stands at the limit it parked on. Finished
         // here, before a person can answer, so that answering without a push doesn't have it reworked again.
         if let Some(c) = parked.unsettled {
-            let (count, max) = if c.conflict {
-                (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
-            } else {
+            let (count, max) = if c.kind.is_review() {
                 (task.run.review_rounds, self.config.repo.max_review_rounds)
+            } else {
+                (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
             };
             if count.is_some_and(|n| n >= max) {
                 tracing::warn!(task = %task.key, "finishing the park's settling of its changes request");
@@ -577,10 +589,10 @@ impl Factory {
         }
         // Changes were requested on this attempt but never recorded as a review (the request was cut short): finish it.
         if let Some(requested) = standing {
-            let round = if requested.conflict {
-                task.run.conflict_reworks.unwrap_or(1)
-            } else {
+            let round = if requested.kind.is_review() {
                 task.run.review_rounds.unwrap_or(1)
+            } else {
+                task.run.conflict_reworks.unwrap_or(1)
             };
             self.request_rework(task, requested.clone(), round, task.run.retries.unwrap_or(0)).await?;
             done.reworked.push(task.key.0.clone());
@@ -614,7 +626,7 @@ impl Factory {
             // A failed CI is reworked without waiting for the review, which would only look at a head that is about
             // to change.
             return Ok(false);
-        } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
+        } else if task.run.pending_changes().is_some_and(|c| c.kind.is_review()) {
             // The rework has pushed and its head awaits review: say so, without approving.
             self.say_gates(&task.key, false).await?;
         }

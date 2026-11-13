@@ -234,16 +234,38 @@ pub enum MergedBy {
     Merger,
 }
 
-/// A review that asked for changes: who, what they said, and the attempt whose PR it reviewed.
+/// Who a rework asked for by failing CI is attributed to, in the worker's feedback and the park question.
+pub const CI_REVIEWER: &str = "CI";
+
+/// What asked for a PR to be changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestKind {
+    /// A reviewer. Its rework uses a review round.
+    #[default]
+    Review,
+    /// The PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
+    Conflict,
+    /// CI failed on the PR's head (TRAIL-390). Its rework merges the base in too.
+    Ci,
+}
+
+impl RequestKind {
+    /// Whether a reviewer asked. The other two are counted as conflict reworks (`max_conflict_reworks`), and their
+    /// rework starts with the base branch merged in.
+    pub fn is_review(self) -> bool {
+        self == RequestKind::Review
+    }
+}
+
+/// A request for changes to a PR: who asked, what they said, and the attempt whose PR it was about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredRequest")]
 pub struct ChangesRequested {
     pub reviewer: String,
     pub body: String,
-    #[serde(default)]
     pub attempt: u32,
-    /// Not a review: the PR no longer merges cleanly with the base branch, and the rework merges it in (TRAIL-199).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub conflict: bool,
+    pub kind: RequestKind,
     /// The PR's head when this was requested. A head that has moved since means someone pushed to the PR, so the
     /// request is stale: a person settled it (TRAIL-338). Unknown for requests recorded before this, or when the
     /// host couldn't say.
@@ -253,6 +275,42 @@ pub struct ChangesRequested {
     /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub settled: bool,
+}
+
+/// A request as task metadata holds it. Records from before `kind` say a conflict with a flag, and CI by the
+/// reviewer's name; tasks in flight still carry those.
+#[derive(Deserialize)]
+struct StoredRequest {
+    reviewer: String,
+    body: String,
+    #[serde(default)]
+    attempt: u32,
+    #[serde(default)]
+    kind: Option<RequestKind>,
+    #[serde(default)]
+    conflict: bool,
+    #[serde(default)]
+    head: Option<String>,
+    #[serde(default)]
+    settled: bool,
+}
+
+impl From<StoredRequest> for ChangesRequested {
+    fn from(stored: StoredRequest) -> ChangesRequested {
+        let kind = stored.kind.unwrap_or(match (stored.conflict, stored.reviewer.as_str()) {
+            (false, _) => RequestKind::Review,
+            (true, CI_REVIEWER) => RequestKind::Ci,
+            (true, _) => RequestKind::Conflict,
+        });
+        ChangesRequested {
+            reviewer: stored.reviewer,
+            body: stored.body,
+            attempt: stored.attempt,
+            kind,
+            head: stored.head,
+            settled: stored.settled,
+        }
+    }
 }
 
 /// A reviewer that overran its budget, and whether the task was parked for it yet.
@@ -544,6 +602,32 @@ pub trait Tracker: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_recorded_before_kinds_reads_its_kind_from_the_flag_and_the_reviewer() {
+        let read = |v: serde_json::Value| serde_json::from_value::<ChangesRequested>(v).unwrap().kind;
+        let old = |reviewer: &str, conflict: bool| serde_json::json!({"reviewer": reviewer, "body": "b", "attempt": 1, "conflict": conflict});
+        assert_eq!(read(old("factory/trail-7-r1", false)), RequestKind::Review);
+        assert_eq!(read(serde_json::json!({"reviewer": "r", "body": "b"})), RequestKind::Review);
+        assert_eq!(read(old("factory", true)), RequestKind::Conflict);
+        assert_eq!(read(old(CI_REVIEWER, true)), RequestKind::Ci);
+    }
+
+    #[test]
+    fn a_request_is_written_with_its_kind_and_without_the_old_flag() {
+        let request = ChangesRequested {
+            reviewer: CI_REVIEWER.into(),
+            body: "test failed".into(),
+            attempt: 2,
+            kind: RequestKind::Ci,
+            head: None,
+            settled: false,
+        };
+        let written = serde_json::to_value(&request).unwrap();
+        assert_eq!(written["kind"], "ci");
+        assert!(written.get("conflict").is_none());
+        assert_eq!(serde_json::from_value::<ChangesRequested>(written).unwrap(), request);
+    }
 
     fn task(key: &str, priority: u8, changes_requested: bool) -> Task {
         Task {

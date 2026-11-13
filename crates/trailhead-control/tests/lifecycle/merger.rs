@@ -253,7 +253,7 @@ async fn failed_ci_sends_the_task_back_for_a_rework_told_what_failed() {
     let task = r.tracker.task(&key);
     assert_eq!((task.status, task.changes_requested), (Status::InReview, true));
     let wanted = task.run.changes_requested.expect("the rework is told why");
-    assert!(wanted.conflict, "counted as a conflict rework, not a review round");
+    assert!(!wanted.kind.is_review(), "counted as a conflict rework, not a review round");
     assert!(
         wanted.body.contains("lint, test") && wanted.body.contains("assertion failed: left == right"),
         "{wanted:?}"
@@ -500,7 +500,7 @@ async fn a_conflict_at_merge_reworks_the_pr_instead_of_forcing_it() {
     assert!(!r.codehost.prs()[0].merged);
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::InReview, "waiting in review for a rework");
-    assert!(task.run.pending_changes().is_some_and(|c| c.conflict));
+    assert!(task.run.pending_changes().is_some_and(|c| !c.kind.is_review()));
 }
 
 #[tokio::test]

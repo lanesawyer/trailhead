@@ -236,7 +236,7 @@ impl Factory {
         let pushed = task
             .run
             .last_changes()
-            .is_some_and(|c| !c.conflict && attempt > c.attempt && c.head.as_deref().is_some_and(|h| h != head));
+            .is_some_and(|c| c.kind.is_review() && attempt > c.attempt && c.head.as_deref().is_some_and(|h| h != head));
         Ok(pushed.then_some(Rework::Pushed))
     }
 

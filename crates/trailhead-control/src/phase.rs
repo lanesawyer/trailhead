@@ -112,7 +112,7 @@ pub(crate) fn standing_request(task: &Task) -> Option<&ChangesRequested> {
     let run = &task.run;
     let attempt = run.attempt.unwrap_or(1);
     let parked_on = |c: &ChangesRequested| {
-        let count = if c.conflict { run.conflict_reworks } else { run.review_rounds };
+        let count = if c.kind.is_review() { run.review_rounds } else { run.conflict_reworks };
         count == Some(0)
     };
     run.pending_changes().filter(|c| c.attempt == attempt && !parked_on(c))
@@ -145,6 +145,7 @@ mod tests {
     use trailhead_factory::{PrRef, Priority, Repo, RunUpdate, TaskKey};
 
     use super::*;
+    use trailhead_factory::RequestKind;
 
     const ME: &str = "factory";
 
@@ -176,12 +177,12 @@ mod tests {
         PrRef { repo: Repo { owner: "o".into(), name: "r".into() }, number: 4, url: "https://host/o/r/4".into() }
     }
 
-    fn request(conflict: bool) -> ChangesRequested {
+    fn request(kind: RequestKind) -> ChangesRequested {
         ChangesRequested {
             reviewer: "factory/trail-7-r1".into(),
             body: "Fix it.".into(),
             attempt: 1,
-            conflict,
+            kind,
             head: None,
             settled: false,
         }
@@ -260,7 +261,7 @@ mod tests {
         let plain = task(Status::NeedsInput, Some("factory/trail-7-a1"), RunUpdate::default());
         assert_eq!(phase(&plain, ME, false), Phase::Parked(Parked { awaiting_done: false, unsettled: None }));
 
-        let asked = request(true);
+        let asked = request(RequestKind::Conflict);
         let run =
             RunUpdate { unapproved_merge: Some(true), changes_requested: Some(asked.clone()), ..RunUpdate::default() };
         let t = task(Status::NeedsInput, None, run);
@@ -284,7 +285,7 @@ mod tests {
 
     #[test]
     fn a_changes_request_waits_for_a_worker_or_was_cut_short_before_the_review_was_written() {
-        let asked = request(false);
+        let asked = request(RequestKind::Review);
         let run = RunUpdate {
             pr: Some(pr()),
             review_rounds: Some(1),

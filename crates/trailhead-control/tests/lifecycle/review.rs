@@ -942,7 +942,10 @@ async fn interrupted_request_for_changes(r: &Rig, key: &TaskKey) {
     r.factory.tick().await.unwrap_err();
     let task = r.tracker.task(key);
     assert_eq!(task.run.review_rounds, Some(1), "the interrupted round isn't counted");
-    assert!(task.run.pending_changes().is_some_and(|c| c.conflict), "the conflict's changes are still pending");
+    assert!(
+        task.run.pending_changes().is_some_and(|c| !c.kind.is_review()),
+        "the conflict's changes are still pending"
+    );
 }
 
 async fn conflicted_in_review() -> Rig {
@@ -951,7 +954,7 @@ async fn conflicted_in_review() -> Rig {
     assert_eq!(r.tracker.task(&key).run.review_rounds, Some(1));
     r.codehost.set_mergeable(&pr, Some(false));
     r.factory.reconcile().await.unwrap();
-    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| c.conflict));
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| !c.kind.is_review()));
     r
 }
 
@@ -983,7 +986,7 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     let task = r.tracker.task(&key);
     assert_eq!(task.run.infra_failures, Some(1), "the revoked name cost an infrastructure failure");
     assert_eq!(task.run.review_rounds, Some(1), "the round was given back");
-    assert!(task.run.last_changes().is_some_and(|c| c.conflict && c.settled), "the conflict request, settled");
+    assert!(task.run.last_changes().is_some_and(|c| !c.kind.is_review() && c.settled), "the conflict request, settled");
 
     tokio::time::advance(std::time::Duration::from_secs(61)).await; // out of the first infrastructure backoff
     let done = r.factory.reconcile().await.unwrap();
@@ -991,7 +994,7 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     assert!(r.tracker.is_revoked("factory/trail-2-a2-r2-1"), "the retry's reviewer, under the next name");
     let task = r.tracker.task(&key);
     assert_eq!(task.run.review_rounds, Some(2), "the first review and this one, not a third");
-    assert!(task.run.pending_changes().is_some_and(|c| !c.conflict), "the review's changes are now pending");
+    assert!(task.run.pending_changes().is_some_and(|c| c.kind.is_review()), "the review's changes are now pending");
 }
 
 #[tokio::test]

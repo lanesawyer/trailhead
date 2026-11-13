@@ -6,14 +6,13 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, Result, Role, RunEvent, RunPhase,
-    RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker, Usd, VerdictKind,
-    WorkerBreach, run_name,
+    ChangesRequested, Error, Feedback, HumanContext, Merged, PrRef, PrState, Profile, RequestKind, Result, Role,
+    RunEvent, RunPhase, RunReport, RunRequest, RunResult, RunUpdate, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker,
+    Usd, VerdictKind, WorkerBreach, run_name,
 };
 
 use crate::infra::{Park, Setback};
 use crate::place::Placement;
-use crate::review::CI_REVIEWER;
 use crate::timing::{backoff, unix_now, until};
 use crate::{CANCEL_GRACE, Factory, Outcome, Placed};
 
@@ -34,7 +33,7 @@ impl Factory {
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
-            let conflict_rework = task.run.last_changes().is_some_and(|c| c.conflict && c.reviewer != CI_REVIEWER);
+            let conflict_rework = task.run.last_changes().is_some_and(|c| c.kind == RequestKind::Conflict);
             let mut state = codehost.pr_state(pr).await?;
             // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
             // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
@@ -135,7 +134,7 @@ impl Factory {
                 },
                 None => None,
             };
-            let merge_base = task.run.last_changes().is_some_and(|c| c.conflict);
+            let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
             // to open: it resumes from it when the remote has it (TRAIL-751).
             let resume = !rework && task.run.released.is_some_and(|at| at > 0);
@@ -354,7 +353,9 @@ impl Factory {
                 // The daemon may have opened the PR without being able to write it down (TRAIL-441). Whatever is
                 // missing is recorded here; a failure is logged, since the PR is open either way.
                 self.record_opened_pr(task, sub, &pr).await;
-                if let Some(stale) = task.run.last_changes().filter(|c| c.conflict).and_then(|c| c.head.clone()) {
+                if let Some(stale) =
+                    task.run.last_changes().filter(|c| !c.kind.is_review()).and_then(|c| c.head.clone())
+                {
                     // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
                     let update = RunUpdate { stale_head: Some(stale), ..RunUpdate::default() };

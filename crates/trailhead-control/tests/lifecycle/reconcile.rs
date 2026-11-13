@@ -389,7 +389,7 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
             reviewer: "factory".into(),
             body: "Merge main.".into(),
             attempt: 1,
-            conflict: true,
+            kind: trailhead_factory::RequestKind::Conflict,
             head: None,
             settled: false,
         }),
