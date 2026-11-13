@@ -188,7 +188,7 @@ mod in_place_tests {
     }
 
     fn update_task(app: &mut App, id: &str, status: &str) {
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
             "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p1", "status": status,
                       "priority": 2, "version": 2})),
@@ -258,7 +258,7 @@ mod in_place_tests {
         let mut q = app.world_mut().query::<(Entity, &BoardColumn)>();
         let columns: Vec<Entity> = q.iter(app.world()).map(|(e, _)| e).collect();
 
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
             "after": task_json(json!({"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
                       "priority": 2, "version": 2})),
@@ -316,7 +316,7 @@ mod in_place_tests {
         let mut move_to = |app: &mut App, id: &str, status: &str, title: &str, settle_after: bool| {
             n += 1;
             version += 1;
-            app.world_mut().write_message(SyncItem::Event(json!({
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
                 "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated",
                 "after": task_json(json!({"id": id, "key": id.to_uppercase(), "title": title, "project_id": "p1",
                           "status": status, "priority": 2, "version": version})),
@@ -376,7 +376,7 @@ mod in_place_tests {
         for (n, id, status) in [(9, "t2", "open"), (10, "t4", "in_progress")] {
             let after = task_json(json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": "p2",
                                          "status": status, "priority": 2, "version": 2}));
-            app.world_mut().write_message(SyncItem::Event(json!({
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
                 "id": n, "entity": "task", "entity_id": sid(id), "kind": "task.updated", "after": after,
             })));
         }

@@ -286,7 +286,7 @@ mod tests {
 
         // An event moves the task to another column.
         app.world_mut().resource_mut::<Filter>().closed = true;
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 6, "entity": "task", "entity_id": sid("t200"), "kind": "task.updated",
             "after": task_json(json!({"id": "t200", "key": "OPS-1", "project_id": "p2", "status": "done", "priority": 2, "version": 2})),
         })));

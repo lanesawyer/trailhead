@@ -13,15 +13,27 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use trailhead_model::Status;
+use trailhead_model::{Entity, Event, Status};
 
 /// What the sync hands to the app, in order. The mirror (`crate::mirror`) is the only thing that applies them.
-#[derive(bevy::prelude::Message, Debug, Clone, PartialEq, Eq)]
+#[derive(bevy::prelude::Message, Debug, Clone, PartialEq)]
 pub enum SyncItem {
     /// Everything as of step 2. It replaces the whole mirror.
     Snapshot(Snapshot),
-    /// One event off the stream, as the server sent it (`id`, `entity`, `entity_id`, `kind`, `after`, ...).
-    Event(Value),
+    /// One event off the stream.
+    Event(Event),
+}
+
+/// The id of the task an event is about: the task itself, or the one its comment or claim is on.
+pub fn task_of(event: &Event) -> Option<&str> {
+    fn on(side: &Option<Value>) -> Option<&str> {
+        side.as_ref().and_then(|v| v["task_id"].as_str())
+    }
+    match event.entity {
+        Entity::Task => Some(&event.entity_id),
+        Entity::Comment | Entity::Claim => on(&event.after).or_else(|| on(&event.before)),
+        _ => None,
+    }
 }
 
 /// The world at step 2, as the API's JSON.
@@ -191,7 +203,7 @@ impl Remote {
                 else {
                     continue;
                 };
-                let Ok(event) = serde_json::from_str::<Value>(&frame.data) else { continue };
+                let Ok(event) = serde_json::from_str::<Event>(&frame.data) else { continue };
                 if !emit(SyncItem::Event(event)) {
                     return StreamEnd::AppGone;
                 }
@@ -269,7 +281,7 @@ pub async fn run(
 ) {
     let mut emit = |item: SyncItem| {
         let id = match &item {
-            SyncItem::Event(e) => e["id"].as_i64(),
+            SyncItem::Event(e) => Some(e.id),
             SyncItem::Snapshot(_) => None,
         };
         let sent = emit(item);

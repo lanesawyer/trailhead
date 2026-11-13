@@ -147,7 +147,7 @@ impl Running {
         self.seen
             .iter()
             .filter_map(|i| match i {
-                SyncItem::Event(e) => e["id"].as_i64(),
+                SyncItem::Event(e) => Some(e.id),
                 SyncItem::Snapshot(_) => None,
             })
             .collect()
@@ -155,7 +155,7 @@ impl Running {
 }
 
 fn has_title(items: &[SyncItem], title: &str) -> bool {
-    items.iter().any(|i| matches!(i, SyncItem::Event(e) if e["after"]["title"] == title))
+    items.iter().any(|i| matches!(i, SyncItem::Event(e) if e.after.as_ref().is_some_and(|a| a["title"] == title)))
 }
 
 fn mirror_app() -> App {
@@ -208,7 +208,7 @@ async fn writes_during_the_snapshot_are_neither_lost_nor_applied_twice() {
     let ids: Vec<_> = events
         .iter()
         .map(|i| match i {
-            SyncItem::Event(e) => e["id"].as_i64().unwrap(),
+            SyncItem::Event(e) => e.id,
             SyncItem::Snapshot(_) => unreachable!(),
         })
         .collect();
@@ -319,8 +319,7 @@ async fn claims_comments_and_projects_are_mirrored() {
     // Resolving the question and releasing the claim arrive on the stream.
     rig.state.store.resolve_comment(&rig.ctx, q.id, Some("because".into())).await.unwrap();
     rig.state.store.release(&bot, &id).await.unwrap();
-    run.until("release", |s, _| s.iter().any(|i| matches!(i, SyncItem::Event(e) if e["kind"] == "claim.released")))
-        .await;
+    run.until("release", |s, _| s.iter().any(|i| matches!(i, SyncItem::Event(e) if e.kind == "claim.released"))).await;
     feed(&mut app, run.seen.clone());
     let world = app.world_mut();
     assert_eq!(world.query::<&Mirrored<Claim>>().iter(world).count(), 0);

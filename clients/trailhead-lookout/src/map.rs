@@ -738,7 +738,7 @@ mod tests {
         }
         assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
         // The claim arrives as an event; its holder is in no agent list.
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 2, "entity": "claim", "entity_id": sid("t42"), "kind": "claim.created",
             "after": claim_json(json!({"task_id": "t42", "holder_id": "a-new"})),
         })));
@@ -747,7 +747,7 @@ mod tests {
         }
         // Until the agent.created event arrives it has no name, so no walker.
         assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 3, "entity": "agent", "entity_id": sid("a-new"), "kind": "agent.created",
             "after": crate::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
         })));

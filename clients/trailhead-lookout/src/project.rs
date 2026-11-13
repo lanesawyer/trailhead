@@ -380,7 +380,7 @@ mod tests {
     fn changing_one_task_leaves_every_other_card_as_it_was() {
         let mut app = app(vec![task("t1", "p1", "open", None), task("t2", "p1", "in_progress", None)]);
         let before = cards(&mut app);
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
             "after": task_json(json!({"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
                       "priority": 2, "version": 2})),

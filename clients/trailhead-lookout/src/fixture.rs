@@ -4,6 +4,8 @@
 
 use serde_json::{Value, json};
 use trailhead_model::{Agent, Claim, Comment, Project, Task, User};
+
+use crate::sync::SyncItem;
 use uuid::Uuid;
 
 /// The UUID a short name stands for. A real UUID is itself.
@@ -53,6 +55,21 @@ pub fn whole(defaults: Value, fields: Value) -> Value {
 }
 
 const AT: &str = "2026-10-01T00:00:00Z";
+
+/// An event off the stream, whole from the fields a test gives (`id`, `entity`, `entity_id` and `after`, mostly).
+pub fn sync_event(fields: Value) -> SyncItem {
+    let defaults = json!({
+        "id": 0, "workspace_id": "w", "batch_id": "b", "actor_id": "u", "on_behalf_of": "u", "task_id": null,
+        "entity": "task", "entity_id": "", "kind": "", "before": null, "after": null, "undoes": null, "at": AT,
+    });
+    let mut event = whole(defaults, fields);
+    for key in ["batch_id", "actor_id"] {
+        if let Some(Value::String(s)) = event.get(key) {
+            event[key] = Value::String(sid(s));
+        }
+    }
+    SyncItem::Event(serde_json::from_value(event).expect("a whole event"))
+}
 
 /// A task's JSON as the API sends it.
 pub fn task_json(fields: Value) -> Value {
