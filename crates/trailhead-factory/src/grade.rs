@@ -38,15 +38,17 @@ impl ChangedFile {
     }
 }
 
-/// A PR's grade, and what raised it above the task's.
+/// A PR's grade, and what raised it above the task's. Written whole into the task's run record: every field
+/// serializes, because the store merges a written record into the one it holds and a field left out would keep the
+/// older grade's value (TRAIL-1471).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrGrade {
     pub grade: Grade,
     /// The task's own grade; none for a task that was never graded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub task: Option<Grade>,
     /// Why the grade is above the task's: the files or rules that did it, and the reviewer.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub reasons: Vec<String>,
 }
 
