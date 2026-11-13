@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,12 +19,21 @@ const POST_BUFFER: &str = "http.postBuffer=33554432";
 /// How long to wait for narrowed egress to take effect. Sprites took under a second in M0's tests.
 const BLOCK_PATIENCE: Duration = Duration::from_secs(15);
 
+/// Finds where repos are cloned from, asked each time a clone needs it.
+pub type FindRemote =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>> + Send + Sync>;
+
+enum Remote {
+    Fixed(String),
+    Found(FindRemote),
+}
+
 /// A git checkout of a GitHub repo, cloned during prepare: anonymously from github.com, or from wherever
-/// `with_remote` points (a gateway git connection, for private repos).
+/// `with_remote` or `with_found_remote` points (a gateway git connection, for private repos).
 pub struct GitWorkspace {
     dir: PathBuf,
     /// Where repos are cloned from; tests point it at a local directory.
-    remote_base: String,
+    remote: Remote,
     block_patience: Duration,
     /// Extra environment for git; tests use it to hide the machine's git config.
     git_env: Vec<(String, String)>,
@@ -54,15 +64,20 @@ impl GitWorkspace {
         GitWorkspace::with_remote(dir, "https://github.com")
     }
 
-    /// Where repos are cloned from.
-    pub fn remote_base(&self) -> &str {
-        &self.remote_base
+    pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
+        GitWorkspace::cloning_from(dir, Remote::Fixed(remote_base.into()))
     }
 
-    pub fn with_remote(dir: impl Into<PathBuf>, remote_base: impl Into<String>) -> GitWorkspace {
+    /// Clones from wherever `find` says at the time of the clone. An error from it fails that prepare, not every
+    /// later one: an origin set from a wrong guess would stay with the checkout for good.
+    pub fn with_found_remote(dir: impl Into<PathBuf>, find: FindRemote) -> GitWorkspace {
+        GitWorkspace::cloning_from(dir, Remote::Found(find))
+    }
+
+    fn cloning_from(dir: impl Into<PathBuf>, remote: Remote) -> GitWorkspace {
         GitWorkspace {
             dir: dir.into(),
-            remote_base: remote_base.into(),
+            remote,
             block_patience: BLOCK_PATIENCE,
             git_env: Vec::new(),
             mise: Mise::new(),
@@ -186,7 +201,11 @@ impl Workspace for GitWorkspace {
         } else {
             let parent = self.dir.parent().unwrap_or(Path::new("/"));
             tokio::fs::create_dir_all(parent).await.map_err(|e| Error::Other(format!("{}: {e}", parent.display())))?;
-            let url = format!("{}/{}/{}.git", self.remote_base.trim_end_matches('/'), req.repo.owner, req.repo.name);
+            let remote_base = match &self.remote {
+                Remote::Fixed(base) => base.clone(),
+                Remote::Found(find) => find().await?,
+            };
+            let url = format!("{}/{}/{}.git", remote_base.trim_end_matches('/'), req.repo.owner, req.repo.name);
             let dir = self.dir.to_string_lossy();
             self.git(parent, &["clone", "--quiet", "--branch", base, &url, &dir]).await?;
         }

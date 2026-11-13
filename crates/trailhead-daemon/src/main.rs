@@ -4,21 +4,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use clap::{CommandFactory, Parser};
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh::protocol::Router;
-use trailhead_codehost_github::{GitHub, Identity};
+use trailhead_codehost_github::Identity;
 use trailhead_daemon::awake::SpriteHolds;
 use trailhead_daemon::net::{DaemonProtocol, watch_network};
 use trailhead_daemon::{Connect, GitWorkspace, HEARTBEAT_EVERY, RENEW_EVERY, RestTracker, Runner};
-use trailhead_factory::{
-    BranchUpdate, ChangedFile, Ci, CodeHost, Commit, DaemonSecrets, Error, HarnessSetup, MergeOutcome, NewPr, PrRef,
-    PrState, Repo, Result, Tracker,
-};
+use trailhead_factory::{DaemonSecrets, HarnessSetup, Tracker};
 use trailhead_wire::api::open_api_tunnel;
 use trailhead_wire::{ALPN, build_id, parse_endpoint_id, parse_secret_key};
+
+use crate::connectors::{Gateway, GatewayCodeHost};
+
+mod connectors;
 
 #[derive(Parser)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -82,101 +82,6 @@ struct Args {
     /// computes that pause idle sandboxes).
     #[arg(long)]
     hold_socket: Option<PathBuf>,
-}
-
-/// Stands in for a code host when the sandbox has no GitHub connector, so runs fail with the reason.
-struct NoCodeHost(String);
-
-#[async_trait]
-impl CodeHost for NoCodeHost {
-    async fn publish(&self, _: &Repo, _: &str, _: &str, _: &[Commit]) -> Result<()> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn open_pr(&self, _: &Repo, _: NewPr) -> Result<PrRef> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn diff(&self, _: &PrRef) -> Result<String> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn comment(&self, _: &PrRef, _: &str) -> Result<u64> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn edit_comment(&self, _: &PrRef, _: u64, _: &str) -> Result<()> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn merge(&self, _: &PrRef, _: &str) -> Result<MergeOutcome> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-    async fn behind(&self, _: &PrRef) -> Result<bool> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn update_branch(&self, _: &PrRef) -> Result<BranchUpdate> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn carries_verdict(&self, _: &PrRef, _: &str) -> Result<bool> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn pr_state(&self, _: &PrRef) -> Result<PrState> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn title(&self, _: &PrRef) -> Result<String> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn files(&self, _: &PrRef) -> Result<Vec<ChangedFile>> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn head(&self, _: &PrRef) -> Result<String> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-
-    async fn ci(&self, _: &PrRef) -> Result<Ci> {
-        Err(Error::Forbidden(self.0.clone()))
-    }
-}
-
-/// The base URL of the `provider` connection in the gateway's list, if this sandbox is granted one.
-fn connection_url(conns: &[serde_json::Value], provider: &str) -> Option<String> {
-    conns.iter().find(|c| c["provider"] == provider).and_then(|c| c["gateway_base_url"].as_str().map(str::to_string))
-}
-
-/// What this sandbox's connections are, found in the gateway's list: GitHub's API through the Sprite's GitHub
-/// connector or the Docker gateway's, and, on Docker, git over smart-HTTP for cloning private repos.
-async fn connections(gateway_list: &str) -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
-    let list: serde_json::Value = reqwest::get(gateway_list).await?.error_for_status()?.json().await?;
-    Ok(list["connections"].as_array().cloned().unwrap_or_default())
-}
-
-fn codehost(
-    author: Identity,
-    conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>,
-) -> Arc<dyn CodeHost> {
-    match conns {
-        Ok(conns) => match connection_url(conns, "github") {
-            Some(url) => {
-                tracing::info!(%url, "using the GitHub connector");
-                Arc::new(GitHub::gateway(url).with_author(author))
-            }
-            None => Arc::new(NoCodeHost("no GitHub connector is granted to this sandbox".into())),
-        },
-        Err(e) => Arc::new(NoCodeHost(format!("couldn't list this sandbox's connectors: {e}"))),
-    }
-}
-
-/// Clones through the gateway's git connection when there is one, else anonymously from github.com.
-fn workspace(workdir: PathBuf, conns: &std::result::Result<Vec<serde_json::Value>, reqwest::Error>) -> GitWorkspace {
-    match conns.as_ref().ok().and_then(|c| connection_url(c, "git")) {
-        Some(url) => {
-            tracing::info!(%url, "cloning through the git connection");
-            GitWorkspace::with_remote(workdir, url)
-        }
-        None => GitWorkspace::new(workdir),
-    }
 }
 
 /// The secrets, with the [`build_id`] of the file they came from.
@@ -285,7 +190,7 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
     let connect: Connect = Arc::new(move |cred| {
         Box::pin(async move { Ok(Arc::new(RestTracker::new(format!("http://{api}"), cred)) as Arc<dyn Tracker>) })
     });
-    let conns = connections(&secrets.gateway_list).await;
+    let gateway = Gateway::new(secrets.gateway_list.clone());
     let harness =
         (trailhead_plugins::harnesses().get(&secrets.harness).map_err(|e| e.to_string())?.build)(&HarnessSetup {
             executable: args.harness_executable,
@@ -293,8 +198,11 @@ async fn serve(args: Args) -> std::result::Result<(), String> {
         });
     let runner = Runner {
         harness,
-        codehost: codehost(Identity { name: args.author_name, email: args.author_email }, &conns),
-        workspace: Arc::new(workspace(args.workdir, &conns)),
+        codehost: Arc::new(GatewayCodeHost::new(
+            gateway.clone(),
+            Identity { name: args.author_name, email: args.author_email },
+        )),
+        workspace: Arc::new(GitWorkspace::with_found_remote(args.workdir, gateway.remote())),
         connect,
         renew_every: RENEW_EVERY,
         heartbeat_every: HEARTBEAT_EVERY,
@@ -371,74 +279,6 @@ mod tests {
         assert_eq!(executable(&[]), std::path::PathBuf::from("claude"));
         assert_eq!(executable(&["--harness-executable", "/bin/h"]), std::path::PathBuf::from("/bin/h"));
         assert_eq!(executable(&["--claude", "/bin/c"]), std::path::PathBuf::from("/bin/c"));
-    }
-
-    fn conns(list: serde_json::Value) -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
-        Ok(list.as_array().unwrap().clone())
-    }
-
-    /// A failed fetch of the gateway's list, from a port nothing listens on.
-    async fn failed_list() -> std::result::Result<Vec<serde_json::Value>, reqwest::Error> {
-        Err(reqwest::get("http://127.0.0.1:1").await.unwrap_err())
-    }
-
-    fn identity() -> trailhead_codehost_github::Identity {
-        trailhead_codehost_github::Identity { name: "n".into(), email: "e@example.com".into() }
-    }
-
-    /// What the code host says to a call: `Forbidden` with its reason from `NoCodeHost`, another error from a
-    /// GitHub that can't reach its (unlistened) gateway.
-    async fn title_error(host: std::sync::Arc<dyn trailhead_factory::CodeHost>) -> trailhead_factory::Error {
-        let pr = trailhead_factory::PrRef {
-            repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
-            number: 1,
-            url: String::new(),
-        };
-        host.title(&pr).await.unwrap_err()
-    }
-
-    #[test]
-    fn connection_url_picks_the_provider() {
-        let list = conns(serde_json::json!([
-            {"provider": "github", "gateway_base_url": "http://gw/github"},
-            {"provider": "git", "gateway_base_url": "http://gw/git"},
-            {"provider": "other"},
-        ]))
-        .unwrap();
-        assert_eq!(super::connection_url(&list, "git").as_deref(), Some("http://gw/git"));
-        assert_eq!(super::connection_url(&list, "github").as_deref(), Some("http://gw/github"));
-        assert_eq!(super::connection_url(&list, "other"), None);
-        assert_eq!(super::connection_url(&list, "missing"), None);
-        assert_eq!(super::connection_url(&[], "git"), None);
-    }
-
-    #[tokio::test]
-    async fn workspace_clones_through_the_git_connection_or_anonymously() {
-        let with_git = conns(serde_json::json!([{"provider": "git", "gateway_base_url": "http://gw/git"}]));
-        assert_eq!(super::workspace("w".into(), &with_git).remote_base(), "http://gw/git");
-
-        let github_only = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://gw/github"}]));
-        assert_eq!(super::workspace("w".into(), &github_only).remote_base(), "https://github.com");
-        assert_eq!(super::workspace("w".into(), &conns(serde_json::json!([]))).remote_base(), "https://github.com");
-        assert_eq!(super::workspace("w".into(), &failed_list().await).remote_base(), "https://github.com");
-    }
-
-    // Paused clock: the GitHub client's GET retries back off 0.5s, 1s and 2s, which would otherwise sleep for real.
-    #[tokio::test(start_paused = true)]
-    async fn codehost_is_github_only_with_a_github_connection() {
-        let with_github = conns(serde_json::json!([{"provider": "github", "gateway_base_url": "http://127.0.0.1:1"}]));
-        let err = title_error(super::codehost(identity(), &with_github)).await;
-        assert!(!matches!(err, trailhead_factory::Error::Forbidden(_)), "{err:?}");
-
-        let git_only = conns(serde_json::json!([{"provider": "git", "gateway_base_url": "http://gw/git"}]));
-        match title_error(super::codehost(identity(), &git_only)).await {
-            trailhead_factory::Error::Forbidden(why) => assert!(why.contains("no GitHub connector"), "{why}"),
-            e => panic!("{e:?}"),
-        }
-        match title_error(super::codehost(identity(), &failed_list().await)).await {
-            trailhead_factory::Error::Forbidden(why) => assert!(why.contains("couldn't list"), "{why}"),
-            e => panic!("{e:?}"),
-        }
     }
 
     #[test]

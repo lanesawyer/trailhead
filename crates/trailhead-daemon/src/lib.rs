@@ -24,4 +24,4 @@ pub use rest::RestTracker;
 
 pub use mise::{Mise, install_hosts_for};
 pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
-pub use workspace::GitWorkspace;
+pub use workspace::{FindRemote, GitWorkspace};
