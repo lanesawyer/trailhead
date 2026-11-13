@@ -11,6 +11,8 @@ mod lifecycle;
 pub mod logs;
 mod merger;
 mod person;
+#[cfg_attr(not(test), expect(dead_code, reason = "reconcile dispatches on it from TRAIL-1457"))]
+mod phase;
 mod place;
 mod pool;
 mod reconcile;
