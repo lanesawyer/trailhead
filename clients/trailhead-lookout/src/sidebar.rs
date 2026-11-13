@@ -719,7 +719,6 @@ mod tests {
                 holding: None,
                 human_grades: None,
                 usage,
-                seq: 1,
             };
             app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
             settle(app);

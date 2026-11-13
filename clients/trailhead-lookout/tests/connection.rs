@@ -403,7 +403,10 @@ async fn the_factory_status_arrives_over_the_ui_protocol() {
     assert_eq!(campsites(&mut app), [("camp-1".to_string(), SandboxState::Idle)]);
     let busy = FactoryEvent::SandboxChanged { sandbox: sandbox("camp-2", SandboxState::Busy) };
     rig.events.send(Sequenced { seq: 2, event: busy }).unwrap();
-    until(&mut app, "event", |a| a.world().resource::<FactoryStatus>().repos["o/r"].seq == 2).await;
+    until(&mut app, "event", |a| {
+        a.world().resource::<trailhead_lookout::factory::FactoryMirror>().seq("o/r") == Some(2)
+    })
+    .await;
     assert_eq!(campsites(&mut app).len(), 2);
 }
 

@@ -636,7 +636,6 @@ mod tests {
                 human_grades: None,
                 holding: None,
                 usage: Vec::new(),
-                seq: 0,
             },
         );
         assert_eq!(

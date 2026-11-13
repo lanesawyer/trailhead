@@ -997,7 +997,6 @@ mod tests {
             human_grades: None,
             holding: None,
             usage: Vec::new(),
-            seq: 1,
         };
         factory.repos.insert("o/r".into(), state);
         let authoring = Authoring::default();
@@ -1290,7 +1289,6 @@ mod tests {
             human_grades: None,
             holding: None,
             usage: Vec::new(),
-            seq: 1,
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
         app.update();
