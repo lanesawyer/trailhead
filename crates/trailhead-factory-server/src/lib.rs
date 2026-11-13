@@ -649,6 +649,7 @@ fn loop_panicked(
     let repo = boards.get(&e.id()).map(|(slug, board)| {
         board.control(trailhead_factory::ControlState::Stopped);
         feed.set_stopped(slug, e.to_string());
+        board.error(format!("loop panicked: {e}"));
         slug.as_str()
     });
     tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
@@ -1016,6 +1017,9 @@ mod tests {
         assert!(reply.repos[0].stopped.as_ref().is_some_and(|m| m.contains("panic")));
         assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(up.snapshot().control, ControlState::Stopped);
+        let (_, message) = up.snapshot().last_error.unwrap();
+        assert!(message.starts_with("loop panicked: "), "{message}");
+        assert!(other.snapshot().last_error.is_none());
         assert_eq!(other.snapshot().control, ControlState::Up);
     }
 
