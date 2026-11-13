@@ -115,3 +115,38 @@ fn a_request_for_changes_after_a_park_on_review_rounds_is_reworked() {
         ],
     );
 }
+
+/// TRAIL-1462: the tracker failed before the rework's sub-agent existed, the factory claimed and released the task
+/// to back it off, and core then took the factory for the worker: the merge it made later could never be finished.
+#[test]
+fn a_rework_that_cant_start_doesnt_make_the_factory_its_worker() {
+    replay(
+        &[3, 1],
+        &[
+            Tick(5688206883176109799),
+            Tick(1712250019273695481),
+            PersonMerges(0),
+            Tick(10545829268931444722),
+            Fault(TrackerFailsWrite(1)),
+            Tick(388732358854232492),
+            PersonApproves(1),
+        ],
+    );
+}
+
+/// TRAIL-1462: the same, found through a conflict rework, where it left the factory unable to approve.
+#[test]
+fn a_conflict_rework_that_cant_start_doesnt_make_the_factory_its_worker() {
+    replay(
+        &[1, 1],
+        &[
+            Tick(2328591859132753582),
+            Mergeable(0, Some(false)),
+            Reconcile(8920950728352337595),
+            Push(0),
+            Fault(TrackerFailsWrite(5)),
+            Reconcile(14972276120280943070),
+            Tick(17905383653971260893),
+        ],
+    );
+}
