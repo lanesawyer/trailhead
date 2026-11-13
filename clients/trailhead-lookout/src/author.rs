@@ -873,7 +873,6 @@ mod tests {
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
     use crate::fixture::{sid, task_json};
     use crate::mirror::MirrorPlugin;
-    use crate::sync::SyncItem;
     use reqwest::Method;
     use serde_json::{Value, json};
 
@@ -1121,12 +1120,12 @@ mod tests {
             AuthorPlugin,
         ));
         app.world_mut().resource_mut::<Outbox>().backoff = Duration::ZERO;
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 1, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated", "after": task(),
         })));
         for (id, key) in [(2, "TRAIL"), (3, "ZED")] {
             let project = crate::fixture::project_json(json!({"id": key, "key": key, "name": key}));
-            app.world_mut().write_message(SyncItem::Event(json!({
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
                 "id": id, "entity": "project", "entity_id": sid(key), "kind": "project.created", "after": project,
             })));
         }

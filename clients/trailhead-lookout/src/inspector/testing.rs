@@ -62,7 +62,7 @@ pub(super) fn fixture() -> Fixture {
 }
 
 pub(super) fn question(id: &str, body: &str) -> SyncItem {
-    SyncItem::Event(json!({
+    crate::fixture::sync_event(json!({
         "id": id.trim_start_matches('c').parse::<i64>().unwrap() + 100, "entity": "comment", "entity_id": sid(id),
         "kind": "comment.created",
         "after": comment_json(json!({"id": id, "task_id": "t7", "kind": "question", "body": body,

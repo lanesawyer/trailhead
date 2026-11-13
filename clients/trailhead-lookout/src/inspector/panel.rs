@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(app.world().get::<Control>(a), Some(&Control::Done), "nothing changed yet");
         assert!(app.world().get_entity(b).is_err(), "a subject not in the mirror loses its controls");
         assert!(!app.world().resource::<Controls>().0.contains_key(&(gone, Action::Undo)));
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
             "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7", "version": 9})),
         })));
@@ -441,7 +441,7 @@ mod tests {
             agents: as_json(&f.agents),
             ..Default::default()
         }));
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 6, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.created",
             "after": comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "body": "q", "resolved_at": null})),
         })));
@@ -636,7 +636,7 @@ mod tests {
     fn a_changed_title_and_a_pressed_control_leave_the_panel_as_it_was() {
         let mut app = app();
         let before = body(&mut app);
-        app.world_mut().write_message(SyncItem::Event(json!({
+        app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 300, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
             "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
                       "version": 5})),

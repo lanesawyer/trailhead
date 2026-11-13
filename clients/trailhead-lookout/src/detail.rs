@@ -3,7 +3,6 @@
 //! the task is selected and again when the stream brings an event about it, and the newest answer wins.
 
 use bevy::prelude::*;
-use serde_json::Value;
 use trailhead_client::http::Client;
 use trailhead_model::{Task, TaskDetail, TaskKey};
 
@@ -11,7 +10,7 @@ use crate::connection::{Connection, SendNet};
 use crate::inspector::{Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::net::NetCommand;
-use crate::sync::SyncItem;
+use crate::sync::{SyncItem, task_of};
 
 /// The server's answer to a fetch, as the net thread passes it on.
 #[derive(Message, Debug, Clone, PartialEq)]
@@ -115,18 +114,9 @@ fn mark_stale(
     }
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
-        if about(e) == Some(id) && !fetching.stale {
+        if task_of(e) == Some(id) && !fetching.stale {
             fetching.stale = true;
         }
-    }
-}
-
-/// The task an event is about.
-fn about(event: &Value) -> Option<&str> {
-    match event["entity"].as_str()? {
-        "task" => event["entity_id"].as_str(),
-        "comment" | "claim" => event["after"]["task_id"].as_str().or_else(|| event["before"]["task_id"].as_str()),
-        _ => None,
     }
 }
 
@@ -216,10 +206,11 @@ mod tests {
         app.update();
     }
 
-    fn event(app: &mut App, entity: &str, after: Value) {
+    fn event(app: &mut App, entity: &str, after: serde_json::Value) {
         let id = after["id"].clone();
-        app.world_mut()
-            .write_message(SyncItem::Event(json!({"id": 9, "entity": entity, "entity_id": id, "after": after})));
+        app.world_mut().write_message(crate::fixture::sync_event(
+            json!({"id": 9, "entity": entity, "entity_id": id, "after": after}),
+        ));
         app.update();
     }
 

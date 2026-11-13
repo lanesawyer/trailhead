@@ -238,23 +238,22 @@ impl Mirror {
         }
     }
 
-    fn apply_event(&mut self, commands: &mut Commands, event: Value) {
-        let Some(event_id) = event["id"].as_i64() else { return };
+    fn apply_event(&mut self, commands: &mut Commands, event: trailhead_model::Event) {
+        let event_id = event.id;
         // The stream is in order, so anything at or before what's applied is a duplicate.
         if event_id <= self.last_event {
             return;
         }
         self.last_event = event_id;
-        let id = event["entity_id"].as_str().unwrap_or_default().to_string();
-        let after = event["after"].clone();
-        let kind = match event["entity"].as_str() {
-            Some("project") => Kind::Project,
-            Some("task") => Kind::Task,
-            Some("comment") => Kind::Comment,
-            Some("claim") => Kind::Claim,
-            Some("agent") => Kind::Agent,
-            Some("dependency") => Kind::Dependency,
-            _ => return,
+        let id = event.entity_id;
+        let after = event.after.unwrap_or(Value::Null);
+        let kind = match event.entity {
+            trailhead_model::Entity::Project => Kind::Project,
+            trailhead_model::Entity::Task => Kind::Task,
+            trailhead_model::Entity::Comment => Kind::Comment,
+            trailhead_model::Entity::Claim => Kind::Claim,
+            trailhead_model::Entity::Agent => Kind::Agent,
+            trailhead_model::Entity::Dependency => Kind::Dependency,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
             return self.remove(commands, kind, &id);
@@ -304,7 +303,7 @@ mod tests {
     }
 
     fn task_event(id: i64, version: i64, title: &str) -> SyncItem {
-        SyncItem::Event(json!({
+        crate::fixture::sync_event(json!({
             "id": id, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
             "after": task_json(json!({"id": "t1", "title": title, "version": version})),
         }))
@@ -358,7 +357,7 @@ mod tests {
         let at = |on: bool| if on { json!("2026-01-01T00:00:00Z") } else { Value::Null };
         let after =
             comment_json(json!({"id": "c1", "task_id": "t1", "resolved_at": at(resolved), "deleted_at": at(deleted)}));
-        SyncItem::Event(
+        crate::fixture::sync_event(
             json!({"id": id, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.updated", "after": after}),
         )
     }
@@ -406,7 +405,7 @@ mod tests {
 
     fn claim_event(id: i64) -> SyncItem {
         let after = claim_json(json!({"task_id": "t1"}));
-        SyncItem::Event(
+        crate::fixture::sync_event(
             json!({"id": id, "entity": "claim", "entity_id": sid("t1"), "kind": "claim.created", "after": after}),
         )
     }
@@ -414,7 +413,7 @@ mod tests {
     fn deleted_task_event(id: i64, version: i64) -> SyncItem {
         let after =
             task_json(json!({"id": "t1", "title": "a", "version": version, "deleted_at": "2026-01-01T00:00:00Z"}));
-        SyncItem::Event(
+        crate::fixture::sync_event(
             json!({"id": id, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": after}),
         )
     }
@@ -455,7 +454,10 @@ mod tests {
         send(&mut app, [snapshot(10, 1, "a")]);
         let mut bad = task_json(json!({"id": "t1", "version": 2}));
         bad["status"] = json!("on_hold");
-        send(&mut app, [SyncItem::Event(json!({"id": 11, "entity": "task", "entity_id": sid("t1"), "after": bad}))]);
+        send(
+            &mut app,
+            [crate::fixture::sync_event(json!({"id": 11, "entity": "task", "entity_id": sid("t1"), "after": bad}))],
+        );
         assert_eq!(title(&mut app), "a");
         assert_eq!(app.world().resource::<Mirror>().last_event(), 11);
     }
@@ -476,7 +478,7 @@ mod tests {
             "created_at": "2026-10-01T00:00:00Z"
         });
         let (before, after) = if kind == "dependency.added" { (Value::Null, edge) } else { (edge, Value::Null) };
-        SyncItem::Event(json!({
+        crate::fixture::sync_event(json!({
             "id": id, "entity": "dependency", "entity_id": format!("{}:{}", sid("t2"), sid("t1")),
             "kind": kind, "before": before, "after": after,
         }))

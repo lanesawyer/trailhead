@@ -238,7 +238,7 @@ mod tests {
         let source = sent(&mut app)[0].source;
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
         let task_event = |id: i64, version: i64| {
-            SyncItem::Event(json!({
+            crate::fixture::sync_event(json!({
                 "id": id, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
                 "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "version": version})),
             }))

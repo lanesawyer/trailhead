@@ -130,14 +130,8 @@ pub struct InspectorState(pub Option<InspectorView>);
 fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) {
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
-        let Some(id) = e["id"].as_i64() else { continue };
-        let task = match e["entity"].as_str() {
-            Some("task") => e["entity_id"].as_str(),
-            Some("comment" | "claim") => e["after"]["task_id"].as_str().or_else(|| e["before"]["task_id"].as_str()),
-            _ => None,
-        };
-        if let Some(task) = task {
-            latest.0.insert(task.to_string(), id);
+        if let Some(task) = crate::sync::task_of(e) {
+            latest.0.insert(task.to_string(), e.id);
         }
     }
 }
