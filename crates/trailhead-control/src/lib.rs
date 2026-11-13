@@ -1,7 +1,12 @@
 //! The factory's control plane: starts sandboxes for ready tasks, enforces
-//! budgets, dispatches reviews and reconciles on boot. It keeps no state of its
-//! own; everything it needs is in the tracker and the compute host
-//! (`docs/factory/state.md`).
+//! budgets, dispatches reviews and reconciles on boot. It keeps no database:
+//! run state is in the tracker and the compute host (`docs/factory/state.md`).
+//! Two things are kept in files under the data dir so a restart doesn't undo
+//! them: each repo's spend on paid targets today, and the subscription usage
+//! readings that pause new runs. Everything else it holds is in memory only
+//! (backoff deadlines, setup-failure counts and the other maps on [`Factory`]),
+//! and is what a restart may safely forget: reconcile rebuilds it from the
+//! tracker, or it simply starts over.
 
 mod core_tracker;
 pub mod daemon_binary;
@@ -20,6 +25,7 @@ mod run_loop;
 mod spend;
 mod status;
 mod timing;
+mod usage;
 
 pub use core_tracker::CoreTracker;
 pub use status::StatusBoard;
@@ -76,6 +82,8 @@ pub struct Host {
     pause_at: BTreeMap<String, u32>,
     /// The latest reading of each subscription usage window: percent used, and when it resets (unix seconds).
     quota: Mutex<HashMap<String, (u32, i64)>>,
+    /// Where the readings are kept across restarts, if anywhere.
+    usage_file: Option<std::path::PathBuf>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
@@ -90,6 +98,29 @@ impl Host {
     /// The shared state for the host settings in the user config's `[factory]`.
     pub fn new(config: &HostConfig) -> Arc<Host> {
         Arc::new(Host { max_sandboxes: config.max_sandboxes, pause_at: config.pause_at.clone(), ..Host::default() })
+    }
+
+    /// As [`Host::new`], keeping the usage readings in `path`, so a restart keeps a pause. It starts from the readings
+    /// there whose window hasn't reset; a file that can't be read starts from none, which is logged.
+    pub fn with_usage_file(config: &HostConfig, path: std::path::PathBuf) -> Arc<Host> {
+        Arc::new(Host {
+            max_sandboxes: config.max_sandboxes,
+            pause_at: config.pause_at.clone(),
+            quota: Mutex::new(usage::load(&path, timing::unix_now())),
+            usage_file: Some(path),
+            ..Host::default()
+        })
+    }
+
+    /// Takes a run's reading of a usage window, saving the readings when it changes one.
+    pub(crate) fn record_usage(&self, window: String, used_percent: u32, resets_at: i64) {
+        let mut quota = self.quota.lock().unwrap();
+        if quota.insert(window, (used_percent, resets_at)) == Some((used_percent, resets_at)) {
+            return;
+        }
+        if let Some(path) = &self.usage_file {
+            usage::save(path, &quota);
+        }
     }
 
     /// The latest reading of each usage window, by window name, with its `pause_at`, for the status board.
