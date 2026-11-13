@@ -268,12 +268,12 @@ pub struct Said {
     pub message: String,
 }
 
-/// A merged PR: who merged it, which PR, and the commit it became.
+/// A merged PR: who merged it, which PR, and the commit it became. Written whole, like [`ChangesRequested`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Merged {
     pub by: MergedBy,
     pub pr: PrRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub commit: Option<String>,
 }
 
@@ -310,7 +310,9 @@ impl RequestKind {
     }
 }
 
-/// A request for changes to a PR: who asked, what they said, and the attempt whose PR it was about.
+/// A request for changes to a PR: who asked, what they said, and the attempt whose PR it was about. Written whole:
+/// every field serializes, unset ones as `null` or `false`, because the store merges a written record into the one
+/// it holds and a field left out would keep the older request's value (TRAIL-1471).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredRequest")]
 pub struct ChangesRequested {
@@ -321,11 +323,11 @@ pub struct ChangesRequested {
     /// The PR's head when this was requested. A head that has moved since means someone pushed to the PR, so the
     /// request is stale: a person settled it (TRAIL-338). Unknown for requests recorded before this, or when the
     /// host couldn't say.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub head: Option<String>,
     /// A person has taken the request over: the task was parked on it and then answered or reopened, which settles
     /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub settled: bool,
 }
 

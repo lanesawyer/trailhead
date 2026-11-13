@@ -1656,3 +1656,42 @@ async fn a_reviewers_summary_with_trailing_whitespace_counts_one_round() {
     assert_eq!(task.run.review_rounds, Some(1), "the stored comment is trimmed; it is still the recorded request");
     assert!(task.changes_requested);
 }
+
+/// The store merges a written record into the one it holds, so a record that left a field out would keep the older
+/// record's value: a new request for changes would be born settled and never reworked (TRAIL-1471).
+#[tokio::test]
+async fn a_record_written_over_an_older_one_keeps_none_of_its_fields() {
+    use trailhead_factory::{ChangesRequested, Merged, MergedBy, PrGrade, PrRef, Repo, RequestKind};
+    let r = rig().await;
+    let key = r.task("Add a greeting").await;
+    let pr = PrRef { repo: Repo { owner: "o".into(), name: "r".into() }, number: 4, url: "https://host/o/r/4".into() };
+    let request = |settled: bool, head: Option<&str>| ChangesRequested {
+        reviewer: "factory/trail-1-a1-r1".into(),
+        body: "Add a test.".into(),
+        attempt: 1,
+        kind: RequestKind::Review,
+        head: head.map(str::to_string),
+        settled,
+    };
+    let older = RunPatch {
+        changes_requested: Patch::Set(request(true, Some("abc"))),
+        grade: Patch::Set(PrGrade { grade: gr(3), task: Some(gr(1)), reasons: vec!["Cargo.toml changed".into()] }),
+        merged: Patch::Set(Merged { by: MergedBy::Merger, pr: pr.clone(), commit: Some("def".into()) }),
+        ..RunPatch::default()
+    };
+    r.tracker.report(&key, older).await.unwrap();
+
+    let newer = RunPatch {
+        changes_requested: Patch::Set(request(false, None)),
+        grade: Patch::Set(PrGrade { grade: gr(1), task: None, reasons: vec![] }),
+        merged: Patch::Set(Merged { by: MergedBy::Human, pr: pr.clone(), commit: None }),
+        ..RunPatch::default()
+    };
+    r.tracker.report(&key, newer).await.unwrap();
+
+    let run = r.show(&key).await.run;
+    assert_eq!(run.changes_requested, Some(request(false, None)), "not settled, and on no head");
+    assert!(run.pending_changes().is_some(), "so it is still to be reworked");
+    assert_eq!(run.grade, Some(PrGrade { grade: gr(1), task: None, reasons: vec![] }));
+    assert_eq!(run.merged, Some(Merged { by: MergedBy::Human, pr, commit: None }));
+}
