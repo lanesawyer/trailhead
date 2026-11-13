@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-pub use trailhead_model::{Grade, Priority, Status, TaskKey};
+pub use trailhead_model::{Grade, Priority, Status, TaskKey, key_number};
 
 /// The key in task metadata that the factory's run fields ([`RunUpdate`]) live under.
 pub const METADATA_KEY: &str = "factory";

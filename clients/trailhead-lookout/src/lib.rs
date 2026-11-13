@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 pub mod author;
 pub mod board;
+pub mod claims;
 pub mod commands;
 pub mod connect;
 pub mod connection;
@@ -11,6 +12,7 @@ pub mod detail;
 pub mod factory;
 #[doc(hidden)]
 pub mod fixture;
+pub mod form;
 pub mod icon;
 pub mod inspector;
 pub mod logs;

@@ -1,6 +1,9 @@
 //! The inspector's data: what a view holds, the actions it offers, and building it from fetched facts.
 
+use trailhead_model::key_number;
+
 use super::*;
+use crate::claims::live_claims;
 
 /// One thing the inspector can do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -220,8 +223,12 @@ pub fn build(
         Subject::Agent(id) => {
             let id = Uuid::parse_str(id).ok()?;
             let name = agent_name(id)?;
-            let held: Vec<String> =
-                input.claims.iter().filter(|c| c.holder_id == id).filter_map(|c| task_key(c.task_id)).collect();
+            let held: Vec<String> = input
+                .claims
+                .iter()
+                .filter(|c| c.holder_id == id && c.is_live(input.now))
+                .filter_map(|c| task_key(c.task_id))
+                .collect();
             let lines =
                 vec![if held.is_empty() { "holds nothing".into() } else { format!("holds {}", held.join(", ")) }];
             Some(InspectorView {
@@ -247,7 +254,7 @@ pub fn build(
             let status = task.status;
             let is_factory = crate::factory::factory_ran(task);
             let run = RunUpdate::of(task).ok();
-            let holder = input.claims.iter().find(|c| c.task_id == task.id).map(|c| c.holder_id);
+            let holder = live_claims(input.claims, input.now).get(&task.id).map(|c| c.holder_id);
             let holder_agent = holder.and_then(agent_name);
 
             let mut lines = Vec::new();
@@ -365,7 +372,7 @@ pub(super) fn facts(
 
     let claim = match detail {
         Some(d) => d.claim.clone(),
-        None => input.claims.iter().find(|c| c.task_id == task.id).cloned(),
+        None => live_claims(input.claims, input.now).get(&task.id).map(|c| (*c).clone()),
     }
     .filter(|c| c.is_live(input.now))
     .map(|c| format!("{}, {}", name_of(c.holder_id), text.lease(&c, input.now)));
@@ -462,10 +469,6 @@ pub(super) fn facts(
 }
 
 /// The number in a key, for ordering `TRAIL-9` before `TRAIL-10`.
-pub(super) fn key_number(key: &str) -> i64 {
-    key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
-}
-
 /// The request an action sends for the subject, or none when what it needs isn't there. `now` is unix seconds.
 pub fn plan(
     action: &Action,

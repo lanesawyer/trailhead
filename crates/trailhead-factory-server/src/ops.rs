@@ -359,7 +359,7 @@ fn render_status(
 
     // Finished tasks pile up, so only the newest (highest numbered) are listed unless asked for all.
     if !finished.is_empty() {
-        finished.sort_by_key(|t| std::cmp::Reverse(key_number(&t.key)));
+        finished.sort_by_key(|t| std::cmp::Reverse(trailhead_factory::key_number(t.key.as_str())));
         let shown = if all_finished { finished.len() } else { finished.len().min(FINISHED_SHOWN) };
         let _ = writeln!(out, "\nFinished ({})", finished.len());
         for t in &finished[..shown] {
@@ -373,10 +373,6 @@ fn render_status(
 }
 
 /// The number in a key like TRAIL-42, to order by age.
-fn key_number(key: &TaskKey) -> u64 {
-    key.0.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
-}
-
 fn task_line(t: &Task) -> String {
     let run = &t.run;
     let mut line = format!("{} [{}]", t.key.0, t.status.as_str().replace('_', " "));
