@@ -276,3 +276,86 @@ async fn a_run_re_parented_out_of_every_queue_is_a_stray_not_an_in_flight_task()
     assert_eq!(keys(tracker.in_flight("TRAIL", queues).await.unwrap()), vec![inside]);
     assert_eq!(keys(tracker.strays("TRAIL", queues).await.unwrap()), vec![outside]);
 }
+
+/// A host pausing at 80% of the five-hour window, keeping its readings in `path`.
+fn pausing_host_in(path: &std::path::Path) -> Arc<Host> {
+    let config = HostConfig { pause_at: [("five_hour".to_string(), 80)].into(), ..Default::default() };
+    Host::with_usage_file(&config, path.to_path_buf())
+}
+
+fn usage_file(dir: &tempfile::TempDir, used_percent: u32, resets_at: i64) -> std::path::PathBuf {
+    let path = dir.path().join("usage.json");
+    let reading = serde_json::json!({ "five_hour": { "used_percent": used_percent, "resets_at": resets_at } });
+    std::fs::write(&path, reading.to_string()).unwrap();
+    path
+}
+
+#[tokio::test]
+async fn a_pause_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.json");
+    let compute = FakeCompute::new();
+    let a = repo("alpha", "", &compute, &pausing_host_in(&path));
+    a.tracker.add_task("TRAIL", "First", "");
+    a.harness.push(Role::Worker, Script::new(changes()).quota("five_hour", 85, unix_now() + 3600));
+    a.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(a.factory.tick().await.unwrap().len(), 1);
+
+    let b = repo("alpha", "", &compute, &pausing_host_in(&path));
+    queue(&b);
+    assert!(b.factory.tick().await.unwrap().is_empty(), "the restarted host is still paused");
+    let usage = b.factory.status().snapshot().usage;
+    assert_eq!(
+        (usage[0].window.as_str(), usage[0].used_percent),
+        ("five_hour", 85),
+        "the board shows the kept reading"
+    );
+}
+
+#[tokio::test]
+async fn a_kept_reading_past_pause_at_pauses_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = usage_file(&dir, 80, unix_now() + 3600);
+    let r = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
+    queue(&r);
+    assert!(r.factory.tick().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_kept_reading_whose_window_has_reset_does_not_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = usage_file(&dir, 95, unix_now() - 1);
+    let r = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
+    queue(&r);
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_unreadable_usage_file_starts_from_no_readings() {
+    let dir = tempfile::tempdir().unwrap();
+    let malformed = dir.path().join("usage.json");
+    std::fs::write(&malformed, "not json").unwrap();
+    let unreadable = dir.path().join("a-directory");
+    std::fs::create_dir(&unreadable).unwrap();
+    for path in [malformed, unreadable] {
+        let r = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
+        queue(&r);
+        assert_eq!(r.factory.tick().await.unwrap().len(), 1, "{} doesn't pause", path.display());
+    }
+}
+
+#[tokio::test]
+async fn a_malformed_usage_file_is_replaced_by_the_next_reading() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("usage.json");
+    std::fs::write(&path, "not json").unwrap();
+    let a = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
+    a.tracker.add_task("TRAIL", "First", "");
+    a.harness.push(Role::Worker, Script::new(changes()).quota("five_hour", 85, unix_now() + 3600));
+    a.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(a.factory.tick().await.unwrap().len(), 1);
+
+    let b = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
+    queue(&b);
+    assert!(b.factory.tick().await.unwrap().is_empty());
+}

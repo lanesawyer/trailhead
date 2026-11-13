@@ -15,6 +15,10 @@ Decided: the control plane keeps no database of its own. Run state lives in Trai
 | Spend within the current step | The daemon, re-reported on reconnect |
 | Sub-agent to revoke when a task ends | Trailhead (agent named after the task) |
 | Global daily spend | Provider usage API ([budgets.md](budgets.md)) |
+| The control plane's own estimate of today's spend on a paid target | `<data dir>/factory/spend-<repo>.json` ([targets.md](targets.md)) |
+| The latest subscription usage readings, which pause new runs | `<data dir>/factory/usage.json` ([budgets.md](budgets.md)) |
+
+Those two files are the control plane's only state of its own, kept so a restart doesn't reset the day's spend or lift a pause. Everything else it holds (backoff deadlines, setup-failure counts, the PRs it is updating and the like) is in memory only, and is what a restart may safely forget: reconcile rebuilds it from the tracker and the compute, or it simply starts over.
 
 On Docker (TRAIL-119), where the table says Sprites API read the Docker engine for which sandboxes exist, plus the Docker Compute's state files (`<data dir>/factory/docker/<name>.json`) for their labels, since Docker labels can't change after creation. Those files belong to the `Compute`, not the control plane: it still keeps no database, and a lost file leaves that container unlabelled, so reconcile no longer sees it and it stays until removed by hand (`docker ps --filter label=dev.trailhead.sandbox`).
 

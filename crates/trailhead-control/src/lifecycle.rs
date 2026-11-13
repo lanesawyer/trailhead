@@ -675,7 +675,7 @@ impl Factory {
                 RunEvent::NeedsInput { question } => tracing::info!(task = %key, %question, "asked"),
                 RunEvent::Quota { window, used_percent, resets_at } => {
                     tracing::info!(%window, used_percent, resets_in = ?until(resets_at), "subscription usage");
-                    self.host.quota.lock().unwrap().insert(window, (used_percent, resets_at));
+                    self.host.record_usage(window, used_percent, resets_at);
                     self.status.usage(self.host.usage());
                 }
                 _ => {}

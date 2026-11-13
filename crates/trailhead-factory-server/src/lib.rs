@@ -383,7 +383,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
         endpoint.id()
     );
 
-    let host = Host::new(&host_config);
+    let host = Host::with_usage_file(&host_config, paths.data_dir.join("factory").join("usage.json"));
     let mut repos = Vec::new();
     for (spec, started) in specs.into_iter().zip(baselines) {
         let slug = spec.slug();

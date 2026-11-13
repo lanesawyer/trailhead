@@ -162,7 +162,7 @@ What only the control plane knows:
 - **Live activity.** Steps, tool calls and spend as they stream from the daemon. Today they're only in the control plane's log.
 - **The control plane itself.** Up, reconciling or stopped, which run it's reconnecting to, and the last error.
 
-The control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n --follow` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no state of its own ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh. Durable facts still go to Trailhead.
+The control plane serves a snapshot of the above plus a stream of factory events (sandbox state changes, run phase changes, steps and tool calls). The CLI's `factory status` reads the snapshot, `factory logs TRAIL-n --follow` follows the stream for one task, and the UI uses both. None of it is stored. The control plane keeps no database ([state.md](state.md)), so on boot it rebuilds the snapshot from compute labels and the tracker, and the stream starts fresh; the usage readings it shows come back from their file. Durable facts still go to Trailhead.
 
 Tool calls and steps don't become Trailhead events. The event log holds reversible changes with before and after snapshots. A run produces hundreds of tool calls, which would bury the changes people undo and push real history toward the archive.
 
