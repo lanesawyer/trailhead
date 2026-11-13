@@ -39,6 +39,28 @@ impl CoreTracker {
         CoreTracker { store, ctx, sub: None, agent: agent.to_string(), flagged: Arc::default(), page_size: PAGE_SIZE }
     }
 
+    /// The task's newest `review` comment, or the newest one someone else left when `by_others`.
+    async fn newest_review(&self, task: &TaskKey, by_others: bool) -> Result<Option<Verdict>> {
+        let ctx = self.ctx().await?;
+        let me = ctx.actor_id();
+        let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
+        let newest = comments.iter().rev().find(|c| c.kind == CommentKind::Review && !(by_others && c.author_id == me));
+        let Some(c) = newest else { return Ok(None) };
+        let Some(verdict) = c.verdict else { return Ok(None) };
+        let reviewer = self.author_names(&ctx, std::slice::from_ref(c)).await?.remove(&c.author_id).unwrap_or_default();
+        let kind = match verdict {
+            trailhead_core::Verdict::Approve => VerdictKind::Approve,
+            trailhead_core::Verdict::RequestChanges => VerdictKind::RequestChanges,
+        };
+        Ok(Some(Verdict {
+            kind,
+            body: c.body.clone(),
+            reviewer,
+            model: c.model.clone().map(ModelId),
+            raise_grade: None,
+        }))
+    }
+
     /// Read lists `page_size` tasks at a time instead of the default, so a test needn't make a thousand tasks.
     pub fn with_page_size(mut self, page_size: usize) -> CoreTracker {
         self.page_size = page_size.max(1) as i64;
@@ -368,22 +390,11 @@ impl Tracker for CoreTracker {
     }
 
     async fn last_review(&self, task: &TaskKey) -> Result<Option<Verdict>> {
-        let ctx = self.ctx().await?;
-        let comments = self.store.list_comments(&ctx, &task.0).await.map_err(map_err)?;
-        let Some(c) = comments.iter().rev().find(|c| c.kind == CommentKind::Review) else { return Ok(None) };
-        let Some(verdict) = c.verdict else { return Ok(None) };
-        let reviewer = self.author_names(&ctx, std::slice::from_ref(c)).await?.remove(&c.author_id).unwrap_or_default();
-        let kind = match verdict {
-            trailhead_core::Verdict::Approve => VerdictKind::Approve,
-            trailhead_core::Verdict::RequestChanges => VerdictKind::RequestChanges,
-        };
-        Ok(Some(Verdict {
-            kind,
-            body: c.body.clone(),
-            reviewer,
-            model: c.model.clone().map(ModelId),
-            raise_grade: None,
-        }))
+        self.newest_review(task, false).await
+    }
+
+    async fn last_review_by_others(&self, task: &TaskKey) -> Result<Option<Verdict>> {
+        self.newest_review(task, true).await
     }
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {

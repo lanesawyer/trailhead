@@ -104,7 +104,9 @@ impl Factory {
                         && task.run.reviewed == task.run.attempt
                         && codehost.carries_verdict(pr, reviewed).await?) =>
             {
-                self.tracker.last_review(key).await?.is_some_and(|v| v.kind == VerdictKind::Approve)
+                // The reviewer's verdict, not a rework the control plane asked for since: a conflict request that
+                // was settled without a push leaves the review of this head standing (TRAIL-1468).
+                self.tracker.last_review_by_others(key).await?.is_some_and(|v| v.kind == VerdictKind::Approve)
             }
             _ => false,
         };
@@ -225,8 +227,13 @@ impl Factory {
     /// Whether the latest review asked for changes that the PR's `head` still hasn't answered.
     async fn rework_state(&self, task: &Task, head: &str) -> Result<Option<Rework>> {
         if task.run.reviewed_head.as_deref() == Some(head) {
-            let asked =
-                self.tracker.last_review(&task.key).await?.is_some_and(|v| v.kind == VerdictKind::RequestChanges);
+            // A request still open, whoever made it, or a reviewer's that was answered without a push.
+            let asked = task.changes_requested
+                || self
+                    .tracker
+                    .last_review_by_others(&task.key)
+                    .await?
+                    .is_some_and(|v| v.kind == VerdictKind::RequestChanges);
             return Ok(asked.then_some(Rework::Running));
         }
         // Only a later attempt than the reviewed one is the rework; a new head on the same attempt is a person's push.
