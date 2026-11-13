@@ -605,7 +605,12 @@ impl Tracker for FakeTracker {
             Ok(())
         });
         if released.is_ok() {
-            self.state.lock().unwrap().claimed_from_review.remove(task);
+            let mut s = self.state.lock().unwrap();
+            s.claimed_from_review.remove(task);
+            // As in core, whoever's release puts the task back in review is on record as having sent it there.
+            if back {
+                s.sent_to_review.insert(task.clone(), self.agent.clone());
+            }
         }
         released
     }

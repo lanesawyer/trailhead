@@ -115,13 +115,17 @@ impl Factory {
                 continue;
             }
             // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox, unless the
-            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
+            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone. Only the
+            // task the sandbox is labelled for keeps it: a parked task's record goes on naming a host its run gave
+            // back long ago, and a later task's cut-short run there would never be released (TRAIL-1474).
+            let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
+                    && labelled.is_none_or(|task| *task == t.key.0)
             }) {
                 // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
                 if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
@@ -265,29 +269,32 @@ impl Factory {
         {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't release the sub-agent's claim before closing");
         }
-        let merged_by_human = merged.by == MergedBy::Human;
-        let pr_url = merged.pr.url.clone();
+        let question = match merged.by {
+            MergedBy::Human => messages::merged_unapproved_question(&merged.pr.url),
+            MergedBy::Merger => messages::merged_unfinished_question(&merged.pr.url),
+        };
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunPatch { merged: Patch::Set(merged), ..RunPatch::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
-        // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
-        if merged_by_human && task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
-            return self.park_unapproved_merge(task, &pr_url).await;
+        // A park cut short after the finish was refused: finish the park, don't try to finish the task (TRAIL-729).
+        if task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
+            return self.park_unfinished_merge(task, &question).await;
         }
         if task.status == Status::NeedsInput {
             self.tracker.claim(&task.key).await?;
         }
         match self.tracker.finish(&task.key, &handoff).await {
-            // A person merged work nobody approved, and core won't let the factory call it done: it isn't one of the
-            // project's reviewers (TRAIL-1439), or its own identity sent the work to review. The merge is recorded, so
-            // ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
-            Err(Error::Forbidden(why)) if merged_by_human => {
-                tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
+            // Core won't let the factory call it done. A person merged work nobody approved and the factory isn't one
+            // of the project's reviewers (TRAIL-1439), or, whoever merged, the factory's own identity sent the work
+            // to review. The merge is recorded, so ask once for a person to mark it done rather than be refused
+            // again every pass (TRAIL-706, TRAIL-1462).
+            Err(Error::Forbidden(why)) => {
+                tracing::warn!(task = %task.key, %why, "the PR is merged but the task can't be finished; parking for a person to finish it");
                 self.tracker
                     .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
                     .await?;
-                return self.park_unapproved_merge(task, &pr_url).await;
+                return self.park_unfinished_merge(task, &question).await;
             }
             finished => finished?,
         }
@@ -295,17 +302,18 @@ impl Factory {
         Ok(())
     }
 
-    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: an approved task is
-    /// unapproved, one in review or open is claimed as it stands (never reopened first: a failed claim then leaves it
-    /// as it was, not open and unheld; TRAIL-826), then asked. A parked one is already claimed.
-    async fn park_unapproved_merge(&self, task: &Task, pr_url: &str) -> Result<()> {
+    /// Parks a task whose PR is merged but which core won't let the factory finish, from wherever a cut-short park
+    /// left it: an approved task is unapproved, one in review or open is claimed as it stands (never reopened first:
+    /// a failed claim then leaves it as it was, not open and unheld; TRAIL-826), then asked. A parked one is already
+    /// claimed.
+    async fn park_unfinished_merge(&self, task: &Task, question: &str) -> Result<()> {
         if task.status == Status::Approved {
             self.tracker.unapprove(&task.key).await?;
         }
         if matches!(task.status, Status::InReview | Status::Approved | Status::Open) {
             self.tracker.claim(&task.key).await?;
         }
-        self.tracker.ask(&task.key, &messages::merged_unapproved_question(pr_url)).await
+        self.tracker.ask(&task.key, question).await
     }
 
     /// A PR closed without merging: the task is parked with a question for a human, rather than reopened, since a
