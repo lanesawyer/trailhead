@@ -23,6 +23,7 @@ factory = ["dep:trailhead-factory-server"]
 docker = ["factory", "trailhead-factory-server/docker"]
 
 [dependencies]
+libc.workspace = true
 trailhead-factory-server = { workspace = true, optional = true }
 trailhead-client.workspace = true
 trailhead-core = { workspace = true, features = ["openapi"] }
