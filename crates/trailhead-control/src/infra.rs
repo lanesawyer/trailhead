@@ -71,7 +71,7 @@ impl Setback {
 impl Factory {
     /// The (failures, waits) in a row held in memory for a task.
     pub(crate) fn held_setbacks(&self, key: &TaskKey) -> (u32, u32) {
-        self.setbacks.lock().unwrap().get(key).map_or((0, 0), |(n, w, _)| (*n, *w))
+        self.backoff.setbacks.lock().unwrap().get(key).map_or((0, 0), |(n, w, _)| (*n, *w))
     }
 
     /// Holds a task back for the backoff its failure calls for: one that isn't parked, or whose park failed.

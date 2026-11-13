@@ -151,7 +151,7 @@ impl Factory {
         }
         match run {
             Finished::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
-                self.setbacks.lock().unwrap().remove(&task.key);
+                self.backoff.setbacks.lock().unwrap().remove(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
                 {
@@ -192,7 +192,7 @@ impl Factory {
                 // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox has
                 // already had its destroy attempted (a failed destroy is left for reconcile), so there's nothing
                 // to suspend.
-                self.setbacks.lock().unwrap().remove(&task.key);
+                self.backoff.setbacks.lock().unwrap().remove(&task.key);
                 tracing::warn!(task = %task.key, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
                 let breach = ReviewBreach { round, attempt, reason: reason.clone(), parked: false };
@@ -270,7 +270,7 @@ impl Factory {
             };
             match parked.await {
                 Ok(()) => {
-                    self.setbacks.lock().unwrap().remove(&task.key);
+                    self.backoff.setbacks.lock().unwrap().remove(&task.key);
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");

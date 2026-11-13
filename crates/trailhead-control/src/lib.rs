@@ -177,14 +177,37 @@ pub struct Factory {
     pub codehost: Option<Arc<dyn CodeHost>>,
     /// Where the merge mode is re-read from before each merge decision, so it can be switched without a restart.
     merge_mode_source: Option<MergeModeSource>,
-    /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
-    merge_mode: Mutex<MergeMode>,
-    troubled: Mutex<HashMap<String, Trouble>>,
+    merger: MergerState,
+    pool: PoolState,
+    backoff: Backoff,
+    /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
+    host: Arc<Host>,
+    /// The tasks holding the sandboxes last reported as starving ready ones, each with whether it is parked, so a
+    /// poll says it once per change.
+    starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
+    /// Tasks already reported as ungraded, so a poll doesn't say it again.
+    ungraded: Mutex<HashSet<TaskKey>>,
+    placing: Placing,
+    /// What this control plane shows of itself to `factory status` and the UI.
+    status: Arc<StatusBoard>,
+}
+
+/// What the factory remembers of tasks that failed on the infrastructure. In memory: a restart starts the waits and
+/// counts again.
+#[derive(Default)]
+struct Backoff {
     /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
     setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
     /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
     /// is only declared when `setup` itself failed twice running (TRAIL-876).
     setup_failures: Mutex<HashMap<TaskKey, u32>>,
+}
+
+/// What the merge path keeps between passes. In memory: a restart reads and asks again.
+#[derive(Default)]
+struct MergerState {
+    /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
+    merge_mode: Mutex<MergeMode>,
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
@@ -195,16 +218,15 @@ pub struct Factory {
     updating: Mutex<HashMap<TaskKey, (String, Instant, u32)>>,
     /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
     held: Mutex<Option<person::Held>>,
-    /// What every repo's factory on this host shares: usage readings, the pause log and the cross-repo sandbox cap.
-    host: Arc<Host>,
-    /// The tasks holding the sandboxes last reported as starving ready ones, each with whether it is parked, so a
-    /// poll says it once per change.
-    starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
+}
+
+/// What the factory remembers of its pooled sandboxes. In memory: a restart counts again from nothing.
+#[derive(Default)]
+struct PoolState {
+    troubled: Mutex<HashMap<String, Trouble>>,
     /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
     /// memory: a restart starts the wait again (TRAIL-601).
     parked_since: Mutex<HashMap<TaskKey, Instant>>,
-    /// Tasks already reported as ungraded, so a poll doesn't say it again.
-    ungraded: Mutex<HashSet<TaskKey>>,
     /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
     /// starting together never take the same sandbox.
     pool_pick: tokio::sync::Mutex<()>,
@@ -215,6 +237,11 @@ pub struct Factory {
     warm_cost: Mutex<HashMap<SandboxId, Duration>>,
     /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
     prepare_failures: Mutex<HashMap<SandboxId, u32>>,
+}
+
+/// Where runs being started have been placed, and what the paid targets have cost.
+#[derive(Default)]
+struct Placing {
     /// The target each worker or review being started has been placed on, until it ends. Its sandbox may not exist yet, so
     /// without this a target's limit would be passed by runs starting together.
     placed: Arc<Mutex<HashMap<(TaskKey, trailhead_factory::Role), String>>>,
@@ -222,8 +249,6 @@ pub struct Factory {
     ledger: Arc<spend::Ledger>,
     /// The targets last reported as at their daily cap, so reaching it and leaving it are each logged once.
     capped: Mutex<HashSet<String>>,
-    /// What this control plane shows of itself to `factory status` and the UI.
-    status: Arc<StatusBoard>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -274,22 +299,22 @@ impl Factory {
     /// has left it: merged, closed, cancelled or otherwise out of review (TRAIL-680). A new per-task map there is
     /// cleared here too.
     pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
-        self.updating.lock().unwrap().remove(task);
-        self.listed.lock().unwrap().remove(task);
+        self.merger.updating.lock().unwrap().remove(task);
+        self.merger.listed.lock().unwrap().remove(task);
     }
 
     /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
     /// task that left review any way at all (cancelled, deleted, re-parented out of the queue, done by hand) is no
     /// longer listed, so its entries go without each way out needing its own check (TRAIL-680).
     pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
-        self.updating.lock().unwrap().retain(|k, _| keep.contains(k));
-        self.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.updating.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
     }
 
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
-        self.updating.lock().unwrap().contains_key(task)
+        self.merger.updating.lock().unwrap().contains_key(task)
     }
 
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
@@ -330,24 +355,13 @@ impl Factory {
             tracker,
             codehost: None,
             merge_mode_source: None,
-            merge_mode,
-            troubled: Mutex::default(),
-            setbacks: Mutex::default(),
-            setup_failures: Mutex::default(),
-            listed: Mutex::default(),
-            updating: Mutex::default(),
-            held: Mutex::default(),
+            merger: MergerState { merge_mode, ..MergerState::default() },
+            pool: PoolState::default(),
+            backoff: Backoff::default(),
             host,
             starved: Mutex::default(),
-            parked_since: Mutex::default(),
             ungraded: Mutex::default(),
-            pool_pick: tokio::sync::Mutex::default(),
-            install_opened: Mutex::default(),
-            warm_cost: Mutex::default(),
-            prepare_failures: Mutex::default(),
-            placed: Arc::default(),
-            ledger: Arc::default(),
-            capped: Mutex::default(),
+            placing: Placing::default(),
             status,
         }
     }
@@ -361,7 +375,7 @@ impl Factory {
 
     /// Keeps the day's spend on paid targets in `path`, so a restart doesn't reset it.
     pub fn with_spend_file(mut self, path: std::path::PathBuf) -> Factory {
-        self.ledger = Arc::new(spend::Ledger::kept_in(path, &spend::today()));
+        self.placing.ledger = Arc::new(spend::Ledger::kept_in(path, &spend::today()));
         self
     }
 
@@ -379,7 +393,7 @@ impl Factory {
 
     /// The merge mode now in force.
     fn merge_mode(&self) -> MergeMode {
-        let mut mode = self.merge_mode.lock().unwrap();
+        let mut mode = self.merger.merge_mode.lock().unwrap();
         if let Some(source) = &self.merge_mode_source {
             match source() {
                 Ok(read) => {
@@ -424,7 +438,7 @@ impl Factory {
     /// Wildcards can't be looked up, so they're left out. That includes the hosts opened for this sandbox's install.
     fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let opened = self.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let opened = self.pool.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
         let install = self.install_egress().domains.into_iter().chain(opened);
         let mut blocked: Vec<String> = Vec::new();
         for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {

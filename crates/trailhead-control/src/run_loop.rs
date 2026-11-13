@@ -293,6 +293,7 @@ impl Factory {
         }
         let delay = Duration::from_secs(u64::from(after) * 60);
         let mut due: Vec<(TaskKey, Duration)> = self
+            .pool
             .parked_since
             .lock()
             .unwrap()
@@ -382,7 +383,7 @@ impl Factory {
                 tracing::debug!(task = %key, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
                 continue;
             }
-            self.parked_since.lock().unwrap().remove(&key);
+            self.pool.parked_since.lock().unwrap().remove(&key);
             released += 1;
             tracing::info!(task = %key, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
             if let Err(e) = self.release_worker(sandbox).await {
@@ -439,7 +440,7 @@ impl Factory {
             let held: Vec<String> = holders
                 .iter()
                 .map(|(k, parked)| {
-                    let retry = self.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                    let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
                     describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
                 })
                 .collect();
@@ -556,7 +557,7 @@ impl Factory {
             .filter(|s| s.labels.get(label::TASK).is_some_and(|t| !running.contains(&TaskKey(t.clone()))))
             .collect();
         if candidates.is_empty() {
-            self.parked_since.lock().unwrap().clear();
+            self.pool.parked_since.lock().unwrap().clear();
             return Ok(held);
         }
         let mut parked = HashSet::new();
@@ -611,7 +612,7 @@ impl Factory {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
                     if task.status == Status::NeedsInput {
                         let key = task.key.clone();
-                        self.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
+                        self.pool.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
                         parked.insert(key);
                     }
                     continue;
@@ -631,7 +632,7 @@ impl Factory {
                 released.push(sandbox.name.clone());
             }
         }
-        self.parked_since.lock().unwrap().retain(|key, _| parked.contains(key));
+        self.pool.parked_since.lock().unwrap().retain(|key, _| parked.contains(key));
         if released.is_empty() {
             return Ok(held);
         }

@@ -107,9 +107,9 @@ Two things the record can't say stay outside it. Whether the run's sandbox is st
 
 **4. Clears that say so.** A write merges, so a field is cleared today by writing a stand-in: an empty string for `merging` and `stale_head`, zero for `released` and `gave_up`. The stored metadata is merged as a JSON merge patch, where `null` already removes a key. The one struct is now two (built, TRAIL-1459): `RunRecord` (what is read: plain optional fields) and `RunPatch` (what is written: each field `Keep`, `Clear` or `Set`), declared from one field list. `Clear` writes `null`. Reads treat the old stand-ins as absent, so existing records need no rewrite.
 
-**5. Usage-pause readings on disk.** The subscription usage readings that pause new runs are held in memory only, so a restart forgets a pause until the next reading. They go in a file beside the spend ledger and are reloaded at start. The claim that the control plane "keeps no state" is corrected for what stays in memory (backoff deadlines, setup-failure counts), which a restart may safely forget.
+**5. Usage-pause readings on disk.** The subscription usage readings that pause new runs were held in memory only, so a restart forgot a pause until the next reading. They are kept in a file beside the spend ledger and reloaded at start (built, TRAIL-1460). The claim that the control plane "keeps no state" is corrected for what stays in memory (backoff deadlines, setup-failure counts), which a restart may safely forget.
 
-**6. `Factory`'s fields in their groups.** Its 21 mutex-guarded maps become four structs they already form (pool, merger, backoff, placement), done as the long functions are split, not as one change.
+**6. `Factory`'s fields in their groups.** Its mutex-guarded maps are in the four structs they already formed (built, TRAIL-1461): `pool`, `merger`, `backoff` and `placing`. Two that only keep a poll from repeating itself stay on `Factory`.
 
 ### Order
 
