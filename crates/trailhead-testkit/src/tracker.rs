@@ -336,7 +336,7 @@ impl FakeTracker {
         let Some(t) = s.tasks.get(task) else { return Ok(()) };
         let me = &self.agent;
         let in_review = matches!(t.status, Status::InReview | Status::Approved);
-        let review_required = || Error::Conflict("this needs human review before it can be approved or done".into());
+        let review_required = || Error::Forbidden("this needs human review before it can be approved or done".into());
         if s.reviewers.contains(me) {
             return match (in_review, s.sent_to_review.get(task) == Some(me)) {
                 (false, _) if approving => Err(review_required()),
@@ -840,7 +840,7 @@ mod tests {
         worker.request_review(&key, "pushed").await.unwrap();
 
         assert!(matches!(tracker.approve(&key).await, Err(Error::Forbidden(why)) if why.contains("reviewer")));
-        assert!(matches!(tracker.finish(&key, "merged").await, Err(Error::Conflict(_))), "review is required");
+        assert!(matches!(tracker.finish(&key, "merged").await, Err(Error::Forbidden(_))), "review is required");
 
         tracker.set_delegated("factory", true);
         tracker.claim(&key).await.unwrap();
