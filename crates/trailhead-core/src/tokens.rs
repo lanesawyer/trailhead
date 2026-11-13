@@ -283,6 +283,9 @@ impl Store {
         if !ctx.is_human() {
             return Err(Error::Forbidden("agents can't revoke tokens".into()));
         }
+        if ctx.is_scoped() {
+            return Err(Error::Forbidden("a token scoped to projects can't revoke tokens".into()));
+        }
         self.write(ctx, async |tx| {
             let rows = tx
                 .conn
