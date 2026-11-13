@@ -114,6 +114,12 @@ string_enum!(ProjectStatus "project status" {
 #[cfg_attr(feature = "openapi", schema(value_type = String, example = "TRAIL-42"))]
 pub struct TaskKey(pub String);
 
+/// The number at the end of a task key (42 for `TRAIL-42`), or 0 if it has none: what keys sort by, so `TRAIL-9`
+/// comes before `TRAIL-10`.
+pub fn key_number(key: &str) -> u64 {
+    key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
 impl TaskKey {
     /// The key as a string slice.
     pub fn as_str(&self) -> &str {

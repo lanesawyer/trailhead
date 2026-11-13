@@ -1,4 +1,7 @@
+use trailhead_model::key_number;
+
 use super::*;
+use crate::claims::live_claims;
 
 /// What the board shows. `None` means all. `project` and `parent` are keys (`TRAIL`, `TRAIL-102`); `holder` is
 /// the id of whoever holds the claim.
@@ -225,7 +228,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         .collect();
     // The claim is keyed by its task.
     let holder_of: HashMap<Uuid, Uuid> =
-        input.claims.iter().filter(|c| c.is_live(input.now)).map(|c| (c.task_id, c.holder_id)).collect();
+        live_claims(input.claims, input.now).into_iter().map(|(task, c)| (task, c.holder_id)).collect();
     let holder_label = |id: Uuid| holder_name.get(&id).map_or_else(|| short(id), |n| n.to_string());
     // The blockers of each task that haven't finished, by the statuses mirrored now (the rule of core's `ready`), so
     // one finishing clears the badge with no fetch. A blocker the mirror lacks (deleted) doesn't count, but the nil id
@@ -463,10 +466,6 @@ pub(super) fn parent_label(key: &str, title: &str) -> String {
         title.chars().take(PARENT_TITLE_CHARS - 1).chain(['…']).collect()
     };
     format!("{key} {title}")
-}
-
-pub(super) fn key_number(key: &str) -> i64 {
-    key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 #[cfg(test)]

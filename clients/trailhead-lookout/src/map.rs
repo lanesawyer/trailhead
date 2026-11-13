@@ -18,11 +18,13 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use jiff::Timestamp;
 use trailhead_factory::{RunPhase, SandboxState};
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task, User};
+use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task, User, key_number};
 use uuid::Uuid;
 
 use crate::board::View;
+use crate::claims::live_claims;
 use crate::factory::{Campsite, FactoryStatus, Run};
 use crate::mirror::{Mirrored, Rev, rows};
 use crate::widgets::{self, BackgroundTone, sandbox_token, size, space, status_label, status_tone, text_toned, token};
@@ -122,10 +124,8 @@ pub struct Input<'a> {
     pub users: &'a [User],
     pub campsites: &'a [Campsite],
     pub runs: &'a [Run],
-}
-
-fn key_number(key: &str) -> i64 {
-    key.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+    /// The time claims are judged against.
+    pub now: Timestamp,
 }
 
 fn grid(index: usize, columns: usize, cell: Vec2, origin: Vec2) -> Vec2 {
@@ -163,8 +163,9 @@ pub fn build(input: Input) -> MapModel {
 
     let agent_name: HashMap<Uuid, &str> = input.agents.iter().map(|a| (a.id, a.name.as_str())).collect();
     let user_name: HashMap<Uuid, &str> = input.users.iter().map(|u| (u.id, u.name.as_str())).collect();
-    let holder_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.holder_id)).collect();
-    let on_behalf_of: HashMap<Uuid, Uuid> = input.claims.iter().map(|c| (c.task_id, c.on_behalf_of)).collect();
+    let claim_on = live_claims(input.claims, input.now);
+    let holder_of: HashMap<Uuid, Uuid> = claim_on.iter().map(|(task, c)| (*task, c.holder_id)).collect();
+    let on_behalf_of: HashMap<Uuid, Uuid> = claim_on.iter().map(|(task, c)| (*task, c.on_behalf_of)).collect();
     let holder_name = |holder: Uuid| agent_name.get(&holder).map(|n| n.to_string());
     let mut questions: HashMap<Uuid, usize> = HashMap::new();
     let mut handoffs: HashMap<Uuid, &Comment> = HashMap::new();
@@ -308,6 +309,7 @@ fn rebuild_map(
         users: &users,
         campsites: &campsites,
         runs: &runs,
+        now: Timestamp::now(),
     });
     if map.0 != next {
         map.0 = next;
@@ -549,6 +551,7 @@ mod tests {
                 users: &self.users,
                 campsites: &self.campsites,
                 runs: &self.runs,
+                now: Timestamp::default(),
             })
         }
     }

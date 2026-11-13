@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 pub mod author;
 pub mod board;
+pub mod claims;
 pub mod commands;
 pub mod connect;
 pub mod connection;
