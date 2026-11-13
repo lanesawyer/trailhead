@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use trailhead_client::http::routes;
 use trailhead_model::{Entity, Event, Status};
 
 /// What the sync hands to the app, in order. The mirror (`crate::mirror`) is the only thing that applies them.
@@ -124,22 +125,23 @@ impl Remote {
 
     /// Step 1: the newest event id, or 0 when there are no events.
     pub async fn newest_event_id(&self) -> Result<i64, String> {
-        let newest = self.list("/v1/events?newest_first=true&limit=1").await?;
+        let newest = self.list(&format!("{}?newest_first=true&limit=1", routes::LIST_EVENTS.path)).await?;
         Ok(newest.first().and_then(|e| e["id"].as_i64()).unwrap_or(0))
     }
 
     /// Step 2. `at` is what step 1 found.
     pub async fn load_snapshot(&self, at: i64) -> Result<Snapshot, String> {
         // Archived ones too: the sidebar lists them apart, and unarchiving one needs it there.
-        let projects = self.list("/v1/projects?archived=true").await?;
-        let agents = self.list("/v1/agents").await?;
-        let users = self.list("/v1/users").await?;
+        let projects = self.list(&format!("{}?archived=true", routes::LIST_PROJECTS.path)).await?;
+        let agents = self.list(routes::LIST_AGENTS.path).await?;
+        let users = self.list(routes::LIST_USERS.path).await?;
         // Pages are by offset, and a task deleted from an earlier page moves the rest up one, so the one at the
         // boundary is skipped. Nothing after `at` need bring it back, so page again if anything was deleted meanwhile.
         let tasks = loop {
             let from = self.newest_event_id().await?.max(at);
             let tasks = self.load_tasks().await?;
-            let deleted = self.list(&format!("/v1/events?after={from}&kinds=task.deleted&limit=1")).await?;
+            let deleted =
+                self.list(&format!("{}?after={from}&kinds=task.deleted&limit=1", routes::LIST_EVENTS.path)).await?;
             if deleted.is_empty() {
                 break tasks;
             }
@@ -154,8 +156,9 @@ impl Remote {
         loop {
             let page = self
                 .list(&format!(
-                    "/v1/tasks?include=claim,open_questions,last_handoff,last_review,blocked_by&status={all_statuses}\
+                    "{}?include=claim,open_questions,last_handoff,last_review,blocked_by&status={all_statuses}\
                      &sort=created_at&limit={PAGE}&offset={}",
+                    routes::LIST_TASKS.path,
                     tasks.len()
                 ))
                 .await?;
@@ -177,7 +180,7 @@ impl Remote {
     ) -> StreamEnd {
         let res = match self
             .http
-            .get(format!("{}/v1/events/stream", self.base))
+            .get(format!("{}{}", self.base, routes::EVENT_STREAM.path))
             .bearer_auth(&self.token)
             .header("last-event-id", last.to_string())
             .send()

@@ -83,9 +83,13 @@ pub mod routes {
     pub const CREATE_WEBHOOK: Route = Route::new(Method::POST, "/v1/webhooks");
     pub const DELETE_WEBHOOK: Route = Route::new(Method::DELETE, "/v1/webhooks/{id}");
     pub const WEBHOOK_DELIVERIES: Route = Route::new(Method::GET, "/v1/webhooks/{id}/deliveries");
+    /// These two have no method on [`Client`]: Lookout's sync reads them its own way (a snapshot it takes record by
+    /// record, and a stream), and names them here so the paths are checked with the rest.
+    pub const LIST_USERS: Route = Route::new(Method::GET, "/v1/users");
+    pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 34] {
+    pub fn all() -> [Route; 36] {
         [
             READY,
             LIST_TASKS,
@@ -121,6 +125,8 @@ pub mod routes {
             CREATE_WEBHOOK,
             DELETE_WEBHOOK,
             WEBHOOK_DELIVERIES,
+            LIST_USERS,
+            EVENT_STREAM,
         ]
     }
 }
