@@ -86,7 +86,7 @@ impl Factory {
             env: self.config.stack.env.clone(),
             credential,
         };
-        let prior = self.tracker.show(&task.key).await?.run.spend.unwrap_or_default();
+        let prior = shown.run.spend.unwrap_or_default();
         self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
@@ -130,18 +130,19 @@ impl Factory {
             .as_ref()
             .filter(|b| !b.parked && !matches!(run, Finished::Breach(..)))
             .map(|b| ReviewBreach { parked: true, ..b.clone() });
-        sub.report(
-            &task.key,
-            RunUpdate {
-                spend: Some(spend),
-                reviewed,
-                reviewed_head,
-                infra_failures,
-                review_breach: settled,
-                ..RunUpdate::default()
-            },
-        )
-        .await?;
+        let record = RunUpdate {
+            spend: Some(spend),
+            reviewed,
+            reviewed_head,
+            infra_failures,
+            review_breach: settled,
+            ..RunUpdate::default()
+        };
+        // A review that can't be recorded didn't happen: the round is given back and the task reviewed again, rather
+        // than acting on a verdict the task doesn't carry.
+        if let Err(e) = sub.report(&task.key, record).await {
+            return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await);
+        }
         if let Err(e) = self.tracker.revoke_sub_agent(&name).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
         }
@@ -229,7 +230,9 @@ impl Factory {
         // raised, and only `MAX_RESOURCE_WAITS` waits in a row park the task.
         let waiting = matches!(error, Error::Unavailable(_));
         let waits = self.setbacks.lock().unwrap().get(&task.key).map_or(0, |(_, w, _)| *w) + 1;
-        let park = !cancelled && if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max };
+        // A request refused for good fails the same way on every retry, so it's parked at once, as for a worker.
+        let rejected = matches!(error, Error::Rejected(_));
+        let park = !cancelled && (rejected || if waiting { waits >= MAX_RESOURCE_WAITS } else { failures >= max });
         if cancelled {
             tracing::info!(task = %task.key, "review cancelled; the round doesn't count");
         } else {
@@ -266,7 +269,9 @@ impl Factory {
             tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; reconcile will");
         }
         if park {
-            let question = if waiting {
+            let question = if rejected {
+                messages::rejected_question(&error.to_string())
+            } else if waiting {
                 messages::resource_wait_question(waits, &error.to_string())
             } else if no_verdict {
                 messages::review_no_verdict_question(failures, max, &error.to_string())
@@ -284,9 +289,12 @@ impl Factory {
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");
-                    // Not parked, so the count mustn't start again: the next failure tries to park once more.
+                    // Not parked, so the count mustn't start again (the next failure tries to park once more), and
+                    // the task needs its backoff, or reconcile reviews it again at once.
                     if waiting {
                         self.set_back_waiting(&task.key, failures - 1);
+                    } else {
+                        self.set_back(&task.key, failures);
                     }
                     let kept = if waiting { prior.unwrap_or(0) } else { failures };
                     let keep = RunUpdate { infra_failures: Some(kept), ..RunUpdate::default() };
