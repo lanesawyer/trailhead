@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, ClaimResult, Comment, CommentKind, CreatedTask, Dependency, Grade, HeldClaim, Priority, Project,
-    ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Verdict,
+    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, Dependency, Grade,
+    HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, Verdict,
 };
 use uuid::Uuid;
 
@@ -69,9 +69,17 @@ pub mod routes {
     pub const REMOVE_BLOCKER: Route = Route::new(Method::DELETE, "/v1/tasks/{task}/blockers/{blocker}");
     pub const LIST_PROJECTS: Route = Route::new(Method::GET, "/v1/projects");
     pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
+    pub const ME: Route = Route::new(Method::GET, "/v1/me");
+    pub const LIST_AGENTS: Route = Route::new(Method::GET, "/v1/agents");
+    pub const CREATE_AGENT: Route = Route::new(Method::POST, "/v1/agents");
+    pub const REVOKE_AGENT: Route = Route::new(Method::POST, "/v1/agents/{agent}/revoke");
+    pub const LIST_TOKENS: Route = Route::new(Method::GET, "/v1/tokens");
+    pub const CREATE_TOKEN: Route = Route::new(Method::POST, "/v1/tokens");
+    pub const REVOKE_TOKEN: Route = Route::new(Method::DELETE, "/v1/tokens/{id}");
+    pub const UPDATE_TOKEN: Route = Route::new(Method::PATCH, "/v1/tokens/{id}");
 
     /// All of them.
-    pub fn all() -> [Route; 21] {
+    pub fn all() -> [Route; 29] {
         [
             READY,
             LIST_TASKS,
@@ -94,6 +102,14 @@ pub mod routes {
             REMOVE_BLOCKER,
             LIST_PROJECTS,
             SHOW_PROJECT,
+            ME,
+            LIST_AGENTS,
+            CREATE_AGENT,
+            REVOKE_AGENT,
+            LIST_TOKENS,
+            CREATE_TOKEN,
+            REVOKE_TOKEN,
+            UPDATE_TOKEN,
         ]
     }
 }
@@ -432,6 +448,46 @@ pub struct ReadyQuery {
     pub limit: Option<usize>,
 }
 
+/// `POST /v1/agents`: an agent and its first token.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewAgent {
+    pub name: String,
+    /// Project keys or ids to limit the token to; empty for every project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<i64>,
+}
+
+/// `POST /v1/tokens`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewToken {
+    /// What the token is for.
+    pub name: String,
+    /// The name or id of the caller's agent to issue it for; unset for the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Project keys or ids to limit the token to; empty for every project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<i64>,
+    /// Seconds until it stops working; unset for never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<i64>,
+}
+
+/// `PATCH /v1/tokens/{id}`: only the fields set are sent.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct TokenUpdate {
+    /// Project keys or ids. `Some(None)` opens the token to every project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Option<Vec<String>>>,
+    /// Requests per minute. `Some(None)` removes the limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<Option<i64>>,
+}
+
 /// The API, as one token sees it.
 #[derive(Clone)]
 pub struct Client {
@@ -660,6 +716,47 @@ impl Client {
     /// `PATCH /v1/projects/{project}`.
     pub async fn update_project(&self, key: &str, update: &ProjectUpdate) -> Result<Project> {
         self.send(self.request(routes::UPDATE_PROJECT, Some(key)).json(update)).await
+    }
+
+    /// `GET /v1/me`: who the token acts as.
+    pub async fn me(&self) -> Result<Me> {
+        self.send(self.request(routes::ME, None)).await
+    }
+
+    /// `GET /v1/agents`.
+    pub async fn list_agents(&self) -> Result<Vec<Agent>> {
+        self.send(self.request(routes::LIST_AGENTS, None)).await
+    }
+
+    /// `POST /v1/agents`: the agent, its token and the token's secret.
+    pub async fn create_agent(&self, new: &NewAgent) -> Result<CreatedAgent> {
+        self.send(self.request(routes::CREATE_AGENT, None).json(new)).await
+    }
+
+    /// `POST /v1/agents/{agent}/revoke`: revokes the agent named `name` (or with that id) and its sub-agents.
+    pub async fn revoke_agent(&self, name: &str) -> Result<Agent> {
+        let req = self.request_with(routes::REVOKE_AGENT, &[("agent", &name.replace('/', "%2F"))]);
+        self.send(req.json(&serde_json::json!({}))).await
+    }
+
+    /// `GET /v1/tokens`, without their secrets.
+    pub async fn list_tokens(&self) -> Result<Vec<Token>> {
+        self.send(self.request(routes::LIST_TOKENS, None)).await
+    }
+
+    /// `POST /v1/tokens`: the token and its secret.
+    pub async fn create_token(&self, new: &NewToken) -> Result<CreatedToken> {
+        self.send(self.request(routes::CREATE_TOKEN, None).json(new)).await
+    }
+
+    /// `DELETE /v1/tokens/{id}`: the revoked token.
+    pub async fn revoke_token(&self, id: &str) -> Result<Token> {
+        self.send(self.request(routes::REVOKE_TOKEN, Some(id))).await
+    }
+
+    /// `PATCH /v1/tokens/{id}`.
+    pub async fn update_token(&self, id: &str, update: &TokenUpdate) -> Result<Token> {
+        self.send(self.request(routes::UPDATE_TOKEN, Some(id)).json(update)).await
     }
 }
 

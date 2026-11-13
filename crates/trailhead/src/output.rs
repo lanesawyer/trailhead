@@ -63,9 +63,8 @@ pub fn task_list(tasks: &[Task], empty: &str) {
 }
 
 /// A task in full, as `GET /v1/tasks/{key}` returns it. `names` maps user and agent ids to names.
-pub fn detail(d: &TaskDetail, names: &HashMap<String, String>) -> String {
-    let name =
-        |id: Uuid| names.get(&id.to_string()).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
+pub fn detail(d: &TaskDetail, names: &HashMap<Uuid, String>) -> String {
+    let name = |id: Uuid| names.get(&id).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
     text().detail(d, &name, Timestamp::now())
 }
 

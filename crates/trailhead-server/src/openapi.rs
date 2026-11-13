@@ -12,7 +12,6 @@ use utoipa::openapi::{
     ContentBuilder, HeaderBuilder, KnownFormat, ObjectBuilder, Ref, RefOr, ResponseBuilder, SchemaFormat, Type,
 };
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
-use uuid::Uuid;
 
 use crate::routes;
 
@@ -161,40 +160,11 @@ pub struct Health {
     pub upgrade_pending: bool,
 }
 
-/// `GET /v1/me`: the caller.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct Me {
-    workspace_id: Uuid,
-    user: trailhead_core::User,
-    /// Set when the token belongs to an agent, even if the agent can't be looked up.
-    agent_id: Option<Uuid>,
-    /// The agent itself, when `agent_id` resolves.
-    agent: Option<trailhead_core::Agent>,
-}
-
-/// `POST /v1/agents`. The secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedAgent {
-    agent: trailhead_core::Agent,
-    token: trailhead_core::Token,
-    secret: String,
-}
-
 /// `POST /v1/webhooks`. The signing secret is shown only here.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct CreatedWebhook {
     webhook: trailhead_core::Webhook,
-    secret: String,
-}
-
-/// `POST /v1/tokens`. The secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedToken {
-    token: trailhead_core::Token,
     secret: String,
 }
 

@@ -568,6 +568,60 @@ pub struct CreatedTask {
     pub possible_duplicates: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Principal {
+    User(Uuid),
+    Agent(Uuid),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Token {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub principal: Principal,
+    pub name: String,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+    /// Projects the token is limited to. `None` means every project.
+    pub projects: Option<Vec<Uuid>>,
+    /// `None` means unlimited.
+    pub rate_limit_per_minute: Option<i64>,
+    /// When it stops working. `None` means never.
+    pub expires_at: Option<Timestamp>,
+}
+
+/// `GET /v1/me`: the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Me {
+    pub workspace_id: Uuid,
+    pub user: User,
+    /// Set when the token belongs to an agent, even if the agent can't be looked up.
+    pub agent_id: Option<Uuid>,
+    /// The agent itself, when `agent_id` resolves.
+    pub agent: Option<Agent>,
+}
+
+/// `POST /v1/agents`. The secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedAgent {
+    pub agent: Agent,
+    pub token: Token,
+    pub secret: String,
+}
+
+/// `POST /v1/tokens`. The secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedToken {
+    pub token: Token,
+    pub secret: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

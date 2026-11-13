@@ -1,6 +1,5 @@
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use libsql::Row;
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -9,33 +8,9 @@ use crate::error::{Error, Result};
 use crate::identity::{is_descendant, lineage_revoked};
 use crate::projects::load_project;
 use crate::store::{Ctx, Store, Tx};
+use trailhead_model::{Principal, Token};
 
 const TOKEN_PREFIX: &str = "th_";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
-pub enum Principal {
-    User(Uuid),
-    Agent(Uuid),
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Token {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub principal: Principal,
-    pub name: String,
-    pub created_at: Timestamp,
-    pub revoked_at: Option<Timestamp>,
-    /// Projects the token is limited to. `None` means every project.
-    pub projects: Option<Vec<Uuid>>,
-    /// `None` means unlimited.
-    pub rate_limit_per_minute: Option<i64>,
-    /// When it stops working. `None` means never.
-    pub expires_at: Option<Timestamp>,
-}
 
 /// Changes to an existing token's limits. `None` leaves a field alone; `Some(None)`
 /// lifts the limit (every project, or no rate limit).
