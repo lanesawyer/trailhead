@@ -1067,6 +1067,7 @@ pub(crate) async fn unclaimed_status(conn: &libsql::Connection, task: &Task) -> 
                        AND COALESCE(json_extract(before, '$.status'), '') != 'in_progress'
                      UNION ALL
                      SELECT chain.root, u.id, chain.depth + 1 FROM events u JOIN chain ON u.undoes = chain.cur
+                     WHERE u.task_id = ?1 AND u.entity = 'task'
                  )
                  SELECT COALESCE((SELECT json_extract(before, '$.status') FROM events
                                   WHERE id = (SELECT root FROM chain GROUP BY root
