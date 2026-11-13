@@ -2,7 +2,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{Method, StatusCode, Url};
+use reqwest::Url;
 use serde_json::Value;
 use trailhead_server::{Paths, modified_ms};
 
@@ -116,30 +116,6 @@ impl Client {
         }
     }
 
-    pub async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        query: &[(&str, String)],
-        body: Option<Value>,
-    ) -> Result<Value> {
-        let url = self.base.join(path.trim_start_matches('/'))?;
-        let mut req = self.http.request(method, url).bearer_auth(&self.token).query(query);
-        if let Some(b) = body {
-            req = req.json(&b);
-        }
-        let res = self.send(req).await?;
-        let status = res.status();
-        if status == StatusCode::NO_CONTENT {
-            return Ok(Value::Null);
-        }
-        let v: Value = res.json().await.context("bad response from server")?;
-        if status.is_success() {
-            return Ok(v);
-        }
-        Err(ApiError::from_body(&v).into())
-    }
-
     /// Follows `GET /v1/events/stream`, calling `on_event` with each event's JSON.
     /// Reconnects from the last id seen if the connection drops.
     pub async fn watch(&self, query: &[(&str, String)], mut on_event: impl FnMut(Value)) -> Result<()> {
@@ -234,25 +210,9 @@ impl Client {
         Ok(out)
     }
 
-    /// The typed client, for the commands moved onto it.
+    /// The typed client every API call goes through, but the event stream and the MCP bridge.
     pub fn api(&self) -> &trailhead_client::http::Client {
         &self.api
-    }
-
-    pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
-        self.request(Method::GET, path, query, None).await
-    }
-
-    pub async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        self.request(Method::POST, path, &[], Some(body)).await
-    }
-
-    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
-        self.request(Method::PATCH, path, &[], Some(body)).await
-    }
-
-    pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.request(Method::DELETE, path, &[], None).await
     }
 }
 

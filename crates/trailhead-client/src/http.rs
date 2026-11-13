@@ -1,7 +1,7 @@
 //! A typed client for the Trailhead API (`http` feature): base URL, bearer token, request bodies built from
 //! `trailhead-model`'s types, and failed responses decoded into an [`Error`] that carries the stable code.
 //!
-//! It covers the endpoints `RestTracker` (`trailhead-tracker-rest`) uses; the rest follow as the CLI and Lookout move over.
+//! It covers the endpoints the CLI and `RestTracker` (`trailhead-tracker-rest`) use; the rest follow as Lookout moves over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
 use std::future::Future;
