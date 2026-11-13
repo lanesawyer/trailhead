@@ -60,9 +60,12 @@ fn repo_agent_without_a_saved_token_names_the_file() {
 #[test]
 fn token_add_agent_issues_a_token_for_the_agent_instead_of_acting_as_it() {
     let th = Instance::new();
-    th.stdout(&["agent", "add", "bot"]);
+    let bot: serde_json::Value = serde_json::from_str(&th.stdout(&["agent", "add", "bot", "--json"])).unwrap();
     let out = th.run(&["token", "add", "t", "--agent", "bot", "--json"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // The token is the agent's, not the human's.
+    let created: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(created["token"]["principal"], serde_json::json!({"kind": "agent", "id": bot["agent"]["id"]}));
     // The caller stayed the human, so a bad agent is the server's complaint, not a missing saved token.
     let out = th.run(&["token", "add", "t2", "--agent", "nobody"]);
     assert!(!out.status.success());
