@@ -70,3 +70,52 @@ A rework (a review's changes, a failed CI, a conflict) whose `setup` check fails
 - **Verdicts live in Trailhead, not GitHub reviews.** Sandboxes act on GitHub as the user who authorized the connector, and GitHub doesn't let a PR's author approve it (inferred, untested). Agent reviews post as PR comments.
 - **Merger.** On factory projects the only delegated reviewer is the control plane's own identity, acting as the merger ([review.md](review.md#the-merger)). Reviewer agents record typed `review` verdicts; they don't move the task. The merger moves it to `approved` once the grade's gates pass, which for grades above Treeline includes a person approving, and to `done` after the PR merges, whether it merged the PR or a person did. A person merging the PR settles it: the task is finished even if nobody approved it (still in review, waiting for a rework, or parked `needs_input`), with the merge recorded as `human` (TRAIL-1438). Core refuses that `done` in two cases, both for a task still in review: the factory isn't one of the project's reviewers (TRAIL-1439), or its own identity sent the work to review, as after a conflict that went away. The merge is still recorded (TRAIL-706), and the task is parked `needs_input` with one question asking a person to mark it done; reconcile skips it from then on. Both go through one function, `Factory::close_merged` (TRAIL-198): reconcile calls it for a merge made outside the factory (`PrState::Merged` from `CodeHost::pr_state`), and the merger calls it right after `CodeHost::merge` (`[factory.merge] mode = "on"`, TRAIL-205), so auto-merge adds the merge call and the gate check, not a second way to finish tasks. It records who merged (`human` or `merger`), the PR and the merge commit in the task's `factory` metadata and in the handoff, which for the merger also names the grade and the gates that passed. A merge conflict at merge time sends the task back to running for a rework, and without delegated-reviewer rights the merger only behaves as in shadow mode. A PR closed without merging parks the task with a question for a person rather than reopening it, since a rework would push to a PR nobody will merge. Other agents can't approve or finish factory tasks. A person adds the factory's identity to the project's reviewers once; only a human can.
 - **Who can write task metadata.** Agents can't edit a task another actor holds, so the daemon writes its own run metadata as the claim holder. If the control plane needs to write it, Trailhead must let a parent agent act on tasks its sub-agents hold.
+
+## Explicit phases (design, TRAIL-1455)
+
+Agreed 2026-11-12 and being built in the steps under Order. It changes how the control plane names what it already does, not what it does.
+
+### The problem
+
+A factory task's state is its Trailhead `status` plus about 35 optional fields in its `factory` metadata (`RunUpdate`). The real states (a run interrupted, a park cut short, a review owed, a rework waiting for a worker) exist only as conditions spread over `reconcile.rs`, `lifecycle.rs`, `review.rs` and `merger.rs`. `reconcile_task` is about 160 lines of them. Each fix adds a field or a condition, and nothing lists the states, so nothing says when two conditions overlap or a case is missing. 59% of this repo's commits have been in the control plane, and 36% of all commits are fixes.
+
+### What is proposed
+
+**1. A `Phase` enum, computed, never stored.** `phase(task, me) -> Phase` is a pure function of the task record (`status`, `holder`, the run fields) and the control plane's own agent name. It is the one place that says which state a task is in. Nothing new is persisted, so there is no migration and a task written by today's build reads the same.
+
+| Phase | Today's condition | What reconcile does |
+| --- | --- | --- |
+| `Untouched` | No `sandbox` in the run fields | Nothing: the queue's business |
+| `ReviewBreachUnparked` | A reviewer breach for this attempt, not parked; task `open`, or `in_progress` held by the factory | Finishes the park |
+| `WorkerBreachUnparked` | A worker breach, not parked; `in_progress` under the run that breached | Finishes the park |
+| `Running` | `in_progress` under the current run's sub-agent, report not handled | Follows the run if its sandbox is still busy, else requeues |
+| `Interrupted` | `in_progress` otherwise | Releases and requeues |
+| `Requeued` | `open` with a run | Settles a merged or closed PR, else leaves it to the queue |
+| `Parked(why)` | `needs_input`: `MergedUnapproved`, `RequestUnsettled`, or `Asked` | Finishes a merge, settles the request, or waits |
+| `ReworkWaiting(kind)` | `in_review`, changes requested, the request still applies | Leaves it to the queue |
+| `ReworkStale` | `in_review`, changes requested, but the request is settled or the PR moved | Answers the request, looks at the PR as it is |
+| `RequestCutShort(kind)` | `in_review`, a pending request never recorded as a review | Records it |
+| `ReviewOwed` | `in_review`, the attempt's PR not reviewed (or pushed to since) | Starts a review once any backoff is over |
+| `AwaitingGates` | `in_review`, reviewed | Evaluates the gates |
+| `Approved` | `approved` | Checks for a conflict, evaluates the gates |
+| `Closed` | `done`, `cancelled` | Nothing |
+
+Two things the record can't say stay inputs to reconcile, beside the phase: what the code host says of the PR (open, merged, closed, mergeable, its head), and whether the run's sandbox is still busy. `ReworkStale` and `ReviewOwed` each need the PR's head, so `phase` returns the candidate and reconcile confirms it against the host, as it does now.
+
+**2. `reconcile_task` becomes a `match` on `Phase`**, one arm per row, each arm a function. No behaviour changes; the lifecycle suite, which since TRAIL-1435 drives the production start path, is the check.
+
+**3. A request kind.** A changes request is a review's, a conflict's or CI's. Today that is `conflict: bool` plus `reviewer == "CI"`, read at nine sites. It becomes `kind: Review | Conflict | Ci` on `ChangesRequested`. The two old fields are no longer written. A record from before has no `kind`, so for a task already in flight it is read from `conflict` and `reviewer`.
+
+**4. Clears that say so.** A write merges, so a field is cleared today by writing a stand-in: an empty string for `merging` and `stale_head`, zero for `released` and `gave_up`. The stored metadata is merged as a JSON merge patch, where `null` already removes a key. The proposal is to split the one struct in two: `Run` (what is read: plain optional fields) and `RunPatch` (what is written: each field `Keep`, `Clear` or `Set`). `Clear` writes `null`. Reads treat the old stand-ins as absent, so existing records need no rewrite.
+
+**5. Usage-pause readings on disk.** The subscription usage readings that pause new runs are held in memory only, so a restart forgets a pause until the next reading. They go in a file beside the spend ledger and are reloaded at start. The claim that the control plane "keeps no state" is corrected for what stays in memory (backoff deadlines, setup-failure counts), which a restart may safely forget.
+
+**6. `Factory`'s fields in their groups.** Its 21 mutex-guarded maps become four structs they already form (pool, merger, backoff, placement), done as the long functions are split, not as one change.
+
+### Order
+
+Each step is one PR that leaves the suite green: the `Phase` enum and `phase()` with unit tests built from the cases `reconcile_task` handles, called by nothing; then the dispatch; then 3, 4 and 5, which are independent of each other; then 6 alongside whatever function is being split.
+
+### Not proposed
+
+Storing the phase, changing any status transition, or changing what a person sees in Trailhead. Lookout showing the phase is a later choice, not part of this.
