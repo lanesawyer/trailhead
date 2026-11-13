@@ -22,14 +22,14 @@ use crate::board::View;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::factory::FactoryStatus;
+use crate::form::{self, FormState};
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
 use crate::project::ProjectPage;
 use crate::widgets::{
-    ButtonKind, Icon, InitialText, Keyed, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, SelectEdit,
-    Token, Truncated, button, dropdown_item, dropdown_list, field, grade_tone, matches_search, open_modal,
-    priority_tone, row, select_toned, size, space, status_tone, text, text_dim, text_input, toggle_switch, token,
-    tool_button,
+    ButtonKind, Icon, InitialText, Keyed, Modal, ModalFocus, ModalSlots, Picked, SelectEdit, Token, Truncated, button,
+    dropdown_item, dropdown_list, field, grade_tone, matches_search, open_modal, priority_tone, row, select_toned,
+    size, space, status_tone, text, text_dim, text_input, toggle_switch, token, tool_button,
 };
 
 /// The priority the form starts a new task at.
@@ -240,35 +240,8 @@ pub fn describe(outcome: &Outcome, what: &str) -> String {
     }
 }
 
-/// The form on screen. `generation` changes whenever it opens or closes, which is when the panel is redrawn
-/// (redrawing for every keystroke would lose the cursor).
-#[derive(Resource, Default, Debug)]
-pub struct Form {
-    pub open: Option<Open>,
-    /// The last refusal, or what is in progress.
-    pub message: String,
-    /// The save awaiting its answer, so it can't be sent twice.
-    pub saving: bool,
-    pub generation: u64,
-}
-
-impl Form {
-    pub fn open(&mut self, open: Open) {
-        self.open = Some(open);
-        self.close_state();
-    }
-
-    pub fn close(&mut self) {
-        self.open = None;
-        self.close_state();
-    }
-
-    fn close_state(&mut self) {
-        self.message.clear();
-        self.saving = false;
-        self.generation += 1;
-    }
-}
+/// The task form on screen.
+pub type Form = FormState<Open>;
 
 /// What a button does.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
@@ -467,22 +440,8 @@ fn on_act(
         Act::Cancel => {}
         Act::Save => {
             let Some(open) = &form.open else { return };
-            if form.saving {
-                return;
-            }
-            if *connection.get() != Connection::Live {
-                form.message = "Not connected to the server; saving waits for Live.".into();
-                return;
-            }
-            match request(open) {
-                Err(why) => form.message = why,
-                Ok(request) => {
-                    let Ok(source) = panel.single() else { return };
-                    submit.write(Submit { source, request });
-                    form.saving = true;
-                    form.message = "Saving...".into();
-                }
-            }
+            let (request, live) = (request(open), *connection.get() == Connection::Live);
+            form.send(request, "saving", live, panel.single().ok(), &mut submit);
         }
     }
 }
@@ -533,8 +492,7 @@ fn finish(
             }
             form.close();
         } else {
-            form.saving = false;
-            form.message = describe(&d.outcome, "task");
+            form.refuse(describe(&d.outcome, "task"));
         }
     }
 }
@@ -551,7 +509,7 @@ impl Plugin for AuthorPlugin {
             .add_observer(on_act)
             .add_observer(on_pick)
             .add_observer(on_queue_toggle)
-            .add_observer(on_modal_closed)
+            .add_observer(form::on_modal_closed::<Open, FormPanel>)
             .add_systems(Update, (follow_factory_queue, read_fields, finish).chain());
     }
 }
@@ -569,7 +527,17 @@ impl Plugin for AuthorUiPlugin {
 /// The systems that draw the form, apart from the plugin so a test can add them to an app that has the logic.
 fn add_drawing(app: &mut App) {
     app.init_resource::<FactoryStatus>().init_resource::<Suggestions>();
-    app.add_systems(Update, (redraw_form, fill_form, dress_form, lock_while_saving, update_message).chain());
+    app.add_systems(
+        Update,
+        (
+            redraw_form,
+            fill_form,
+            dress_form,
+            form::lock_while_saving::<Open, FormPanel>,
+            form::update_message::<Open, FormMessage>,
+        )
+            .chain(),
+    );
 }
 
 /// A button for `act`: a normal one, with no icon.
@@ -892,38 +860,6 @@ fn dress_form(
         },
         |_, _, _| {},
     );
-}
-
-/// A close request (the X, Escape, a click outside) closes the form too; the modal is already going.
-fn on_modal_closed(closed: On<ModalClosed>, forms: Query<(), With<FormPanel>>, mut form: ResMut<Form>) {
-    if forms.contains(closed.modal) {
-        form.close();
-    }
-}
-
-/// A save in flight can't be withdrawn, so the form's modal stays open until it is answered.
-fn lock_while_saving(form: Res<Form>, forms: Query<Entity, With<FormPanel>>, mut commands: Commands) {
-    if !form.is_changed() {
-        return;
-    }
-    for e in &forms {
-        if form.saving {
-            commands.entity(e).insert(ModalLocked);
-        } else {
-            commands.entity(e).remove::<ModalLocked>();
-        }
-    }
-}
-
-fn update_message(form: Res<Form>, mut messages: Query<&mut Text, With<FormMessage>>) {
-    if !form.is_changed() {
-        return;
-    }
-    for mut text in &mut messages {
-        if text.0 != form.message {
-            text.0.clone_from(&form.message);
-        }
-    }
 }
 
 #[cfg(test)]

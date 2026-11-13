@@ -17,11 +17,12 @@ use trailhead_model::{Project, ProjectStatus};
 use crate::author::describe;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
+use crate::form::{self, FormState};
 use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::widgets::{
-    ButtonKind, Icon, InitialText, Modal, ModalClosed, ModalFocus, ModalLocked, ModalSlots, Picked, button,
-    button_group, field, open_modal, size, text_dim, text_input,
+    ButtonKind, Icon, InitialText, Modal, ModalFocus, ModalSlots, Picked, button, button_group, field, open_modal,
+    size, text_dim, text_input,
 };
 
 /// Lines tall the brief's box is.
@@ -91,34 +92,8 @@ impl ProjectOpen {
     }
 }
 
-/// The form on screen. `generation` changes whenever it opens or closes, which is when the modal is redrawn.
-#[derive(Resource, Default, Debug)]
-pub struct ProjectForm {
-    pub open: Option<ProjectOpen>,
-    /// The last refusal, or what is in progress.
-    pub message: String,
-    /// The save awaiting its answer, so it can't be sent twice.
-    pub saving: bool,
-    pub generation: u64,
-}
-
-impl ProjectForm {
-    pub fn open(&mut self, open: ProjectOpen) {
-        self.open = Some(open);
-        self.reset();
-    }
-
-    pub fn close(&mut self) {
-        self.open = None;
-        self.reset();
-    }
-
-    fn reset(&mut self) {
-        self.message.clear();
-        self.saving = false;
-        self.generation += 1;
-    }
-}
+/// The project form on screen.
+pub type ProjectForm = FormState<ProjectOpen>;
 
 /// Whether `key` is one the server takes: 2 to 10 uppercase letters or digits, starting with a letter.
 fn valid_key(key: &str) -> bool {
@@ -288,51 +263,19 @@ fn on_form_act(
     mut submit: MessageWriter<Submit>,
 ) {
     let Ok(act) = acts.get(activate.entity) else { return };
+    let live = *connection.get() == Connection::Live;
     match act {
         // A save in flight can't be withdrawn, so the form stays until it is answered.
         FormAct::Cancel if !form.saving => form.close(),
         FormAct::Cancel => {}
         FormAct::Save => {
             let Some(open) = &form.open else { return };
-            if form.saving {
-                return;
-            }
-            if *connection.get() != Connection::Live {
-                form.message = "Not connected to the server; saving waits for Live.".into();
-                return;
-            }
             let request = request(open);
-            send(&mut form, request, &panel, &mut submit);
+            form.send(request, "saving", live, panel.single().ok(), &mut submit);
         }
         FormAct::Archive => {
-            let Some(open) = &form.open else { return };
-            if form.saving {
-                return;
-            }
-            if *connection.get() != Connection::Live {
-                form.message = "Not connected to the server; archiving waits for Live.".into();
-                return;
-            }
-            let Some(request) = archive_request(open) else { return };
-            send(&mut form, Ok(request), &panel, &mut submit);
-        }
-    }
-}
-
-/// Sends `request` from the form's modal, or shows why it can't be sent.
-fn send(
-    form: &mut ProjectForm,
-    request: Result<Request, String>,
-    panel: &Query<Entity, With<ProjectFormPanel>>,
-    submit: &mut MessageWriter<Submit>,
-) {
-    match request {
-        Err(why) => form.message = why,
-        Ok(request) => {
-            let Ok(source) = panel.single() else { return };
-            submit.write(Submit { source, request });
-            form.saving = true;
-            form.message = "Saving...".into();
+            let Some(request) = form.open.as_ref().and_then(archive_request) else { return };
+            form.send(Ok(request), "archiving", live, panel.single().ok(), &mut submit);
         }
     }
 }
@@ -343,13 +286,6 @@ fn on_review_pick(picked: On<Picked>, picks: Query<(), With<ReviewPick>>, mut fo
     }
     if let Some(open) = &mut form.open {
         open.draft.require_review = picked.index == 1;
-    }
-}
-
-/// A close request (the X, Escape, a click outside) closes the form too; the modal is already going.
-fn on_modal_closed(closed: On<ModalClosed>, panels: Query<(), With<ProjectFormPanel>>, mut form: ResMut<ProjectForm>) {
-    if panels.contains(closed.modal) {
-        form.close();
     }
 }
 
@@ -386,8 +322,7 @@ fn finish(
             }
             form.close();
         } else {
-            form.saving = false;
-            form.message = describe(&d.outcome, "project");
+            form.refuse(describe(&d.outcome, "project"));
         }
     }
 }
@@ -403,7 +338,7 @@ impl Plugin for ProjectFormPlugin {
             .add_observer(on_edit_project)
             .add_observer(on_form_act)
             .add_observer(on_review_pick)
-            .add_observer(on_modal_closed)
+            .add_observer(form::on_modal_closed::<ProjectOpen, ProjectFormPanel>)
             .add_systems(Update, (read_fields, finish).chain());
     }
 }
@@ -413,8 +348,16 @@ pub struct ProjectFormUiPlugin;
 
 impl Plugin for ProjectFormUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(ProjectFormPlugin)
-            .add_systems(Update, (redraw_form, fill_form, lock_while_saving, update_message).chain());
+        app.add_plugins(ProjectFormPlugin).add_systems(
+            Update,
+            (
+                redraw_form,
+                fill_form,
+                form::lock_while_saving::<ProjectOpen, ProjectFormPanel>,
+                form::update_message::<ProjectOpen, ProjectFormMessage>,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -502,31 +445,6 @@ fn fill_form(
                     FormAct::Archive
                 })
                 .insert(ChildOf(footer));
-        }
-    }
-}
-
-/// A save in flight can't be withdrawn, so the modal stays open until it is answered.
-fn lock_while_saving(form: Res<ProjectForm>, panels: Query<Entity, With<ProjectFormPanel>>, mut commands: Commands) {
-    if !form.is_changed() {
-        return;
-    }
-    for e in &panels {
-        if form.saving {
-            commands.entity(e).insert(ModalLocked);
-        } else {
-            commands.entity(e).remove::<ModalLocked>();
-        }
-    }
-}
-
-fn update_message(form: Res<ProjectForm>, mut messages: Query<&mut Text, With<ProjectFormMessage>>) {
-    if !form.is_changed() {
-        return;
-    }
-    for mut text in &mut messages {
-        if text.0 != form.message {
-            text.0.clone_from(&form.message);
         }
     }
 }
