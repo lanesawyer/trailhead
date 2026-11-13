@@ -9,10 +9,6 @@ use trailhead_client::text::Text;
 use trailhead_core::{Claim, Event, Task, TaskDetail};
 use uuid::Uuid;
 
-pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
-    v[key].as_str().unwrap_or("")
-}
-
 static LOCAL_TZ: OnceLock<TimeZone> = OnceLock::new();
 
 /// The system time zone (honours `TZ`), with DST rules from the zoneinfo database.

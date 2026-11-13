@@ -14,9 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, Dependency, Event, Grade,
-    HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport,
-    Verdict,
+    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, CreatedWebhook,
+    Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail,
+    TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -79,9 +79,13 @@ pub mod routes {
     pub const REVOKE_TOKEN: Route = Route::new(Method::DELETE, "/v1/tokens/{id}");
     pub const UPDATE_TOKEN: Route = Route::new(Method::PATCH, "/v1/tokens/{id}");
     pub const LIST_EVENTS: Route = Route::new(Method::GET, "/v1/events");
+    pub const LIST_WEBHOOKS: Route = Route::new(Method::GET, "/v1/webhooks");
+    pub const CREATE_WEBHOOK: Route = Route::new(Method::POST, "/v1/webhooks");
+    pub const DELETE_WEBHOOK: Route = Route::new(Method::DELETE, "/v1/webhooks/{id}");
+    pub const WEBHOOK_DELIVERIES: Route = Route::new(Method::GET, "/v1/webhooks/{id}/deliveries");
 
     /// All of them.
-    pub fn all() -> [Route; 30] {
+    pub fn all() -> [Route; 34] {
         [
             READY,
             LIST_TASKS,
@@ -113,6 +117,10 @@ pub mod routes {
             REVOKE_TOKEN,
             UPDATE_TOKEN,
             LIST_EVENTS,
+            LIST_WEBHOOKS,
+            CREATE_WEBHOOK,
+            DELETE_WEBHOOK,
+            WEBHOOK_DELIVERIES,
         ]
     }
 }
@@ -510,6 +518,15 @@ pub struct EventQuery {
     pub limit: Option<usize>,
 }
 
+/// `POST /v1/webhooks`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewWebhook {
+    /// Where to POST events.
+    pub url: String,
+    /// Event kind prefixes, e.g. `task.` or `comment.created`; empty for every event.
+    pub event_kinds: Vec<String>,
+}
+
 /// The API, as one token sees it.
 #[derive(Clone)]
 pub struct Client {
@@ -815,6 +832,26 @@ impl Client {
     /// `POST /v1/revert`: reverts what one actor did since a time, skipping what someone else changed later.
     pub async fn revert(&self, revert: &Revert) -> Result<UndoReport> {
         self.send(self.request(routes::REVERT, None).json(revert)).await
+    }
+
+    /// `GET /v1/webhooks`, without their secrets.
+    pub async fn list_webhooks(&self) -> Result<Vec<Webhook>> {
+        self.send(self.request(routes::LIST_WEBHOOKS, None)).await
+    }
+
+    /// `POST /v1/webhooks`: the webhook and its signing secret.
+    pub async fn create_webhook(&self, new: &NewWebhook) -> Result<CreatedWebhook> {
+        self.send(self.request(routes::CREATE_WEBHOOK, None).json(new)).await
+    }
+
+    /// `DELETE /v1/webhooks/{id}`.
+    pub async fn delete_webhook(&self, id: &str) -> Result<()> {
+        self.send_empty(self.request(routes::DELETE_WEBHOOK, Some(id))).await
+    }
+
+    /// `GET /v1/webhooks/{id}/deliveries`: the latest `limit` delivery attempts, newest first.
+    pub async fn webhook_deliveries(&self, id: &str, limit: usize) -> Result<Vec<WebhookDelivery>> {
+        self.send(self.request(routes::WEBHOOK_DELIVERIES, Some(id)).query(&[("limit", limit)])).await
     }
 }
 

@@ -643,6 +643,51 @@ pub struct Skipped {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Webhook {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub url: String,
+    /// Event kind prefixes to send, e.g. `task.` or `comment.created`. Empty means every event.
+    pub event_kinds: Vec<String>,
+    /// The last event id delivered (or skipped as not matching).
+    pub cursor: i64,
+    pub failure_count: i64,
+    pub next_attempt_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    /// Set after too many consecutive failures, or by hand. Disabled webhooks get nothing.
+    pub disabled_at: Option<Timestamp>,
+}
+
+impl Webhook {
+    pub fn wants(&self, kind: &str) -> bool {
+        self.event_kinds.is_empty() || self.event_kinds.iter().any(|k| kind.starts_with(k.as_str()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WebhookDelivery {
+    pub id: i64,
+    pub webhook_id: Uuid,
+    pub event_id: Option<i64>,
+    /// The receiver's HTTP status, if it answered.
+    pub status_code: Option<i64>,
+    /// Set when the attempt failed.
+    pub error: Option<String>,
+    pub at: Timestamp,
+}
+
+/// `POST /v1/webhooks`. The signing secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedWebhook {
+    pub webhook: Webhook,
+    pub secret: String,
+}
+
 /// `POST /v1/tokens`. The secret is shown only here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

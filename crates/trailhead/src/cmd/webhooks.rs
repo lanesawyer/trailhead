@@ -1,60 +1,60 @@
 use anyhow::Result;
-use serde_json::{Value, json};
+use trailhead_client::http::NewWebhook;
 
-use super::{Ctx, print_json};
+use super::{Ctx, count, print_json, to_json};
 use crate::cli::WebhookCmd;
-use crate::output::{s, short_time};
+use crate::client::api_err;
+use crate::output::short_time;
 
 pub(crate) async fn webhook(cx: &Ctx, cmd: WebhookCmd) -> Result<()> {
-    let c = &cx.c;
+    let api = cx.c.api();
     match cmd {
         WebhookCmd::Ls => {
-            let v = c.get("webhooks", &[]).await?;
+            let hooks = api.list_webhooks().await.map_err(api_err)?;
             if cx.json {
-                print_json(&v);
+                print_json(&to_json(&hooks));
                 return Ok(());
             }
-            for w in v.as_array().into_iter().flatten() {
-                let kinds = w["event_kinds"]
-                    .as_array()
-                    .map(|k| k.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","));
-                let state = match (w["disabled_at"].as_str(), w["failure_count"].as_i64()) {
+            for w in &hooks {
+                let state = match (w.disabled_at, w.failure_count) {
                     (Some(_), _) => "disabled".to_string(),
-                    (None, Some(n)) if n > 0 => format!("failing ({n})"),
+                    (None, n) if n > 0 => format!("failing ({n})"),
                     _ => "ok".to_string(),
                 };
-                let kinds = kinds.filter(|k| !k.is_empty()).unwrap_or_else(|| "all events".into());
-                println!("{}  {}  [{kinds}]  {state}", s(w, "id"), s(w, "url"));
+                let kinds = if w.event_kinds.is_empty() { "all events".into() } else { w.event_kinds.join(",") };
+                println!("{}  {}  [{kinds}]  {state}", w.id, w.url);
             }
         }
         WebhookCmd::Add { target, kinds } => {
-            let v = c.post("webhooks", json!({ "url": target, "event_kinds": kinds })).await?;
+            let created = api.create_webhook(&NewWebhook { url: target, event_kinds: kinds }).await.map_err(api_err)?;
             if cx.json {
-                print_json(&v);
+                print_json(&to_json(&created));
             } else {
-                println!("webhook {}", s(&v["webhook"], "id"));
-                println!("signing secret (shown once): {}", s(&v, "secret"));
+                println!("webhook {}", created.webhook.id);
+                println!("signing secret (shown once): {}", created.secret);
             }
         }
         WebhookCmd::Rm { id } => {
-            c.delete(&format!("webhooks/{id}")).await?;
+            api.delete_webhook(&id).await.map_err(api_err)?;
             if !cx.json {
                 println!("deleted");
             }
         }
         WebhookCmd::Log { id, limit } => {
-            let v = c.get(&format!("webhooks/{id}/deliveries"), &[("limit", limit.to_string())]).await?;
+            let limit = count(Some(limit))?.unwrap_or_default();
+            let deliveries = api.webhook_deliveries(&id, limit).await.map_err(api_err)?;
             if cx.json {
-                print_json(&v);
+                print_json(&to_json(&deliveries));
                 return Ok(());
             }
-            for d in v.as_array().into_iter().flatten() {
-                let outcome = match (d["status_code"].as_i64(), d["error"].as_str()) {
+            for d in &deliveries {
+                let outcome = match (d.status_code, &d.error) {
                     (Some(code), None) => code.to_string(),
                     (code, Some(err)) => format!("failed {} {err}", code.map(|c| c.to_string()).unwrap_or_default()),
                     _ => "?".into(),
                 };
-                println!("{}  event #{}  {outcome}", short_time(s(d, "at")), d["event_id"]);
+                let event = d.event_id.map_or("null".to_string(), |e| e.to_string());
+                println!("{}  event #{event}  {outcome}", short_time(&d.at.to_string()));
             }
         }
     }

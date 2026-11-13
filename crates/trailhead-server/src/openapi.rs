@@ -160,14 +160,6 @@ pub struct Health {
     pub upgrade_pending: bool,
 }
 
-/// `POST /v1/webhooks`. The signing secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedWebhook {
-    webhook: trailhead_core::Webhook,
-    secret: String,
-}
-
 /// Bearer auth, the `trailhead-batch` header on every response, and the
 /// error responses every authenticated route can return.
 struct Common;

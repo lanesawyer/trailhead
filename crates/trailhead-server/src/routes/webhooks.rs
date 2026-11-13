@@ -5,13 +5,13 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{Webhook, WebhookDelivery};
+use trailhead_core::{CreatedWebhook, Webhook, WebhookDelivery};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::auth::Auth;
 use crate::error::{ApiResult, Json, Path, Query};
-use crate::openapi::{CreatedWebhook, ErrorBody};
+use crate::openapi::ErrorBody;
 
 use super::{S, created};
 
@@ -38,7 +38,7 @@ pub(crate) struct CreateWebhook {
 )]
 pub(crate) async fn create_webhook(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateWebhook>) -> ApiResult<Response> {
     let (webhook, secret) = s.store.create_webhook(&ctx, &b.url, b.event_kinds).await?;
-    Ok(created(json!({ "webhook": webhook, "secret": secret })))
+    Ok(created(CreatedWebhook { webhook, secret }))
 }
 
 #[utoipa::path(
