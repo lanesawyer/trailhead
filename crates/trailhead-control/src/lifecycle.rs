@@ -87,15 +87,12 @@ impl Factory {
                 }
                 return Err(e);
             }
-            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity. Revoking
-            // the sub-agent that was never created fails, and that warning is expected.
+            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity, which
+            // takes the claim only if the task has to be parked. Revoking the sub-agent that was never created
+            // fails, and that warning is expected.
             Err(e) => {
-                // Parking and releasing need the claim, so take it as the factory's own identity first.
-                if let Err(claim) = self.tracker.claim(&task.key).await {
-                    tracing::warn!(task = %task.key, error = %claim, "couldn't claim the task to back it off");
-                }
                 return Err(self
-                    .infra_failed(task, &self.tracker, &name, e, task.run.infra_failures, Patch::Keep)
+                    .infra_failed_by(task, &self.tracker, false, &name, e, task.run.infra_failures, Patch::Keep)
                     .await);
             }
         };
@@ -520,6 +517,24 @@ impl Factory {
         prior: Option<u32>,
         failure: Patch<String>,
     ) -> Error {
+        self.infra_failed_by(task, sub, true, name, error, prior, failure).await
+    }
+
+    /// [`Factory::infra_failed`], for a run whose claim `by` holds (`held`) or one that failed before anything
+    /// claimed the task. An unheld task is claimed only to be parked, never to be released again: a claim and
+    /// release of a task waiting in review for its rework reads to core as the factory sending the work to review,
+    /// after which it may neither approve nor finish it (TRAIL-1462).
+    #[allow(clippy::too_many_arguments)]
+    async fn infra_failed_by(
+        &self,
+        task: &Task,
+        sub: &Arc<dyn Tracker>,
+        held: bool,
+        name: &str,
+        error: Error,
+        prior: Option<u32>,
+        failure: Patch<String>,
+    ) -> Error {
         let max = self.config.repo.max_infra_failures.max(1);
         // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
@@ -543,7 +558,7 @@ impl Factory {
         if setback.park.is_none() {
             self.back_off(&task.key, &setback);
         }
-        // Before the release: the run's sub-agent holds the claim, so only it can report.
+        // Before the release: when the run's sub-agent holds the claim, only it can report.
         let update = RunPatch {
             attempt: Patch::Set(task.run.attempt.unwrap_or(0)),
             retries: Patch::Set(task.run.retries.unwrap_or(0) + 1),
@@ -563,6 +578,9 @@ impl Factory {
                 Park::Waited => messages::resource_wait_question(waits, &error.to_string()),
                 Park::Limit => messages::infra_question(failures, max, &error.to_string()),
             };
+            if !held && let Err(e) = sub.claim(&task.key).await {
+                tracing::warn!(task = %task.key, error = %e, "couldn't claim the task to park it");
+            }
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
@@ -579,7 +597,7 @@ impl Factory {
                     }
                 }
             }
-        } else if let Err(e) = sub.release(&task.key).await {
+        } else if held && let Err(e) = sub.release(&task.key).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't release the task; reconcile retries");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {

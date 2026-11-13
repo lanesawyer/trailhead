@@ -876,6 +876,36 @@ async fn an_approval_over_a_persons_request_goes_back_to_review_before_any_confl
     assert_eq!((asked.kind, asked.body.as_str()), (trailhead_factory::RequestKind::Review, "Add a test."));
 }
 
+/// Whoever merged, a finish core refuses parks the task once for a person to mark it done. A merge by the merger
+/// used to be retried, and refused, on every pass (TRAIL-1462).
+#[tokio::test]
+async fn a_merge_by_the_merger_whose_finish_is_refused_parks_the_task_once() {
+    let config = format!("{CONFIG}\n[merge]\nmode = \"on\"\n");
+    let r = rig_with(&config).await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    // The factory itself takes the task and sends it to review again, so in core's eyes it did the work.
+    let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key, "pushed").await.unwrap();
+    approve_as_lane(&r, &key).await;
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged, "Lane's approval merges it");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput, "{:?}", task.run.merge);
+    assert_eq!(task.run.merged.as_ref().expect("recorded").by, trailhead_factory::MergedBy::Merger);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().rev().find(|c| c.kind == CommentKind::Question).expect("a question");
+    assert!(question.body.contains("The factory merged the PR") && question.body.contains("Mark it done"));
+
+    let version = r.store.get_task(&r.human, &key.0).await.unwrap().version;
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.store.get_task(&r.human, &key.0).await.unwrap().version, version, "asked once, then left alone");
+    assert_eq!(r.store.list_comments(&r.human, &key.0).await.unwrap().len(), comments.len());
+}
+
 /// A person approves before the attempt's review has run. Reviews were only started for tasks in review, so the
 /// merger waited on one forever. It runs, and the approval stays, so an approving review merges (TRAIL-1469).
 #[tokio::test(start_paused = true)]
