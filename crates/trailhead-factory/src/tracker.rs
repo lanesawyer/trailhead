@@ -190,8 +190,9 @@ run_fields! {
     asked: u32,
     /// How the task's PR was merged, once it has been.
     merged: Merged,
-    /// A person merged the PR without the approval core requires to finish the task, so the task is being parked for a
-    /// person to mark it done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
+    /// The PR is merged but core refused the factory's `done` (a person merged it without the approval core requires,
+    /// or the factory's own identity sent the work to review), so the task is being parked for a person to mark it
+    /// done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
     /// outside `needs_input` finishes the park rather than closing the task (TRAIL-729). `merged` alone can't say
     /// this: it is also recorded by a close that failed before the park.
     unapproved_merge: bool,

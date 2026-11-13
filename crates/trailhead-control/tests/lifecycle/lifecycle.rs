@@ -699,6 +699,25 @@ async fn a_task_backing_off_at_the_head_of_the_queue_doesnt_hold_up_the_rest() {
     assert_eq!(r.tracker.task(&first).status, Status::Open, "still waiting out its backoff");
 }
 
+/// A rework that can't start because the tracker failed before the run's sub-agent existed backs off without the
+/// factory claiming the task. A claim and release of a task in review reads to core as the factory sending the work
+/// to review, after which it could neither approve nor finish it (TRAIL-1462).
+#[tokio::test]
+async fn a_rework_that_fails_before_its_sub_agent_exists_doesnt_make_the_factory_the_worker() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+
+    r.tracker.fail_sub_agents(true);
+    assert!(r.factory.tick().await.is_err(), "the rework couldn't start");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.holder), (Status::InReview, None));
+    assert_eq!(task.run.infra_failures, Some(1), "counted without the claim");
+    Tracker::approve(&r.tracker, &key).await.expect("the factory didn't do the work, so it may still approve it");
+}
+
 /// Reports and sub-agent creation both fail, so `infra_failed` runs every time with no persisted count.
 #[tokio::test(start_paused = true)]
 async fn infrastructure_retries_back_off_longer_when_the_tracker_is_down_entirely() {

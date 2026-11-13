@@ -536,6 +536,13 @@ pub fn merged_unapproved_question(pr_url: &str) -> String {
     )
 }
 
+/// Why a task is parked when the factory's merger merged its PR and core then refused the factory's `done`.
+pub fn merged_unfinished_question(pr_url: &str) -> String {
+    format!(
+        "The factory merged the PR {pr_url}, but it isn't allowed to finish this task: its own identity is on record as having sent the work to review. Mark it done."
+    )
+}
+
 /// Why a task is parked when the agent's work is done and checked but publishing it failed.
 pub fn publish_failed_question(error: &dyn std::fmt::Display) -> String {
     format!(
