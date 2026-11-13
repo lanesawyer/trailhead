@@ -1,62 +1,60 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use trailhead_client::http::{NewProject, ProjectUpdate};
+use trailhead_core::ProjectStatus;
 
-use super::{Ctx, print_json};
+use super::{Ctx, print_json, to_json};
 use crate::cli::ProjectCmd;
-use crate::output::{project_line, s};
+use crate::client::api_err;
+use crate::output::text;
 
 pub(crate) async fn project(cx: &Ctx, cmd: ProjectCmd) -> Result<()> {
-    let c = &cx.c;
+    let api = cx.c.api();
     match cmd {
         ProjectCmd::Ls { all } => {
-            let v = c.get("projects", &[("archived", all.to_string())]).await?;
+            let projects = api.list_projects(all).await.map_err(api_err)?;
             if cx.json {
-                print_json(&v);
+                print_json(&to_json(&projects));
             } else {
-                v.as_array().into_iter().flatten().for_each(|p| println!("{}", project_line(p)));
+                projects.iter().for_each(|p| println!("{}", text().project_line(p)));
             }
         }
         ProjectCmd::Add { key, name, brief, brief_file, review } => {
             let brief = read_brief(brief, brief_file)?.unwrap_or_default();
-            let v = c
-                .post("projects", json!({ "key": key, "name": name, "brief": brief, "require_review": review }))
-                .await?;
-            cx.show(&v, project_line);
+            let new = NewProject { key, name, brief, require_review: review, claim_ttl: None };
+            let project = api.create_project(&new).await.map_err(api_err)?;
+            cx.emit(&project, |p| text().project_line(p));
         }
         ProjectCmd::Show { project } => {
-            let v = c.get(&format!("projects/{project}"), &[]).await?;
+            let p = api.show_project(&project).await.map_err(api_err)?;
             if cx.json {
-                print_json(&v);
+                print_json(&to_json(&p));
             } else {
-                println!("{}", project_line(&v));
-                if !s(&v, "brief").is_empty() {
-                    println!("\n{}", s(&v, "brief"));
+                println!("{}", text().project_line(&p));
+                if !p.brief.is_empty() {
+                    println!("\n{}", p.brief);
                 }
             }
         }
         ProjectCmd::Edit { project, name, brief, brief_file, review, reviewers, archive, unarchive } => {
-            let mut body = json!({});
-            if let Some(r) = reviewers {
-                body["reviewers"] = json!(r.into_iter().filter(|n| !n.trim().is_empty()).collect::<Vec<_>>());
-            }
-            if let Some(n) = name {
-                body["name"] = json!(n);
-            }
-            if let Some(b) = read_brief(brief, brief_file)? {
-                body["brief"] = json!(b);
-            }
-            if let Some(r) = review {
-                body["require_review"] = json!(r);
-            }
-            match (archive, unarchive) {
+            let brief = read_brief(brief, brief_file)?;
+            let status = match (archive, unarchive) {
                 (true, true) => bail!("--archive or --unarchive, not both"),
-                (true, false) => body["status"] = json!("archived"),
-                (false, true) => body["status"] = json!("active"),
-                _ => {}
-            }
-            cx.show(&c.patch(&format!("projects/{project}"), body).await?, project_line);
+                (true, false) => Some(ProjectStatus::Archived),
+                (false, true) => Some(ProjectStatus::Active),
+                _ => None,
+            };
+            let update = ProjectUpdate {
+                name,
+                brief,
+                require_review: review,
+                status,
+                reviewers: reviewers.map(|r| r.into_iter().filter(|n| !n.trim().is_empty()).collect()),
+                ..ProjectUpdate::default()
+            };
+            let p = api.update_project(&project, &update).await.map_err(api_err)?;
+            cx.emit(&p, |p| text().project_line(p));
         }
     }
     Ok(())

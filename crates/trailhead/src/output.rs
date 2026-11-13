@@ -6,7 +6,7 @@ use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use serde_json::Value;
 use trailhead_client::text::Text;
-use trailhead_core::{Claim, Event, Project, Task, TaskDetail};
+use trailhead_core::{Claim, Event, Task, TaskDetail};
 use uuid::Uuid;
 
 pub fn s<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -67,10 +67,6 @@ pub fn detail(d: &TaskDetail, names: &HashMap<String, String>) -> String {
     let name =
         |id: Uuid| names.get(&id.to_string()).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
     text().detail(d, &name, Timestamp::now())
-}
-
-pub fn project_line(p: &Value) -> String {
-    typed(p, |p: &Project| text().project_line(p))
 }
 
 pub fn event_line(e: &Value) -> String {

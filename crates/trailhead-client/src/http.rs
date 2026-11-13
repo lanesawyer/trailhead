@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, ClaimResult, Comment, CommentKind, CreatedTask, Dependency, Grade, HeldClaim, Priority, ProjectStatus,
-    SearchHit, Status, Task, TaskDetail, TaskKey, Verdict,
+    Claim, ClaimResult, Comment, CommentKind, CreatedTask, Dependency, Grade, HeldClaim, Priority, Project,
+    ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Verdict,
 };
 use uuid::Uuid;
 
@@ -67,9 +67,11 @@ pub mod routes {
     pub const DELETE_TASK: Route = Route::new(Method::DELETE, "/v1/tasks/{task}");
     pub const ADD_BLOCKER: Route = Route::new(Method::POST, "/v1/tasks/{task}/blockers");
     pub const REMOVE_BLOCKER: Route = Route::new(Method::DELETE, "/v1/tasks/{task}/blockers/{blocker}");
+    pub const LIST_PROJECTS: Route = Route::new(Method::GET, "/v1/projects");
+    pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
 
     /// All of them.
-    pub fn all() -> [Route; 19] {
+    pub fn all() -> [Route; 21] {
         [
             READY,
             LIST_TASKS,
@@ -90,6 +92,8 @@ pub mod routes {
             DELETE_TASK,
             ADD_BLOCKER,
             REMOVE_BLOCKER,
+            LIST_PROJECTS,
+            SHOW_PROJECT,
         ]
     }
 }
@@ -263,6 +267,9 @@ pub struct ProjectUpdate {
     pub claim_ttl: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ProjectStatus>,
+    /// Names or ids of the agents that may approve review work here, replacing the list; empty clears it. Humans only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewers: Option<Vec<String>>,
 }
 
 /// `POST /v1/tasks/{task}/comments`.
@@ -633,6 +640,26 @@ impl Client {
         let req =
             self.request_with(routes::REMOVE_BLOCKER, &[("task", blocked.as_str()), ("blocker", blocker.as_str())]);
         self.send_empty(req).await
+    }
+
+    /// `GET /v1/projects`, with the archived ones too if `archived`.
+    pub async fn list_projects(&self, archived: bool) -> Result<Vec<Project>> {
+        self.send(self.request(routes::LIST_PROJECTS, None).query(&[("archived", archived)])).await
+    }
+
+    /// `POST /v1/projects`.
+    pub async fn create_project(&self, new: &NewProject) -> Result<Project> {
+        self.send(self.request(routes::CREATE_PROJECT, None).json(new)).await
+    }
+
+    /// `GET /v1/projects/{project}`.
+    pub async fn show_project(&self, key: &str) -> Result<Project> {
+        self.send(self.request(routes::SHOW_PROJECT, Some(key))).await
+    }
+
+    /// `PATCH /v1/projects/{project}`.
+    pub async fn update_project(&self, key: &str, update: &ProjectUpdate) -> Result<Project> {
+        self.send(self.request(routes::UPDATE_PROJECT, Some(key)).json(update)).await
     }
 }
 
