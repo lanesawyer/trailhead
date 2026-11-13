@@ -75,6 +75,8 @@ unused_must_use = "deny"
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
+# The limit is in clippy.toml, and is only ever lowered.
+too_many_lines = "warn"
 
 [profile.dev]
 # Line tables only: backtraces keep file:line, but builds, links and target/ shrink a lot.
