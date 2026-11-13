@@ -14,8 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, Dependency, Grade,
-    HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, Verdict,
+    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, Dependency, Event, Grade,
+    HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport,
+    Verdict,
 };
 use uuid::Uuid;
 
@@ -77,9 +78,10 @@ pub mod routes {
     pub const CREATE_TOKEN: Route = Route::new(Method::POST, "/v1/tokens");
     pub const REVOKE_TOKEN: Route = Route::new(Method::DELETE, "/v1/tokens/{id}");
     pub const UPDATE_TOKEN: Route = Route::new(Method::PATCH, "/v1/tokens/{id}");
+    pub const LIST_EVENTS: Route = Route::new(Method::GET, "/v1/events");
 
     /// All of them.
-    pub fn all() -> [Route; 29] {
+    pub fn all() -> [Route; 30] {
         [
             READY,
             LIST_TASKS,
@@ -110,6 +112,7 @@ pub mod routes {
             CREATE_TOKEN,
             REVOKE_TOKEN,
             UPDATE_TOKEN,
+            LIST_EVENTS,
         ]
     }
 }
@@ -488,6 +491,25 @@ pub struct TokenUpdate {
     pub rate_limit_per_minute: Option<Option<i64>>,
 }
 
+/// `POST /v1/undo` for a whole batch: everything one request did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UndoBatch {
+    pub batch_id: Uuid,
+}
+
+/// `GET /v1/events` filters. Unset ones aren't sent.
+#[derive(Debug, Default, Clone)]
+pub struct EventQuery {
+    /// A task's key or id.
+    pub task: Option<String>,
+    /// The user or agent that acted.
+    pub actor: Option<Uuid>,
+    /// Leaves out notifications (`task.due_soon`, `task.overdue`).
+    pub changes_only: bool,
+    pub newest_first: bool,
+    pub limit: Option<usize>,
+}
+
 /// The API, as one token sees it.
 #[derive(Clone)]
 pub struct Client {
@@ -757,6 +779,42 @@ impl Client {
     /// `PATCH /v1/tokens/{id}`.
     pub async fn update_token(&self, id: &str, update: &TokenUpdate) -> Result<Token> {
         self.send(self.request(routes::UPDATE_TOKEN, Some(id)).json(update)).await
+    }
+
+    /// `GET /v1/events`.
+    pub async fn list_events(&self, q: &EventQuery) -> Result<Vec<Event>> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(t) = &q.task {
+            query.push(("task", t.clone()));
+        }
+        if let Some(a) = q.actor {
+            query.push(("actor", a.to_string()));
+        }
+        if q.changes_only {
+            query.push(("changes_only", "true".into()));
+        }
+        if q.newest_first {
+            query.push(("newest_first", "true".into()));
+        }
+        if let Some(l) = q.limit {
+            query.push(("limit", l.to_string()));
+        }
+        self.send(self.request(routes::LIST_EVENTS, None).query(&query)).await
+    }
+
+    /// `POST /v1/undo`: reverts one event.
+    pub async fn undo(&self, undo: &Undo) -> Result<UndoReport> {
+        self.send(self.request(routes::UNDO, None).json(undo)).await
+    }
+
+    /// `POST /v1/undo`: reverts a batch.
+    pub async fn undo_batch(&self, undo: &UndoBatch) -> Result<UndoReport> {
+        self.send(self.request(routes::UNDO, None).json(undo)).await
+    }
+
+    /// `POST /v1/revert`: reverts what one actor did since a time, skipping what someone else changed later.
+    pub async fn revert(&self, revert: &Revert) -> Result<UndoReport> {
+        self.send(self.request(routes::REVERT, None).json(revert)).await
     }
 }
 

@@ -614,6 +614,35 @@ pub struct CreatedAgent {
     pub secret: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UndoReport {
+    pub batch_id: Uuid,
+    pub reverted: Vec<Reverted>,
+    pub skipped: Vec<Skipped>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Reverted {
+    pub entity: Entity,
+    pub entity_id: String,
+    /// The event that recorded the revert, if anything actually changed.
+    pub event_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Skipped {
+    pub entity: Entity,
+    pub entity_id: String,
+    pub task_id: Option<Uuid>,
+    /// A later event by someone else that would be overwritten, if that is why it was skipped.
+    pub later_event: Option<i64>,
+    /// Why it was skipped.
+    pub reason: String,
+}
+
 /// `POST /v1/tokens`. The secret is shown only here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
 use jiff::Timestamp;
-use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -16,36 +15,7 @@ use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{check_claim_access, check_no_parent_cycle, check_review, load_task, save_task};
-use trailhead_model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct UndoReport {
-    pub batch_id: Uuid,
-    pub reverted: Vec<Reverted>,
-    pub skipped: Vec<Skipped>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Reverted {
-    pub entity: Entity,
-    pub entity_id: String,
-    /// The event that recorded the revert, if anything actually changed.
-    pub event_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Skipped {
-    pub entity: Entity,
-    pub entity_id: String,
-    pub task_id: Option<Uuid>,
-    /// A later event by someone else that would be overwritten, if that is why it was skipped.
-    pub later_event: Option<i64>,
-    /// Why it was skipped.
-    pub reason: String,
-}
+use trailhead_model::{Claim, Comment, Dependency, Entity, Event, Project, Reverted, Skipped, Task, UndoReport};
 
 /// What [`restore`] did.
 enum Restored {

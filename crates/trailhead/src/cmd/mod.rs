@@ -29,13 +29,6 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
-    /// The full JSON with `--json`, else one line made from it.
-    pub(crate) fn show(&self, v: &Value, line: impl Fn(&Value) -> String) {
-        if self.json { print_json(v) } else { println!("{}", line(v)) }
-    }
-}
-
-impl Ctx {
     /// A typed result: the full JSON with `--json`, else one line made from it.
     pub(crate) fn emit<T: serde::Serialize>(&self, v: &T, line: impl Fn(&T) -> String) {
         if self.json { print_json(&to_json(v)) } else { println!("{}", line(v)) }
@@ -54,6 +47,11 @@ pub(crate) fn print_json(v: &Value) {
 /// Query parameters, leaving out the ones not given.
 pub(crate) fn params<const N: usize>(pairs: [(&'static str, Option<String>); N]) -> Vec<(&'static str, String)> {
     pairs.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
+}
+
+/// A `--limit` for the typed client, which takes no negative counts.
+pub(crate) fn count<T: TryFrom<i64>>(limit: Option<i64>) -> Result<Option<T>> {
+    limit.map(|n| T::try_from(n).map_err(|_| anyhow::anyhow!("--limit must be 0 or more, not {n}"))).transpose()
 }
 
 /// Maps user and agent ids to names for display.

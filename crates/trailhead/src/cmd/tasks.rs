@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use trailhead_client::http::{NewTask, ReadyQuery, TaskQuery, TaskUpdate};
 use trailhead_core::{Priority, Status, Task, TaskKey};
 
-use super::{Ctx, names, print_json, to_json};
+use super::{Ctx, count, names, print_json, to_json};
 use crate::cli::{AddArgs, EditArgs};
 use crate::client::api_err;
 use crate::dates::{Field, local_today, parse_day_time};
@@ -93,11 +93,6 @@ pub(crate) async fn ls(
 /// `--status`, comma-separated, blanks dropped.
 fn statuses(s: &str) -> Result<Vec<Status>> {
     s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| p.parse().context("--status")).collect()
-}
-
-/// A `--limit` for the typed client, which takes no negative counts.
-fn count<T: TryFrom<i64>>(limit: Option<i64>) -> Result<Option<T>> {
-    limit.map(|n| T::try_from(n).map_err(|_| anyhow::anyhow!("--limit must be 0 or more, not {n}"))).transpose()
 }
 
 pub(crate) async fn show(cx: &Ctx, task: &str) -> Result<()> {
