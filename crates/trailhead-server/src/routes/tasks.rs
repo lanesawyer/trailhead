@@ -160,10 +160,10 @@ pub(crate) struct CreateTask {
     metadata: Option<Value>,
     source: Option<String>,
     external_id: Option<String>,
-    /// Tasks that must finish before this one.
+    /// Tasks that must finish before this one. Added with the task: if one is refused, no task is created.
     #[serde(default)]
     blocked_by: Vec<String>,
-    /// Tasks this one blocks.
+    /// Tasks this one blocks, added the same way.
     #[serde(default)]
     blocks: Vec<String>,
 }
@@ -193,16 +193,12 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
         metadata: b.metadata,
         source: b.source,
         external_id: b.external_id,
+        blocked_by: b.blocked_by.into_iter().map(Into::into).collect(),
+        blocks: b.blocks.into_iter().map(Into::into).collect(),
     };
     let project = new.project.clone();
     let task = s.store.create_task(&ctx, new).await?;
     let similar = s.store.similar_tasks(&ctx, &project, &task.title, Some(task.id)).await.unwrap_or_default();
-    for blocker in &b.blocked_by {
-        s.store.add_dependency(&ctx, blocker, &task.key).await?;
-    }
-    for blocked in &b.blocks {
-        s.store.add_dependency(&ctx, &task.key, blocked).await?;
-    }
     let version = task.version;
     let mut body = serde_json::to_value(task).expect("tasks serialize");
     if !similar.is_empty() {
@@ -261,6 +257,8 @@ pub(crate) struct UpdateTask {
     #[serde(default, deserialize_with = "nullable")]
     parent: Option<Option<String>>,
     metadata: Option<Value>,
+    /// A handoff comment written with the update. If the update is refused, it isn't written.
+    handoff: Option<String>,
     /// Also accepted in the body for clients that can't set headers.
     version: Option<i64>,
 }
@@ -298,6 +296,7 @@ pub(crate) async fn update_task(
         scheduled_tz: b.scheduled_tz,
         parent: b.parent.map(|p| p.map(Into::into)),
         metadata: b.metadata,
+        handoff: b.handoff,
     };
     let version = if_match(&headers)?.or(b.version);
     let task = s.store.update_task(&ctx, &t, patch, version).await?;

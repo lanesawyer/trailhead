@@ -217,8 +217,9 @@ impl Tracker for RestTracker {
     }
 
     async fn request_review(&self, key: &TaskKey, handoff: &str) -> Result<()> {
-        self.handoff(key, handoff).await?;
-        self.status(key, Status::InReview).await
+        let update =
+            TaskUpdate { status: Some(Status::InReview), handoff: Some(handoff.into()), ..TaskUpdate::default() };
+        self.patch(key, update).await
     }
 
     async fn handoff(&self, key: &TaskKey, body: &str) -> Result<()> {
@@ -263,8 +264,8 @@ impl Tracker for RestTracker {
     }
 
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
-        self.comment(key, CommentKind::Handoff, handoff).await?;
-        self.status(key, Status::Done).await
+        let update = TaskUpdate { status: Some(Status::Done), handoff: Some(handoff.into()), ..TaskUpdate::default() };
+        self.patch(key, update).await
     }
 
     async fn create_task(

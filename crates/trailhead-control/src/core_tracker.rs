@@ -229,9 +229,10 @@ impl CoreTracker {
         }
     }
 
-    async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status) -> Result<()> {
+    /// Moves the task to `to`, with the handoff in the same write, so a refused move leaves none.
+    async fn set_status(&self, task: &TaskKey, to: trailhead_core::Status, handoff: Option<&str>) -> Result<()> {
         let ctx = self.ctx().await?;
-        let patch = TaskPatch { status: Some(to), ..TaskPatch::default() };
+        let patch = TaskPatch { status: Some(to), handoff: handoff.map(str::to_string), ..TaskPatch::default() };
         self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
         Ok(())
     }
@@ -447,8 +448,7 @@ impl Tracker for CoreTracker {
     }
 
     async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()> {
-        self.comment(task, CommentKind::Handoff, handoff).await?;
-        self.set_status(task, trailhead_core::Status::InReview).await
+        self.set_status(task, trailhead_core::Status::InReview, Some(handoff)).await
     }
 
     async fn handoff(&self, task: &TaskKey, body: &str) -> Result<()> {
@@ -470,11 +470,11 @@ impl Tracker for CoreTracker {
     }
 
     async fn unapprove(&self, task: &TaskKey) -> Result<()> {
-        self.set_status(task, trailhead_core::Status::InReview).await
+        self.set_status(task, trailhead_core::Status::InReview, None).await
     }
 
     async fn reopen(&self, task: &TaskKey) -> Result<()> {
-        self.set_status(task, trailhead_core::Status::Open).await
+        self.set_status(task, trailhead_core::Status::Open, None).await
     }
 
     async fn raise_grade(&self, task: &TaskKey, grade: Grade) -> Result<()> {
@@ -507,10 +507,7 @@ impl Tracker for CoreTracker {
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
-        // The status first: core may refuse it (unapproved work, no reviewer's rights), and a caller that tries again
-        // each pass would leave a handoff comment every time (TRAIL-1439).
-        self.set_status(task, trailhead_core::Status::Done).await?;
-        self.comment(task, CommentKind::Handoff, handoff).await
+        self.set_status(task, trailhead_core::Status::Done, Some(handoff)).await
     }
 
     async fn create_task(

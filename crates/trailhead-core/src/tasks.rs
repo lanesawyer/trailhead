@@ -5,19 +5,19 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::claims::{drop_claim, live_claim};
-use crate::comments::list_comments_for;
+use crate::comments::{NewComment, insert_comment, list_comments_for};
 use crate::db::{
     collect, first, fmt_ts, get_enum, get_json, get_opt_date, get_opt_scale, get_opt_ts, get_opt_uuid, get_scale,
     get_ts, get_uuid, json_ids, opt_date_value, opt_ts_value, opt_uuid_value,
 };
-use crate::deps::{unfinished_blockers, visible_key};
+use crate::deps::{link, unfinished_blockers, visible_key};
 use crate::error::{Error, Result};
 use crate::metadata::{merge_patch, validate_path};
 use crate::projects::{check_project_write, find_project, load_project};
 use crate::store::{Ctx, Store, Tx};
 use crate::when;
 use trailhead_model::{
-    Claim, Entity, Grade, MatchField, Priority, SearchHit, SearchMatch, Status, Task, TaskDetail, TaskKey,
+    Claim, CommentKind, Entity, Grade, MatchField, Priority, SearchHit, SearchMatch, Status, Task, TaskDetail, TaskKey,
 };
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
@@ -251,6 +251,20 @@ pub(crate) async fn check_claim_access(tx: &Tx, task: &Task) -> Result<Option<Cl
     Ok(claim)
 }
 
+/// Writes a changed task, releasing the claim when the new status doesn't keep one.
+async fn save_update(tx: &Tx, claim: Option<Claim>, before: &Task, after: Task) -> Result<Task> {
+    let keeps_claim = matches!(after.status, Status::InProgress | Status::NeedsInput);
+    if let Some(c) = claim
+        && !keeps_claim
+    {
+        drop_claim(tx, &c, "claim.released").await?;
+    }
+    let after = save_task(tx, before, after).await?;
+    tx.emit_change(Entity::Task, after.id.to_string(), Some(after.id), "task.updated", Some(before), Some(&after))
+        .await?;
+    Ok(after)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NewTask {
     /// Project key or id.
@@ -276,6 +290,11 @@ pub struct NewTask {
     pub metadata: Option<Value>,
     pub source: Option<String>,
     pub external_id: Option<String>,
+    /// Keys or ids of tasks that must finish before this one. Added with the task, so a refused one (not found, a
+    /// cycle) creates nothing.
+    pub blocked_by: Vec<TaskKey>,
+    /// Keys or ids of tasks this one blocks, added the same way.
+    pub blocks: Vec<TaskKey>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -304,6 +323,8 @@ pub struct TaskPatch {
     pub parent: Option<Option<TaskKey>>,
     /// RFC 7386 merge patch: `null` removes a key.
     pub metadata: Option<Value>,
+    /// A handoff comment written with the update, so a refused status change leaves none behind.
+    pub handoff: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -423,6 +444,8 @@ pub struct SearchFilter {
 }
 
 impl Store {
+    /// Creates a task with its dependencies in one transaction. A task with the same `source` and `external_id`
+    /// comes back as it is, its dependencies untouched.
     pub async fn create_task(&self, ctx: &Ctx, new: NewTask) -> Result<Task> {
         let title = new.title.trim().to_string();
         if title.is_empty() {
@@ -509,11 +532,19 @@ impl Store {
             let task = task_from_row(&rows.next().await?.expect("RETURNING yields a row"))?;
             tx.emit_change(Entity::Task, id.to_string(), Some(id), "task.created", None, Some(&task))
                 .await?;
+            for blocker in &new.blocked_by {
+                link(tx, &find_task(&tx.conn, ctx, blocker, false).await?, &task).await?;
+            }
+            for blocked in &new.blocks {
+                link(tx, &task, &find_task(&tx.conn, ctx, blocked, false).await?).await?;
+            }
             Ok(task)
         })
         .await
     }
 
+    /// Applies a patch under the claim and review rules. A handoff in it is written in the same transaction, after
+    /// the change, and even when nothing else changes.
     pub async fn update_task(
         &self,
         ctx: &Ctx,
@@ -521,6 +552,10 @@ impl Store {
         patch: TaskPatch,
         expected_version: Option<i64>,
     ) -> Result<Task> {
+        let handoff = match patch.handoff.as_deref().map(str::trim) {
+            Some("") => return Err(Error::Invalid("handoff is empty".into())),
+            h => h.map(|h| NewComment::new(CommentKind::Handoff, h)),
+        };
         self.write(ctx, async |tx| {
             let before = find_task(&tx.conn, ctx, task, false).await?;
             if let Some(v) = expected_version
@@ -628,25 +663,10 @@ impl Store {
                     None => None,
                 };
             }
-            if after == before {
-                return Ok(before);
+            let after = if after == before { before } else { save_update(tx, claim, &before, after).await? };
+            if let Some(h) = &handoff {
+                insert_comment(tx, after.id, h, &h.body).await?;
             }
-            let keeps_claim = matches!(after.status, Status::InProgress | Status::NeedsInput);
-            if let Some(c) = claim
-                && !keeps_claim
-            {
-                drop_claim(tx, &c, "claim.released").await?;
-            }
-            let after = save_task(tx, &before, after).await?;
-            tx.emit_change(
-                Entity::Task,
-                after.id.to_string(),
-                Some(after.id),
-                "task.updated",
-                Some(&before),
-                Some(&after),
-            )
-            .await?;
             Ok(after)
         })
         .await

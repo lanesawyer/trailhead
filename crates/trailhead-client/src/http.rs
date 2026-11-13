@@ -169,6 +169,9 @@ pub struct TaskUpdate {
     /// Merged into the task's metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// A handoff comment written with the update, or not at all if the update is refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<String>,
 }
 
 /// `POST /v1/projects`.

@@ -57,7 +57,8 @@ pub(crate) struct CreateAgent {
     limits: TokenLimits,
 }
 
-/// Creates an agent and its first token. The secret is only shown here.
+/// Creates an agent and its first token in one transaction: a refused token creates no agent. The secret is only
+/// shown here.
 #[utoipa::path(
     post, path = "/v1/agents", tag = "agents", request_body = CreateAgent,
     responses(
@@ -67,9 +68,7 @@ pub(crate) struct CreateAgent {
     )
 )]
 pub(crate) async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) -> ApiResult<Response> {
-    let agent = s.store.create_agent(&ctx, &b.name).await?;
-    let (token, secret) =
-        s.store.create_token_with(&ctx, Principal::Agent(agent.id), &agent.name, b.limits.into()).await?;
+    let (agent, token, secret) = s.store.create_agent_with_token(&ctx, &b.name, b.limits.into()).await?;
     Ok(created(json!({ "agent": agent, "token": token, "secret": secret })))
 }
 

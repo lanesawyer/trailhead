@@ -84,6 +84,36 @@ async fn would_cycle(conn: &Connection, blocker: Uuid, blocked: Uuid) -> Result<
     Ok(rows.next().await?.is_some())
 }
 
+/// Makes `blocker` block `blocked` unless it already does, refusing a task blocking itself or a cycle.
+pub(crate) async fn link(tx: &Tx, blocker: &Task, blocked: &Task) -> Result<Dependency> {
+    if blocker.id == blocked.id {
+        return Err(Error::Invalid("a task can't block itself".into()));
+    }
+    if let Some(d) = load_dependency(&tx.conn, blocker.id, blocked.id).await? {
+        return Ok(d);
+    }
+    if would_cycle(&tx.conn, blocker.id, blocked.id).await? {
+        return Err(Error::DependencyCycle);
+    }
+    let dep = Dependency {
+        workspace_id: tx.ctx.workspace_id,
+        blocker_id: blocker.id,
+        blocked_id: blocked.id,
+        created_at: tx.now,
+    };
+    insert_dependency(tx, &dep).await?;
+    tx.emit_change(
+        Entity::Dependency,
+        dep_entity_id(blocker.id, blocked.id),
+        Some(blocked.id),
+        "dependency.added",
+        None,
+        Some(&dep),
+    )
+    .await?;
+    Ok(dep)
+}
+
 impl Store {
     /// `blocker` must finish (done or cancelled) before `blocked` is ready.
     /// Works across projects.
@@ -91,32 +121,7 @@ impl Store {
         self.write(ctx, async |tx| {
             let blocker = find_task(&tx.conn, ctx, blocker, false).await?;
             let blocked = find_task(&tx.conn, ctx, blocked, false).await?;
-            if blocker.id == blocked.id {
-                return Err(Error::Invalid("a task can't block itself".into()));
-            }
-            if let Some(d) = load_dependency(&tx.conn, blocker.id, blocked.id).await? {
-                return Ok(d);
-            }
-            if would_cycle(&tx.conn, blocker.id, blocked.id).await? {
-                return Err(Error::DependencyCycle);
-            }
-            let dep = Dependency {
-                workspace_id: ctx.workspace_id,
-                blocker_id: blocker.id,
-                blocked_id: blocked.id,
-                created_at: tx.now,
-            };
-            insert_dependency(tx, &dep).await?;
-            tx.emit_change(
-                Entity::Dependency,
-                dep_entity_id(blocker.id, blocked.id),
-                Some(blocked.id),
-                "dependency.added",
-                None,
-                Some(&dep),
-            )
-            .await?;
-            Ok(dep)
+            link(tx, &blocker, &blocked).await
         })
         .await
     }
