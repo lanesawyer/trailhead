@@ -1,0 +1,3 @@
+# A ratchet, not a target: just above the longest function today (`Factory::conclude`, 172 lines). Lower it as
+# functions are split; never raise it.
+too-many-lines-threshold = 175

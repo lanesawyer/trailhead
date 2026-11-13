@@ -1,0 +1,3 @@
+# Lookout's own ratchet, since a crate's clippy.toml replaces the workspace's: just above its longest function today
+# (`spawn_block` in inspector/layout.rs, 241 lines). Lower it as functions are split; never raise it.
+too-many-lines-threshold = 245
