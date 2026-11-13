@@ -84,6 +84,8 @@ fn rig_built(
     daemon: impl FnOnce(Arc<ScriptedHarness>, FakeCodeHost, FakeTracker) -> LocalDaemon,
 ) -> Rig {
     let tracker = FakeTracker::new("factory");
+    // As on a factory project: a person has made the control plane's identity the project's reviewer.
+    tracker.set_delegated("factory", true);
     let compute = FakeCompute::new();
     let codehost = FakeCodeHost::new();
     let harness = Arc::new(ScriptedHarness::new());

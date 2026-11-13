@@ -32,13 +32,14 @@ struct State {
     parents: HashMap<TaskKey, TaskKey>,
     priorities: HashMap<TaskKey, Priority>,
     context_fails: bool,
-    /// Agents refused when they approve, as ones a human hasn't listed as the project's reviewers would be.
-    undelegated: HashSet<String>,
+    /// The agents a human has listed as reviewers, which alone may approve work in review or finish it.
+    reviewers: HashSet<String>,
+    /// Who last sent each task to review, and so did the work a reviewer is asked to pass.
+    sent_to_review: HashMap<TaskKey, String>,
     /// Agent and operation to how many of that agent's calls to let through, then how many more fail.
     failing: HashMap<(String, TrackerOp), (usize, usize)>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
-    finish_unapproved_forbidden: bool,
     /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
     sub_agents_fail: bool,
     /// The message `create_sub_agent` is refused with as `Rejected`, a permanent refusal.
@@ -165,12 +166,6 @@ impl FakeTracker {
         self.state.lock().unwrap().reports_fail = fails;
     }
 
-    /// Makes finishing a task still in review refuse with `Forbidden`, as core does when the factory did the work
-    /// and nobody approved it.
-    pub fn forbid_finishing_unapproved(&self, forbids: bool) {
-        self.state.lock().unwrap().finish_unapproved_forbidden = forbids;
-    }
-
     /// Makes `create_sub_agent` fail (or heal) with an error that isn't `Forbidden`, as a whole-tracker outage does.
     pub fn fail_sub_agents(&self, fails: bool) {
         self.state.lock().unwrap().sub_agents_fail = fails;
@@ -221,12 +216,13 @@ impl FakeTracker {
         self.state.lock().unwrap().tasks.get_mut(key).unwrap().grade = None;
     }
 
-    /// Whether this agent may approve tasks, as a delegated reviewer can; every agent may until told otherwise.
+    /// Whether this agent is one of the project's reviewers, as a human makes it: no agent is until a test says so,
+    /// and only a reviewer may approve work in review or finish it (and not work it sent there itself).
     pub fn set_delegated(&self, agent: &str, delegated: bool) {
         let mut s = self.state.lock().unwrap();
         match delegated {
-            true => s.undelegated.remove(agent),
-            false => s.undelegated.insert(agent.to_string()),
+            true => s.reviewers.insert(agent.to_string()),
+            false => s.reviewers.remove(agent),
         };
     }
 
@@ -326,9 +322,40 @@ impl FakeTracker {
     /// A human moves a task, as from the CLI.
     pub fn set_status(&self, key: &TaskKey, status: Status) {
         let mut s = self.state.lock().unwrap();
+        if status == Status::InReview {
+            s.sent_to_review.remove(key);
+        }
         let t = s.tasks.get_mut(key).unwrap();
         t.status = status;
         t.holder = None;
+    }
+
+    /// Core's `check_review` for an agent moving `task` to `approved` (`approving`) or `done`.
+    fn review_gate(&self, task: &TaskKey, approving: bool) -> Result<()> {
+        let s = self.state.lock().unwrap();
+        let Some(t) = s.tasks.get(task) else { return Ok(()) };
+        let me = &self.agent;
+        let in_review = matches!(t.status, Status::InReview | Status::Approved);
+        let review_required = || Error::Conflict("this needs human review before it can be approved or done".into());
+        if s.reviewers.contains(me) {
+            return match (in_review, s.sent_to_review.get(task) == Some(me)) {
+                (false, _) if approving => Err(review_required()),
+                (false, _) => Ok(()),
+                (true, true) => Err(Error::Forbidden(
+                    "a reviewer can't approve or finish work it did; another reviewer or a human has to".into(),
+                )),
+                (true, false) => Ok(()),
+            };
+        }
+        if approving {
+            return Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(me, &task.0, task.project())));
+        }
+        if t.status == Status::Approved {
+            return Err(Error::Forbidden(
+                "this task is approved; only a human or a delegated reviewer can mark it done".into(),
+            ));
+        }
+        if in_review { Err(review_required()) } else { Ok(()) }
     }
 
     fn write<T>(&self, key: &TaskKey, f: impl FnOnce(&mut Task, &str) -> Result<T>) -> Result<T> {
@@ -593,6 +620,7 @@ impl Tracker for FakeTracker {
             t.status = Status::InReview;
             Ok(())
         })?;
+        self.state.lock().unwrap().sent_to_review.insert(task.clone(), self.agent.clone());
         self.comment(task, "handoff", handoff);
         Ok(())
     }
@@ -604,15 +632,9 @@ impl Tracker for FakeTracker {
     }
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {
-        let delegated = !self.state.lock().unwrap().undelegated.contains(&self.agent);
-        self.write(task, |t, me| {
-            if !delegated {
-                return Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(
-                    me,
-                    &t.key.0,
-                    t.key.project(),
-                )));
-            }
+        self.check_live()?;
+        self.review_gate(task, true)?;
+        self.write(task, |t, _| {
             if t.status != Status::InReview {
                 return Err(Error::Conflict(format!("{} isn't in review", t.key.0)));
             }
@@ -696,13 +718,8 @@ impl Tracker for FakeTracker {
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.inject(TrackerOp::Finish)?;
-        if self.state.lock().unwrap().finish_unapproved_forbidden
-            && self.state.lock().unwrap().tasks.get(task).is_some_and(|t| t.status == Status::InReview)
-        {
-            return Err(Error::Forbidden(
-                "a reviewer can't approve or finish work it did; another reviewer or a human has to".into(),
-            ));
-        }
+        self.check_live()?;
+        self.review_gate(task, false)?;
         self.write(task, |t, me| {
             // Like core: review states need no claim, and an unclaimed task can be finished by anyone, but
             // not one another agent holds.
@@ -811,6 +828,33 @@ mod tests {
             assert_eq!(t.status, Status::InProgress, "claiming from {status:?}");
             assert_eq!(t.holder.as_deref(), Some("factory"));
         }
+    }
+
+    #[tokio::test]
+    async fn only_a_reviewer_that_didnt_do_the_work_approves_or_finishes_it_like_core() {
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "t", "d");
+        let worker = tracker.sub_agent("w");
+        tracker.state.lock().unwrap().agents.insert("factory/w".into(), Agent::default());
+        worker.claim(&key).await.unwrap();
+        worker.request_review(&key, "pushed").await.unwrap();
+
+        assert!(matches!(tracker.approve(&key).await, Err(Error::Forbidden(why)) if why.contains("reviewer")));
+        assert!(matches!(tracker.finish(&key, "merged").await, Err(Error::Conflict(_))), "review is required");
+
+        tracker.set_delegated("factory", true);
+        tracker.claim(&key).await.unwrap();
+        tracker.request_review(&key, "pushed again").await.unwrap();
+        for refused in [tracker.approve(&key).await, tracker.finish(&key, "merged").await] {
+            assert!(matches!(refused, Err(Error::Forbidden(why)) if why.contains("work it did")));
+        }
+
+        worker.claim(&key).await.unwrap();
+        worker.request_review(&key, "pushed").await.unwrap();
+        tracker.approve(&key).await.unwrap();
+        assert!(matches!(worker.finish(&key, "merged").await, Err(Error::Forbidden(_))), "approved, and no reviewer");
+        tracker.finish(&key, "merged").await.unwrap();
+        assert_eq!(tracker.task(&key).status, Status::Done);
     }
 
     #[tokio::test]

@@ -1018,13 +1018,19 @@ async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     assert!(!r.factory.awaiting_branch_update(&key));
 }
 
+/// The factory's own identity takes the task and sends it to review again, as it does when a conflict it was to
+/// rework is gone. Core then counts the work in review as the factory's, and won't let it finish the task unapproved.
+async fn sent_to_review_by_the_factory(r: &Rig, key: &trailhead_factory::TaskKey) {
+    r.tracker.claim(key).await.unwrap();
+    r.tracker.request_review(key, "The conflict is gone.").await.unwrap();
+}
+
 #[tokio::test]
 async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    sent_to_review_by_the_factory(&r, &key).await;
     assert_eq!(r.tracker.task(&key).status, Status::InReview);
-    // Core refuses the factory's `done` on work it did that nobody approved.
-    r.tracker.forbid_finishing_unapproved(true);
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
 
@@ -1045,7 +1051,7 @@ async fn a_pr_merged_by_hand_before_approval_is_parked_once_not_retried() {
 async fn a_failed_claim_leaves_a_pr_merged_before_approval_in_review_not_open() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
-    r.tracker.forbid_finishing_unapproved(true);
+    sent_to_review_by_the_factory(&r, &key).await;
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
 
@@ -1194,7 +1200,7 @@ async fn a_host_error_while_looking_after_a_persons_pr_keeps_the_hold() {
 async fn a_park_cut_short_after_a_merge_by_hand_is_finished_not_closed() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
-    r.tracker.forbid_finishing_unapproved(true);
+    sent_to_review_by_the_factory(&r, &key).await;
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
 
