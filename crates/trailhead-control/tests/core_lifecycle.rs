@@ -1534,3 +1534,17 @@ async fn without_reviewer_rights_a_pr_merged_by_hand_in_review_is_parked_once_fo
     assert_eq!(after.iter().filter(|c| c.kind == CommentKind::Handoff).count(), handoffs);
     assert_eq!(r.show(&key).await.status, Status::NeedsInput);
 }
+
+#[tokio::test]
+async fn a_pr_a_person_merges_in_review_finishes_the_task_though_nobody_approved_it() {
+    let r = rig_with(&format!("{CONFIG}\n[merge]\nmode = \"shadow\"\n")).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = merged_by_hand_in_review(&r).await;
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Done, "merging settles it");
+    assert_eq!(task.run.merged.expect("the merge is recorded").by, trailhead_factory::MergedBy::Human);
+    assert_eq!(task.run.unapproved_merge, None);
+}
