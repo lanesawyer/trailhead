@@ -955,6 +955,31 @@ async fn a_warm_sandbox_that_fails_prepare_once_is_released_and_keeps_its_cache(
 }
 
 #[tokio::test]
+async fn a_good_prepare_between_two_failed_ones_resets_the_failure_count() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+
+    let second = r.tracker.add_task("TRAIL", "Fails, then works", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_some(), "kept after the first failure");
+
+    // A good prepare on the same sandbox clears its count.
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap();
+
+    let third = r.tracker.add_task("TRAIL", "Fails again", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&third)).await.unwrap_err();
+    let kept = r.compute.get("trailhead-w1").expect("one failure after a good prepare isn't two in a row");
+    assert_eq!(kept.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+}
+
+#[tokio::test]
 async fn a_warm_sandbox_that_fails_prepare_repeatedly_is_destroyed_and_the_next_task_gets_a_fresh_one() {
     let r = rig();
     let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
