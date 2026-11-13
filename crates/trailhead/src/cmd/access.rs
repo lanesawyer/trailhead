@@ -151,6 +151,10 @@ pub(crate) async fn login(paths: &trailhead_server::Paths, url: &str, json: bool
     }
     let c = Client::connect(url, Some(secret.to_string()), None).await?;
     let me = c.api().me().await.map_err(api_err)?;
+    // An agent token whose agent doesn't resolve must not be saved as the user's.
+    if let (Some(id), None) = (me.agent_id, &me.agent) {
+        bail!("this token belongs to agent {id}, but the server can't look that agent up, so it can't be saved");
+    }
     let agent = me.agent.as_ref().map(|a| a.name.as_str());
     let saved = match agent {
         Some(name) => c.creds.save(Cred::Agent(name), secret)?,
