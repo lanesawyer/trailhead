@@ -23,12 +23,13 @@ use crate::factory::{FactoryLink, FactoryStatus};
 use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::project_form::NewProject;
+use crate::search::Deep;
 use crate::settings::SettingsButton;
 use crate::usage::{UsageMeterEntities, spawn_usage_card, sync_usage};
 use crate::widgets::{
     ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading_action, nav_item,
     nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
-    spawn_search_field_filling, text, token, tool_button,
+    spawn_search_field_filling, text, text_toned, token, tool_button,
 };
 
 /// Where a sidebar entry goes.
@@ -49,6 +50,10 @@ pub struct Sidebar;
 /// The search field, the text entity that holds what is typed.
 #[derive(Component)]
 pub struct SearchBox;
+
+/// The line under the search box that says a deeper search failed.
+#[derive(Component)]
+pub struct SearchNote;
 
 /// The part that scrolls: the places and the projects, between the search box and the footer.
 #[derive(Component)]
@@ -101,7 +106,16 @@ impl Plugin for SidebarUiPlugin {
             .add_observer(on_nav)
             .add_systems(
                 Update,
-                (read_search_box, sync_projects, mark_current, update_chip, gate_new_task, sync_usage).chain(),
+                (
+                    read_search_box,
+                    note_failed_search,
+                    sync_projects,
+                    mark_current,
+                    update_chip,
+                    gate_new_task,
+                    sync_usage,
+                )
+                    .chain(),
             );
     }
 }
@@ -118,6 +132,11 @@ fn spawn_sidebar(mut commands: Commands) {
     let search = spawn_search_field_filling(&mut commands, "Search tasks");
     commands.entity(search.field).insert(SearchBox);
     commands.entity(search.entry).insert(ChildOf(root));
+    commands.queue_spawn_scene(text_toned("", size::SECONDARY, token::STATUS_WARN)).insert((
+        SearchNote,
+        Node { display: Display::None, flex_shrink: 0.0, ..default() },
+        ChildOf(root),
+    ));
     let frame = commands.spawn(scroll_frame()).insert(ChildOf(root)).id();
     let places = commands.spawn((scroll_body(), Places)).insert(ChildOf(frame)).id();
     commands.queue_spawn_scene(scrollbar(places, ControlOrientation::Vertical)).insert(ChildOf(frame));
@@ -174,6 +193,21 @@ fn read_search_box(
     if !filter.query.trim().is_empty() && *view.get() != View::Board {
         next.set(View::Board);
     }
+}
+
+/// Says under the search box that the deeper search failed, so a board showing only key and title matches isn't
+/// taken for the whole answer.
+fn note_failed_search(deep: Option<Res<Deep>>, mut notes: Query<(&mut Node, &mut Text), With<SearchNote>>) {
+    let Some(deep) = deep.filter(|d| d.is_changed()) else { return };
+    let Ok((mut node, text)) = notes.single_mut() else { return };
+    let (display, note) = match &deep.failed {
+        Some(why) => (Display::Flex, format!("Searching descriptions and comments failed ({why}); trying again.")),
+        None => (Display::None, String::new()),
+    };
+    if node.display != display {
+        node.display = display;
+    }
+    set_text(text, &note);
 }
 
 /// One entry per project, by key, following the mirror's projects and their tasks.
@@ -464,10 +498,11 @@ mod tests {
         assert_eq!(world.get::<Node>(frame).unwrap().min_height, px(0), "the frame may shrink so the places scroll");
         // The title and the search box above it, the footer below.
         let top: Vec<Entity> = world.get::<Children>(root).unwrap().iter().collect();
-        assert_eq!(top.len(), 7, "the drag edge, title, New task, search, places, usage, footer");
-        assert!(world.get::<crate::usage::UsageCard>(top[5]).is_some(), "the usage card sits on the footer");
+        assert_eq!(top.len(), 8, "the drag edge, title, New task, search, its note, places, usage, footer");
+        assert!(world.get::<crate::usage::UsageCard>(top[6]).is_some(), "the usage card sits on the footer");
         assert!(world.get::<crate::widgets::SidebarEdge>(top[0]).is_some());
-        assert_eq!(top[4], frame);
+        assert_eq!(world.get::<Node>(top[4]).unwrap().display, Display::None, "no failed search, so no note");
+        assert_eq!(top[5], frame);
         let mut entries = world.query_filtered::<Entity, With<NavTo>>();
         let entries: Vec<Entity> = entries.iter(world).collect();
         assert_eq!(entries.len(), 5, "the places, the Projects heading and the projects");
@@ -484,8 +519,8 @@ mod tests {
         // In a short window the places scroll rather than squash, and the footer keeps its height.
         let mut shrinks = world.query_filtered::<&Node, With<NavItem>>();
         assert!(shrinks.iter(world).all(|n| n.flex_shrink == 0.0));
-        assert_eq!(world.get::<Node>(top[5]).unwrap().flex_shrink, 0.0);
         assert_eq!(world.get::<Node>(top[6]).unwrap().flex_shrink, 0.0);
+        assert_eq!(world.get::<Node>(top[7]).unwrap().flex_shrink, 0.0);
     }
 
     #[test]
@@ -697,6 +732,23 @@ mod tests {
         assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
         let tone = |f| connection_chip(Connection::Live, &status, &f).0;
         assert_ne!(tone(FactoryLink::Running), tone(FactoryLink::Unreachable));
+    }
+
+    #[test]
+    fn a_failed_deeper_search_is_said_under_the_search_box_until_it_answers() {
+        let mut app = app();
+        app.init_resource::<Deep>();
+        app.update();
+        let note = one::<SearchNote>(&mut app);
+        let shown = |app: &App| app.world().get::<Node>(note).unwrap().display != Display::None;
+        assert!(!shown(&app));
+        app.world_mut().resource_mut::<Deep>().failed = Some("the server answered 502".into());
+        app.update();
+        assert!(shown(&app));
+        assert!(app.world().get::<Text>(note).unwrap().0.contains("the server answered 502"));
+        app.world_mut().resource_mut::<Deep>().failed = None;
+        app.update();
+        assert!(!shown(&app));
     }
 
     #[test]

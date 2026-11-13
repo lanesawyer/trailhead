@@ -1,5 +1,7 @@
 //! Deeper search (`GET /v1/search`): after a pause in typing, the board's query is also put to the server, whose
-//! full-text index covers descriptions and comments. Answers for a query that has since changed are dropped.
+//! full-text index covers descriptions and comments. Answers for a query that has since changed are dropped. A search
+//! that fails is said (the sidebar shows [`Deep::failed`] under the search box) and asked again, at longer and longer
+//! intervals, for as long as the query stands.
 //!
 //! The local part of searching (key and title, as you type) is [`crate::board::build`]'s; this adds the tasks that
 //! match only deeper down.
@@ -15,6 +17,11 @@ use crate::net::NetCommand;
 
 /// How long the query has to sit unchanged before it is put to the server.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// How long after a failed search the same query is asked again; doubled with each failure in a row, up to
+/// [`RETRY_AT_MOST`].
+pub const RETRY_AFTER: Duration = Duration::from_secs(2);
+pub const RETRY_AT_MOST: Duration = Duration::from_secs(30);
 
 /// How many hits one search asks for.
 pub const LIMIT: u32 = 100;
@@ -74,6 +81,9 @@ pub struct Deep {
     /// The (trimmed) query `hits` answer; empty when none has.
     pub query: String,
     pub hits: Vec<DeepHit>,
+    /// Why the search for the query as it stands failed, until an ask for it succeeds or the query changes. The
+    /// board is then showing only what matches by key and title.
+    pub failed: Option<String>,
 }
 
 /// The debounce and the ask in flight.
@@ -87,6 +97,18 @@ struct Asking {
     quiet: Duration,
     /// The query as of the last look, to tell when it changes.
     seen: String,
+    /// How many asks for the query as it stands have failed in a row.
+    failures: u32,
+}
+
+impl Asking {
+    /// How long the query must have been left alone, or the last failed ask been over, before the next ask.
+    fn wait(&self) -> Duration {
+        match self.failures {
+            0 => DEBOUNCE,
+            n => RETRY_AFTER.saturating_mul(2u32.saturating_pow(n - 1)).min(RETRY_AT_MOST),
+        }
+    }
 }
 
 impl Deep {
@@ -120,7 +142,7 @@ fn forget_when_empty(filter: Res<Filter>, mut deep: ResMut<Deep>, mut asking: Re
     if !filter.is_changed() || !filter.query.trim().is_empty() {
         return;
     }
-    if !deep.query.is_empty() || !deep.hits.is_empty() {
+    if !deep.query.is_empty() || !deep.hits.is_empty() || deep.failed.is_some() {
         *deep = Deep::default();
     }
     if asking.asked.is_some() {
@@ -133,7 +155,7 @@ fn forget_when_empty(filter: Res<Filter>, mut deep: ResMut<Deep>, mut asking: Re
 fn ask(
     filter: Res<Filter>,
     time: Res<Time>,
-    deep: Res<Deep>,
+    mut deep: ResMut<Deep>,
     mut asking: ResMut<Asking>,
     mut net: MessageWriter<SendNet>,
 ) {
@@ -141,11 +163,15 @@ fn ask(
     if asking.seen != wanted {
         asking.seen = wanted.to_string();
         asking.quiet = Duration::ZERO;
+        asking.failures = 0;
+        if deep.failed.is_some() {
+            deep.failed = None;
+        }
     } else {
         asking.quiet += time.delta();
     }
     let answered = deep.query == wanted || asking.asked.as_ref().is_some_and(|(_, q)| q == wanted);
-    if wanted.is_empty() || answered || asking.quiet < DEBOUNCE {
+    if wanted.is_empty() || answered || asking.quiet < asking.wait() {
         return;
     }
     asking.next += 1;
@@ -158,7 +184,7 @@ fn ask(
 fn take_replies(
     mut replies: MessageReader<SearchReply>,
     filter: Res<Filter>,
-    asking: Res<Asking>,
+    mut asking: ResMut<Asking>,
     mut deep: ResMut<Deep>,
 ) {
     for reply in replies.read() {
@@ -166,9 +192,18 @@ fn take_replies(
         if seq != reply.seq || query != filter.query.trim() {
             continue;
         }
-        if let Ok(hits) = &reply.result {
-            deep.query = query;
-            deep.hits = hits.clone();
+        match &reply.result {
+            Ok(hits) => {
+                asking.failures = 0;
+                *deep = Deep { query, hits: hits.clone(), failed: None };
+            }
+            // Not answered: `ask` puts the query again once the wait for this many failures is over.
+            Err(why) => {
+                asking.asked = None;
+                asking.failures += 1;
+                asking.quiet = Duration::ZERO;
+                deep.failed = Some(why.clone());
+            }
         }
     }
 }
@@ -334,5 +369,38 @@ mod tests {
         app.world_mut().resource_mut::<DeepChanges>().0 = 0;
         pass(&mut app, 10);
         assert_eq!(app.world().resource::<DeepChanges>().0, 0, "idle with the query answered");
+    }
+
+    #[test]
+    fn a_failed_search_is_said_and_asked_again_until_it_answers() {
+        let mut app = app();
+        type_query(&mut app, "migrat");
+        let (seq, _) = pass(&mut app, 6).remove(0);
+        app.world_mut().write_message(SearchReply { seq, result: Err("the server answered 502".into()) });
+        app.update();
+        assert_eq!(app.world().resource::<Deep>().failed.as_deref(), Some("the server answered 502"));
+
+        assert!(pass(&mut app, 10).is_empty(), "not again at once");
+        let again = pass(&mut app, 15);
+        assert_eq!(again, vec![(seq + 1, "migrat".to_string())], "asked again after the wait");
+
+        app.world_mut().write_message(SearchReply { seq: seq + 1, result: Ok(vec![hit("t1", "comment")]) });
+        app.update();
+        let deep = app.world().resource::<Deep>();
+        assert_eq!((deep.failed.as_deref(), deep.for_query("migrat")), (None, &[hit("t1", "comment")][..]));
+        assert!(pass(&mut app, 40).is_empty(), "answered, so not asked again");
+    }
+
+    #[test]
+    fn a_changed_query_forgets_the_failure_and_is_asked_after_the_usual_pause() {
+        let mut app = app();
+        type_query(&mut app, "migrat");
+        let (seq, _) = pass(&mut app, 6).remove(0);
+        app.world_mut().write_message(SearchReply { seq, result: Err("boom".into()) });
+        app.update();
+        type_query(&mut app, "migrate");
+        let asked = pass(&mut app, 5);
+        assert_eq!(asked, vec![(seq + 1, "migrate".to_string())]);
+        assert_eq!(app.world().resource::<Deep>().failed, None);
     }
 }
