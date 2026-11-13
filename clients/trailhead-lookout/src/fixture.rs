@@ -39,7 +39,7 @@ const IDS: [&str; 12] = [
 ];
 
 /// `defaults` with `fields` over them, each id field's short name turned into its UUID.
-fn whole(defaults: Value, fields: Value) -> Value {
+pub fn whole(defaults: Value, fields: Value) -> Value {
     let mut v = defaults;
     let (Some(out), Value::Object(fields)) = (v.as_object_mut(), fields) else { panic!("fixtures are JSON objects") };
     out.extend(fields);

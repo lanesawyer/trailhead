@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use serde_json::Value;
+use trailhead_client::http::Client;
+use trailhead_model::SearchHit;
 
 use crate::board::Filter;
 use crate::connection::{Connection, SendNet};
@@ -45,33 +46,16 @@ pub struct SearchReply {
     pub result: Result<Vec<DeepHit>, String>,
 }
 
-/// Reads a `/v1/search` body: tasks, each with a `match` object.
-pub fn parse_hits(body: &Value) -> Vec<DeepHit> {
-    let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_string();
-    body.as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|hit| {
-            let id = hit["id"].as_str()?.to_string();
-            Some(DeepHit { id, field: text(&hit["match"], "field"), snippet: text(&hit["match"], "snippet") })
-        })
-        .collect()
+impl From<SearchHit> for DeepHit {
+    fn from(hit: SearchHit) -> DeepHit {
+        DeepHit { id: hit.task.id.to_string(), field: hit.matched.field.as_str().into(), snippet: hit.matched.snippet }
+    }
 }
 
 /// Asks the server for `query`'s hits.
-pub async fn fetch(http: &reqwest::Client, base: &str, token: &str, query: &str) -> Result<Vec<DeepHit>, String> {
-    let res = http
-        .get(format!("{base}/v1/search"))
-        .bearer_auth(token)
-        .query(&[("q", query), ("limit", &LIMIT.to_string())])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("the server answered {}", res.status()));
-    }
-    let body: Value = res.json().await.map_err(|e| e.to_string())?;
-    Ok(parse_hits(&body))
+pub async fn fetch(api: &Client, query: &str) -> Result<Vec<DeepHit>, String> {
+    let hits = api.search(query, LIMIT).await.map_err(|e| e.to_string())?;
+    Ok(hits.into_iter().map(DeepHit::from).collect())
 }
 
 /// What the server found, and for which query. It changes only when they do, so a view that rebuilds on its change
@@ -257,14 +241,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_servers_hits() {
-        let body =
-            json!([{"id": "t1", "key": "TRAIL-1", "match": {"field": "comment", "snippet": "a …b"}}, {"nope": 1}]);
-        assert_eq!(
-            parse_hits(&body),
-            vec![DeepHit { id: "t1".into(), field: "comment".into(), snippet: "a …b".into() }]
-        );
-        assert!(parse_hits(&json!({"error": "x"})).is_empty());
+    fn a_hit_keeps_the_tasks_id_and_where_it_matched() {
+        let body = json!({"match": {"field": "comment", "snippet": "a …b", "comment_id": null}});
+        let hit: SearchHit =
+            serde_json::from_value(crate::fixture::whole(crate::fixture::task_json(json!({"id": "t1"})), body))
+                .unwrap();
+        let id = hit.task.id.to_string();
+        assert_eq!(DeepHit::from(hit), DeepHit { id, field: "comment".into(), snippet: "a …b".into() });
     }
 
     #[test]

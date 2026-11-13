@@ -4,7 +4,8 @@
 
 use bevy::prelude::*;
 use serde_json::Value;
-use trailhead_model::{Task, TaskDetail};
+use trailhead_client::http::Client;
+use trailhead_model::{Task, TaskDetail, TaskKey};
 
 use crate::connection::{Connection, SendNet};
 use crate::inspector::{Selection, Subject};
@@ -26,12 +27,8 @@ pub struct DetailReply {
 pub struct Refetch;
 
 /// Asks the server for the task `key` in full.
-pub async fn fetch(http: &reqwest::Client, base: &str, token: &str, key: &str) -> Result<Box<TaskDetail>, String> {
-    let res = http.get(format!("{base}/v1/tasks/{key}")).bearer_auth(token).send().await.map_err(|e| e.to_string())?;
-    if !res.status().is_success() {
-        return Err(format!("the server answered {}", res.status()));
-    }
-    res.json::<TaskDetail>().await.map(Box::new).map_err(|e| format!("couldn't read the task: {e}"))
+pub async fn fetch(api: &Client, key: &str) -> Result<Box<TaskDetail>, String> {
+    api.show_task(&TaskKey(key.to_string())).await.map(Box::new).map_err(|e| e.to_string())
 }
 
 /// The selected task in full. It changes only when the selection or the answer does, so a view that rebuilds on its

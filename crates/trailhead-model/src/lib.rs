@@ -477,6 +477,46 @@ pub struct TaskDetail {
     pub duplicates: Vec<TaskKey>,
 }
 
+/// A search result, as `GET /v1/search` returns it: the task and where the query matched it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub task: Task,
+    #[serde(rename = "match")]
+    pub matched: SearchMatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct SearchMatch {
+    /// The first of title, description or a comment that matched.
+    pub field: MatchField,
+    /// A short excerpt around the match, `…` where text was cut.
+    pub snippet: String,
+    /// The newest matching comment, when `field` is `comment`.
+    pub comment_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MatchField {
+    Title,
+    Description,
+    Comment,
+}
+
+impl MatchField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MatchField::Title => "title",
+            MatchField::Description => "description",
+            MatchField::Comment => "comment",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Dependency {

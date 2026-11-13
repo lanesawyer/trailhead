@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, ProjectStatus, Status, Task, TaskDetail,
-    TaskKey, Verdict,
+    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, ProjectStatus, SearchHit, Status, Task,
+    TaskDetail, TaskKey, Verdict,
 };
 use uuid::Uuid;
 
@@ -57,6 +57,7 @@ pub mod routes {
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
+    pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
@@ -64,7 +65,7 @@ pub mod routes {
     pub const UPDATE_PROJECT: Route = Route::new(Method::PATCH, "/v1/projects/{project}");
 
     /// All of them.
-    pub fn all() -> [Route; 15] {
+    pub fn all() -> [Route; 16] {
         [
             READY,
             LIST_TASKS,
@@ -78,6 +79,7 @@ pub mod routes {
             UNDO,
             REVERT,
             MY_CLAIMS,
+            SEARCH,
             RESOLVE_COMMENT,
             CREATE_PROJECT,
             UPDATE_PROJECT,
@@ -412,6 +414,11 @@ impl Client {
     /// `GET /v1/ready`.
     pub async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
         self.send(self.request(routes::READY, None).query(&[("project", project), ("limit", &limit.to_string())])).await
+    }
+
+    /// `GET /v1/search`: the tasks matching `query` in their title, description or comments, at most `limit`.
+    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
+        self.send(self.request(routes::SEARCH, None).query(&[("q", query), ("limit", &limit.to_string())])).await
     }
 
     /// `GET /v1/tasks`.
