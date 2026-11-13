@@ -12,7 +12,7 @@ use trailhead_factory::messages;
 use trailhead_factory::{ControlState, Labels, Result, Role, RunUpdate, Sandbox, Status, Task, TaskKey, label};
 
 use crate::timing::{unix_now, until};
-use crate::{FACTORY_LABEL, Factory, Outcome, Reconciled, SHUTDOWN_GRACE};
+use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
 
 impl Factory {
     /// The control plane's main loop: reconcile, then keep up to the repo's cap of tasks running, checking for
@@ -196,19 +196,39 @@ impl Factory {
         keys: &mut HashMap<task::Id, TaskKey>,
         reviewing: usize,
     ) -> Result<()> {
+        let busy: HashSet<TaskKey> = keys.values().cloned().collect();
+        for (task, target) in self.startable(&busy, keys.len(), reviewing).await? {
+            let key = task.key.clone();
+            let factory = self.clone();
+            let (target, place) = (target.clone(), self.hold(&key, Role::Worker, target));
+            let handle =
+                running.spawn(async move { factory.run_task_on(&task, &target, place).await }.in_current_span());
+            keys.insert(handle.id(), key);
+        }
+        Ok(())
+    }
+
+    /// The ready tasks to start now, each with the target it goes to: what the sandbox caps, backoffs and a usage
+    /// pause leave of the queue. `busy` are the tasks this process is already on, `running` how many runs and
+    /// reviews that is, and `reviewing` how many of those are reviews, which take no place in the cap.
+    async fn startable(
+        &self,
+        busy: &HashSet<TaskKey>,
+        running: usize,
+        reviewing: usize,
+    ) -> Result<Vec<(Task, &Placed)>> {
         // Before any early return, so the status board's spend keeps moving while the factory is full or paused, and
         // a usage reading another repo's run heard reaches this repo's board.
         self.capped();
         self.status.usage(self.host.usage());
         if self.usage_paused() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        let busy: HashSet<TaskKey> = keys.values().cloned().collect();
-        let mut others = self.held_by_others(&busy).await?;
-        let mut room = self.room(keys.len() - reviewing + others.len()).await?;
-        if room == 0 && self.release_parked_for_waiting(&busy, &others).await > 0 {
-            others = self.held_by_others(&busy).await?;
-            room = self.room(keys.len() - reviewing + others.len()).await?;
+        let mut others = self.held_by_others(busy).await?;
+        let mut room = self.room(running - reviewing + others.len()).await?;
+        if room == 0 && self.release_parked_for_waiting(busy, &others).await > 0 {
+            others = self.held_by_others(busy).await?;
+            room = self.room(running - reviewing + others.len()).await?;
         }
         // Skipped before taking `room`, so a task still backing off at the head of the queue can't keep the ones
         // behind it from starting (TRAIL-756).
@@ -219,17 +239,18 @@ impl Factory {
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
-            if starvation_is_parked_tasks(keys.len(), reviewing, others.len(), self.config.repo.max_sandboxes) {
+            if starvation_is_parked_tasks(running, reviewing, others.len(), self.config.repo.max_sandboxes) {
                 self.warn_if_starved(&others).await;
             } else {
                 // Workers running, or only the host's cap full with other repos' work: forget the last warning, so
                 // the same holders starving the queue again are said so again (TRAIL-629).
                 *self.starved.lock().unwrap() = None;
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         *self.starved.lock().unwrap() = None;
         let mut survey = self.survey().await;
+        let mut placed = Vec::new();
         for task in startable {
             // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
             // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
@@ -243,14 +264,9 @@ impl Factory {
                 tracing::info!("{}", messages::no_target_has_room(&task.key));
                 continue;
             };
-            let key = task.key.clone();
-            let factory = self.clone();
-            let (target, place) = (target.clone(), self.hold(&key, Role::Worker, target));
-            let handle =
-                running.spawn(async move { factory.run_task_on(&task, &target, place).await }.in_current_span());
-            keys.insert(handle.id(), key);
+            placed.push((task, target));
         }
-        Ok(())
+        Ok(placed)
     }
 
     /// The sandboxes in the cap held for tasks this process isn't running: parked tasks', mostly.
@@ -388,6 +404,12 @@ impl Factory {
                 return;
             }
         };
+        // Nothing waits most of the time a parked task holds the last place, and this runs every poll: the holders
+        // aren't looked up for a warning that won't be given.
+        if waiting == 0 {
+            *self.starved.lock().unwrap() = None;
+            return;
+        }
         let mut holders: Vec<(TaskKey, bool)> = Vec::new();
         for key in others.0.iter().flatten() {
             let parked = match self.tracker.show(key).await {
@@ -616,38 +638,10 @@ impl Factory {
         Ok(held.into_iter().filter(|s| !released.contains(&s.name)).collect())
     }
 
-    /// Starts runs for ready tasks, up to the repo's sandbox cap, one after another. For tests and one-shot use.
+    /// Starts the runs the loop would start now, but one after another, each to its end. For tests and one-shot use.
     pub async fn tick(&self) -> Result<Vec<(Task, Outcome)>> {
-        self.capped();
-        self.status.usage(self.host.usage());
-        if self.usage_paused() {
-            return Ok(Vec::new());
-        }
-        let none = HashSet::new();
-        let mut others = self.held_by_others(&none).await?;
-        let mut room = self.room(others.len()).await?;
-        if room == 0 && self.release_parked_for_waiting(&none, &others).await > 0 {
-            others = self.held_by_others(&none).await?;
-            room = self.room(others.len()).await?;
-        }
-        let ready = self.ready_graded().await?;
-        let startable: Vec<Task> = ready.into_iter().filter(|t| self.setback_over(&t.key)).collect();
-        if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
-            return Ok(Vec::new());
-        }
         let mut out = Vec::new();
-        let mut survey = self.survey().await;
-        for task in startable {
-            if !others.contains(&task.key) {
-                if room == 0 {
-                    continue;
-                }
-                room -= 1;
-            }
-            let Some(target) = self.place_task(&mut survey, &task) else {
-                tracing::info!("{}", messages::no_target_has_room(&task.key));
-                continue;
-            };
+        for (task, target) in self.startable(&HashSet::new(), 0, 0).await? {
             let place = self.hold(&task.key, Role::Worker, target);
             let outcome = self.run_task_on(&task, target, place).await?;
             out.push((task, outcome));
