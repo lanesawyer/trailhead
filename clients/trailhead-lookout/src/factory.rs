@@ -96,8 +96,6 @@ pub struct RepoState {
     pub holding: Option<String>,
     /// The subscription's usage windows, as this repo's control plane last heard them.
     pub usage: Vec<UsageWindow>,
-    /// The last event applied, or the snapshot's.
-    pub seq: u64,
 }
 
 /// A line of live activity.
@@ -114,9 +112,13 @@ pub struct FactoryStatus {
     /// What the last status frame said of the server's control plane.
     pub control: Option<FactoryState>,
     pub repos: BTreeMap<String, RepoState>,
-    /// Newest last, at most [`ACTIVITY`] of them.
-    pub activity: VecDeque<Activity>,
 }
+
+/// The live activity lines, newest last, at most [`ACTIVITY`] of them. Apart from [`FactoryStatus`] because a line
+/// arrives with every tool call, and what reads the status (the board, the inspector, the sidebar, the forms)
+/// would all run again for each one.
+#[derive(Resource, Debug, Default)]
+pub struct FactoryActivity(pub VecDeque<Activity>);
 
 impl FactoryStatus {
     /// What the map shows beside the factory: why it isn't running, or that the server can't be reached.
@@ -200,11 +202,18 @@ impl FactoryStatus {
 pub struct FactoryMirror {
     campsites: HashMap<(String, String), (Entity, SandboxStatus)>,
     runs: HashMap<(String, TaskKey), (Entity, RunStatus)>,
+    /// Each repo's last event applied, or its snapshot's.
+    seqs: HashMap<String, u64>,
 }
 
 impl FactoryMirror {
     pub fn campsite(&self, repo: &str, name: &str) -> Option<Entity> {
         self.campsites.get(&(repo.to_string(), name.to_string())).map(|(e, _)| *e)
+    }
+
+    /// The number of the last event applied for `repo`, or its snapshot's.
+    pub fn seq(&self, repo: &str) -> Option<u64> {
+        self.seqs.get(repo).copied()
     }
 
     pub fn run(&self, repo: &str, task: &str) -> Option<Entity> {
@@ -276,6 +285,7 @@ impl FactoryMirror {
         for run in snapshot.runs {
             self.set_run(commands, &repo, run);
         }
+        self.seqs.insert(repo.clone(), snapshot.seq);
         status.repos.insert(
             repo,
             RepoState {
@@ -285,28 +295,37 @@ impl FactoryMirror {
                 holding: snapshot.holding,
                 usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
-                seq: snapshot.seq,
             },
         );
     }
 
-    fn apply_event(&mut self, commands: &mut Commands, status: &mut FactoryStatus, repo: &str, event: Sequenced) {
+    /// `status` is only borrowed mutably by the events that change it, so the rest (every step and tool call)
+    /// don't mark it changed.
+    fn apply_event<'s>(
+        &mut self,
+        commands: &mut Commands,
+        status: &'s mut ResMut<FactoryStatus>,
+        activity: &mut FactoryActivity,
+        repo: &str,
+        event: Sequenced,
+    ) {
         // Without a snapshot there is nothing to apply an event to; the first thing on a connection is one.
-        let Some(state) = status.repos.get_mut(repo) else { return };
-        if event.seq <= state.seq {
+        let Some(seq) = self.seqs.get_mut(repo).filter(|_| status.repos.contains_key(repo)) else { return };
+        if event.seq <= *seq {
             return;
         }
-        state.seq = event.seq;
+        *seq = event.seq;
         // An event from a newer control plane says nothing worth logging; its number still counted above.
         if matches!(event.event, FactoryEvent::Unknown) {
             return;
         }
         let line = event.event.line();
+        let state = |status: &'s mut ResMut<FactoryStatus>| status.repos.get_mut(repo).expect("checked above");
         match event.event {
-            FactoryEvent::Control { control } => state.control = control,
-            FactoryEvent::Error { message } => state.last_error = Some((unix_now(), message)),
-            FactoryEvent::Holding { holding } => state.holding = holding,
-            FactoryEvent::Usage { usage } => state.usage = usage,
+            FactoryEvent::Control { control } => state(status).control = control,
+            FactoryEvent::Error { message } => state(status).last_error = Some((unix_now(), message)),
+            FactoryEvent::Holding { holding } => state(status).holding = holding,
+            FactoryEvent::Usage { usage } => state(status).usage = usage,
             FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
             FactoryEvent::SandboxGone { name } => {
@@ -329,9 +348,9 @@ impl FactoryMirror {
                 r.last_tool = Some(name);
             }),
         }
-        status.activity.push_back(Activity { repo: repo.to_string(), seq: event.seq, line });
-        while status.activity.len() > ACTIVITY {
-            status.activity.pop_front();
+        activity.0.push_back(Activity { repo: repo.to_string(), seq: event.seq, line });
+        while activity.0.len() > ACTIVITY {
+            activity.0.pop_front();
         }
     }
 
@@ -392,20 +411,23 @@ pub fn apply_factory(
     mut items: MessageReader<FactoryItem>,
     mut mirror: ResMut<FactoryMirror>,
     mut status: ResMut<FactoryStatus>,
+    mut activity: ResMut<FactoryActivity>,
     mut commands: Commands,
 ) {
     for FactoryItem(update) in items.read() {
         match update.clone() {
             FactoryUpdate::Snapshot(repos) => {
-                status.link = match status.control.clone() {
+                let link = match status.control.clone() {
                     Some(state) if state != FactoryState::Running => FactoryLink::Control(state),
                     _ => FactoryLink::Running,
                 };
+                set_link(&mut status, link);
                 // A repo the control plane no longer serves goes with it.
                 let gone: Vec<_> =
                     status.repos.keys().filter(|r| !repos.iter().any(|s| &s.repo == *r)).cloned().collect();
                 for repo in gone {
                     status.repos.remove(&repo);
+                    mirror.seqs.remove(&repo);
                     mirror.campsites.retain(|(r, _), (e, _)| {
                         let keep = *r != repo;
                         if !keep {
@@ -425,12 +447,25 @@ pub fn apply_factory(
                     mirror.apply_snapshot(&mut commands, &mut status, repo);
                 }
             }
-            FactoryUpdate::Event { repo, event } => mirror.apply_event(&mut commands, &mut status, &repo, event),
-            FactoryUpdate::Control(state) => status.control = state,
-            FactoryUpdate::Unreachable => status.link = FactoryLink::Unreachable,
-            FactoryUpdate::TooOld(why) => status.link = FactoryLink::TooOld(why),
-            FactoryUpdate::Refused(why) => status.link = FactoryLink::Refused(why),
+            FactoryUpdate::Event { repo, event } => {
+                mirror.apply_event(&mut commands, &mut status, &mut activity, &repo, event);
+            }
+            FactoryUpdate::Control(state) => {
+                if status.control != state {
+                    status.control = state;
+                }
+            }
+            FactoryUpdate::Unreachable => set_link(&mut status, FactoryLink::Unreachable),
+            FactoryUpdate::TooOld(why) => set_link(&mut status, FactoryLink::TooOld(why)),
+            FactoryUpdate::Refused(why) => set_link(&mut status, FactoryLink::Refused(why)),
         }
+    }
+}
+
+/// Sets the link only when it differs, so hearing the same thing again doesn't mark the status changed.
+fn set_link(status: &mut ResMut<FactoryStatus>, link: FactoryLink) {
+    if status.link != link {
+        status.link = link;
     }
 }
 
@@ -441,6 +476,7 @@ impl Plugin for FactoryPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FactoryMirror>()
             .init_resource::<FactoryStatus>()
+            .init_resource::<FactoryActivity>()
             .add_message::<FactoryItem>()
             .add_systems(PreUpdate, apply_factory);
     }
@@ -522,7 +558,7 @@ mod tests {
         send(&mut app, [event(4, changed), event(5, FactoryEvent::SandboxGone { name: "b".into() })]);
         assert_eq!(campsites(&mut app), [("a".into(), SandboxState::Busy)]);
         assert!(app.world().resource::<FactoryMirror>().campsite("o/r", "a").is_some());
-        assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].seq, 5);
+        assert_eq!(app.world().resource::<FactoryMirror>().seq("o/r"), Some(5));
     }
 
     #[test]
@@ -533,7 +569,7 @@ mod tests {
         let stale = FactoryEvent::SandboxChanged { sandbox: sandbox("a", SandboxState::Broken) };
         send(&mut app, [event(3, stale)]);
         assert_eq!(campsites(&mut app), [("a".into(), SandboxState::Idle)]);
-        assert!(app.world().resource::<FactoryStatus>().activity.is_empty());
+        assert!(app.world().resource::<FactoryActivity>().0.is_empty());
     }
 
     #[test]
@@ -541,9 +577,8 @@ mod tests {
         let mut app = app();
         send(&mut app, [snapshot(3, vec![])]);
         send(&mut app, [event(4, FactoryEvent::Unknown)]);
-        let status = app.world().resource::<FactoryStatus>();
-        assert!(status.activity.is_empty());
-        assert_eq!(status.repos["o/r"].seq, 4);
+        assert!(app.world().resource::<FactoryActivity>().0.is_empty());
+        assert_eq!(app.world().resource::<FactoryMirror>().seq("o/r"), Some(4));
     }
 
     #[test]
@@ -560,10 +595,38 @@ mod tests {
         let [run] = &runs(&mut app)[..] else { panic!("one run") };
         assert_eq!((run.phase, run.steps, run.tool_calls), (RunPhase::Agent, 1, 1));
         assert_eq!(run.last_tool.as_deref(), Some("Bash"));
-        assert_eq!(app.world().resource::<FactoryStatus>().activity.len(), 4);
+        assert_eq!(app.world().resource::<FactoryActivity>().0.len(), 4);
 
         send(&mut app, [event(5, FactoryEvent::RunEnded { task })]);
         assert!(runs(&mut app).is_empty());
+    }
+
+    #[derive(Resource, Default)]
+    struct StatusChanges(usize);
+
+    fn count_status_changes(status: Res<FactoryStatus>, mut changes: ResMut<StatusChanges>) {
+        if status.is_changed() {
+            changes.0 += 1;
+        }
+    }
+
+    #[test]
+    fn a_tool_call_or_a_step_leaves_the_status_unchanged_for_what_reads_it() {
+        let mut app = app();
+        app.init_resource::<StatusChanges>().add_systems(Update, count_status_changes);
+        let task = TaskKey("TRAIL-1".into());
+        send(&mut app, [snapshot(0, vec![])]);
+        send(&mut app, [event(1, FactoryEvent::RunPhase { task: task.clone(), phase: RunPhase::Agent })]);
+        let changes = |app: &App| app.world().resource::<StatusChanges>().0;
+        let before = changes(&app);
+
+        let tool = FactoryEvent::ToolCall { task: task.clone(), name: "Bash".into(), detail: None };
+        send(&mut app, [event(2, tool), event(3, FactoryEvent::Step { task, step: 1, spend: Usd::ZERO })]);
+        assert_eq!(changes(&app), before, "only the activity log and the run moved");
+        assert_eq!(app.world().resource::<FactoryActivity>().0.len(), 3);
+
+        send(&mut app, [event(4, FactoryEvent::Holding { holding: Some("a person's PR goes first".into()) })]);
+        assert_eq!(changes(&app), before + 1, "what the merger holds is status");
     }
 
     #[test]
@@ -614,7 +677,6 @@ mod tests {
             holding: None,
             human_grades: Some(human),
             usage: Vec::new(),
-            seq: 1,
         };
         let mut status = FactoryStatus::default();
         status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));

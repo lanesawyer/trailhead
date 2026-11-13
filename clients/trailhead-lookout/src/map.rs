@@ -398,19 +398,14 @@ fn redraw(
     terrain: Query<Entity, With<Terrain>>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
-    mut link: Local<Option<crate::factory::FactoryLink>>,
-    mut held: Local<Vec<String>>,
 ) {
     let (panel, _) = *panel;
     let fresh = *drawn != Some(panel);
-    // The factory's status changes with every tool call; only its link and what the merger is holding are drawn.
-    let holds = factory.holds();
-    if !(fresh || map.is_changed() || *link != Some(factory.link.clone()) || *held != holds) {
+    if !(fresh || map.is_changed() || factory.is_changed()) {
         return;
     }
-    held.clone_from(&holds);
+    let holds = factory.holds();
     *drawn = Some(panel);
-    *link = Some(factory.link.clone());
     for e in &terrain {
         commands.entity(e).despawn();
     }
@@ -811,7 +806,6 @@ mod tests {
             human_grades: None,
             holding: Some("#306 has auto-merge on but CI failed".into()),
             usage: Vec::new(),
-            seq: 1,
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
         let line = "o/r: holding merges: #306 has auto-merge on but CI failed";
