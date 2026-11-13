@@ -1285,13 +1285,12 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     r.codehost.set_conflicts(true);
     r.codehost.set_ci(&mine, CiState::Passed);
     r.codehost.set_ci(&pr, CiState::Passed);
-    let (logs, _capture) = crate::run_loop::Logs::capture();
+    let (logs, _capture) = crate::logs::Logs::capture();
 
     for _ in 0..3 {
         r.factory.reconcile().await.unwrap();
     }
-    let warned =
-        |logs: &crate::run_loop::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+    let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
     assert_eq!(warned(&logs), 1, "{}", logs.text());
     assert!(!r.codehost.prs()[0].merged, "still held");
 }
