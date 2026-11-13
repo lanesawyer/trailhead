@@ -662,12 +662,19 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
             if body.replace(framing).is_some() {
                 return Err("conflicting body framing");
             }
+            // Dropped: the canonical line written below is what the upstream frames the body by.
+            continue;
         }
         if name.starts_with("proxy-") || matches!(name.as_str(), "host" | "connection" | "keep-alive") {
             continue;
         }
         out.push_str(l);
         out.push_str("\r\n");
+    }
+    match &body {
+        Some(Body::Length(n)) => out.push_str(&format!("Content-Length: {n}\r\n")),
+        Some(Body::Chunked(_)) => out.push_str("Transfer-Encoding: chunked\r\n"),
+        None => {}
     }
     out.push_str("\r\n");
     Ok(Request::Plain { host, port, head: out.into_bytes(), body: body.unwrap_or(Body::Length(0)) })
@@ -813,6 +820,20 @@ mod tests {
         };
         assert_eq!(port, 80);
         assert!(String::from_utf8(head).unwrap().starts_with("GET /?q=1 HTTP/1.1\r\n"));
+        // Framing is rewritten from the parsed body, never forwarded as the client wrote it.
+        for (raw, framing) in [
+            ("Content-Length: +5", "Content-Length: 5"),
+            ("Content-Length : 5", "Content-Length: 5"),
+            ("Transfer-Encoding : chunked", "Transfer-Encoding: chunked"),
+            ("transfer-encoding: CHUNKED", "Transfer-Encoding: chunked"),
+        ] {
+            let req = format!("POST http://a/ HTTP/1.1\r\nX: y\r\n{raw}\r\n\r\n");
+            let Ok(Request::Plain { head, .. }) = parse_head(req.as_bytes()) else { panic!("{raw}") };
+            assert_eq!(
+                String::from_utf8(head).unwrap(),
+                format!("POST / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nX: y\r\n{framing}\r\n\r\n")
+            );
+        }
         assert!(parse_head(b"GET /relative HTTP/1.1\r\n\r\n").is_err());
         assert!(parse_head(b"nonsense\r\n\r\n").is_err());
     }
