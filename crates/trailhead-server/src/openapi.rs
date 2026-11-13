@@ -87,36 +87,44 @@ pub struct IfMatch(
 
 /// The error envelope every failed request returns.
 #[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
 pub struct ErrorBody {
-    error: ErrorDetail,
+    pub error: ErrorDetail,
 }
 
-/// `code` is stable; `message` is for people. Some codes carry extra fields.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
+/// `code` is stable; `message` is for people. Some codes carry extra fields, which are absent on the others.
+#[derive(Serialize, ToSchema, Default)]
 pub struct ErrorDetail {
     #[schema(schema_with = error_code)]
-    code: String,
-    message: String,
+    pub code: String,
+    pub message: String,
     /// `blocked_by`: keys of the unfinished blockers.
-    blocked_by: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<Vec<String>>,
     /// `version_conflict`: the task's current version.
-    current_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<i64>,
     /// `claim_held`: who holds the claim.
-    holder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
     /// `claim_held`: the holder's user or agent id.
-    holder_id: Option<String>,
-    /// `claim_held`: when the claim expires.
-    expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holder_id: Option<String>,
+    /// `claim_held`: when the claim expires, or `null` for one that doesn't.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    pub expires_at: Option<Option<String>>,
     /// `rate_limited`: seconds until a request will be accepted (also in `Retry-After`).
-    retry_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
     /// `undo_conflict`: the later event that would be overwritten.
-    later_event: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub later_event: Option<i64>,
     /// `invalid_transition`: the current status.
-    from: Option<trailhead_core::Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<trailhead_core::Status>,
     /// `invalid_transition`: the requested status.
-    to: Option<trailhead_core::Status>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<trailhead_core::Status>,
 }
 
 fn error_code() -> utoipa::openapi::Object {

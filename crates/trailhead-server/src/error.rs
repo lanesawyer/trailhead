@@ -1,6 +1,6 @@
+use crate::openapi::{ErrorBody, ErrorDetail};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
 use trailhead_core::Error;
 
 /// Every error leaves the server as `{"error": {"code", "message", ...}}` with a
@@ -77,27 +77,27 @@ impl IntoResponse for ApiError {
             Error::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Error::Db(_) | Error::Json(_) | Error::Corrupt(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let mut body = json!({ "code": e.code(), "message": e.to_string() });
+        let mut body = ErrorDetail { code: e.code().into(), message: e.to_string(), ..ErrorDetail::default() };
         match e {
-            Error::BlockedBy(keys) => body["blocked_by"] = json!(keys),
-            Error::VersionConflict { current, .. } => body["current_version"] = json!(current),
+            Error::BlockedBy(keys) => body.blocked_by = Some(keys.iter().map(|k| k.0.clone()).collect()),
+            Error::VersionConflict { current, .. } => body.current_version = Some(*current),
             Error::ClaimHeld { holder, holder_id, expires_at } => {
-                body["holder"] = json!(holder);
-                body["holder_id"] = json!(holder_id);
-                body["expires_at"] = json!(expires_at);
+                body.holder = Some(holder.clone());
+                body.holder_id = Some(holder_id.clone());
+                body.expires_at = Some(expires_at.clone());
             }
-            Error::UndoConflict { later_event, .. } => body["later_event"] = json!(later_event),
-            Error::RateLimited { retry_after } => body["retry_after"] = json!(retry_after),
+            Error::UndoConflict { later_event, .. } => body.later_event = Some(*later_event),
+            Error::RateLimited { retry_after } => body.retry_after = Some(*retry_after),
             Error::InvalidTransition { from, to } => {
-                body["from"] = json!(from);
-                body["to"] = json!(to);
+                body.from = Some(*from);
+                body.to = Some(*to);
             }
             _ => {}
         }
         if status == StatusCode::INTERNAL_SERVER_ERROR {
             tracing::error!(error = %e, "internal error");
         }
-        let mut res = (status, axum::Json(json!({ "error": body }))).into_response();
+        let mut res = (status, axum::Json(ErrorBody { error: body })).into_response();
         if let Error::RateLimited { retry_after } = e {
             res.headers_mut().insert(axum::http::header::RETRY_AFTER, (*retry_after).into());
         }
