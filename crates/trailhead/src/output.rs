@@ -44,38 +44,29 @@ fn typed<T: serde::de::DeserializeOwned>(v: &Value, show: impl FnOnce(&T) -> Str
 }
 
 /// "until <when>" for a lease, or "since <when>, no expiry" for a claim that never lapses.
-pub fn lease(claim: &Value) -> String {
-    typed(claim, |c: &Claim| text().lease(c, Timestamp::now()))
-}
-
-pub fn task_line(t: &Value) -> String {
-    typed(t, |t: &Task| text().task_line(t))
+pub fn lease(claim: &Claim) -> String {
+    text().lease(claim, Timestamp::now())
 }
 
 /// [`task_list`], marking the tasks whose key is in `changes_requested`.
-pub fn task_list_flagged(tasks: &Value, empty: &str, changes_requested: &HashSet<String>) {
-    let line = |t: &Value| {
-        let flagged = t["key"].as_str().is_some_and(|k| changes_requested.contains(k));
-        typed(t, |t: &Task| text().task_line_flagged(t, flagged))
-    };
-    match tasks.as_array() {
-        Some(items) if !items.is_empty() => items.iter().for_each(|t| println!("{}", line(t))),
-        _ => println!("{empty}"),
+pub fn task_list_flagged(tasks: &[Task], empty: &str, changes_requested: &HashSet<String>) {
+    if tasks.is_empty() {
+        println!("{empty}");
+    }
+    for t in tasks {
+        println!("{}", text().task_line_flagged(t, changes_requested.contains(t.key.as_str())));
     }
 }
 
-pub fn task_list(tasks: &Value, empty: &str) {
-    match tasks.as_array() {
-        Some(items) if !items.is_empty() => items.iter().for_each(|t| println!("{}", task_line(t))),
-        _ => println!("{empty}"),
-    }
+pub fn task_list(tasks: &[Task], empty: &str) {
+    println!("{}", text().task_list(tasks, empty));
 }
 
 /// A task in full, as `GET /v1/tasks/{key}` returns it. `names` maps user and agent ids to names.
-pub fn detail(v: &Value, names: &HashMap<String, String>) -> String {
+pub fn detail(d: &TaskDetail, names: &HashMap<String, String>) -> String {
     let name =
         |id: Uuid| names.get(&id.to_string()).cloned().unwrap_or_else(|| id.to_string().chars().take(8).collect());
-    typed(v, |d: &TaskDetail| text().detail(d, &name, Timestamp::now()))
+    text().detail(d, &name, Timestamp::now())
 }
 
 pub fn project_line(p: &Value) -> String {

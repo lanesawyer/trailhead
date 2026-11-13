@@ -61,17 +61,6 @@ pub struct ListedTask {
     blocked_by_hidden: Option<u32>,
 }
 
-/// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; the handler adds possible_duplicates to the JSON")]
-pub struct CreatedTask {
-    #[serde(flatten)]
-    task: trailhead_core::Task,
-    /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
-    #[schema(nullable = false)]
-    possible_duplicates: Option<Vec<String>>,
-}
-
 /// Path and header parameters many routes share, declared once for the docs.
 #[derive(IntoParams)]
 #[into_params(parameter_in = Path)]

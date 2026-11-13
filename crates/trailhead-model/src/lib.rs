@@ -556,6 +556,18 @@ string_enum!(Entity "entity" {
     Agent => "agent",
 });
 
+/// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedTask {
+    #[serde(flatten)]
+    pub task: Task,
+    /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub possible_duplicates: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

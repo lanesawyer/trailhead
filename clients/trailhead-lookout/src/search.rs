@@ -54,7 +54,7 @@ impl From<SearchHit> for DeepHit {
 
 /// Asks the server for `query`'s hits.
 pub async fn fetch(api: &Client, query: &str) -> Result<Vec<DeepHit>, String> {
-    let hits = api.search(query, LIMIT).await.map_err(|e| e.to_string())?;
+    let hits = api.search(query, Some(LIMIT)).await.map_err(|e| e.to_string())?;
     Ok(hits.into_iter().map(DeepHit::from).collect())
 }
 

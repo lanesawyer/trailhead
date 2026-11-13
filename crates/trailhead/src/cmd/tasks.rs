@@ -2,28 +2,26 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use trailhead_core::Status;
+use trailhead_client::http::{NewTask, ReadyQuery, TaskQuery, TaskUpdate};
+use trailhead_core::{Priority, Status, Task, TaskKey};
 
-use super::{Ctx, names, params, print_json};
+use super::{Ctx, names, print_json, to_json};
 use crate::cli::{AddArgs, EditArgs};
+use crate::client::api_err;
 use crate::dates::{Field, local_today, parse_day_time};
-use crate::output::{self, s, task_line, task_list, task_list_flagged};
+use crate::output::{self, task_list, task_list_flagged, text};
 
 pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<String>, limit: Option<i64>) -> Result<()> {
-    let q = params([
-        ("project", project.or(cx.project.clone())),
-        ("grade", grade),
-        ("limit", limit.map(|n| n.to_string())),
-    ]);
-    let v = cx.c.get("ready", &q).await?;
+    let q = ReadyQuery { project: project.or(cx.project.clone()), grade, limit: count(limit)? };
+    let tasks = cx.c.api().ready(&q).await.map_err(api_err)?;
     if cx.json {
-        print_json(&v)
+        print_json(&to_json(&tasks))
     } else {
-        task_list(&v, "nothing ready");
+        task_list(&tasks, "nothing ready");
         // People's claims don't expire, so a forgotten one would hide work for good.
-        let held = cx.c.get("claims", &[]).await?;
-        for h in held.as_array().into_iter().flatten() {
-            println!("you hold {} ({}), claimed {}", s(h, "key"), s(h, "status"), output::lease(&h["claim"]));
+        let held = cx.c.api().my_claims().await.map_err(api_err)?;
+        for h in &held {
+            println!("you hold {} ({}), claimed {}", h.key, h.status.as_str(), output::lease(&h.claim));
         }
     }
     Ok(())
@@ -41,37 +39,43 @@ pub(crate) async fn ls(
     title: Option<String>,
     limit: Option<i64>,
 ) -> Result<()> {
-    let status = status.or(all.then(|| "open,in_progress,needs_input,in_review,approved,done,cancelled".into()));
-    let q = params([
-        ("project", project.or(cx.project.clone())),
-        ("status", status),
-        ("parent", parent),
-        ("scheduled_through", today.then(|| local_today().to_string())),
-        ("grade", grade),
-        ("title", title),
-        ("sort", today.then(|| "scheduled".to_string())),
-        ("limit", limit.map(|n| n.to_string())),
-    ]);
-    let v = cx.c.get("tasks", &q).await?;
+    let status = match status {
+        Some(s) => statuses(&s)?,
+        None if all => Status::ALL.to_vec(),
+        None => Vec::new(),
+    };
+    let q = TaskQuery {
+        project: project.or(cx.project.clone()),
+        status,
+        parent: parent.map(TaskKey),
+        title,
+        scheduled_through: today.then(local_today),
+        grade,
+        sort: today.then(|| "scheduled".to_string()),
+        limit: count(limit)?,
+        ..TaskQuery::default()
+    };
+    let tasks: Vec<Task> = cx.c.api().list_tasks(&q).await.map_err(api_err)?.into_iter().map(|t| t.task).collect();
     if cx.json {
-        print_json(&v)
+        print_json(&to_json(&tasks))
     } else {
-        let waiting = if v.as_array().into_iter().flatten().any(|t| t["status"] == "in_review") {
-            let mut q = q;
-            q.retain(|(k, _)| ["project", "parent"].contains(k));
-            q.push(("status", "in_review".into()));
-            q.push(("changes_requested", "true".into()));
+        let waiting = if tasks.iter().any(|t| t.status == Status::InReview) {
             // The server returns at most 100 a page by default, so page until a short one.
             const PAGE: usize = 100;
-            q.push(("limit", PAGE.to_string()));
+            let mut q = TaskQuery {
+                project: q.project,
+                parent: q.parent,
+                status: vec![Status::InReview],
+                changes_requested: Some(true),
+                limit: Some(PAGE),
+                ..TaskQuery::default()
+            };
             let mut keys = HashSet::new();
             let mut offset = 0;
             loop {
-                let mut page_q = q.clone();
-                page_q.push(("offset", offset.to_string()));
-                let page = cx.c.get("tasks", &page_q).await?;
-                let page = page.as_array().map(Vec::as_slice).unwrap_or_default();
-                keys.extend(page.iter().map(|t| s(t, "key").to_string()));
+                q.offset = Some(offset);
+                let page = cx.c.api().list_tasks(&q).await.map_err(api_err)?;
+                keys.extend(page.iter().map(|t| t.task.key.0.clone()));
                 if page.len() < PAGE {
                     break;
                 }
@@ -81,93 +85,108 @@ pub(crate) async fn ls(
         } else {
             Default::default()
         };
-        task_list_flagged(&v, "no tasks", &waiting)
+        task_list_flagged(&tasks, "no tasks", &waiting)
     }
     Ok(())
 }
 
+/// `--status`, comma-separated, blanks dropped.
+fn statuses(s: &str) -> Result<Vec<Status>> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty()).map(|p| p.parse().context("--status")).collect()
+}
+
+/// A `--limit` for the typed client, which takes no negative counts.
+fn count<T: TryFrom<i64>>(limit: Option<i64>) -> Result<Option<T>> {
+    limit.map(|n| T::try_from(n).map_err(|_| anyhow::anyhow!("--limit must be 0 or more, not {n}"))).transpose()
+}
+
 pub(crate) async fn show(cx: &Ctx, task: &str) -> Result<()> {
-    let v = cx.c.get(&format!("tasks/{task}"), &[]).await?;
+    let detail = cx.c.api().show_task(&TaskKey(task.into())).await.map_err(api_err)?;
     if cx.json {
-        print_json(&v);
+        print_json(&to_json(&detail));
         return Ok(());
     }
-    println!("{}", output::detail(&v, &names(&cx.c).await?));
+    println!("{}", output::detail(&detail, &names(&cx.c).await?));
     Ok(())
 }
 
 pub(crate) async fn add(cx: &Ctx, a: AddArgs) -> Result<()> {
     let project =
         a.project.or(cx.project.clone()).context("--project is required (or set project in .trailhead.toml)")?;
-    let mut body = json!({
-        "project": project,
-        "title": a.title,
-        "description": a.description.unwrap_or_default(),
-        "priority": a.priority,
-        "grade": a.grade.as_deref().map(parse_grade).transpose()?.flatten(),
-        "parent": a.parent,
-        "blocked_by": a.after,
-        "blocks": a.blocks,
-    });
+    let mut new = NewTask {
+        project,
+        title: a.title,
+        description: a.description.unwrap_or_default(),
+        priority: a.priority.map(priority).transpose()?,
+        grade: a.grade.as_deref().map(parse_grade).transpose()?.flatten(),
+        parent: a.parent,
+        blocked_by: a.after,
+        blocks: a.blocks,
+        ..NewTask::default()
+    };
     if let Some(due) = a.due {
-        merge(&mut body, parse_day_time(Field::Due, &due)?);
+        let v = parse_day_time(Field::Due, &due)?;
+        (new.due_on, new.due_at, new.due_tz) =
+            (set(&v, "due_on").flatten(), set(&v, "due_at").flatten(), set(&v, "due_tz").flatten());
     }
     if let Some(on) = a.on {
-        merge(&mut body, parse_day_time(Field::Scheduled, &on)?);
+        let v = parse_day_time(Field::Scheduled, &on)?;
+        (new.scheduled_on, new.scheduled_at, new.scheduled_tz) =
+            (set(&v, "scheduled_on").flatten(), set(&v, "scheduled_at").flatten(), set(&v, "scheduled_tz").flatten());
     }
-    let created = cx.c.post("tasks", body).await?;
-    cx.show(&created, task_line);
+    let created = cx.c.api().create_task(&new).await.map_err(api_err)?;
+    cx.emit(&created, |c| text().task_line(&c.task));
     if !cx.json
-        && let Some(keys) = created["possible_duplicates"].as_array()
+        && let Some(keys) = &created.possible_duplicates
     {
-        let keys: Vec<_> = keys.iter().filter_map(Value::as_str).collect();
         println!("possible duplicates: {}", keys.join(", "));
     }
     Ok(())
 }
 
 pub(crate) async fn edit(cx: &Ctx, a: EditArgs) -> Result<()> {
-    let mut body = json!({});
-    if let Some(t) = a.title {
-        body["title"] = json!(t);
-    }
-    if let Some(d) = a.description {
-        body["description"] = json!(d);
-    }
-    if let Some(p) = a.priority {
-        body["priority"] = json!(p);
-    }
-    if let Some(g) = a.grade {
-        body["grade"] = json!(parse_grade(&g)?);
-    }
+    let mut update = TaskUpdate {
+        title: a.title,
+        description: a.description,
+        priority: a.priority.map(priority).transpose()?,
+        grade: a.grade.as_deref().map(parse_grade).transpose()?,
+        status: a.status.as_deref().map(|s| s.parse().context("--status")).transpose()?,
+        parent: a.parent.map(|p| (p != "none").then_some(p)),
+        version: a.version,
+        ..TaskUpdate::default()
+    };
     if let Some(d) = a.due {
         if d == ["none"] {
-            body["due_on"] = Value::Null;
+            update.due_on = Some(None);
         } else {
-            merge(&mut body, parse_day_time(Field::Due, &d)?);
+            let v = parse_day_time(Field::Due, &d)?;
+            (update.due_on, update.due_at, update.due_tz) = (set(&v, "due_on"), set(&v, "due_at"), set(&v, "due_tz"));
         }
     }
     if let Some(d) = a.on {
         if d == ["none"] {
-            body["scheduled_on"] = Value::Null;
+            update.scheduled_on = Some(None);
         } else {
-            merge(&mut body, parse_day_time(Field::Scheduled, &d)?);
+            let v = parse_day_time(Field::Scheduled, &d)?;
+            (update.scheduled_on, update.scheduled_at, update.scheduled_tz) =
+                (set(&v, "scheduled_on"), set(&v, "scheduled_at"), set(&v, "scheduled_tz"));
         }
     }
-    if let Some(st) = a.status {
-        body["status"] = json!(st);
-    }
-    if let Some(p) = a.parent {
-        body["parent"] = if p == "none" { Value::Null } else { json!(p) };
-    }
     if !a.meta.is_empty() {
-        body["metadata"] = meta_patch(&a.meta)?;
+        update.metadata = Some(meta_patch(&a.meta)?);
     }
-    if let Some(v) = a.version {
-        body["version"] = json!(v);
-    }
-    cx.show(&cx.c.patch(&format!("tasks/{}", a.task), body).await?, task_line);
+    let task = cx.c.api().update_task(&TaskKey(a.task), &update).await.map_err(api_err)?;
+    cx.emit(&task, |t| text().task_line(t));
     Ok(())
+}
+
+/// A field [`parse_day_time`] set: unset if it left it out, `Some(None)` if it set it to `null`.
+fn set(fields: &Value, key: &str) -> Option<Option<String>> {
+    fields.get(key).map(|v| v.as_str().map(String::from))
+}
+
+fn priority(n: i64) -> Result<Priority> {
+    Priority::try_from(n).context("--priority")
 }
 
 /// Builds a JSON merge patch from `a.b=value` pairs; a value that isn't JSON is a string,
@@ -329,44 +348,36 @@ fn parse_grade(g: &str) -> Result<Option<trailhead_core::Grade>> {
     trailhead_core::parse_grade(g).context("--grade")
 }
 
-fn merge(body: &mut Value, fields: Value) {
-    if let (Some(body), Value::Object(fields)) = (body.as_object_mut(), fields) {
-        body.extend(fields);
-    }
-}
-
 /// Moves a task to `status`, with a handoff if there is one: both or neither.
 pub(crate) async fn finish(cx: &Ctx, task: &str, status: Status, handoff: Option<String>) -> Result<()> {
-    let mut body = json!({ "status": status });
-    if let Some(m) = handoff {
-        body["handoff"] = json!(m);
-    }
-    cx.show(&cx.c.patch(&format!("tasks/{task}"), body).await?, task_line);
+    let update = TaskUpdate { status: Some(status), handoff, ..TaskUpdate::default() };
+    let task = cx.c.api().update_task(&TaskKey(task.into()), &update).await.map_err(api_err)?;
+    cx.emit(&task, |t| text().task_line(t));
     Ok(())
 }
 
 pub(crate) async fn cancel(cx: &Ctx, task: &str, duplicate_of: Option<String>) -> Result<()> {
-    let mut body = json!({ "status": "cancelled" });
-    if let Some(d) = duplicate_of {
-        body["duplicate_of"] = json!(d);
-    }
-    cx.show(&cx.c.patch(&format!("tasks/{task}"), body).await?, task_line);
+    let update =
+        TaskUpdate { status: Some(Status::Cancelled), duplicate_of: duplicate_of.map(Some), ..TaskUpdate::default() };
+    let task = cx.c.api().update_task(&TaskKey(task.into()), &update).await.map_err(api_err)?;
+    cx.emit(&task, |t| text().task_line(t));
     Ok(())
 }
 
 pub(crate) async fn rm(cx: &Ctx, task: &str) -> Result<()> {
-    cx.show(&cx.c.delete(&format!("tasks/{task}")).await?, |t| format!("deleted {}", s(t, "key")));
+    let task = cx.c.api().delete_task(&TaskKey(task.into())).await.map_err(api_err)?;
+    cx.emit(&task, |t| format!("deleted {}", t.key));
     Ok(())
 }
 
 pub(crate) async fn block(cx: &Ctx, blocker: &str, blocked: &str) -> Result<()> {
-    let v = cx.c.post(&format!("tasks/{blocked}/blockers"), json!({ "blocker": blocker })).await?;
-    cx.show(&v, |_| format!("{blocker} now blocks {blocked}"));
+    let dep = cx.c.api().add_blocker(&TaskKey(blocked.into()), &TaskKey(blocker.into())).await.map_err(api_err)?;
+    cx.emit(&dep, |_| format!("{blocker} now blocks {blocked}"));
     Ok(())
 }
 
 pub(crate) async fn unblock(cx: &Ctx, blocker: &str, blocked: &str) -> Result<()> {
-    cx.c.delete(&format!("tasks/{blocked}/blockers/{blocker}")).await?;
+    cx.c.api().remove_blocker(&TaskKey(blocked.into()), &TaskKey(blocker.into())).await.map_err(api_err)?;
     if !cx.json {
         println!("{blocker} no longer blocks {blocked}");
     }
@@ -374,12 +385,12 @@ pub(crate) async fn unblock(cx: &Ctx, blocker: &str, blocked: &str) -> Result<()
 }
 
 pub(crate) async fn search(cx: &Ctx, query: &[String], limit: Option<i64>) -> Result<()> {
-    let q = params([("q", Some(query.join(" "))), ("limit", limit.map(|n| n.to_string()))]);
-    let v = cx.c.get("search", &q).await?;
+    let hits = cx.c.api().search(&query.join(" "), count(limit)?).await.map_err(api_err)?;
     if cx.json {
-        print_json(&v)
+        print_json(&to_json(&hits))
     } else {
-        task_list(&v, "no matches")
+        let tasks: Vec<Task> = hits.into_iter().map(|h| h.task).collect();
+        task_list(&tasks, "no matches")
     }
     Ok(())
 }

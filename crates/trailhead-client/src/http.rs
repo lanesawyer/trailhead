@@ -14,8 +14,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, ProjectStatus, SearchHit, Status, Task,
-    TaskDetail, TaskKey, Verdict,
+    Claim, ClaimResult, Comment, CommentKind, CreatedTask, Dependency, Grade, HeldClaim, Priority, ProjectStatus,
+    SearchHit, Status, Task, TaskDetail, TaskKey, Verdict,
 };
 use uuid::Uuid;
 
@@ -64,8 +64,12 @@ pub mod routes {
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
     pub const UPDATE_PROJECT: Route = Route::new(Method::PATCH, "/v1/projects/{project}");
 
+    pub const DELETE_TASK: Route = Route::new(Method::DELETE, "/v1/tasks/{task}");
+    pub const ADD_BLOCKER: Route = Route::new(Method::POST, "/v1/tasks/{task}/blockers");
+    pub const REMOVE_BLOCKER: Route = Route::new(Method::DELETE, "/v1/tasks/{task}/blockers/{blocker}");
+
     /// All of them.
-    pub fn all() -> [Route; 16] {
+    pub fn all() -> [Route; 19] {
         [
             READY,
             LIST_TASKS,
@@ -83,6 +87,9 @@ pub mod routes {
             RESOLVE_COMMENT,
             CREATE_PROJECT,
             UPDATE_PROJECT,
+            DELETE_TASK,
+            ADD_BLOCKER,
+            REMOVE_BLOCKER,
         ]
     }
 }
@@ -136,6 +143,13 @@ impl std::error::Error for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A failed response as an [`Error::Api`].
+async fn api_error(res: reqwest::Response) -> Error {
+    let status = res.status().as_u16();
+    let body: Value = res.json().await.unwrap_or(Value::Null);
+    Error::Api { status, error: ApiError::from_body(&body) }
+}
+
 /// `POST /v1/tasks`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct NewTask {
@@ -150,6 +164,30 @@ pub struct NewTask {
     /// Only a human can create a task with a grade.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grade: Option<Grade>,
+    /// The day it's due, `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<String>,
+    /// A time it's due by, RFC 3339 with the offset it was set in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// The IANA zone the deadline was set in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_tz: Option<String>,
+    /// The day to work it, `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_on: Option<String>,
+    /// A time on that day, RFC 3339 with the offset it was planned in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<String>,
+    /// The IANA zone `scheduled_at` was planned in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_tz: Option<String>,
+    /// Keys of the tasks that must finish first, added with the task.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// Keys of the tasks this one blocks, added the same way.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
 }
 
 /// `PATCH /v1/tasks/{task}`: only the fields set are sent.
@@ -172,6 +210,31 @@ pub struct TaskUpdate {
     /// A handoff comment written with the update, or not at all if the update is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// The key of the task this one duplicates, which needs `cancelled`. `Some(None)` clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<Option<String>>,
+    /// `YYYY-MM-DD`. A new day without `due_at` drops the time; `Some(None)` removes the deadline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<Option<String>>,
+    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_tz: Option<Option<String>>,
+    /// `YYYY-MM-DD`. A new day without `scheduled_at` drops the time; `Some(None)` unschedules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_on: Option<Option<String>>,
+    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_tz: Option<Option<String>>,
+    /// The key of the task to move this one under; `Some(None)` makes it top-level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Option<String>>,
+    /// Refuses the update if the task has changed since this version, like `If-Match`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
 }
 
 /// `POST /v1/projects`.
@@ -325,6 +388,14 @@ pub struct TaskQuery {
     /// Adds each task's live claim (`include=claim`).
     pub with_claim: bool,
     pub limit: Option<usize>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    pub grade: Option<String>,
+    /// Only tasks scheduled on or before this day.
+    pub scheduled_through: Option<jiff::civil::Date>,
+    /// `priority` (the server's default), `updated_at` or `created_at`, with `-` for newest first, or `scheduled`.
+    pub sort: Option<String>,
+    /// Skips this many, to page with `limit`.
+    pub offset: Option<usize>,
 }
 
 /// A live claim as `include=claim` lists it. Only what a client reads of it.
@@ -343,6 +414,15 @@ pub struct ListedTask {
     pub task: Task,
     #[serde(default)]
     pub claim: Option<ListedClaim>,
+}
+
+/// `GET /v1/ready` filters. Unset ones aren't sent.
+#[derive(Debug, Default, Clone)]
+pub struct ReadyQuery {
+    pub project: Option<String>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    pub grade: Option<String>,
+    pub limit: Option<usize>,
 }
 
 /// The API, as one token sees it.
@@ -392,16 +472,7 @@ impl Client {
     }
 
     async fn send<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
-        let retry = req.try_clone();
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) => match (&self.reconnect, retry) {
-                (Some(reconnect), Some(retry)) if e.is_connect() && reconnect().await => {
-                    retry.send().await.map_err(Error::Transport)?
-                }
-                _ => return Err(Error::Transport(e)),
-            },
-        };
+        let res = self.dispatch(req).await?;
         let status = res.status();
         if status.is_success() {
             return match res.json().await {
@@ -410,18 +481,39 @@ impl Client {
                 Err(e) => Err(Error::Transport(e)),
             };
         }
-        let body: Value = res.json().await.unwrap_or(Value::Null);
-        Err(Error::Api { status: status.as_u16(), error: ApiError::from_body(&body) })
+        Err(api_error(res).await)
+    }
+
+    /// Sends `req`, reconnecting and retrying once if it couldn't connect, and returns the response whatever its status.
+    async fn dispatch(&self, req: RequestBuilder) -> Result<reqwest::Response> {
+        let retry = req.try_clone();
+        match req.send().await {
+            Ok(res) => Ok(res),
+            Err(e) => match (&self.reconnect, retry) {
+                (Some(reconnect), Some(retry)) if e.is_connect() && reconnect().await => {
+                    retry.send().await.map_err(Error::Transport)
+                }
+                _ => Err(Error::Transport(e)),
+            },
+        }
     }
 
     /// `GET /v1/ready`.
-    pub async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
-        self.send(self.request(routes::READY, None).query(&[("project", project), ("limit", &limit.to_string())])).await
+    pub async fn ready(&self, q: &ReadyQuery) -> Result<Vec<Task>> {
+        let query =
+            [("project", q.project.clone()), ("grade", q.grade.clone()), ("limit", q.limit.map(|l| l.to_string()))];
+        let query: Vec<_> = query.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+        self.send(self.request(routes::READY, None).query(&query)).await
     }
 
-    /// `GET /v1/search`: the tasks matching `query` in their title, description or comments, at most `limit`.
-    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
-        self.send(self.request(routes::SEARCH, None).query(&[("q", query), ("limit", &limit.to_string())])).await
+    /// `GET /v1/search`: the tasks matching `query` in their title, description or comments, at most `limit` (or the
+    /// server's default).
+    pub async fn search(&self, query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>> {
+        let mut req = self.request(routes::SEARCH, None).query(&[("q", query)]);
+        if let Some(l) = limit {
+            req = req.query(&[("limit", l)]);
+        }
+        self.send(req).await
     }
 
     /// `GET /v1/tasks`.
@@ -448,6 +540,18 @@ impl Client {
         if let Some(l) = q.limit {
             query.push(("limit", l.to_string()));
         }
+        if let Some(g) = &q.grade {
+            query.push(("grade", g.clone()));
+        }
+        if let Some(d) = q.scheduled_through {
+            query.push(("scheduled_through", d.to_string()));
+        }
+        if let Some(s) = &q.sort {
+            query.push(("sort", s.clone()));
+        }
+        if let Some(o) = q.offset {
+            query.push(("offset", o.to_string()));
+        }
         self.send(self.request(routes::LIST_TASKS, None).query(&query)).await
     }
 
@@ -456,15 +560,14 @@ impl Client {
         self.send(self.request(routes::SHOW_TASK, Some(key.as_str()))).await
     }
 
-    /// `POST /v1/tasks`; the new task's key.
-    pub async fn create_task(&self, new: &NewTask) -> Result<TaskKey> {
-        let task: Task = self.send(self.request(routes::CREATE_TASK, None).json(new)).await?;
-        Ok(task.key)
+    /// `POST /v1/tasks`.
+    pub async fn create_task(&self, new: &NewTask) -> Result<CreatedTask> {
+        self.send(self.request(routes::CREATE_TASK, None).json(new)).await
     }
 
     /// `PATCH /v1/tasks/{task}`.
-    pub async fn update_task(&self, key: &TaskKey, update: &TaskUpdate) -> Result<()> {
-        self.send::<Value>(self.request(routes::UPDATE_TASK, Some(key.as_str())).json(update)).await.map(drop)
+    pub async fn update_task(&self, key: &TaskKey, update: &TaskUpdate) -> Result<Task> {
+        self.send(self.request(routes::UPDATE_TASK, Some(key.as_str())).json(update)).await
     }
 
     /// `POST /v1/tasks/{task}/comments`.
@@ -499,6 +602,40 @@ impl Client {
     }
 }
 
+impl Client {
+    /// The request for a route whose parameters [`Route::url`] doesn't fill: each `(name, value)` replaces `{name}`.
+    fn request_with(&self, route: Route, params: &[(&str, &str)]) -> RequestBuilder {
+        let path = params
+            .iter()
+            .fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value));
+        self.http.request(route.method.clone(), format!("{}{path}", self.base)).bearer_auth(&self.token)
+    }
+
+    /// Sends `req` to an endpoint that answers `204 No Content`.
+    async fn send_empty(&self, req: RequestBuilder) -> Result<()> {
+        let res = self.dispatch(req).await?;
+        if res.status().is_success() { Ok(()) } else { Err(api_error(res).await) }
+    }
+
+    /// `DELETE /v1/tasks/{task}`: the task, soft-deleted.
+    pub async fn delete_task(&self, key: &TaskKey) -> Result<Task> {
+        self.send(self.request(routes::DELETE_TASK, Some(key.as_str()))).await
+    }
+
+    /// `POST /v1/tasks/{task}/blockers`: `blocker` must finish before `blocked`.
+    pub async fn add_blocker(&self, blocked: &TaskKey, blocker: &TaskKey) -> Result<Dependency> {
+        let req = self.request(routes::ADD_BLOCKER, Some(blocked.as_str()));
+        self.send(req.json(&serde_json::json!({ "blocker": blocker }))).await
+    }
+
+    /// `DELETE /v1/tasks/{task}/blockers/{blocker}`.
+    pub async fn remove_blocker(&self, blocked: &TaskKey, blocker: &TaskKey) -> Result<()> {
+        let req =
+            self.request_with(routes::REMOVE_BLOCKER, &[("task", blocked.as_str()), ("blocker", blocker.as_str())]);
+        self.send_empty(req).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,7 +659,7 @@ mod tests {
         let base = serve_once(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 7\r\nconnection: close\r\n\r\n{\"x\":1}",
         );
-        let err = Client::new(base, "t").ready("TRAIL", 1).await.unwrap_err();
+        let err = Client::new(base, "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
         assert_eq!(err.status(), Some(200));
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
@@ -531,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_connection_stays_transport() {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready("TRAIL", 1).await.unwrap_err();
+        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Transport(_)), "{err}");
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
