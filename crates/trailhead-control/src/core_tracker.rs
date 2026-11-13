@@ -261,6 +261,8 @@ fn map_err(e: trailhead_core::Error) -> Error {
     match e {
         E::NotFound(what) => Error::NotFound(what),
         E::Forbidden(why) => Error::Forbidden(why),
+        // A refusal for want of a reviewer's rights, as the server's 403 for it says: not a state to retry against.
+        e @ E::ReviewRequired => Error::Forbidden(e.to_string()),
         E::Unauthorized => Error::Forbidden("missing or invalid token".into()),
         e @ (E::ClaimHeld { .. }
         | E::NotClaimHolder
@@ -268,7 +270,6 @@ fn map_err(e: trailhead_core::Error) -> Error {
         | E::VersionConflict { .. }
         | E::BlockedBy(_)
         | E::InvalidTransition { .. }
-        | E::ReviewRequired
         | E::AlreadyExists(_)) => Error::Conflict(e.to_string()),
         e => Error::Other(e.to_string()),
     }
@@ -459,13 +460,16 @@ impl Tracker for CoreTracker {
     }
 
     async fn approve(&self, task: &TaskKey) -> Result<()> {
-        match self.set_status(task, trailhead_core::Status::Approved).await {
+        let ctx = self.ctx().await?;
+        let patch = TaskPatch { status: Some(trailhead_core::Status::Approved), ..TaskPatch::default() };
+        match self.store.update_task(&ctx, &task.0, patch, None).await {
+            Ok(_) => Ok(()),
             // Core's `ReviewRequired` here means the caller is neither a human nor a delegated reviewer. A reviewer
             // that did the work in review is refused with its own `Forbidden`, which passes through.
-            Err(Error::Conflict(why)) if why == trailhead_core::Error::ReviewRequired.to_string() => {
+            Err(trailhead_core::Error::ReviewRequired) => {
                 Err(Error::Forbidden(trailhead_factory::messages::not_a_reviewer(&self.agent, &task.0, task.project())))
             }
-            result => result,
+            Err(e) => Err(map_err(e)),
         }
     }
 
@@ -507,8 +511,10 @@ impl Tracker for CoreTracker {
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
-        self.comment(task, CommentKind::Handoff, handoff).await?;
-        self.set_status(task, trailhead_core::Status::Done).await
+        // The status first: core may refuse it (unapproved work, no reviewer's rights), and a caller that tries again
+        // each pass would leave a handoff comment every time (TRAIL-1439).
+        self.set_status(task, trailhead_core::Status::Done).await?;
+        self.comment(task, CommentKind::Handoff, handoff).await
     }
 
     async fn create_task(

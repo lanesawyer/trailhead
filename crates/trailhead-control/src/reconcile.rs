@@ -292,8 +292,9 @@ impl Factory {
             self.tracker.claim(&task.key).await?;
         }
         match self.tracker.finish(&task.key, &handoff).await {
-            // A person merged work nobody approved, and core won't let the factory that did it call it done. The merge
-            // is recorded, so ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
+            // A person merged work nobody approved, and core won't let the factory call it done: it isn't one of the
+            // project's reviewers (TRAIL-1439), or its own identity sent the work to review. The merge is recorded, so
+            // ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
             Err(Error::Forbidden(why)) if merged_by_human => {
                 tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
                 self.tracker

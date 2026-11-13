@@ -1496,3 +1496,41 @@ async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_
     beta.reconcile().await.unwrap();
     assert!(!logs.text().contains(&theirs.0), "{}", logs.text());
 }
+
+/// Runs a grade 3 task to an open PR, leaves it in review unapproved, and merges the PR as a person would.
+async fn merged_by_hand_in_review(r: &Rig) -> TaskKey {
+    let new =
+        NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(3)), ..Default::default() };
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    let pr = task.run.pr.unwrap();
+    let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
+    trailhead_factory::CodeHost::merge(&r.codehost, &pr, &head).await.unwrap();
+    key
+}
+
+#[tokio::test]
+async fn without_reviewer_rights_a_pr_merged_by_hand_in_review_is_parked_once_for_a_person() {
+    let r = rig_with(&format!("{CONFIG}\n[merge]\nmode = \"shadow\"\n")).await;
+    let key = merged_by_hand_in_review(&r).await;
+
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput, "a person is asked to mark it done");
+    assert_eq!(task.run.unapproved_merge, Some(true));
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert_eq!(comments.iter().filter(|c| c.kind == CommentKind::Question).count(), 1);
+    let handoffs = comments.iter().filter(|c| c.kind == CommentKind::Handoff).count();
+
+    for _ in 0..3 {
+        r.factory.reconcile().await.unwrap();
+    }
+    let after = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert_eq!(after.len(), comments.len(), "later passes leave it alone");
+    assert_eq!(after.iter().filter(|c| c.kind == CommentKind::Handoff).count(), handoffs);
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+}
