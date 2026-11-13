@@ -2,11 +2,11 @@ use std::collections::HashSet;
 
 use trailhead_factory::messages::{self, AfterUpdate, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, Result, ReviewBreach, RunUpdate, Sandbox,
-    Status, Task, TaskKey, WorkerBreach, label,
+    ChangesRequested, CiState, Error, Merged, MergedBy, PrRef, PrState, Result, RunUpdate, Sandbox, Status, Task,
+    TaskKey, WorkerBreach, label,
 };
 
-use crate::lifecycle::worker_name;
+use crate::phase::{Parked, Phase, Review, may_be_running, phase, unreviewed};
 use crate::review::{CI_REVIEWER, reviewer_name};
 use crate::run_loop::Due;
 use crate::timing::until;
@@ -118,7 +118,8 @@ impl Factory {
             // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
-                (t.status == Status::NeedsInput || self.unparked_breach(t).is_some())
+                (t.status == Status::NeedsInput
+                    || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none_or(|at| at <= 0)
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
             }) {
@@ -154,14 +155,16 @@ impl Factory {
                 done.unknown.push(task.key.0.clone());
                 continue;
             }
-            if let Some(breach) = self.unparked_breach(task) {
+            // Its sandbox isn't busy with it: a run still going was followed above.
+            let phase = phase(task, self.tracker.agent(), false);
+            if let Phase::WorkerBreachUnparked(breach) = phase {
                 self.finish_worker_breach(task, breach, &live, &mut done).await;
                 continue;
             }
             // A task that is only waiting on its PR costs the code host requests; those wait out a nearly spent limit.
             // Finishing a reviewer-breach park only needs the tracker, so a pause doesn't hold it back.
             if task.status != Status::InProgress
-                && self.unparked_review_breach(task).is_none()
+                && !matches!(phase, Phase::ReviewBreachUnparked { .. })
                 && let Some(resets_at) = self.code_host_pause()
             {
                 tracing::warn!(task = %task.key, resumes_in = ?until(resets_at), "code host rate limit nearly spent; leaving its PR alone");
@@ -176,15 +179,6 @@ impl Factory {
             }
         }
         Ok((done, due))
-    }
-
-    /// A worker's breach the task wasn't parked for yet (TRAIL-451): never marked parked, the task still in progress
-    /// under the sub-agent of the run that breached, and that run its current one.
-    fn unparked_breach<'a>(&self, task: &'a Task) -> Option<&'a WorkerBreach> {
-        let breach = task.run.worker_breach.as_ref().filter(|b| !b.parked)?;
-        let current = task.run.sandbox.as_ref() == Some(&breach.run);
-        let held = task.holder.as_deref() == Some(self.tracker.sub_agent(&breach.run).agent());
-        (task.status == Status::InProgress && current && held).then_some(breach)
     }
 
     /// Finishes the park of a run that breached its budget, cut short by a restart: its sandbox is cut off (again, if
@@ -220,20 +214,13 @@ impl Factory {
         }
     }
 
-    /// The pooled sandbox a task's worker run is on, if the run may still be going there: the task is in progress
-    /// under its run's sub-agent, its report hasn't been handled, and the sandbox is busy with it.
+    /// The pooled sandbox a task's worker run is on, if the run may still be going there: the record says it may
+    /// be, and the sandbox is busy with it.
     fn live_run<'a>(&self, task: &Task, live: &'a [Sandbox]) -> Option<&'a Sandbox> {
-        let name = task.run.sandbox.as_ref()?;
-        let host = task.run.host.as_ref()?;
-        // A run that gave its attempt back (a stop on purpose, a lost daemon) is over, whatever the daemon still has.
-        let current = worker_name(&task.key, task.run.attempt?, task.run.retries.unwrap_or(0));
-        if *name != current
-            || task.run.concluded.as_ref() == Some(name)
-            || task.status != Status::InProgress
-            || task.holder.as_deref() != Some(self.tracker.sub_agent(name).agent())
-        {
+        if !may_be_running(task, self.tracker.agent()) {
             return None;
         }
+        let host = task.run.host.as_ref()?;
         live.iter().find(|s| {
             s.name == *host
                 && s.labels.get(label::STATE).map(String::as_str) == Some(label::BUSY)
@@ -449,177 +436,189 @@ impl Factory {
         }
     }
 
-    /// The reviewer's breach this attempt's park was cut short of, with whether the park has to claim the task first.
-    fn unparked_review_breach<'a>(&self, task: &'a Task) -> Option<(&'a ReviewBreach, bool)> {
-        let breach =
-            task.run.review_breach.as_ref().filter(|b| !b.parked && b.attempt == task.run.attempt.unwrap_or(1))?;
-        let mine = task.holder.as_deref() == Some(self.tracker.agent());
-        match task.status {
-            Status::Open => Some((breach, true)),
-            Status::InProgress if mine => Some((breach, false)),
-            _ => None,
+    /// Puts one in-flight task right, by its phase; true when its PR is due a review. For a task whose run isn't
+    /// going: one that is, the caller follows.
+    pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        match phase(task, self.tracker.agent(), false) {
+            Phase::Untouched | Phase::Closed => Ok(false),
+            // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
+            Phase::ReviewBreachUnparked { breach, claim } => {
+                tracing::warn!(task = %task.key, "finishing the park for the reviewer's breach");
+                self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
+                done.breached.push(task.key.0.clone());
+                Ok(false)
+            }
+            // The worker's breach is finished by the caller, which has the sandboxes; from anywhere else the task is
+            // put back like any run that stopped.
+            Phase::Running | Phase::WorkerBreachUnparked(_) | Phase::Interrupted => {
+                self.requeue_interrupted(task, done).await?;
+                Ok(false)
+            }
+            Phase::Requeued => {
+                self.settle_requeued(task, done).await?;
+                Ok(false)
+            }
+            Phase::Parked(parked) => {
+                self.reconcile_parked(task, parked, done).await?;
+                Ok(false)
+            }
+            Phase::Approved => {
+                self.reconcile_approved(task, done).await?;
+                Ok(false)
+            }
+            Phase::InReview(review) => self.reconcile_in_review(task, review, done).await,
         }
     }
 
-    /// Puts one in-flight task right; true when its PR is due a review.
-    pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
-        let Some(name) = &task.run.sandbox else { return Ok(false) };
-        // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
-        if let Some((breach, claim)) = self.unparked_review_breach(task) {
-            tracing::warn!(task = %task.key, "finishing the park for the reviewer's breach");
-            self.park_review_breach(&task.key, breach.clone(), claim, task.run.retries.unwrap_or(0)).await?;
-            done.breached.push(task.key.0.clone());
+    async fn requeue_interrupted(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
+        let Some(name) = &task.run.sandbox else { return Ok(()) };
+        let sub = self.tracker.sub_agent(name);
+        if task.holder.as_deref() == Some(sub.agent()) {
+            sub.release(&task.key).await?;
+        }
+        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
+        }
+        done.requeued.push(task.key.0.clone());
+        Ok(())
+    }
+
+    /// A PR merged or closed while the task waited for its rework is settled rather than reworked on a dead branch.
+    async fn settle_requeued(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
+        if matches!(self.pr_settled(task, done).await?, PrSettle::Settled) {
+            return Ok(());
+        }
+        if let Some(name) = &task.run.sandbox
+            && let Err(e) = self.tracker.revoke_sub_agent(name).await
+        {
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
+        }
+        Ok(())
+    }
+
+    /// Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge by
+    /// anyone finishes the task all the same, unless it is already recorded (merged by hand before approval, parked
+    /// for a person to mark it done).
+    async fn reconcile_parked(&self, task: &Task, parked: Parked<'_>, done: &mut Reconciled) -> Result<()> {
+        // One already parked for a merge by hand waits for a person to finish it: don't ask again. A `merged`
+        // record without the park is a close that failed before it, so it is retried (TRAIL-729).
+        if !parked.awaiting_done
+            && let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
+            && let PrState::Merged { commit } = codehost.pr_state(pr).await?
+        {
+            self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
+            done.merged.push(task.key.0.clone());
+        }
+        // A park whose settling write was lost: the request still stands at the limit it parked on. Finished
+        // here, before a person can answer, so that answering without a push doesn't have it reworked again.
+        if let Some(c) = parked.unsettled {
+            let (count, max) = if c.conflict {
+                (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
+            } else {
+                (task.run.review_rounds, self.config.repo.max_review_rounds)
+            };
+            if count.is_some_and(|n| n >= max) {
+                tracing::warn!(task = %task.key, "finishing the park's settling of its changes request");
+                self.settle_parked_request(task, c, task.run.retries.unwrap_or(0)).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_approved(&self, task: &Task, done: &mut Reconciled) -> Result<()> {
+        let PrSettle::Open { mergeable, .. } = self.pr_settled(task, done).await? else { return Ok(()) };
+        // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which would
+        // otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that doesn't auto-merge).
+        if let Some(pr) = &task.run.pr
+            && mergeable == Some(false)
+        {
+            self.tracker.unapprove(&task.key).await?;
+            let attempt = task.run.attempt.unwrap_or(1);
+            self.rework_conflict(task, pr, attempt).await?;
+            done.conflicted.push(task.key.0.clone());
+            return Ok(());
+        }
+        self.evaluate_gates(&task.key).await
+    }
+
+    /// True when the PR is due a review.
+    async fn reconcile_in_review(&self, task: &Task, review: Review<'_>, done: &mut Reconciled) -> Result<bool> {
+        let PrSettle::Open { mergeable, head } = self.pr_settled(task, done).await? else { return Ok(false) };
+        let attempt = task.run.attempt.unwrap_or(1);
+        let mut standing = match review {
+            Review::ReworkWaiting { request } => request,
+            Review::RequestCutShort(request) => Some(request),
+            Review::Unreviewed | Review::AwaitingGates => None,
+        };
+        // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that has
+        // moved since was pushed to by a person (TRAIL-338). It's only fetched for a request that stands: after a
+        // normal rework the old one lingers until the next review, and asking the host about it each reconcile would
+        // be wasted.
+        if let (Some(c), Some(pr), Some(codehost)) = (standing, &task.run.pr, &self.codehost)
+            && let Some(recorded) = &c.head
+        {
+            let current = match &head {
+                Some(head) => head.clone(),
+                None => codehost.head(pr).await?,
+            };
+            if current != *recorded {
+                standing = None;
+            }
+        }
+        if matches!(review, Review::ReworkWaiting { .. }) {
+            // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request. One
+            // that no longer stands (the PR was pushed to, or a person settled the park) is answered here, and the
+            // PR is looked at as it is.
+            let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
+            let stale =
+                recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some()) && standing.is_none();
+            let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
+            self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
+        }
+        // Changes were requested on this attempt but never recorded as a review (the request was cut short): finish it.
+        if let Some(requested) = standing {
+            let round = if requested.conflict {
+                task.run.conflict_reworks.unwrap_or(1)
+            } else {
+                task.run.review_rounds.unwrap_or(1)
+            };
+            self.request_rework(task, requested.clone(), round, task.run.retries.unwrap_or(0)).await?;
+            done.reworked.push(task.key.0.clone());
             return Ok(false);
         }
-        match task.status {
-            Status::InProgress => {
-                let sub = self.tracker.sub_agent(name);
-                if task.holder.as_deref() == Some(sub.agent()) {
-                    sub.release(&task.key).await?;
-                }
-                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
-                }
-                done.requeued.push(task.key.0.clone());
-            }
-            Status::Open => {
-                // A PR merged or closed while the task waited for its rework: settle it rather than rework a dead branch.
-                if matches!(self.pr_settled(task, done).await?, PrSettle::Settled) {
-                    return Ok(false);
-                }
-                if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-                    tracing::warn!(task = %task.key, error = %e, "couldn't revoke the sub-agent; its token will expire");
-                }
-            }
-            // Parked for a human, so a PR still open or closed stays as it is (a closed one was the question). A merge
-            // by anyone finishes the task all the same, unless it is already recorded (merged by hand before approval,
-            // parked for a person to mark it done): that one is skipped below.
-            Status::NeedsInput => {
-                // One already parked for a merge by hand waits for a person to finish it: don't ask again. A `merged`
-                // record without the park is a close that failed before it, so it is retried (TRAIL-729).
-                if task.run.unapproved_merge != Some(true)
-                    && let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost)
-                    && let PrState::Merged { commit } = codehost.pr_state(pr).await?
-                {
-                    self.close_merged(task, Merged { by: MergedBy::Human, pr: pr.clone(), commit }).await?;
-                    done.merged.push(task.key.0.clone());
-                }
-                // A park whose settling write was lost: the request still stands at the limit it parked on. Finished
-                // here, before a person can answer, so that answering without a push doesn't have it reworked again.
-                if let Some(c) = task.run.changes_requested.as_ref().filter(|c| !c.settled) {
-                    let (count, max) = if c.conflict {
-                        (task.run.conflict_reworks, self.config.repo.max_conflict_reworks)
-                    } else {
-                        (task.run.review_rounds, self.config.repo.max_review_rounds)
-                    };
-                    if count.is_some_and(|n| n >= max) {
-                        tracing::warn!(task = %task.key, "finishing the park's settling of its changes request");
-                        self.settle_parked_request(task, c, task.run.retries.unwrap_or(0)).await;
-                    }
-                }
-            }
-            Status::Approved => {
-                let PrSettle::Open { mergeable, .. } = self.pr_settled(task, done).await? else { return Ok(false) };
-                // Main may have moved since the approval: a PR that now conflicts goes back for a rework, which
-                // would otherwise wait for a merge attempt (and never come, in shadow mode or at a grade that
-                // doesn't auto-merge).
-                if let Some(pr) = &task.run.pr
-                    && mergeable == Some(false)
-                {
-                    self.tracker.unapprove(&task.key).await?;
-                    let attempt = task.run.attempt.unwrap_or(1);
-                    self.rework_conflict(task, pr, attempt).await?;
-                    done.conflicted.push(task.key.0.clone());
-                    return Ok(false);
-                }
-                self.evaluate_gates(&task.key).await?;
-            }
-            Status::InReview => {
-                let PrSettle::Open { mergeable, head } = self.pr_settled(task, done).await? else { return Ok(false) };
-                let attempt = task.run.attempt.unwrap_or(1);
-                // Changes were requested on this attempt but never recorded as a review (the request was cut short):
-                // finish it.
-                // A park resets the counts to zero, so a request still recorded beside zero counts was parked on and
-                // then settled by a person: it's stale, and the PR is looked at as it is now (TRAIL-304).
-                let parked = |c: &ChangesRequested| {
-                    let count = if c.conflict { task.run.conflict_reworks } else { task.run.review_rounds };
-                    count == Some(0)
-                };
-                // The head recorded with the request is sturdier than the counts, whose reset can be lost: a PR that
-                // has moved since was pushed to by a person (TRAIL-338).
-                // It's only fetched for a request that applies to this attempt: after a normal rework the old one
-                // lingers until the next review, and asking the host about it each reconcile would be wasted.
-                let mut applicable = task.run.pending_changes().filter(|c| c.attempt == attempt && !parked(c));
-                if let (Some(c), Some(pr), Some(codehost)) = (applicable, &task.run.pr, &self.codehost)
-                    && let Some(recorded) = &c.head
-                {
-                    let current = match &head {
-                        Some(head) => head.clone(),
-                        None => codehost.head(pr).await?,
-                    };
-                    if current != *recorded {
-                        applicable = None;
-                    }
-                }
-                if task.changes_requested {
-                    // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request.
-                    // One that no longer applies (the PR was pushed to, or a person settled the park) is answered
-                    // here, and the PR is looked at as it stands.
-                    let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
-                    let stale = recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some())
-                        && applicable.is_none();
-                    let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
-                    self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
-                }
-                if let Some(requested) = applicable {
-                    let round = if requested.conflict {
-                        task.run.conflict_reworks.unwrap_or(1)
-                    } else {
-                        task.run.review_rounds.unwrap_or(1)
-                    };
-                    self.request_rework(task, requested.clone(), round, task.run.retries.unwrap_or(0)).await?;
-                    done.reworked.push(task.key.0.clone());
-                    return Ok(false);
-                }
-                if let Some(pr) = &task.run.pr
-                    // Not yet worked out by the host (`None`): the next reconcile asks again.
-                    && mergeable == Some(false)
-                {
-                    self.rework_conflict(task, pr, attempt).await?;
-                    done.conflicted.push(task.key.0.clone());
-                    return Ok(false);
-                }
-                // A push from outside the factory leaves the head differing from the one last reviewed; that wants a
-                // review like a rework does, or the merger's agent_review gate would wait on it forever (TRAIL-298).
-                let mut stale = task.run.reviewed != Some(attempt);
-                if let (Some(pr), Some(codehost), Some(reviewed)) =
-                    (&task.run.pr, &self.codehost, &task.run.reviewed_head)
-                    && !stale
-                    // The head the host showed above is the one reviewed: nothing to ask.
-                    && head.as_ref() != Some(reviewed)
-                {
-                    stale = !codehost.carries_verdict(pr, reviewed).await?;
-                }
-                let owed = task.run.pr.is_some() && stale;
-                let due = owed && self.setback_over(&task.key);
-                // A review backed off after an infrastructure failure is still owed: approving now could pass a grade
-                // whose gate doesn't ask for agent_review, and nothing would schedule the review afterwards (TRAIL-263).
-                if !owed {
-                    // CI may have finished, or Lane approved, since the gates were last looked at.
-                    self.evaluate_gates(&task.key).await?;
-                } else if self.rework_if_ci_failed(&task.key).await? {
-                    // A failed CI is reworked without waiting for the review, which would only look at a head that
-                    // is about to change.
-                    return Ok(false);
-                } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
-                    // The rework has pushed and its head awaits review: say so, without approving.
-                    self.say_gates(&task.key, false).await?;
-                }
-                return Ok(due);
-            }
-            _ => {}
+        if let Some(pr) = &task.run.pr
+            // Not yet worked out by the host (`None`): the next reconcile asks again.
+            && mergeable == Some(false)
+        {
+            self.rework_conflict(task, pr, attempt).await?;
+            done.conflicted.push(task.key.0.clone());
+            return Ok(false);
         }
-        Ok(false)
+        // A push from outside the factory leaves the head differing from the one last reviewed; that wants a review
+        // like a rework does, or the merger's agent_review gate would wait on it forever (TRAIL-298).
+        let mut owed = unreviewed(task);
+        if let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head)
+            && !owed
+            // The head the host showed above is the one reviewed: nothing to ask.
+            && head.as_ref() != Some(reviewed)
+        {
+            owed = !codehost.carries_verdict(pr, reviewed).await?;
+        }
+        let due = owed && self.setback_over(&task.key);
+        // A review backed off after an infrastructure failure is still owed: approving now could pass a grade whose
+        // gate doesn't ask for agent_review, and nothing would schedule the review afterwards (TRAIL-263).
+        if !owed {
+            // CI may have finished, or Lane approved, since the gates were last looked at.
+            self.evaluate_gates(&task.key).await?;
+        } else if self.rework_if_ci_failed(&task.key).await? {
+            // A failed CI is reworked without waiting for the review, which would only look at a head that is about
+            // to change.
+            return Ok(false);
+        } else if task.run.pending_changes().is_some_and(|c| !c.conflict) {
+            // The rework has pushed and its head awaits review: say so, without approving.
+            self.say_gates(&task.key, false).await?;
+        }
+        Ok(due)
     }
 }
 
