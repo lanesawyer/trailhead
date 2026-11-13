@@ -115,6 +115,25 @@ async fn expired_claims_free_the_task() {
 }
 
 #[tokio::test]
+async fn ready_wakes_event_streams_only_when_it_frees_an_expired_claim() {
+    let env = Env::new().await;
+    let t = env.task("lease").await;
+    let a = env.agent("a").await;
+    env.store.claim(&a, &t.key, Some(60)).await.unwrap();
+    let changes = env.store.changes();
+    let seen = *changes.borrow();
+
+    assert!(env.ready_keys().await.is_empty());
+    assert_eq!(*changes.borrow(), seen, "a ready that changed nothing is only a read");
+
+    env.advance(90);
+    assert_eq!(env.ready_keys().await, vec![t.key.clone()]);
+    assert_eq!(*changes.borrow(), seen + 1, "the expiry is an event");
+    assert_eq!(env.ready_keys().await, vec![t.key.clone()]);
+    assert_eq!(*changes.borrow(), seen + 1);
+}
+
+#[tokio::test]
 async fn claim_ttl_comes_from_project_then_workspace() {
     let env = Env::new().await;
     let t = env.task("ttl").await;
