@@ -363,7 +363,13 @@ impl Factory {
         // A review's round goes in the same write, so a stop between the two can't count it twice (TRAIL-322).
         let update = RunPatch {
             review_rounds: Patch::from(kind.is_review().then_some(round)),
-            reviewed: Patch::Set(requested.attempt),
+            // Only a review marks the attempt reviewed. A conflict or failed CI is the factory's own request, and one
+            // dropped without a rework (the conflict cleared) must leave a review still owed as owed (TRAIL-1470).
+            reviewed: Patch::from(kind.is_review().then_some(requested.attempt)),
+            // A review's request is on the head it read. A request reconcile took up from a verdict alone (the
+            // review's own record was cut short, or a person left it) has no other mark of that head, and without
+            // one a push since is never seen as owed a review (TRAIL-1470).
+            reviewed_head: Patch::from(requested.head.clone().filter(|_| kind.is_review())),
             attempt_base: Patch::Set(requested.attempt),
             changes_requested: Patch::Set(requested.clone()),
             ..RunPatch::default()

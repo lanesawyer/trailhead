@@ -766,6 +766,64 @@ async fn a_conflict_that_clears_on_a_task_a_person_reopened_is_dropped_and_the_t
     assert_eq!(r.show(&key).await.run.attempt, Some(2));
 }
 
+/// A task whose worker pushed a PR and whose review failed before it gave a verdict: in review, with the review owed.
+async fn awaiting_review(r: &Rig, title: &str) -> (TaskKey, trailhead_factory::PrRef) {
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let key = r.task(title).await;
+    // No reviewer script: the review ends without a verdict and backs off like an infrastructure failure.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::AwaitingReview { .. }), "{:?}", ran[0].1);
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.run.reviewed), (Status::InReview, None));
+    (key, task.run.pr.unwrap())
+}
+
+/// Only a review marks an attempt reviewed. A conflict request on a PR whose review is still owed, dropped because
+/// the conflict cleared, must leave the review owed, or the merger waits on it forever (TRAIL-1470).
+#[tokio::test(start_paused = true)]
+async fn a_conflict_request_that_clears_leaves_an_owed_review_owed() {
+    let r = rig().await;
+    let (key, pr) = awaiting_review(&r, "Add a greeting").await;
+
+    r.codehost.set_mergeable(&pr, Some(false));
+    assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+    r.codehost.set_mergeable(&pr, Some(true));
+    // Past the failed review's backoff, which holds the task's next run back too.
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Settled { .. }), "{:?}", ran[0].1);
+    assert_eq!(r.show(&key).await.run.reviewed, None, "no review has read the PR");
+
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.reconcile().await.unwrap().reviewed, std::slice::from_ref(&key.0));
+    assert_eq!(r.show(&key).await.run.reviewed, Some(1));
+}
+
+/// A request reconcile takes up from a verdict alone records the head it was on as the reviewed head. Without it, a
+/// person's push afterwards answers the request and nothing ever sees the new head as owed a review (TRAIL-1470).
+#[tokio::test(start_paused = true)]
+async fn a_verdict_reconcile_takes_up_records_its_head_so_a_push_since_is_reviewed() {
+    let r = rig().await;
+    let (key, pr) = awaiting_review(&r, "Add a greeting").await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+
+    reviewer_requests_changes(&r, &key, "Add a test.").await;
+    assert_eq!(r.factory.reconcile().await.unwrap().reworked, std::slice::from_ref(&key.0));
+    assert_eq!(r.show(&key).await.run.reviewed_head, Some(head));
+
+    // A person pushes the fix themselves: the request no longer applies, and the new head wants a review.
+    r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert!(!r.show(&key).await.changes_requested, "the stale request was answered");
+    tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert_eq!(r.factory.reconcile().await.unwrap().reviewed, std::slice::from_ref(&key.0));
+    let task = r.show(&key).await;
+    assert_eq!(task.run.reviewed_head, Some(CodeHost::head(&r.codehost, &pr).await.unwrap()));
+}
+
 /// TRAIL-1418: a settled conflict request isn't a live conflict rework, so a reopened task isn't dropped again
 /// by the check that sends a rework back to review when the host reports no conflict.
 #[tokio::test]
