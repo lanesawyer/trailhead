@@ -178,7 +178,7 @@ pub(crate) fn check_grade(ctx: &Ctx, before: Option<Grade>, after: Option<Grade>
 
 /// Agents may only finish work through review when the project requires it, and
 /// only a human (or a delegated reviewer who didn't do the work) can approve.
-async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
+pub(crate) async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()> {
     let finishes = to == Status::Done || to == Status::Approved;
     if !finishes || tx.ctx.is_human() {
         return Ok(());

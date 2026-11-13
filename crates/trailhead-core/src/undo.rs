@@ -5,16 +5,17 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::claims::{any_claim, put_claim};
+use crate::claims::{any_claim, claim_held, put_claim};
 use crate::comments::{load_comment, save_comment};
 use crate::db::collect;
 use crate::deps::{insert_dependency, load_dependency, remove_dependency_row};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, UNDO_WINDOW, event_from_row, scope_sql};
+use crate::identity::is_descendant;
 use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
-use crate::tasks::{check_no_parent_cycle, load_task, save_task};
+use crate::tasks::{check_claim_access, check_no_parent_cycle, check_review, load_task, save_task};
 use trailhead_model::{Claim, Comment, Dependency, Entity, Event, Project, Task};
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +93,11 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                     other => other?,
                 }
             }
+            // The rules an update goes by: undoing someone else's change is no way around a claim or the review gate.
+            check_claim_access(tx, &cur).await?;
+            if want.status != cur.status {
+                check_review(tx, &cur, want.status).await?;
+            }
             let saved = save_task(tx, &cur, want).await?;
             (Some(cur.id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
         }
@@ -142,6 +148,14 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             let want: Option<Claim> = target.map(serde_json::from_value).transpose()?;
             if cur == want {
                 return Ok(Restored::Done(None));
+            }
+            // As `release` has it: an agent takes a live claim only from itself or an agent under it.
+            if let (Some(c), Some(me)) = (&cur, tx.ctx.agent_id)
+                && c.is_live(tx.now)
+                && c.holder_id != me
+                && !is_descendant(&tx.conn, me, c.holder_id).await?
+            {
+                return Err(claim_held(&tx.conn, c).await);
             }
             match &want {
                 Some(c) => put_claim(tx, c).await?,
@@ -337,12 +351,14 @@ impl Store {
     /// touched since is skipped and reported rather than overwritten. A `since`
     /// before the undo window is clamped to it: older events aren't reverted.
     ///
-    /// Skipping only covers entities someone else touched. A permission failure
-    /// (`Error::Forbidden`: an event outside the token's scope, an agent lowering
-    /// a grade, or a change to a project's review settings) aborts the whole
-    /// revert and rolls back every entity in it, so callers get an error, not a
-    /// partial report.
+    /// Only for a person: an agent undoes single events or batches, under the rules
+    /// an update goes by. Skipping only covers entities someone else touched. An
+    /// event outside the token's scope (`Error::Forbidden`) aborts the whole revert
+    /// and rolls back every entity in it, so callers get an error, not a partial report.
     pub async fn revert_actor(&self, ctx: &Ctx, actor_id: Uuid, since: Timestamp) -> Result<UndoReport> {
+        if !ctx.is_human() {
+            return Err(Error::Forbidden("only a human can revert an actor's changes".into()));
+        }
         self.write(ctx, async |tx| {
             let since = since.max(tx.now - UNDO_WINDOW);
             let events = query_events(
