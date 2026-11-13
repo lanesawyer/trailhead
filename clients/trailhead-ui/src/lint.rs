@@ -24,7 +24,7 @@ pub struct Line<'a> {
     pub path: &'a str,
     /// The line's code, without a trailing comment.
     pub code: &'a str,
-    /// Whether the line is in the file's tests: at or after its `#[cfg(test)]`.
+    /// Whether the line is in one of the file's test modules: see [`test_lines`].
     pub in_tests: bool,
 }
 
@@ -181,9 +181,9 @@ pub fn check(crate_root: impl AsRef<Path>, dirs: &[&str], rules: &[Rule], allowe
         let relative = relative.to_string_lossy().replace('\\', "/");
         let toml = relative.ends_with(".toml");
         let source = std::fs::read_to_string(&path).unwrap_or_default();
-        let mut in_tests = false;
+        let tests = test_lines(&source);
         for (number, text) in source.lines().enumerate() {
-            in_tests |= text.trim_start().starts_with("#[cfg(test)]");
+            let in_tests = tests[number];
             let code = strip_comment(text, toml);
             if code.trim().is_empty() {
                 continue;
@@ -208,6 +208,33 @@ pub fn check(crate_root: impl AsRef<Path>, dirs: &[&str], rules: &[Rule], allowe
         }
     }
     found
+}
+
+/// For each line of `source`, whether it is in a test module: from a `#[cfg(test)]` on a `mod name {` to the brace that
+/// closes it. A `#[cfg(test)]` on anything else (an import, one function, a `mod name;`) hides nothing, so the code
+/// after it is still checked. Goes by indentation, so it wants `rustfmt`'s layout.
+pub fn test_lines(source: &str) -> Vec<bool> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut tests = vec![false; lines.len()];
+    let mut at = 0;
+    while at < lines.len() {
+        let indent = lines[at].len() - lines[at].trim_start().len();
+        let opens = lines[at].trim() == "#[cfg(test)]"
+            && lines[at + 1..].iter().find(|l| !l.trim_start().starts_with("#[")).is_some_and(|next| {
+                let next = next.trim();
+                let item = next.strip_prefix("pub(crate) ").or(next.strip_prefix("pub ")).unwrap_or(next);
+                item.starts_with("mod ") && item.ends_with('{')
+            });
+        if !opens {
+            at += 1;
+            continue;
+        }
+        let close = format!("{}}}", &lines[at][..indent]);
+        let end = lines[at..].iter().position(|l| *l == close).map_or(lines.len() - 1, |n| at + n);
+        tests[at..=end].fill(true);
+        at = end + 1;
+    }
+    tests
 }
 
 /// The `.rs` and `.toml` files under `dirs` (folders or single files, relative to `crate_root`), sorted: the one walk
@@ -358,13 +385,38 @@ mod tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(
             root.join("src/view.rs"),
-            "// row_gap: px(6) was too loose\nlet a = 1;\n#[cfg(test)]\nlet ink = Color::WHITE;\nuse bevy::feathers::x;\n",
+            "// row_gap: px(6) was too loose\nlet a = 1;\n#[cfg(test)]\nmod tests {\n    let ink = Color::WHITE;\n    use \
+             bevy::feathers::x;\n}\n",
         )
         .unwrap();
         let found = check(&root, &["src"], &[SPACING, COLOR_LITERAL, NO_FEATHERS], &[]);
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].starts_with("src/view.rs:5: [no-feathers]"), "{found:?}");
+        assert!(found[0].starts_with("src/view.rs:6: [no-feathers]"), "{found:?}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_test_module_is_tests_not_whatever_follows_a_cfg_test() {
+        let source = "#[cfg(test)]\nuse a::B;\nfn one() {}\n#[cfg(test)]\nmod testing;\nimpl C {\n    #[cfg(test)]\n    fn \
+                      d() {}\n}\n#[cfg(test)]\n#[allow(x)]\nmod first {\n    fn e() {\n    }\n}\nfn two() {}\n#[cfg(test)]\npub(crate) \
+                      mod tests {\n    fn f() {}\n}\n";
+        let tests = test_lines(source);
+        let marked: Vec<&str> = source.lines().zip(&tests).filter(|(_, t)| **t).map(|(l, _)| l.trim()).collect();
+        assert_eq!(
+            marked,
+            [
+                "#[cfg(test)]",
+                "#[allow(x)]",
+                "mod first {",
+                "fn e() {",
+                "}",
+                "}",
+                "#[cfg(test)]",
+                "pub(crate) mod tests {",
+                "fn f() {}",
+                "}"
+            ]
+        );
     }
 
     #[test]

@@ -82,10 +82,11 @@ fn no_view_redraws_a_surface_wholesale() {
     for dir in [root.join("src"), root.join("../trailhead-ui/src")] {
         for path in trailhead_ui::lint::sources(&dir, &["."]) {
             let file = path.strip_prefix(&dir).unwrap().to_str().unwrap().to_string();
-            // Only the code above the tests: a test may despawn what it likes.
+            // Not the test modules: a test may despawn what it likes.
             let source = fs::read_to_string(&path).unwrap();
-            let code = source.split("#[cfg(test)]").next().unwrap();
-            for function in flagged(code) {
+            let tests = trailhead_ui::lint::test_lines(&source);
+            let code: Vec<&str> = source.lines().zip(tests).filter(|(_, test)| !test).map(|(line, _)| line).collect();
+            for function in flagged(&code.join("\n")) {
                 if ALLOWED.iter().any(|(f, name, _)| *f == file && *name == function) {
                     allowed_seen.push((file.clone(), function));
                 } else {
