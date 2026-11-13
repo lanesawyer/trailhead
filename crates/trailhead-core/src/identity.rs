@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::db::{collect, first, fmt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store, Tx};
-use crate::tokens::{Principal, Token, TokenOptions, issue_token};
-use trailhead_model::{Agent, Entity, User, Workspace};
+use crate::tokens::{TokenOptions, issue_token};
+use trailhead_model::{Agent, Entity, Principal, Token, User, Workspace};
 
 fn workspace_from_row(row: &Row) -> Result<Workspace> {
     Ok(Workspace {

@@ -556,6 +556,146 @@ string_enum!(Entity "entity" {
     Agent => "agent",
 });
 
+/// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedTask {
+    #[serde(flatten)]
+    pub task: Task,
+    /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "openapi", schema(nullable = false))]
+    pub possible_duplicates: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum Principal {
+    User(Uuid),
+    Agent(Uuid),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Token {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub principal: Principal,
+    pub name: String,
+    pub created_at: Timestamp,
+    pub revoked_at: Option<Timestamp>,
+    /// Projects the token is limited to. `None` means every project.
+    pub projects: Option<Vec<Uuid>>,
+    /// `None` means unlimited.
+    pub rate_limit_per_minute: Option<i64>,
+    /// When it stops working. `None` means never.
+    pub expires_at: Option<Timestamp>,
+}
+
+/// `GET /v1/me`: the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Me {
+    pub workspace_id: Uuid,
+    pub user: User,
+    /// Set when the token belongs to an agent, even if the agent can't be looked up.
+    pub agent_id: Option<Uuid>,
+    /// The agent itself, when `agent_id` resolves.
+    pub agent: Option<Agent>,
+}
+
+/// `POST /v1/agents`. The secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedAgent {
+    pub agent: Agent,
+    pub token: Token,
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UndoReport {
+    pub batch_id: Uuid,
+    pub reverted: Vec<Reverted>,
+    pub skipped: Vec<Skipped>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Reverted {
+    pub entity: Entity,
+    pub entity_id: String,
+    /// The event that recorded the revert, if anything actually changed.
+    pub event_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Skipped {
+    pub entity: Entity,
+    pub entity_id: String,
+    pub task_id: Option<Uuid>,
+    /// A later event by someone else that would be overwritten, if that is why it was skipped.
+    pub later_event: Option<i64>,
+    /// Why it was skipped.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Webhook {
+    pub id: Uuid,
+    pub workspace_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub url: String,
+    /// Event kind prefixes to send, e.g. `task.` or `comment.created`. Empty means every event.
+    pub event_kinds: Vec<String>,
+    /// The last event id delivered (or skipped as not matching).
+    pub cursor: i64,
+    pub failure_count: i64,
+    pub next_attempt_at: Option<Timestamp>,
+    pub created_at: Timestamp,
+    /// Set after too many consecutive failures, or by hand. Disabled webhooks get nothing.
+    pub disabled_at: Option<Timestamp>,
+}
+
+impl Webhook {
+    pub fn wants(&self, kind: &str) -> bool {
+        self.event_kinds.is_empty() || self.event_kinds.iter().any(|k| kind.starts_with(k.as_str()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WebhookDelivery {
+    pub id: i64,
+    pub webhook_id: Uuid,
+    pub event_id: Option<i64>,
+    /// The receiver's HTTP status, if it answered.
+    pub status_code: Option<i64>,
+    /// Set when the attempt failed.
+    pub error: Option<String>,
+    pub at: Timestamp,
+}
+
+/// `POST /v1/webhooks`. The signing secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedWebhook {
+    pub webhook: Webhook,
+    pub secret: String,
+}
+
+/// `POST /v1/tokens`. The secret is shown only here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CreatedToken {
+    pub token: Token,
+    pub secret: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

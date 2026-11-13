@@ -110,7 +110,7 @@ pub enum NetCommand {
     /// Let go of the control plane and forget it, so the next start doesn't dial it either.
     Disconnect,
     /// Make this request (`crate::commands`); `attempt` comes back with the answer.
-    Request { id: CommandId, attempt: u32, request: Request },
+    Request { id: CommandId, attempt: u32, request: Box<Request> },
     /// Search tasks and comments for `query` (`GET /v1/search`); `seq` comes back with the answer.
     Search { seq: u64, query: String },
     /// Follow the control plane's log, or stop. Sent as the Logs page opens and closes.
@@ -454,7 +454,7 @@ async fn run(
                     net.pasted = Some(token.trim().to_string());
                     net.check().await;
                 }
-                Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, request),
+                Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, *request),
                 Some(NetCommand::Search { seq, query }) => net.search(seq, query),
                 Some(NetCommand::Logs(on)) => net.set_logs(on),
                 Some(NetCommand::Detail { seq, key }) => net.detail(seq, key),

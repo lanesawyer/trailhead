@@ -17,13 +17,14 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::AppState;
 use crate::auth::Auth;
 use crate::error::{ApiResult, Json, invalid};
-use crate::openapi::{Health, Me};
+use crate::openapi::Health;
 use crate::params::split_list;
+use trailhead_core::Me;
 
 type S = State<Arc<AppState>>;
 
@@ -152,11 +153,11 @@ async fn health(State(s): S, headers: HeaderMap) -> Json<Health> {
     get, path = "/v1/me", tag = "meta",
     responses((status = 200, description = "The caller", body = Me))
 )]
-async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Value>> {
+async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Me>> {
     let user = s.store.get_user(&ctx, ctx.user_id).await?;
     let agent = match ctx.agent_id {
         Some(id) => s.store.list_agents(&ctx).await?.into_iter().find(|a| a.id == id),
         None => None,
     };
-    Ok(Json(json!({ "workspace_id": ctx.workspace_id, "user": user, "agent_id": ctx.agent_id, "agent": agent })))
+    Ok(Json(Me { workspace_id: ctx.workspace_id, user, agent_id: ctx.agent_id, agent }))
 }

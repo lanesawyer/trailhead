@@ -3,9 +3,8 @@
 //! pattern). The server does the HTTP; this module owns the state.
 
 use hmac::{Hmac, KeyInit, Mac};
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use libsql::Row;
-use serde::Serialize;
 use sha2::Sha256;
 use uuid::Uuid;
 
@@ -13,48 +12,11 @@ use crate::db::{collect, fmt_ts, get_opt_ts, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, event_from_row};
 use crate::store::{Ctx, Store};
-use trailhead_model::Event;
+use trailhead_model::{Event, Webhook, WebhookDelivery};
 
 /// Consecutive failures before a webhook is switched off.
 pub const MAX_FAILURES: i64 = 20;
 const SECRET_PREFIX: &str = "whsec_";
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct Webhook {
-    pub id: Uuid,
-    pub workspace_id: Uuid,
-    pub owner_user_id: Uuid,
-    pub url: String,
-    /// Event kind prefixes to send, e.g. `task.` or `comment.created`. Empty means every event.
-    pub event_kinds: Vec<String>,
-    /// The last event id delivered (or skipped as not matching).
-    pub cursor: i64,
-    pub failure_count: i64,
-    pub next_attempt_at: Option<Timestamp>,
-    pub created_at: Timestamp,
-    /// Set after too many consecutive failures, or by hand. Disabled webhooks get nothing.
-    pub disabled_at: Option<Timestamp>,
-}
-
-impl Webhook {
-    pub fn wants(&self, kind: &str) -> bool {
-        self.event_kinds.is_empty() || self.event_kinds.iter().any(|k| kind.starts_with(k.as_str()))
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct WebhookDelivery {
-    pub id: i64,
-    pub webhook_id: Uuid,
-    pub event_id: Option<i64>,
-    /// The receiver's HTTP status, if it answered.
-    pub status_code: Option<i64>,
-    /// Set when the attempt failed.
-    pub error: Option<String>,
-    pub at: Timestamp,
-}
 
 const WEBHOOK_COLS: &str = "id, workspace_id, owner_user_id, url, event_kinds, cursor, failure_count, next_attempt_at, created_at, disabled_at, secret";
 

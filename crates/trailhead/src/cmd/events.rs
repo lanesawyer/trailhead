@@ -1,17 +1,18 @@
-use anyhow::{Result, bail};
-use serde_json::json;
+use anyhow::{Context, Result, bail};
+use trailhead_client::http::{EventQuery, Revert, Undo, UndoBatch};
 
-use super::{Ctx, params, print_json};
+use super::{Ctx, count, params, print_json, to_json};
+use crate::client::api_err;
 use crate::dates::parse_when;
-use crate::output::{event_line, s};
+use crate::output::{event_line, text};
 
 pub(crate) async fn log(cx: &Ctx, task: Option<String>, limit: i64) -> Result<()> {
-    let q = params([("newest_first", Some("true".into())), ("limit", Some(limit.to_string())), ("task", task)]);
-    let v = cx.c.get("events", &q).await?;
+    let q = EventQuery { task, newest_first: true, limit: count(Some(limit))?, ..EventQuery::default() };
+    let events = cx.c.api().list_events(&q).await.map_err(api_err)?;
     if cx.json {
-        print_json(&v);
+        print_json(&to_json(&events));
     } else {
-        v.as_array().into_iter().flatten().for_each(|e| println!("{}", event_line(e)));
+        events.iter().for_each(|e| println!("{}", text().event_line(e)));
     }
     Ok(())
 }
@@ -30,38 +31,46 @@ pub(crate) async fn watch(cx: &Ctx, task: Option<String>, kinds: Option<String>,
 
 /// Undoes an event or a batch, or with neither, the caller's last batch.
 pub(crate) async fn undo(cx: &Ctx, event_id: Option<i64>, batch: Option<String>) -> Result<()> {
-    let body = match (event_id, batch) {
-        (Some(e), None) => json!({ "event_id": e }),
-        (None, Some(b)) => json!({ "batch_id": b }),
+    let api = cx.c.api();
+    let report = match (event_id, batch) {
+        (Some(event_id), None) => api.undo(&Undo { event_id }).await,
+        (None, Some(b)) => {
+            api.undo_batch(&UndoBatch { batch_id: b.parse().with_context(|| format!("{b:?} isn't a batch id"))? }).await
+        }
         (None, None) => {
-            let me = cx.c.get("me", &[]).await?;
-            let actor = me["agent"]["id"].as_str().or(me["user"]["id"].as_str()).unwrap_or("").to_string();
-            let q = [
-                ("actor", actor),
-                ("newest_first", "true".into()),
-                ("changes_only", "true".into()),
-                ("limit", "1".into()),
-            ];
-            let last = cx.c.get("events", &q).await?;
-            let Some(b) = last[0]["batch_id"].as_str() else { bail!("nothing to undo") };
-            json!({ "batch_id": b })
+            let me = api.me().await.map_err(api_err)?;
+            let actor = me.agent.map_or(me.user.id, |a| a.id);
+            let q = EventQuery {
+                actor: Some(actor),
+                newest_first: true,
+                changes_only: true,
+                limit: Some(1),
+                ..EventQuery::default()
+            };
+            let last = api.list_events(&q).await.map_err(api_err)?;
+            let Some(e) = last.first() else { bail!("nothing to undo") };
+            api.undo_batch(&UndoBatch { batch_id: e.batch_id }).await
         }
         _ => bail!("give an event id or --batch, not both"),
-    };
-    let v = cx.c.post("undo", body).await?;
-    cx.show(&v, |r| format!("reverted {} change(s)", r["reverted"].as_array().map_or(0, Vec::len)));
+    }
+    .map_err(api_err)?;
+    cx.emit(&report, |r| format!("reverted {} change(s)", r.reverted.len()));
     Ok(())
 }
 
 pub(crate) async fn revert(cx: &Ctx, actor_id: &str, since: &str) -> Result<()> {
-    let v = cx.c.post("revert", json!({ "actor_id": actor_id, "since": parse_when(since)? })).await?;
+    let revert = Revert {
+        actor_id: actor_id.parse().with_context(|| format!("{actor_id:?} isn't a user or agent id"))?,
+        since: parse_when(since)?,
+    };
+    let report = cx.c.api().revert(&revert).await.map_err(api_err)?;
     if cx.json {
-        print_json(&v);
+        print_json(&to_json(&report));
         return Ok(());
     }
-    println!("reverted {} change(s)", v["reverted"].as_array().map_or(0, Vec::len));
-    for sk in v["skipped"].as_array().into_iter().flatten() {
-        println!("skipped {} {}: {}", s(sk, "entity"), s(sk, "entity_id"), s(sk, "reason"));
+    println!("reverted {} change(s)", report.reverted.len());
+    for sk in &report.skipped {
+        println!("skipped {} {}: {}", sk.entity.as_str(), sk.entity_id, sk.reason);
     }
     Ok(())
 }

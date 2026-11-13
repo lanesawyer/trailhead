@@ -12,7 +12,6 @@ use utoipa::openapi::{
     ContentBuilder, HeaderBuilder, KnownFormat, ObjectBuilder, Ref, RefOr, ResponseBuilder, SchemaFormat, Type,
 };
 use utoipa::{IntoParams, Modify, OpenApi, ToSchema};
-use uuid::Uuid;
 
 use crate::routes;
 
@@ -59,17 +58,6 @@ pub struct ListedTask {
     blocked_by: Option<Vec<uuid::Uuid>>,
     /// With `include=blocked_by`: how many unfinished blockers outside the token's scope this task has, which `blocked_by` leaves out.
     blocked_by_hidden: Option<u32>,
-}
-
-/// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; the handler adds possible_duplicates to the JSON")]
-pub struct CreatedTask {
-    #[serde(flatten)]
-    task: trailhead_core::Task,
-    /// Keys of open tasks with a close title; absent when there are none. A warning, not an error.
-    #[schema(nullable = false)]
-    possible_duplicates: Option<Vec<String>>,
 }
 
 /// Path and header parameters many routes share, declared once for the docs.
@@ -170,43 +158,6 @@ pub struct Health {
     /// Whether the server restarts into a new binary once its runs finish. Always sent: a CLI only asks for the
     /// upgrade restart when it sees this field, since a server from before it would die of the signal.
     pub upgrade_pending: bool,
-}
-
-/// `GET /v1/me`: the caller.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct Me {
-    workspace_id: Uuid,
-    user: trailhead_core::User,
-    /// Set when the token belongs to an agent, even if the agent can't be looked up.
-    agent_id: Option<Uuid>,
-    /// The agent itself, when `agent_id` resolves.
-    agent: Option<trailhead_core::Agent>,
-}
-
-/// `POST /v1/agents`. The secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedAgent {
-    agent: trailhead_core::Agent,
-    token: trailhead_core::Token,
-    secret: String,
-}
-
-/// `POST /v1/webhooks`. The signing secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedWebhook {
-    webhook: trailhead_core::Webhook,
-    secret: String,
-}
-
-/// `POST /v1/tokens`. The secret is shown only here.
-#[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; handlers build these bodies with json!")]
-pub struct CreatedToken {
-    token: trailhead_core::Token,
-    secret: String,
 }
 
 /// Bearer auth, the `trailhead-batch` header on every response, and the

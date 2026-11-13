@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use serde_json::Value;
+use uuid::Uuid;
 
-use crate::client::Client;
-use crate::output::s;
+use crate::client::{Client, api_err};
 
 /// What every command against a server needs.
 pub(crate) struct Ctx {
@@ -26,13 +26,6 @@ pub(crate) struct Ctx {
     pub(crate) json: bool,
     /// The project in `.trailhead.toml`, used when `-p` isn't given.
     pub(crate) project: Option<String>,
-}
-
-impl Ctx {
-    /// The full JSON with `--json`, else one line made from it.
-    pub(crate) fn show(&self, v: &Value, line: impl Fn(&Value) -> String) {
-        if self.json { print_json(v) } else { println!("{}", line(v)) }
-    }
 }
 
 impl Ctx {
@@ -56,13 +49,14 @@ pub(crate) fn params<const N: usize>(pairs: [(&'static str, Option<String>); N])
     pairs.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect()
 }
 
+/// A `--limit` for the typed client, which takes no negative counts.
+pub(crate) fn count<T: TryFrom<i64>>(limit: Option<i64>) -> Result<Option<T>> {
+    limit.map(|n| T::try_from(n).map_err(|_| anyhow::anyhow!("--limit must be 0 or more, not {n}"))).transpose()
+}
+
 /// Maps user and agent ids to names for display.
-pub(crate) async fn names(c: &Client) -> Result<HashMap<String, String>> {
-    let mut map = HashMap::new();
-    let me = c.get("me", &[]).await?;
-    map.insert(s(&me["user"], "id").to_string(), s(&me["user"], "name").to_string());
-    for a in c.get("agents", &[]).await?.as_array().into_iter().flatten() {
-        map.insert(s(a, "id").to_string(), s(a, "name").to_string());
-    }
-    Ok(map)
+pub(crate) async fn names(c: &Client) -> Result<HashMap<Uuid, String>> {
+    let me = c.api().me().await.map_err(api_err)?;
+    let agents = c.api().list_agents().await.map_err(api_err)?;
+    Ok(std::iter::once((me.user.id, me.user.name)).chain(agents.into_iter().map(|a| (a.id, a.name))).collect())
 }

@@ -6,7 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use trailhead_core::{
-    Grade, GradeFilter, NewTask, Priority, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter, TaskPatch,
+    CreatedTask, Grade, GradeFilter, NewTask, Priority, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter,
+    TaskPatch,
 };
 use utoipa::{IntoParams, ToSchema};
 
@@ -171,7 +172,7 @@ pub(crate) struct CreateTask {
 #[utoipa::path(
     post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
     responses(
-        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = crate::openapi::CreatedTask, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
+        (status = 201, description = "Created. `possible_duplicates` lists keys of open tasks with a close title, when there are any; it's a warning, not an error.", body = CreatedTask, headers(("ETag" = String, description = "The version, quoted, for `If-Match`"))),
         (status = 404, description = "`not_found`: project, parent or dependency", body = ErrorBody),
         (status = 409, description = "`dependency_cycle` from `blocked_by`/`blocks`. Repeating a `source` + `external_id` returns the existing task instead of an error.", body = ErrorBody),
     )
@@ -200,11 +201,8 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
     let task = s.store.create_task(&ctx, new).await?;
     let similar = s.store.similar_tasks(&ctx, &project, &task.title, Some(task.id)).await.unwrap_or_default();
     let version = task.version;
-    let mut body = serde_json::to_value(task).expect("tasks serialize");
-    if !similar.is_empty() {
-        body["possible_duplicates"] = json!(similar.iter().map(|t| &t.key).collect::<Vec<_>>());
-    }
-    let mut res = with_etag(version, body);
+    let possible_duplicates = (!similar.is_empty()).then(|| similar.into_iter().map(|t| t.key.0).collect());
+    let mut res = with_etag(version, CreatedTask { task, possible_duplicates });
     *res.status_mut() = StatusCode::CREATED;
     Ok(res)
 }

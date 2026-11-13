@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
-use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, TaskQuery, TaskUpdate};
+use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate};
 use trailhead_factory::{
     Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunUpdate, Status, Task,
     TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
@@ -29,7 +29,7 @@ impl RestTracker {
     }
 
     async fn patch(&self, task: &TaskKey, update: TaskUpdate) -> Result<()> {
-        self.client.update_task(task, &update).await.map_err(error)
+        self.client.update_task(task, &update).await.map(drop).map_err(error)
     }
 
     async fn status(&self, task: &TaskKey, status: Status) -> Result<()> {
@@ -138,7 +138,8 @@ impl Tracker for RestTracker {
 
     async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
         // Never just `limit`: the cut comes after the reworks are merged in and the blockers raised ([`in_ready_order`]).
-        let ready = self.client.ready(project, 1000).await.map_err(error)?;
+        let q = ReadyQuery { project: Some(project.to_string()), limit: Some(1000), ..ReadyQuery::default() };
+        let ready = self.client.ready(&q).await.map_err(error)?;
         let mut queued = HashSet::new();
         for q in queue {
             let query = TaskQuery {
@@ -282,7 +283,7 @@ impl Tracker for RestTracker {
             priority,
             ..NewTask::default()
         };
-        self.client.create_task(&new).await.map_err(error)
+        self.client.create_task(&new).await.map(|c| c.task.key).map_err(error)
     }
 
     async fn follow_ups(&self, _: &TaskKey) -> Result<Vec<FollowUpTask>> {

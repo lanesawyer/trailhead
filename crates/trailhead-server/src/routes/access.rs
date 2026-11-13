@@ -4,13 +4,13 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{Agent, Error, Principal, Token, TokenOptions, TokenPatch};
+use trailhead_core::{Agent, CreatedAgent, CreatedToken, Error, Principal, Token, TokenOptions, TokenPatch};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Auth;
 use crate::error::{ApiError, ApiResult, Json, Path};
-use crate::openapi::{CreatedAgent, CreatedToken, ErrorBody};
+use crate::openapi::ErrorBody;
 
 use super::{S, created, nullable};
 
@@ -69,7 +69,7 @@ pub(crate) struct CreateAgent {
 )]
 pub(crate) async fn create_agent(State(s): S, Auth(ctx): Auth, Json(b): Json<CreateAgent>) -> ApiResult<Response> {
     let (agent, token, secret) = s.store.create_agent_with_token(&ctx, &b.name, b.limits.into()).await?;
-    Ok(created(json!({ "agent": agent, "token": token, "secret": secret })))
+    Ok(created(CreatedAgent { agent, token, secret }))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -103,7 +103,7 @@ pub(crate) async fn create_token(State(s): S, Auth(ctx): Auth, Json(b): Json<Cre
         }
     };
     let (token, secret) = s.store.create_token_with(&ctx, principal, &b.name, b.limits.into()).await?;
-    Ok(created(json!({ "token": token, "secret": secret })))
+    Ok(created(CreatedToken { token, secret }))
 }
 
 #[utoipa::path(

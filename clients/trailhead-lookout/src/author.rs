@@ -201,6 +201,7 @@ pub fn request(open: &Open) -> Result<Request, String> {
         priority: Some(d.priority),
         parent: (!parent.is_empty()).then(|| parent.into()),
         grade: if d.queued { d.grade } else { None },
+        ..NewTask::default()
     };
     Ok(Request::new(Call::CreateTask(new), None))
 }

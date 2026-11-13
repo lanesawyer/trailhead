@@ -1,7 +1,7 @@
 //! A typed client for the Trailhead API (`http` feature): base URL, bearer token, request bodies built from
 //! `trailhead-model`'s types, and failed responses decoded into an [`Error`] that carries the stable code.
 //!
-//! It covers the endpoints `RestTracker` (`trailhead-tracker-rest`) uses; the rest follow as the CLI and Lookout move over.
+//! It covers the endpoints the CLI and `RestTracker` (`trailhead-tracker-rest`) use; the rest follow as Lookout moves over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
 use std::future::Future;
@@ -14,8 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Claim, ClaimResult, Comment, CommentKind, Grade, HeldClaim, Priority, ProjectStatus, SearchHit, Status, Task,
-    TaskDetail, TaskKey, Verdict,
+    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, CreatedWebhook,
+    Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail,
+    TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -64,8 +65,27 @@ pub mod routes {
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
     pub const UPDATE_PROJECT: Route = Route::new(Method::PATCH, "/v1/projects/{project}");
 
+    pub const DELETE_TASK: Route = Route::new(Method::DELETE, "/v1/tasks/{task}");
+    pub const ADD_BLOCKER: Route = Route::new(Method::POST, "/v1/tasks/{task}/blockers");
+    pub const REMOVE_BLOCKER: Route = Route::new(Method::DELETE, "/v1/tasks/{task}/blockers/{blocker}");
+    pub const LIST_PROJECTS: Route = Route::new(Method::GET, "/v1/projects");
+    pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
+    pub const ME: Route = Route::new(Method::GET, "/v1/me");
+    pub const LIST_AGENTS: Route = Route::new(Method::GET, "/v1/agents");
+    pub const CREATE_AGENT: Route = Route::new(Method::POST, "/v1/agents");
+    pub const REVOKE_AGENT: Route = Route::new(Method::POST, "/v1/agents/{agent}/revoke");
+    pub const LIST_TOKENS: Route = Route::new(Method::GET, "/v1/tokens");
+    pub const CREATE_TOKEN: Route = Route::new(Method::POST, "/v1/tokens");
+    pub const REVOKE_TOKEN: Route = Route::new(Method::DELETE, "/v1/tokens/{id}");
+    pub const UPDATE_TOKEN: Route = Route::new(Method::PATCH, "/v1/tokens/{id}");
+    pub const LIST_EVENTS: Route = Route::new(Method::GET, "/v1/events");
+    pub const LIST_WEBHOOKS: Route = Route::new(Method::GET, "/v1/webhooks");
+    pub const CREATE_WEBHOOK: Route = Route::new(Method::POST, "/v1/webhooks");
+    pub const DELETE_WEBHOOK: Route = Route::new(Method::DELETE, "/v1/webhooks/{id}");
+    pub const WEBHOOK_DELIVERIES: Route = Route::new(Method::GET, "/v1/webhooks/{id}/deliveries");
+
     /// All of them.
-    pub fn all() -> [Route; 16] {
+    pub fn all() -> [Route; 34] {
         [
             READY,
             LIST_TASKS,
@@ -83,6 +103,24 @@ pub mod routes {
             RESOLVE_COMMENT,
             CREATE_PROJECT,
             UPDATE_PROJECT,
+            DELETE_TASK,
+            ADD_BLOCKER,
+            REMOVE_BLOCKER,
+            LIST_PROJECTS,
+            SHOW_PROJECT,
+            ME,
+            LIST_AGENTS,
+            CREATE_AGENT,
+            REVOKE_AGENT,
+            LIST_TOKENS,
+            CREATE_TOKEN,
+            REVOKE_TOKEN,
+            UPDATE_TOKEN,
+            LIST_EVENTS,
+            LIST_WEBHOOKS,
+            CREATE_WEBHOOK,
+            DELETE_WEBHOOK,
+            WEBHOOK_DELIVERIES,
         ]
     }
 }
@@ -136,6 +174,13 @@ impl std::error::Error for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A failed response as an [`Error::Api`].
+async fn api_error(res: reqwest::Response) -> Error {
+    let status = res.status().as_u16();
+    let body: Value = res.json().await.unwrap_or(Value::Null);
+    Error::Api { status, error: ApiError::from_body(&body) }
+}
+
 /// `POST /v1/tasks`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct NewTask {
@@ -150,6 +195,30 @@ pub struct NewTask {
     /// Only a human can create a task with a grade.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grade: Option<Grade>,
+    /// The day it's due, `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<String>,
+    /// A time it's due by, RFC 3339 with the offset it was set in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
+    /// The IANA zone the deadline was set in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_tz: Option<String>,
+    /// The day to work it, `YYYY-MM-DD`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_on: Option<String>,
+    /// A time on that day, RFC 3339 with the offset it was planned in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<String>,
+    /// The IANA zone `scheduled_at` was planned in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_tz: Option<String>,
+    /// Keys of the tasks that must finish first, added with the task.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// Keys of the tasks this one blocks, added the same way.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
 }
 
 /// `PATCH /v1/tasks/{task}`: only the fields set are sent.
@@ -172,6 +241,31 @@ pub struct TaskUpdate {
     /// A handoff comment written with the update, or not at all if the update is refused.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// The key of the task this one duplicates, which needs `cancelled`. `Some(None)` clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<Option<String>>,
+    /// `YYYY-MM-DD`. A new day without `due_at` drops the time; `Some(None)` removes the deadline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_on: Option<Option<String>>,
+    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_tz: Option<Option<String>>,
+    /// `YYYY-MM-DD`. A new day without `scheduled_at` drops the time; `Some(None)` unschedules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_on: Option<Option<String>>,
+    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_tz: Option<Option<String>>,
+    /// The key of the task to move this one under; `Some(None)` makes it top-level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<Option<String>>,
+    /// Refuses the update if the task has changed since this version, like `If-Match`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
 }
 
 /// `POST /v1/projects`.
@@ -200,6 +294,9 @@ pub struct ProjectUpdate {
     pub claim_ttl: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ProjectStatus>,
+    /// Names or ids of the agents that may approve review work here, replacing the list; empty clears it. Humans only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewers: Option<Vec<String>>,
 }
 
 /// `POST /v1/tasks/{task}/comments`.
@@ -325,6 +422,14 @@ pub struct TaskQuery {
     /// Adds each task's live claim (`include=claim`).
     pub with_claim: bool,
     pub limit: Option<usize>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    pub grade: Option<String>,
+    /// Only tasks scheduled on or before this day.
+    pub scheduled_through: Option<jiff::civil::Date>,
+    /// `priority` (the server's default), `updated_at` or `created_at`, with `-` for newest first, or `scheduled`.
+    pub sort: Option<String>,
+    /// Skips this many, to page with `limit`.
+    pub offset: Option<usize>,
 }
 
 /// A live claim as `include=claim` lists it. Only what a client reads of it.
@@ -343,6 +448,83 @@ pub struct ListedTask {
     pub task: Task,
     #[serde(default)]
     pub claim: Option<ListedClaim>,
+}
+
+/// `GET /v1/ready` filters. Unset ones aren't sent.
+#[derive(Debug, Default, Clone)]
+pub struct ReadyQuery {
+    pub project: Option<String>,
+    /// `1` to `4`, `graded` or `ungraded`.
+    pub grade: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// `POST /v1/agents`: an agent and its first token.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewAgent {
+    pub name: String,
+    /// Project keys or ids to limit the token to; empty for every project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<i64>,
+}
+
+/// `POST /v1/tokens`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewToken {
+    /// What the token is for.
+    pub name: String,
+    /// The name or id of the caller's agent to issue it for; unset for the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Project keys or ids to limit the token to; empty for every project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<i64>,
+    /// Seconds until it stops working; unset for never.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_seconds: Option<i64>,
+}
+
+/// `PATCH /v1/tokens/{id}`: only the fields set are sent.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct TokenUpdate {
+    /// Project keys or ids. `Some(None)` opens the token to every project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Option<Vec<String>>>,
+    /// Requests per minute. `Some(None)` removes the limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<Option<i64>>,
+}
+
+/// `POST /v1/undo` for a whole batch: everything one request did.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UndoBatch {
+    pub batch_id: Uuid,
+}
+
+/// `GET /v1/events` filters. Unset ones aren't sent.
+#[derive(Debug, Default, Clone)]
+pub struct EventQuery {
+    /// A task's key or id.
+    pub task: Option<String>,
+    /// The user or agent that acted.
+    pub actor: Option<Uuid>,
+    /// Leaves out notifications (`task.due_soon`, `task.overdue`).
+    pub changes_only: bool,
+    pub newest_first: bool,
+    pub limit: Option<usize>,
+}
+
+/// `POST /v1/webhooks`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewWebhook {
+    /// Where to POST events.
+    pub url: String,
+    /// Event kind prefixes, e.g. `task.` or `comment.created`; empty for every event.
+    pub event_kinds: Vec<String>,
 }
 
 /// The API, as one token sees it.
@@ -392,16 +574,7 @@ impl Client {
     }
 
     async fn send<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
-        let retry = req.try_clone();
-        let res = match req.send().await {
-            Ok(res) => res,
-            Err(e) => match (&self.reconnect, retry) {
-                (Some(reconnect), Some(retry)) if e.is_connect() && reconnect().await => {
-                    retry.send().await.map_err(Error::Transport)?
-                }
-                _ => return Err(Error::Transport(e)),
-            },
-        };
+        let res = self.dispatch(req).await?;
         let status = res.status();
         if status.is_success() {
             return match res.json().await {
@@ -410,18 +583,39 @@ impl Client {
                 Err(e) => Err(Error::Transport(e)),
             };
         }
-        let body: Value = res.json().await.unwrap_or(Value::Null);
-        Err(Error::Api { status: status.as_u16(), error: ApiError::from_body(&body) })
+        Err(api_error(res).await)
+    }
+
+    /// Sends `req`, reconnecting and retrying once if it couldn't connect, and returns the response whatever its status.
+    async fn dispatch(&self, req: RequestBuilder) -> Result<reqwest::Response> {
+        let retry = req.try_clone();
+        match req.send().await {
+            Ok(res) => Ok(res),
+            Err(e) => match (&self.reconnect, retry) {
+                (Some(reconnect), Some(retry)) if e.is_connect() && reconnect().await => {
+                    retry.send().await.map_err(Error::Transport)
+                }
+                _ => Err(Error::Transport(e)),
+            },
+        }
     }
 
     /// `GET /v1/ready`.
-    pub async fn ready(&self, project: &str, limit: usize) -> Result<Vec<Task>> {
-        self.send(self.request(routes::READY, None).query(&[("project", project), ("limit", &limit.to_string())])).await
+    pub async fn ready(&self, q: &ReadyQuery) -> Result<Vec<Task>> {
+        let query =
+            [("project", q.project.clone()), ("grade", q.grade.clone()), ("limit", q.limit.map(|l| l.to_string()))];
+        let query: Vec<_> = query.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+        self.send(self.request(routes::READY, None).query(&query)).await
     }
 
-    /// `GET /v1/search`: the tasks matching `query` in their title, description or comments, at most `limit`.
-    pub async fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>> {
-        self.send(self.request(routes::SEARCH, None).query(&[("q", query), ("limit", &limit.to_string())])).await
+    /// `GET /v1/search`: the tasks matching `query` in their title, description or comments, at most `limit` (or the
+    /// server's default).
+    pub async fn search(&self, query: &str, limit: Option<u32>) -> Result<Vec<SearchHit>> {
+        let mut req = self.request(routes::SEARCH, None).query(&[("q", query)]);
+        if let Some(l) = limit {
+            req = req.query(&[("limit", l)]);
+        }
+        self.send(req).await
     }
 
     /// `GET /v1/tasks`.
@@ -448,6 +642,18 @@ impl Client {
         if let Some(l) = q.limit {
             query.push(("limit", l.to_string()));
         }
+        if let Some(g) = &q.grade {
+            query.push(("grade", g.clone()));
+        }
+        if let Some(d) = q.scheduled_through {
+            query.push(("scheduled_through", d.to_string()));
+        }
+        if let Some(s) = &q.sort {
+            query.push(("sort", s.clone()));
+        }
+        if let Some(o) = q.offset {
+            query.push(("offset", o.to_string()));
+        }
         self.send(self.request(routes::LIST_TASKS, None).query(&query)).await
     }
 
@@ -456,15 +662,14 @@ impl Client {
         self.send(self.request(routes::SHOW_TASK, Some(key.as_str()))).await
     }
 
-    /// `POST /v1/tasks`; the new task's key.
-    pub async fn create_task(&self, new: &NewTask) -> Result<TaskKey> {
-        let task: Task = self.send(self.request(routes::CREATE_TASK, None).json(new)).await?;
-        Ok(task.key)
+    /// `POST /v1/tasks`.
+    pub async fn create_task(&self, new: &NewTask) -> Result<CreatedTask> {
+        self.send(self.request(routes::CREATE_TASK, None).json(new)).await
     }
 
     /// `PATCH /v1/tasks/{task}`.
-    pub async fn update_task(&self, key: &TaskKey, update: &TaskUpdate) -> Result<()> {
-        self.send::<Value>(self.request(routes::UPDATE_TASK, Some(key.as_str())).json(update)).await.map(drop)
+    pub async fn update_task(&self, key: &TaskKey, update: &TaskUpdate) -> Result<Task> {
+        self.send(self.request(routes::UPDATE_TASK, Some(key.as_str())).json(update)).await
     }
 
     /// `POST /v1/tasks/{task}/comments`.
@@ -499,6 +704,157 @@ impl Client {
     }
 }
 
+impl Client {
+    /// The request for a route whose parameters [`Route::url`] doesn't fill: each `(name, value)` replaces `{name}`.
+    fn request_with(&self, route: Route, params: &[(&str, &str)]) -> RequestBuilder {
+        let path = params
+            .iter()
+            .fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value));
+        self.http.request(route.method.clone(), format!("{}{path}", self.base)).bearer_auth(&self.token)
+    }
+
+    /// Sends `req` to an endpoint that answers `204 No Content`.
+    async fn send_empty(&self, req: RequestBuilder) -> Result<()> {
+        let res = self.dispatch(req).await?;
+        if res.status().is_success() { Ok(()) } else { Err(api_error(res).await) }
+    }
+
+    /// `DELETE /v1/tasks/{task}`: the task, soft-deleted.
+    pub async fn delete_task(&self, key: &TaskKey) -> Result<Task> {
+        self.send(self.request(routes::DELETE_TASK, Some(key.as_str()))).await
+    }
+
+    /// `POST /v1/tasks/{task}/blockers`: `blocker` must finish before `blocked`.
+    pub async fn add_blocker(&self, blocked: &TaskKey, blocker: &TaskKey) -> Result<Dependency> {
+        let req = self.request(routes::ADD_BLOCKER, Some(blocked.as_str()));
+        self.send(req.json(&serde_json::json!({ "blocker": blocker }))).await
+    }
+
+    /// `DELETE /v1/tasks/{task}/blockers/{blocker}`.
+    pub async fn remove_blocker(&self, blocked: &TaskKey, blocker: &TaskKey) -> Result<()> {
+        let req =
+            self.request_with(routes::REMOVE_BLOCKER, &[("task", blocked.as_str()), ("blocker", blocker.as_str())]);
+        self.send_empty(req).await
+    }
+
+    /// `GET /v1/projects`, with the archived ones too if `archived`.
+    pub async fn list_projects(&self, archived: bool) -> Result<Vec<Project>> {
+        self.send(self.request(routes::LIST_PROJECTS, None).query(&[("archived", archived)])).await
+    }
+
+    /// `POST /v1/projects`.
+    pub async fn create_project(&self, new: &NewProject) -> Result<Project> {
+        self.send(self.request(routes::CREATE_PROJECT, None).json(new)).await
+    }
+
+    /// `GET /v1/projects/{project}`.
+    pub async fn show_project(&self, key: &str) -> Result<Project> {
+        self.send(self.request(routes::SHOW_PROJECT, Some(key))).await
+    }
+
+    /// `PATCH /v1/projects/{project}`.
+    pub async fn update_project(&self, key: &str, update: &ProjectUpdate) -> Result<Project> {
+        self.send(self.request(routes::UPDATE_PROJECT, Some(key)).json(update)).await
+    }
+
+    /// `GET /v1/me`: who the token acts as.
+    pub async fn me(&self) -> Result<Me> {
+        self.send(self.request(routes::ME, None)).await
+    }
+
+    /// `GET /v1/agents`.
+    pub async fn list_agents(&self) -> Result<Vec<Agent>> {
+        self.send(self.request(routes::LIST_AGENTS, None)).await
+    }
+
+    /// `POST /v1/agents`: the agent, its token and the token's secret.
+    pub async fn create_agent(&self, new: &NewAgent) -> Result<CreatedAgent> {
+        self.send(self.request(routes::CREATE_AGENT, None).json(new)).await
+    }
+
+    /// `POST /v1/agents/{agent}/revoke`: revokes the agent named `name` (or with that id) and its sub-agents.
+    pub async fn revoke_agent(&self, name: &str) -> Result<Agent> {
+        let req = self.request_with(routes::REVOKE_AGENT, &[("agent", &name.replace('/', "%2F"))]);
+        self.send(req.json(&serde_json::json!({}))).await
+    }
+
+    /// `GET /v1/tokens`, without their secrets.
+    pub async fn list_tokens(&self) -> Result<Vec<Token>> {
+        self.send(self.request(routes::LIST_TOKENS, None)).await
+    }
+
+    /// `POST /v1/tokens`: the token and its secret.
+    pub async fn create_token(&self, new: &NewToken) -> Result<CreatedToken> {
+        self.send(self.request(routes::CREATE_TOKEN, None).json(new)).await
+    }
+
+    /// `DELETE /v1/tokens/{id}`: the revoked token.
+    pub async fn revoke_token(&self, id: &str) -> Result<Token> {
+        self.send(self.request(routes::REVOKE_TOKEN, Some(id))).await
+    }
+
+    /// `PATCH /v1/tokens/{id}`.
+    pub async fn update_token(&self, id: &str, update: &TokenUpdate) -> Result<Token> {
+        self.send(self.request(routes::UPDATE_TOKEN, Some(id)).json(update)).await
+    }
+
+    /// `GET /v1/events`.
+    pub async fn list_events(&self, q: &EventQuery) -> Result<Vec<Event>> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(t) = &q.task {
+            query.push(("task", t.clone()));
+        }
+        if let Some(a) = q.actor {
+            query.push(("actor", a.to_string()));
+        }
+        if q.changes_only {
+            query.push(("changes_only", "true".into()));
+        }
+        if q.newest_first {
+            query.push(("newest_first", "true".into()));
+        }
+        if let Some(l) = q.limit {
+            query.push(("limit", l.to_string()));
+        }
+        self.send(self.request(routes::LIST_EVENTS, None).query(&query)).await
+    }
+
+    /// `POST /v1/undo`: reverts one event.
+    pub async fn undo(&self, undo: &Undo) -> Result<UndoReport> {
+        self.send(self.request(routes::UNDO, None).json(undo)).await
+    }
+
+    /// `POST /v1/undo`: reverts a batch.
+    pub async fn undo_batch(&self, undo: &UndoBatch) -> Result<UndoReport> {
+        self.send(self.request(routes::UNDO, None).json(undo)).await
+    }
+
+    /// `POST /v1/revert`: reverts what one actor did since a time, skipping what someone else changed later.
+    pub async fn revert(&self, revert: &Revert) -> Result<UndoReport> {
+        self.send(self.request(routes::REVERT, None).json(revert)).await
+    }
+
+    /// `GET /v1/webhooks`, without their secrets.
+    pub async fn list_webhooks(&self) -> Result<Vec<Webhook>> {
+        self.send(self.request(routes::LIST_WEBHOOKS, None)).await
+    }
+
+    /// `POST /v1/webhooks`: the webhook and its signing secret.
+    pub async fn create_webhook(&self, new: &NewWebhook) -> Result<CreatedWebhook> {
+        self.send(self.request(routes::CREATE_WEBHOOK, None).json(new)).await
+    }
+
+    /// `DELETE /v1/webhooks/{id}`.
+    pub async fn delete_webhook(&self, id: &str) -> Result<()> {
+        self.send_empty(self.request(routes::DELETE_WEBHOOK, Some(id))).await
+    }
+
+    /// `GET /v1/webhooks/{id}/deliveries`: the latest `limit` delivery attempts, newest first.
+    pub async fn webhook_deliveries(&self, id: &str, limit: usize) -> Result<Vec<WebhookDelivery>> {
+        self.send(self.request(routes::WEBHOOK_DELIVERIES, Some(id)).query(&[("limit", limit)])).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,7 +878,7 @@ mod tests {
         let base = serve_once(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 7\r\nconnection: close\r\n\r\n{\"x\":1}",
         );
-        let err = Client::new(base, "t").ready("TRAIL", 1).await.unwrap_err();
+        let err = Client::new(base, "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
         assert_eq!(err.status(), Some(200));
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
@@ -531,7 +887,7 @@ mod tests {
     #[tokio::test]
     async fn a_refused_connection_stays_transport() {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready("TRAIL", 1).await.unwrap_err();
+        let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Transport(_)), "{err}");
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
