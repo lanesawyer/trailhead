@@ -194,7 +194,7 @@ async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
     assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
     let key = r.tracker.add_task("TRAIL", "Fails", "");
@@ -205,6 +205,11 @@ async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
     assert!(ran.is_err(), "{ran:?}");
     assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
     assert_eq!(r.tracker.task(&key).run.gave_up.unwrap_or(0), 0);
+    // The task is set back too: it isn't picked up again until the backoff is over.
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1, "retried once the backoff is over");
 }
 
 #[tokio::test]

@@ -1155,3 +1155,20 @@ async fn a_review_whose_park_failed_waits_out_its_backoff_before_the_next_try() 
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.reviewed.len(), 1, "{done:?}");
 }
+
+/// The host never works `mergeable` out. The check before a conflict rework reads the PR once, then waits before
+/// each re-read, so it asks 1 + 3 times over 10 seconds rather than re-reading at once (TRAIL-1341).
+#[tokio::test(start_paused = true)]
+async fn the_pre_rework_check_waits_before_every_re_read_of_mergeable() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    r.codehost.set_mergeable(&pr, None);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/b.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let (calls, start) = (r.codehost.calls("pr_state"), tokio::time::Instant::now());
+    r.factory.tick().await.unwrap();
+    // The pre-rework check asks 1 + 3 times; the worker's publish then asks 4 more, each after a wait.
+    assert_eq!(r.codehost.calls("pr_state") - calls, 4 + 4, "no read without a wait before it");
+    assert_eq!(start.elapsed().as_secs(), 10 + 10, "both checks wait out the whole backoff");
+}

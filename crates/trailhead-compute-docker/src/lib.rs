@@ -727,7 +727,8 @@ impl Compute for DockerCompute {
         if let Err(e) = &listed {
             tracing::warn!(error = %e, "couldn't list checkpoint images to size the disk a run needs");
         }
-        let (size, checkpoint) = disk_size(fs, listed.as_ref().ok().and_then(Option::as_ref));
+        let checkpoint = listed.as_ref().ok().and_then(Option::as_ref);
+        let size = disk_size(fs, checkpoint);
         let need = disk_needed(self.config.min_free_bytes, self.config.concurrent_checkpoints, size);
         if free < need {
             return Err(Error::Unavailable(disk_short(&id.0, free, need, fs, listed.is_ok(), checkpoint)));
@@ -814,8 +815,8 @@ fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
     labels.and_then(|l| l.get(CHECKPOINT_ENV)).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
 }
 
-/// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
-/// largest of all of them.
+/// `images` as `(of, size, name)` tuples for [`pick_checkpoint`], each image named by its first checkpoint tag, or by
+/// its ID when it has none.
 fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)> {
     let sized = images
         .iter()
@@ -827,15 +828,13 @@ fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)
     pick_checkpoint(sandbox, sized)
 }
 
-/// The size the disk need follows, and the checkpoint image that sets it: `None` unless it is larger than the
-/// container's own `fs` size.
-fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> (u64, Option<&(u64, String)>) {
-    match checkpoint {
-        Some((big, _)) if *big > fs => (*big, checkpoint),
-        _ => (fs, None),
-    }
+/// The size the disk need follows: the larger of the container's own `fs` size and the checkpoint image's.
+fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> u64 {
+    checkpoint.map_or(fs, |(big, _)| fs.max(*big))
 }
 
+/// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
+/// largest of all of them.
 fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
     let largest = |own: bool| {
         images
@@ -868,8 +867,8 @@ fn full_disk(msg: &str) -> bool {
 /// The message for a sandbox short of disk, naming both sizes the need could rest on so an operator knows what to
 /// free: the container's filesystem, or the largest checkpoint image (which `docker rmi` frees if it is stale).
 ///
-/// `checkpoint` is `None` when no image is larger than `fs` (none exists, or the largest is smaller), since then the
-/// filesystem sets the need.
+/// `checkpoint` is the largest image listed, whether or not it is larger than `fs`; the message says when it is not
+/// (then the filesystem sets the need), and `None` means none exists.
 ///
 /// `listed` is whether the checkpoint images could be listed: if not, their size is unknown rather than absent.
 fn disk_short(
@@ -881,10 +880,11 @@ fn disk_short(
     checkpoint: Option<&(u64, String)>,
 ) -> String {
     let checkpoint = match checkpoint {
-        Some((big, name)) => {
+        Some((big, name)) if *big > fs => {
             format!("largest checkpoint {} MiB, image {name}; `docker rmi {name}` frees it if it is stale", big >> 20)
         }
-        None if listed => "no checkpoint image larger than the filesystem".to_string(),
+        Some((big, name)) => format!("largest checkpoint {} MiB, image {name}, smaller than the filesystem", big >> 20),
+        None if listed => "no checkpoint image".to_string(),
         None => "checkpoint size unknown, the images couldn't be listed".to_string(),
     };
     format!(
@@ -1137,7 +1137,10 @@ mod tests {
         assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
         assert!(both.contains("`docker rmi cp:1`"), "{both}");
         let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, None);
-        assert!(none.contains("filesystem 300 MiB, no checkpoint image larger than the filesystem"), "{none}");
+        assert!(none.contains("filesystem 300 MiB, no checkpoint image)"), "{none}");
+        let small = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, Some(&(200 * mib, "cp:2".into())));
+        assert!(small.contains("largest checkpoint 200 MiB, image cp:2, smaller than the filesystem"), "{small}");
+        assert!(!small.contains("docker rmi"), "{small}");
         let unknown = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, false, None);
         assert!(unknown.contains("filesystem 300 MiB, checkpoint size unknown"), "{unknown}");
     }
@@ -1189,12 +1192,12 @@ mod tests {
     }
 
     #[test]
-    fn the_preflight_names_the_checkpoint_only_when_it_is_larger_than_the_container() {
+    fn the_disk_need_is_the_larger_of_the_container_and_the_checkpoint() {
         let cp = (800, "cp:1".to_string());
-        assert_eq!(disk_size(300, Some(&cp)), (800, Some(&cp)));
-        assert_eq!(disk_size(800, Some(&cp)), (800, None), "equal does not set the need");
-        assert_eq!(disk_size(900, Some(&cp)), (900, None));
-        assert_eq!(disk_size(300, None), (300, None));
+        assert_eq!(disk_size(300, Some(&cp)), 800);
+        assert_eq!(disk_size(800, Some(&cp)), 800);
+        assert_eq!(disk_size(900, Some(&cp)), 900);
+        assert_eq!(disk_size(300, None), 300);
     }
 
     #[test]

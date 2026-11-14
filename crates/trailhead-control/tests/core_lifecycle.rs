@@ -1707,13 +1707,13 @@ async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again(
 
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 1, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 1, "{}", logs.text());
 
     r.store.update_task(&r.human, &task.0, reparent(Some(queue.clone())), None).await.unwrap();
     alpha.reconcile().await.unwrap();
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 2, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 2, "{}", logs.text());
 }
 
 #[tokio::test]

@@ -208,7 +208,7 @@ fn cargo_line_ok(line: &str) -> bool {
 /// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
 /// `requires-dist`. A table that says where to fetch from is a new source.
 fn uv_line_ok(line: &str) -> bool {
-    const SOURCES: [&str; 7] = ["url", "git", "path", "registry", "directory", "editable", "virtual"];
+    const SOURCES: [&str; 8] = ["url", "git", "path", "registry", "directory", "editable", "virtual", "index"];
     let entry = line.starts_with("{ name = \"")
         && line.trim_end_matches(',').ends_with('}')
         && !SOURCES.iter().any(|k| line.contains(&format!(", {k} = ")));
@@ -521,6 +521,7 @@ mod tests {
         for bad in [
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
+            "+    { name = \"x\", index = \"https://x/simple\" },",
             "+version = \"1.0.0\"",
             "+[[package]]",
         ] {
