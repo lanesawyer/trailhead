@@ -67,7 +67,7 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
     let (rows, runs): (Vec<Row>, _) = match &live {
         Some(live) => (live.snapshot.sandboxes.iter().map(Row::from_status).collect(), Some(live)),
         None => {
-            let computes = computes(&config, &opts, &fnox, &paths, Default::default(), true)?;
+            let computes = computes(&config, &opts, &fnox, &paths, Default::default(), true, true)?;
             let labels = Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), slug)]);
             let (sandboxes, unreachable) = list_everywhere(&computes, &labels).await?;
             for name in &unreachable {
@@ -182,7 +182,7 @@ async fn log_source(
     paths: &trailhead_client::paths::Paths,
     task: &Task,
 ) -> Result<(Arc<dyn trailhead_factory::Compute>, Sandbox)> {
-    let computes = computes(config, opts, fnox, paths, Default::default(), true)?;
+    let computes = computes(config, opts, fnox, paths, Default::default(), true, true)?;
     let wanted =
         Labels::from([(label::FACTORY.into(), FACTORY_LABEL.into()), (label::REPO.into(), config.repo.repo().slug())]);
     let (found, unreachable) = list_everywhere(&computes, &wanted).await?;
