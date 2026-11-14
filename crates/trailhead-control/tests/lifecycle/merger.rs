@@ -1006,12 +1006,14 @@ async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1023,11 +1025,13 @@ async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.codehost.close(&pr);
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 /// The factory's own identity takes the task and sends it to review again, as it does when a conflict it was to
@@ -1257,10 +1261,12 @@ async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.set_status(&key, Status::Cancelled);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1272,10 +1278,12 @@ async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.detach(&key);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1295,6 +1303,32 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     }
     let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
     assert_eq!(warned(&logs), 1, "{}", logs.text());
+    assert!(!r.codehost.prs()[0].merged, "still held");
+}
+
+/// TRAIL-1304: "once per head" must not become "once ever": a new head that still conflicts is warned about again.
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_again_when_its_head_moves() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let (logs, _capture) = crate::logs::Logs::capture();
+    let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+
+    r.codehost.push_to(&mine);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "the new head, still conflicting, is warned about: {}", logs.text());
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "but only once for it");
     assert!(!r.codehost.prs()[0].merged, "still held");
 }
 
