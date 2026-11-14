@@ -870,6 +870,9 @@ fn full_disk(msg: &str) -> bool {
 /// The message for a sandbox short of disk, naming both sizes the need could rest on so an operator knows what to
 /// free: the container's filesystem, or the largest checkpoint image (which `docker rmi` frees if it is stale).
 ///
+/// `checkpoint` is `None` when no image is larger than `fs` (none exists, or the largest is smaller), since then the
+/// filesystem sets the need.
+///
 /// `listed` is whether the checkpoint images could be listed: if not, their size is unknown rather than absent.
 fn disk_short(
     sandbox: &str,
@@ -883,7 +886,7 @@ fn disk_short(
         Some((big, name)) => {
             format!("largest checkpoint {} MiB, image {name}; `docker rmi {name}` frees it if it is stale", big >> 20)
         }
-        None if listed => "no checkpoint image".to_string(),
+        None if listed => "no checkpoint image larger than the filesystem".to_string(),
         None => "checkpoint size unknown, the images couldn't be listed".to_string(),
     };
     format!(
@@ -1136,7 +1139,7 @@ mod tests {
         assert!(both.contains("filesystem 300 MiB, largest checkpoint 800 MiB, image cp:1"), "{both}");
         assert!(both.contains("`docker rmi cp:1`"), "{both}");
         let none = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, true, None);
-        assert!(none.contains("filesystem 300 MiB, no checkpoint image"), "{none}");
+        assert!(none.contains("filesystem 300 MiB, no checkpoint image larger than the filesystem"), "{none}");
         let unknown = disk_short("sb", 100 * mib, 900 * mib, 300 * mib, false, None);
         assert!(unknown.contains("filesystem 300 MiB, checkpoint size unknown"), "{unknown}");
     }
