@@ -88,7 +88,7 @@ Any `/v1` write may send `Idempotency-Key` (1-255 characters). A retry with the 
 
 ## Undo
 
-Every request is one batch; its id is in the `trailhead-batch` response header. `POST /v1/undo` with `{"batch_id"}` or `{"event_id"}` reverts it, as a new write that can itself be undone. If something it touched changed later it fails with `409 undo_conflict` (`later_event`); past 90 days it is `409 undo_window_expired`. A human can `POST /v1/revert` `{"actor_id", "since"}` to revert everything one actor did since a time, skipping and reporting anything someone else changed afterwards.
+Every request is one batch; its id is in the `trailhead-batch` response header. `POST /v1/undo` with `{"batch_id"}` or `{"event_id"}` reverts it, as a new write that can itself be undone. If something it touched changed later it fails with `409 undo_conflict` (`later_event`); past 90 days it is `409 undo_window_expired`. A human can `POST /v1/revert` `{"actor_id", "since"}` to revert everything one actor did since a time, skipping and reporting anything someone else changed afterwards, or a task restore that would form a parent cycle (`later_event` null, cause in `reason`).
 
 ## Events
 

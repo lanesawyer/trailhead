@@ -296,6 +296,7 @@ async fn the_live_probe_checks_the_token_only_every_few_probes() {
     let probes = health.load(Ordering::SeqCst) - health_from;
     let checks = me.load(Ordering::SeqCst) - me_from;
     assert!(probes >= 30, "the probe ran only {probes} times in 5 s");
+    assert!(checks >= 1, "the Live probe never checked the token in {probes} probes");
     assert!(checks <= probes / 15 + 1, "{checks} token checks in {probes} probes, expected about one in 15");
     assert_eq!(state(&app), Connection::Live);
 }
