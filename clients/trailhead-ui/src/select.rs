@@ -193,7 +193,8 @@ pub(crate) fn style_select_captions(
     }
 }
 
-/// The size feathers sets a select's caption at, which its cut is measured by.
+/// The size feathers sets a select's caption at, which its cut is measured by. A test ties it to feathers' own
+/// constant.
 const CAPTION_SIZE: Size = size::CARD_TITLE;
 
 /// A select's caption, cut to the room its button leaves it. Feathers writes the chosen row's whole words into the
@@ -566,6 +567,13 @@ mod tests {
             info.scale_factor = 1.0;
             info.size = Vec2::new(words_width, 14.0);
         }
+    }
+
+    /// Feathers sets a select's caption at its medium font, which `CAPTION_SIZE` stands in for when the cut is
+    /// measured: if feathers moves that size, this fails rather than the cut drifting early or late.
+    #[test]
+    fn the_caption_size_is_the_size_feathers_sets_the_caption_at() {
+        assert_eq!(FontSize::from(CAPTION_SIZE), bevy::feathers::constants::size::MEDIUM_FONT);
     }
 
     #[test]
