@@ -845,7 +845,8 @@ impl Factory {
     }
 }
 
-/// The waits before each reading of a just-pushed PR's `mergeable`: GitHub usually has it within a few seconds.
+/// The waits before each reading of a PR's `mergeable`, for a just-pushed PR and for one whose base has just moved
+/// (before a conflict rework): GitHub usually has it within a few seconds.
 const MERGEABLE_WAITS: [Duration; 4] =
     [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(5)];
 
