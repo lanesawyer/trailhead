@@ -667,9 +667,7 @@ impl Factory {
             // Waiting for a worker: the task is listed as ready, and the worker's handoff answers the request. One
             // that no longer stands (the PR was pushed to, or a person settled the park) is answered here, and the
             // PR is looked at as it is.
-            let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
-            let stale =
-                recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some()) && standing.is_none();
+            let stale = task.run.last_changes().is_some_and(|c| c.attempt == attempt) && standing.is_none();
             let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
             self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
         }
