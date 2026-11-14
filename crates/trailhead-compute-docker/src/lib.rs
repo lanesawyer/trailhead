@@ -162,6 +162,13 @@ pub fn build(
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
 
+/// The supervisor's command line: the programs dir (the one `logs` reads), then `args` (a program name, or none).
+fn supervisor_cmd(args: &[&str]) -> Vec<String> {
+    let mut cmd = vec![SUPERVISE_PATH.to_string(), programs_dir(&target().dir)];
+    cmd.extend(args.iter().map(|a| a.to_string()));
+    cmd
+}
+
 /// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`). A floor: a sandbox with a
 /// big filesystem needs more ([`disk_needed`]).
 pub const DEFAULT_MIN_FREE_BYTES: u64 = 10 << 30;
@@ -328,12 +335,11 @@ impl DockerCompute {
         env
     }
 
-    /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
-    /// already has it.
-    async fn run_container(&self, name: &str, image: &str, fresh: bool, extra_env: Vec<String>) -> Result<()> {
+    /// Creates and starts the sandbox's container from `image`, with the current supervisor uploaded first.
+    async fn run_container(&self, name: &str, image: &str, extra_env: Vec<String>) -> Result<()> {
         let body = ContainerCreateBody {
             image: Some(image.into()),
-            cmd: Some(vec![SUPERVISE_PATH.into(), programs_dir(&target().dir)]),
+            cmd: Some(supervisor_cmd(&[])),
             entrypoint: Some(vec![]),
             env: Some([self.sandbox_env(), extra_env].concat()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
@@ -356,11 +362,15 @@ impl DockerCompute {
         };
         let opts = CreateContainerOptions { name: Some(name.into()), ..Default::default() };
         self.docker.create_container(Some(opts), body).await.map_err(docker_err)?;
-        if fresh {
-            let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
-            self.upload(name, "/", tar).await?;
-        }
+        self.upload_supervisor(name).await?;
         self.docker.start_container(name, None).await.map_err(docker_err)
+    }
+
+    /// Puts the current supervisor in the container. A checkpoint holds the one from when it was taken, whose calling
+    /// convention may be older, so every restore and `start` refreshes it.
+    async fn upload_supervisor(&self, name: &str) -> Result<()> {
+        let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
+        self.upload(name, "/", tar).await
     }
 
     async fn upload(&self, name: &str, dir: &str, tar: Vec<u8>) -> Result<()> {
@@ -504,7 +514,7 @@ impl Compute for DockerCompute {
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
         self.attach(&spec.name, &state).await?;
-        match self.run_container(&spec.name, &self.config.image, true, Vec::new()).await {
+        match self.run_container(&spec.name, &self.config.image, Vec::new()).await {
             // Lost a race with another create of the same name.
             Err(Error::Conflict(_)) => {}
             other => other?,
@@ -604,7 +614,7 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false, multi_line).await?;
+        self.run_container(&id.0, &cp.0, multi_line).await?;
         // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
         if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
@@ -649,7 +659,8 @@ impl Compute for DockerCompute {
             return Err(Error::Other(format!("sandbox {name}: moving files into place ({code}): {}", out.trim())));
         }
 
-        self.spawn(name, vec!["setsid".into(), SUPERVISE_PATH.into(), programs, program.name.clone()]).await?;
+        self.upload_supervisor(name).await?;
+        self.spawn(name, [vec!["setsid".to_string()], supervisor_cmd(&[&program.name])].concat()).await?;
         tokio::time::sleep(START_WATCH).await;
         let check = format!("cat {0}/exits; echo ---; tail -n 50 {0}/log", shell_quote(&dir));
         let (_, out) = self.exec(name, None, &check).await?;
@@ -1283,6 +1294,16 @@ mod tests {
         };
         compute.write_state("trail-1-a1", &state).await.unwrap();
         assert_eq!(compute.read_state("trail-1-a1").await.unwrap(), state);
+    }
+
+    #[test]
+    fn the_supervisor_is_given_the_programs_dir_the_logs_read() {
+        let programs = programs_dir(&target().dir);
+        assert_eq!(supervisor_cmd(&[]), vec![SUPERVISE_PATH.to_string(), programs.clone()]);
+        assert_eq!(
+            supervisor_cmd(&["trailhead-daemon"]),
+            vec![SUPERVISE_PATH.to_string(), programs, "trailhead-daemon".into()]
+        );
     }
 
     #[test]
