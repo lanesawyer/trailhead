@@ -427,23 +427,25 @@ impl Factory {
         if !should_say_starved(&mut last, &holders, waiting) {
             return;
         }
-        let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
+        let parked: Vec<String> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.clone()).collect();
         let max_sandboxes = self.config.repo.max_sandboxes;
         let tasks = if waiting == 1 { "task" } else { "tasks" };
         if parked_fill_repo_cap(parked.len(), max_sandboxes) {
             tracing::warn!(
-                held_by = parked.join(", "),
+                held_by = collapse_repeats(parked.clone()).join(", "),
                 max_sandboxes,
                 "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
             );
         } else {
-            let held: Vec<String> = holders
-                .iter()
-                .map(|(k, parked)| {
-                    let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
-                    describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
-                })
-                .collect();
+            let held = collapse_repeats(
+                holders
+                    .iter()
+                    .map(|(k, parked)| {
+                        let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                        describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
+                    })
+                    .collect(),
+            );
             tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
         }
         *last = Some(holders);
@@ -830,9 +832,28 @@ fn describe_holder(key: &str, parked: bool, retry_in: Option<Duration>) -> Strin
     }
 }
 
+/// One task can hold several pooled sandboxes, so a sorted list of holders repeats it: name each once, with a count.
+fn collapse_repeats(sorted: Vec<String>) -> Vec<String> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for item in sorted {
+        match out.last_mut() {
+            Some((last, n)) if *last == item => *n += 1,
+            _ => out.push((item, 1)),
+        }
+    }
+    out.into_iter().map(|(item, n)| if n > 1 { format!("{item} ×{n}") } else { item }).collect()
+}
+
 #[cfg(test)]
 mod holder_tests {
     use super::*;
+
+    #[test]
+    fn a_task_holding_two_sandboxes_is_named_once() {
+        let two = describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42)));
+        let held = collapse_repeats(vec![two.clone(), two, "TRAIL-2 (parked)".into()]);
+        assert_eq!(held, ["TRAIL-1087 (retrying in 42s) ×2", "TRAIL-2 (parked)"]);
+    }
 
     #[test]
     fn a_holder_in_setback_is_not_called_parked() {
