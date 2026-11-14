@@ -696,6 +696,7 @@ impl Net {
         let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
+        let _ = self.events.send(NetEvent::Factory(FactoryUpdate::Reset));
         self.stop_sync();
         self.token = None;
         self.pasted = None;
