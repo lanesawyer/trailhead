@@ -350,13 +350,17 @@ impl Factory {
                 let mut merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
                 push_said(&mut merged.history, merged_message);
                 let body = messages::status_comment(&merged.message, &merged.history);
+                // Said before recording, so a comment `say` had to post anew is the one the record keeps.
+                match self.say(pr, decision.comment, &body).await {
+                    Ok(id) => merged.comment = Some(id),
+                    Err(e) => {
+                        tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
+                    }
+                }
                 if let Err(e) =
                     self.tracker.report(&task.key, RunPatch { merge: Patch::Set(merged), ..RunPatch::default() }).await
                 {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
-                }
-                if let Err(e) = self.say(pr, decision.comment, &body).await {
-                    tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,
