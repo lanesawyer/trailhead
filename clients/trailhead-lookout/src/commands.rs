@@ -8,8 +8,9 @@
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
 //! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
-//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] failures (or as many rate-limit
-//! answers) it is reported failed (a rate limit is handed back as `RateLimited`) rather than tried forever.
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] failures, or once a
+//! rate-limited command has been sent that many times in all, it is reported failed (a rate limit is handed back as
+//! `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,9 +21,10 @@ use trailhead_client::http::{Call, Client};
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
 
-/// How many failed attempts a command gets before it is reported failed, and, counted separately, how many
-/// rate-limit answers it is retried through before `RateLimited` is handed back. Sends that never reached the
-/// server (see [`NOT_CONNECTED`]) count toward neither.
+/// Caps real failures: a command is reported failed after this many. A send the net thread refused with
+/// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries: a
+/// `RateLimited` answer is retried only while the command has been sent fewer than this many times in all, counting
+/// every send (including those two kinds), before `RateLimited` is handed back.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The longest the outbox waits on a `Retry-After` before sending again.
