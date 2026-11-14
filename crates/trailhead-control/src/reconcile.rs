@@ -47,9 +47,9 @@ impl Factory {
     }
 
     /// Warns, once per stretch outside the queues, about factory tasks sitting outside every repo's queue:
-    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses. The run loop
-    /// releases the pooled sandbox held for one on its next poll (TRAIL-1147), but reconcile still can't see the task
-    /// (TRAIL-531). Which repo owns one is unknowable, so nothing else is torn down.
+    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses. Once its run
+    /// has ended, the run loop releases the pooled sandbox held for one on its next poll (TRAIL-1147), but reconcile
+    /// still can't see the task (TRAIL-531). Which repo owns one is unknowable, so nothing else is torn down.
     async fn warn_strays(&self) {
         // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
         // asks: the other repo's in-flight runs are that repo's own.

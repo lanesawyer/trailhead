@@ -545,10 +545,11 @@ impl Factory {
     }
 
     /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished, or taken
-    /// off the queue by hand (re-parented while parked or running, TRAIL-1147), are released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
-    /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
-    /// A task holds one pooled sandbox: any other still labelled for it is left over from an earlier attempt and is
-    /// released too (TRAIL-1185).
+    /// off the queue by hand (re-parented while parked or running, TRAIL-1147), are released; one still running is
+    /// released on the first poll after its run ends. A parked task keeps its sandbox, so without this the place stays
+    /// taken until the next reconcile (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh
+    /// checkout with the answer in its prompt. A task holds one pooled sandbox: any other still labelled for it is left
+    /// over from an earlier attempt and is released too (TRAIL-1185).
     async fn occupied_after_release(&self, running: &HashSet<TaskKey>) -> Result<Vec<Sandbox>> {
         let held = self.occupied().await?;
         let candidates: Vec<&Sandbox> = held
