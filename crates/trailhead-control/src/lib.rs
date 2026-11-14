@@ -329,6 +329,13 @@ impl Factory {
         self.merger.updating.lock().unwrap().contains_key(task)
     }
 
+    /// Whether the merger holds the files it listed for this task's PR, so a pass at the same head can skip the
+    /// listing (for tests).
+    #[doc(hidden)]
+    pub fn caches_pr_files(&self, task: &TaskKey) -> bool {
+        self.merger.listed.lock().unwrap().contains_key(task)
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,
