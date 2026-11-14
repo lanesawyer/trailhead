@@ -994,6 +994,10 @@ async fn rework_holding_two_sandboxes(warm: bool) -> (Rig, TaskKey) {
 }
 
 async fn rework_in_recorded_sandbox(r: &Rig, key: &TaskKey) {
+    // The tick's first release of `w2` (in `occupied_after_release`, before any task is placed) fails on its first
+    // call, `set_egress`, so `w2` is still busy and held for the task when `acquire_worker` places it. That is the
+    // stale-release loop under test; without the fault `occupied_after_release` releases `w2` and the loop never runs.
+    r.compute.fail_once_after("trailhead-w2", "set_egress", 0);
     r.codehost.set_conflicts(false);
     let pr = r.tracker.task(key).run.pr.expect("a PR");
     r.codehost.set_mergeable(&pr, Some(false));
@@ -1001,6 +1005,7 @@ async fn rework_in_recorded_sandbox(r: &Rig, key: &TaskKey) {
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
     assert!(ran.iter().any(|(t, o)| &t.key == key && !matches!(o, Outcome::Settled { .. })), "the rework ran: {ran:?}");
+    assert_eq!(r.tracker.task(key).run.host.as_deref(), Some("trailhead-w1"), "the rework ran in its recorded sandbox");
 }
 
 #[tokio::test]
