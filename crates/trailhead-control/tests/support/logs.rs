@@ -50,6 +50,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLogs {
 
 impl Logs {
     /// Captures this thread's log lines until the returned guard drops.
+    ///
+    /// Capture is per thread, so it relies on the current-thread runtime `#[tokio::test]` uses by default: the code
+    /// under test runs on the test's own thread. On a multi-thread runtime (`flavor = "multi_thread"`) or in a
+    /// spawned OS thread, lines logged off the test's thread are not captured.
     pub(crate) fn capture() -> (Logs, Capture) {
         static INSTALL: std::sync::Once = std::sync::Once::new();
         INSTALL.call_once(|| {
