@@ -69,3 +69,15 @@ fn ls_flags_every_task_awaiting_changes_past_one_page() {
     let listed = th.stdout(&["ls", "-p", "QA", "--limit", "200"]);
     assert_eq!(listed.matches("(changes requested)").count(), 101, "{listed}");
 }
+
+#[test]
+fn ls_title_finds_only_the_exact_title_ignoring_case_and_padding() {
+    let th = Instance::new();
+    th.stdout(&["project", "add", "QA", "Queue"]);
+    th.stdout(&["add", "Fix the login", "-p", "QA"]);
+    th.stdout(&["add", "Fix the login page", "-p", "QA"]);
+    th.stdout(&["add", "Other", "-p", "QA"]);
+    let found = th.stdout(&["ls", "-p", "QA", "--title", "  fix THE login "]);
+    assert!(found.contains("QA-1") && found.contains("Fix the login"), "{found}");
+    assert!(!found.contains("QA-2") && !found.contains("QA-3"), "{found}");
+}
