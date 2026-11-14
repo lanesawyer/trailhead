@@ -224,8 +224,9 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
-    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: reconcile
-    /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
+    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: a parked
+    /// task's sandbox is otherwise left alone, so that loses the suspended state, which beats leaving it reachable.
+    /// If the destroy fails too the sandbox is `Stuck`: reconcile destroys it, and the status board shows it broken.
     pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
         let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
         tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");

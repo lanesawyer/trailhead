@@ -84,13 +84,21 @@ impl Factory {
         let (live, down) = self.list_all(&self.base_labels()).await?;
         let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await;
         // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
-        let parked: HashSet<String> = in_flight
-            .iter()
-            .flatten()
-            .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
-            .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
-            .collect();
-        self.status.sync_sandboxes(&live, &down, &parked);
+        // A sandbox a breach left stuck (cut-off and destroy both failed) is shown apart: waiting to be destroyed,
+        // not suspended.
+        let held = |stuck: bool| -> HashSet<String> {
+            in_flight
+                .iter()
+                .flatten()
+                .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
+                .filter(|t| {
+                    let breach = t.run.worker_breach.as_ref();
+                    breach.is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) == stuck
+                })
+                .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
+                .collect()
+        };
+        self.status.sync_sandboxes(&live, &down, &held(false), &held(true));
         self.warn_strays().await;
         let in_flight = in_flight?;
         // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.

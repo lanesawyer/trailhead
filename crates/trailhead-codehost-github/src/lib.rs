@@ -263,33 +263,54 @@ impl GitHub {
     }
 
     /// Whether `head` is exactly `commits` on top of `start`: walking back one commit per entry meets their messages
-    /// in order and ends at `start`.
+    /// in order and ends at `start`, and each commit's tree is the one this publish would write. Blobs and trees are
+    /// content-addressed, so writing them again yields the shas the failed attempt got; a different change carrying
+    /// the same messages ends in different trees.
     async fn is_published(&self, repo: &Repo, head: &str, start: &str, commits: &[Commit]) -> Result<bool> {
         if commits.is_empty() {
             return Ok(false);
         }
         let r = Self::repo_path(repo);
         let mut sha = head.to_string();
+        // Each commit's tree, newest first.
+        let mut trees = Vec::with_capacity(commits.len());
         for commit in commits.iter().rev() {
             let found = self.call(self.request(Method::GET, &format!("{r}/git/commits/{sha}"))).await?;
             if found["message"].as_str() != Some(commit.message.as_str()) {
                 return Ok(false);
             }
+            let Some(tree) = found["tree"]["sha"].as_str() else { return Ok(false) };
+            trees.push(tree.to_string());
             let first = &found["parents"][0];
             match first["sha"].as_str().or_else(|| first.as_str()) {
                 Some(parent) => sha = parent.to_string(),
                 None => return Ok(false),
             }
         }
-        Ok(sha == start)
+        if sha != start {
+            return Ok(false);
+        }
+        trees.reverse();
+        let mut base = self.tree_of(repo, start).await?;
+        for (commit, tree) in commits.iter().zip(trees) {
+            if self.write_tree(repo, &base, commit).await? != tree {
+                return Ok(false);
+            }
+            base = tree;
+        }
+        Ok(true)
     }
 
-    /// Writes one commit on top of `parent` and returns its sha.
-    async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
+    /// The tree a commit holds.
+    async fn tree_of(&self, repo: &Repo, commit: &str) -> Result<String> {
+        let path = format!("{}/git/commits/{commit}", Self::repo_path(repo));
+        let found = self.call(self.request(Method::GET, &path)).await?;
+        found["tree"]["sha"].as_str().map(str::to_string).ok_or_else(|| Error::Other("commit without a tree".into()))
+    }
+
+    /// Writes the tree `commit`'s changes make on top of `base_tree` and returns its sha.
+    async fn write_tree(&self, repo: &Repo, base_tree: &str, commit: &Commit) -> Result<String> {
         let r = Self::repo_path(repo);
-        let parent_commit = self.call(self.request(Method::GET, &format!("{r}/git/commits/{parent}"))).await?;
-        let base_tree =
-            parent_commit["tree"]["sha"].as_str().ok_or_else(|| Error::Other("parent without a tree".into()))?;
         let mut entries = Vec::with_capacity(commit.changes.len());
         for change in &commit.changes {
             let (sha, mode) = match &change.contents {
@@ -306,8 +327,16 @@ impl GitHub {
         }
         let tree = json!({ "base_tree": base_tree, "tree": entries });
         let tree = self.call(self.request(Method::POST, &format!("{r}/git/trees")).json(&tree)).await?;
+        tree["sha"].as_str().map(str::to_string).ok_or_else(|| Error::Other("tree without a sha".into()))
+    }
+
+    /// Writes one commit on top of `parent` and returns its sha.
+    async fn write_commit(&self, repo: &Repo, parent: &str, commit: &Commit) -> Result<String> {
+        let r = Self::repo_path(repo);
+        let base_tree = self.tree_of(repo, parent).await?;
+        let tree = self.write_tree(repo, &base_tree, commit).await?;
         let parents: Vec<&str> = std::iter::once(parent).chain(commit.merges.iter().map(String::as_str)).collect();
-        let mut body = json!({ "message": commit.message, "tree": tree["sha"], "parents": parents });
+        let mut body = json!({ "message": commit.message, "tree": tree, "parents": parents });
         if let Some(a) = &self.author {
             body["author"] = json!({ "name": a.name, "email": a.email });
             body["committer"] = body["author"].clone();
