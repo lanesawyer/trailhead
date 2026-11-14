@@ -563,6 +563,15 @@ async fn the_reviewers_infrastructure_failures_keep_counting_across_a_control_pl
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+
+    // Lane sends it back to review, and a new factory sees one more failure: the streak starts again at 1.
+    r.tracker.set_status(&key, Status::InReview);
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "connection lost");
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the reopened task's streak starts over");
+    assert_eq!(task.status, Status::InReview, "retried, not parked");
 }
 
 #[tokio::test(start_paused = true)]
