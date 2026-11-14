@@ -165,6 +165,25 @@ fn a_rate_limited_command_is_sent_again_with_its_key_until_attempts_run_out() {
 }
 
 #[test]
+fn a_stale_rate_limit_does_not_requeue_a_later_attempt() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let (sent, _) = step(&mut app);
+    let id = sent[0].0;
+    set(&mut app, Connection::Syncing);
+    set(&mut app, Connection::Live);
+    let (resent, _) = step(&mut app);
+    assert_eq!(resent[0].1, 2);
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::ZERO), message: "slow".into() };
+    reply(&mut app, id, 1, Ok(limited));
+    let (again, done) = step(&mut app);
+    assert!(again.is_empty() && done.is_empty(), "attempt 2 is still out; nothing else is sent");
+    assert_eq!(app.world().resource::<Outbox>().len(), 1);
+}
+
+#[test]
 fn a_rate_limited_command_waits_for_retry_after() {
     let mut app = app();
     let control = app.world_mut().spawn_empty().id();
