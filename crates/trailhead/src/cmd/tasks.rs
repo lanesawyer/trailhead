@@ -273,6 +273,11 @@ impl Kind {
 /// The kind of a known `factory.<field>` key (or nested path, like `factory.pr.url`), if `path` is one.
 fn factory_kind(path: &str) -> Option<Kind> {
     let (_, field) = path.split_once('.').filter(|(ns, _)| *ns == "factory")?;
+    field_kind(field)
+}
+
+/// The kind of `field`, a `factory` field or nested path without the `factory.` prefix, if it's a known one.
+fn field_kind(field: &str) -> Option<Kind> {
     FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field).map(|(_, k)| *k)
 }
 
@@ -312,7 +317,7 @@ fn check_factory_field(path: &str, value: &Value) -> Result<()> {
 fn check_factory_prefixes(field: &str) -> Result<()> {
     for (i, _) in field.match_indices('.') {
         let prefix = &field[..i];
-        if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == prefix)
+        if let Some(kind) = field_kind(prefix)
             && !matches!(kind, Kind::Object)
         {
             anyhow::bail!("--meta factory.{prefix} is {}, so factory.{field} can't be set", kind.name());
@@ -324,7 +329,7 @@ fn check_factory_prefixes(field: &str) -> Result<()> {
 /// Checks `value` against the kind of `field` if it's a known path, then descends into an object, so an unknown
 /// field holding an object still has its known leaves checked.
 fn check_factory_leaves(path: &str, field: &str, value: &Value) -> Result<()> {
-    if let Some((_, kind)) = FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field)
+    if let Some(kind) = field_kind(field)
         && !value.is_null()
         && !kind.accepts(value)
     {

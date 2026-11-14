@@ -565,6 +565,7 @@ fn quota(info: &Value) -> Vec<RunEvent> {
         .iter()
         .filter_map(|(window, w)| {
             let used = w["utilization"].as_f64()?;
+            warn_unknown_window(window);
             Some(RunEvent::Quota {
                 window: window.clone(),
                 used_percent: (used * 100.0).round().clamp(0.0, 1000.0) as u32,
@@ -572,6 +573,28 @@ fn quota(info: &Value) -> Vec<RunEvent> {
             })
         })
         .collect()
+}
+
+/// Warns, once per window name per process, that Claude Code reported a usage window `pause_at` can't name: a limit
+/// on it would silently never match.
+fn warn_unknown_window(window: &str) {
+    if first_unknown_window(window) {
+        tracing::warn!(
+            window,
+            known = %trailhead_factory::host::USAGE_WINDOWS.join(", "),
+            "claude reported a usage window pause_at can't name; a limit on it would never match"
+        );
+    }
+}
+
+/// True the first time an unrecognized window name is seen.
+fn first_unknown_window(window: &str) -> bool {
+    static WARNED: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+    if trailhead_factory::host::USAGE_WINDOWS.contains(&window) {
+        return false;
+    }
+    let mut warned = WARNED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    warned.get_or_insert_with(HashSet::new).insert(window.to_string())
 }
 
 /// What a tool call is about, in one short line: a Bash command, a file path or a search pattern.
@@ -755,6 +778,15 @@ mod tests {
             let RunEvent::Quota { window, .. } = event else { panic!("not a quota event: {event:?}") };
             assert!(trailhead_factory::host::USAGE_WINDOWS.contains(&window.as_str()), "{window}");
         }
+    }
+
+    #[test]
+    fn an_unknown_window_is_flagged_once_and_known_ones_never() {
+        assert!(!first_unknown_window("five_hour"));
+        assert!(!first_unknown_window("seven_day"));
+        assert!(first_unknown_window("test_only_window"));
+        assert!(!first_unknown_window("test_only_window"));
+        assert!(first_unknown_window("another_test_window"));
     }
 
     #[test]
