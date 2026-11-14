@@ -417,8 +417,8 @@ async fn a_holder_on_a_down_target_does_not_start_elsewhere_over_the_repo_cap() 
     let t = two_capped_at(1, &local_holds(""), None);
     let key = answered_holder_on_local(&t).await;
     t.local.compute.set_unreachable(true);
-    // Whether the tick errors or finds nothing to do, the repo mustn't go to two sandboxes.
-    let _ = t.factory.tick().await;
+    // Only local is down, so the tick succeeds; it just has nowhere safe to start the task.
+    t.factory.tick().await.unwrap();
     assert!(ran(&t.cloud, Role::Worker).is_empty(), "starting on the cloud would put the repo at two sandboxes");
     assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()], "only the parked run ever ran there");
 
@@ -427,6 +427,15 @@ async fn a_holder_on_a_down_target_does_not_start_elsewhere_over_the_repo_cap() 
     t.factory.tick().await.unwrap();
     assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone(); 2]);
     assert!(ran(&t.cloud, Role::Worker).is_empty());
+}
+
+#[tokio::test]
+async fn a_task_on_a_down_target_starts_elsewhere_when_the_repo_has_room_for_both() {
+    let t = two_capped_at(3, &local_holds(""), None);
+    let key = answered_holder_on_local(&t).await;
+    t.local.compute.set_unreachable(true);
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.cloud, Role::Worker), vec![key.0.clone()], "room for the new sandbox and the unseen one");
 }
 
 #[tokio::test]
