@@ -167,6 +167,15 @@ pub struct Card {
     pub found: Option<String>,
     /// Its pull request, which a tool button opens in the browser.
     pub pr: Option<PrLink>,
+    /// The agent holding it, whom a tool button opens in the inspector. A person holding it has no such view.
+    pub holder: Option<HolderLink>,
+}
+
+/// An agent holding a task: its id (what `Subject::Agent` carries) and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderLink {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +372,13 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
             actions,
             found: found(t),
             pr: pr_link(t),
+            holder: holder_of.get(&t.id).and_then(|id| {
+                input
+                    .agents
+                    .iter()
+                    .find(|a| a.id == *id)
+                    .map(|a| HolderLink { id: id.to_string(), name: a.name.clone() })
+            }),
         }
     };
 
@@ -590,6 +606,15 @@ mod tests {
     }
 
     #[test]
+    fn a_card_held_by_an_agent_links_to_it_and_one_held_by_a_person_does_not() {
+        let view = run(&Filter::default());
+        let link = card(&view, "TRAIL-103").holder.clone().expect("an agent holds it");
+        assert_eq!((link.id, link.name), (sid("a1"), "factory/trail-103-a1".to_string()));
+        assert_eq!(card(&view, "OPS-1").holder, None);
+        assert_eq!(card(&view, "TRAIL-102").holder, None);
+    }
+
+    #[test]
     fn an_ungraded_task_under_a_factory_queue_is_flagged_and_a_graded_one_is_not() {
         let view = run(&Filter::default());
         // TRAIL-105 is open under the queue TRAIL-102 with no grade.
@@ -777,6 +802,7 @@ mod tests {
                 actions: vec![],
                 found: None,
                 pr: None,
+                holder: None,
             })
             .collect()
     }
