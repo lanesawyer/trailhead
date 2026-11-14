@@ -664,3 +664,19 @@ async fn a_stale_stack_sandbox_that_wont_be_destroyed_is_labelled_broken_and_fre
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.destroyed, ["trailhead-w1"]);
 }
+
+#[tokio::test]
+async fn a_destroyed_sandboxs_warm_cost_is_forgotten() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    assert_eq!(r.factory.warm_costs_tracked(), 1, "the warm sandbox has a cost");
+    // Left busy with a warm checkpoint that's gone, so releasing it destroys it.
+    let id = trailhead_factory::SandboxId("trailhead-w1".into());
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::WARM.into(), "gone".into());
+    r.compute.set_labels(&id, &labels).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.factory.warm_costs_tracked(), 0, "the cost went with the sandbox");
+}
