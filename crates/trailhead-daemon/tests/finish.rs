@@ -284,3 +284,51 @@ async fn a_review_request_the_tracker_refuses_is_not_retried() {
         assert_eq!(tracker.review_requests(&key), 1, "{error}");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn claim_renewal_keeps_its_cadence_from_driving_into_finishing() {
+    let tracker = FakeTracker::new("factory");
+    let key = tracker.add_task("TRAIL", "Add a greeting", "");
+    let harness = Arc::new(ScriptedHarness::new());
+    // The agent ends at 8s, just before the first renewal is due at 10s.
+    harness.push(
+        Role::Worker,
+        Script::new(RunOutcome::Changes {
+            commits: vec![Commit {
+                message: format!("feat: greet [{}]", key.0),
+                changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
+                merges: vec![],
+            }],
+            summary: "Adds a greeting.".into(),
+        })
+        .slow_tool(Duration::from_secs(8)),
+    );
+    let codehost = Arc::new(FakeCodeHost::new());
+    // Publishing tries at 8s, 13s and 23s (waits of 5 and 10 seconds), then gets through.
+    codehost.flaky_publish(2);
+    let connect: Connect = {
+        let tracker = tracker.clone();
+        Arc::new(move |_| {
+            let tracker = tracker.clone();
+            Box::pin(async move { Ok(Arc::new(tracker) as Arc<dyn Tracker>) })
+        })
+    };
+    let runner = Runner {
+        harness,
+        codehost: codehost.clone(),
+        workspace: Arc::new(FakeWorkspace::default()),
+        connect,
+        renew_every: Duration::from_secs(10),
+        heartbeat_every: HEARTBEAT_EVERY,
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut req = request(key.clone());
+    req.role = Role::Worker;
+
+    let report = runner.run(req, tx, Arc::new(Notify::new())).await.unwrap();
+
+    assert!(matches!(report.result, RunResult::PrOpened(_)), "{:?}", report.result);
+    assert_eq!(codehost.publish_attempts(), 3);
+    // Renewals fall at 10s and 20s. A timer restarted when the agent ended (8s) would renew at 18s only.
+    assert_eq!(tracker.renews(&key), 2);
+}
