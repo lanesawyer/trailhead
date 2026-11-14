@@ -16,16 +16,6 @@ use std::path::Path;
 /// (file, function, why). Add to this only for opening and closing a surface, never for a change in what it shows.
 const ALLOWED: &[(&str, &str, &str)] = &[
     ("author.rs", "redraw_form", "opens and closes the form's modal"),
-    (
-        "board/panel.rs",
-        "dress_cards",
-        "a card is a leaf redrawn only when its own view model changed (TRAIL-853); in place is a follow-up",
-    ),
-    (
-        "board/panel.rs",
-        "dress_slots",
-        "a column's \"Show more\" button, relabelled when its count changes; in place is a follow-up",
-    ),
     ("hint.rs", "hide_hint", "closes a hint, which lives as a child of what it describes"),
     ("hint.rs", "show_hint", "opens a hint, first closing any other still shown"),
     ("select.rs", "set_toned", "a select's rows, respawned only when its options changed; the select and popup stay"),

@@ -24,9 +24,9 @@ use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::search::{Deep, DeepHit};
 use crate::widgets;
 use crate::widgets::{
-    ButtonKind, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, Token, badge, button, card as card_shell,
-    card_found, card_row, card_title, card_under, field, grade_tone, link_tool_button, priority_tone, select, space,
-    status_label, token, tool_button,
+    ButtonKind, ExternalLink, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, TextTone, Token, badge, button,
+    card as card_shell, card_found, card_row, card_title, card_under, field, grade_tone, link_tool_button,
+    priority_tone, select, space, status_label, token, tool_button,
 };
 
 /// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).
@@ -92,12 +92,12 @@ impl Plugin for BoardUiPlugin {
             .add_observer(on_more_press)
             .add_systems(
                 Update,
-                (dress_columns, dress_slots, update_counts, dress_header, update_header)
+                (dress_columns, dress_slots, relabel_more, update_counts, dress_header, update_header)
                     .chain()
                     .after(sync_tree)
                     .run_if(in_state(View::Board)),
             )
             // Cards are drawn wherever they are, on the board or on a project's page.
-            .add_systems(Update, (dress_cards, tools_follow_connection));
+            .add_systems(Update, (dress_cards, update_cards, sync_card_rows, tools_follow_connection).chain());
     }
 }
