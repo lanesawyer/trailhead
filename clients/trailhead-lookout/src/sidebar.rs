@@ -388,9 +388,6 @@ mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
 
-    use bevy::input::keyboard::KeyboardInput;
-    use bevy::input_focus::FocusedInput;
-
     use super::*;
     use crate::board::BoardPlugin;
     use crate::fixture::{project_json, sid, task_json};
@@ -701,16 +698,7 @@ mod tests {
         app.world_mut().entity_mut(field).insert(EditableText::new("trail-8"));
         settle(&mut app);
         assert_eq!(app.world().resource::<Filter>().query, "trail-8");
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: bevy::input::keyboard::Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: field,
-        };
-        let window = app.world_mut().spawn_empty().id();
-        app.world_mut().trigger(FocusedInput::new(field, input, window));
+        trailhead_ui::test_support::press_escape(app.world_mut(), field);
         settle(&mut app);
         assert_eq!(app.world().get::<EditableText>(field).unwrap().value().to_string(), "");
         assert_eq!(app.world().resource::<Filter>().query, "");

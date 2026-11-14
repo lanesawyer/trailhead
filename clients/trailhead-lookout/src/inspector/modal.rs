@@ -565,18 +565,8 @@ mod tests {
     }
 
     fn key(app: &mut App, from: Entity, code: KeyCode) {
-        let input = KeyboardInput {
-            key_code: code,
-            logical_key: bevy::input::keyboard::Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: from,
-        };
-        // A real window: the press climbs to it last and stops there. An entity without `Window` would be handed
-        // the press again forever.
-        let window = app.world_mut().spawn(Window::default()).id();
-        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        let unidentified = bevy::input::keyboard::Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified);
+        trailhead_ui::test_support::press_key(app.world_mut(), from, code, unidentified);
         settle(app);
     }
 

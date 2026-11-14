@@ -428,8 +428,6 @@ impl Plugin for SettingsUiPlugin {
 
 #[cfg(test)]
 mod tests {
-    use bevy::input::keyboard::{Key, KeyboardInput};
-    use bevy::input_focus::FocusedInput;
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
 
@@ -520,15 +518,7 @@ mod tests {
         open(&mut app);
         // With nothing focused, the press goes to the window.
         let window = app.world_mut().spawn_empty().id();
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window,
-        };
-        app.world_mut().trigger(FocusedInput::new(window, input, window));
+        trailhead_ui::test_support::press_escape(app.world_mut(), window);
         settle(&mut app);
         assert_eq!(modals(&mut app), 0);
     }
