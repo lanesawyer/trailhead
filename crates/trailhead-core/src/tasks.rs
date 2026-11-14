@@ -332,7 +332,7 @@ pub struct TaskFilter {
     pub project: Option<String>,
     /// Empty means every status that isn't done or cancelled.
     pub statuses: Vec<Status>,
-    pub parent: Option<String>,
+    pub parent: Option<TaskKey>,
     /// Only tasks with this title, ignoring case (ASCII) and surrounding whitespace.
     pub title: Option<String>,
     pub due_before: Option<Timestamp>,
@@ -759,7 +759,7 @@ impl Store {
             push(&mut sql, " AND project_id = ?", project.id.to_string().into());
         }
         if let Some(p) = &filter.parent {
-            let parent = find_task(&conn, ctx, p, false).await?;
+            let parent = find_task(&conn, ctx, &p.0, false).await?;
             push(&mut sql, " AND parent_id = ?", parent.id.to_string().into());
         }
         if let Some(t) = &filter.title {
