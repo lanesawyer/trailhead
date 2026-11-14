@@ -595,6 +595,20 @@ fn check_result(failed: usize) -> Result<()> {
     }
 }
 
+/// Where each secret comes from (env, fnox, keyring or file), never its value. `opts` holds what the environment set.
+fn print_secret_sources(opts: &Opts, fnox: &fnox::Fnox, paths: &Paths) {
+    let creds = paths.creds();
+    let writer = std::env::var("GITHUB_WRITER_TOKEN").ok();
+    for (name, env, cred) in [
+        ("SPRITES_TOKEN", opts.sprites_token.clone(), login::SPRITES),
+        ("GITHUB_TOKEN", opts.github_token.clone(), login::GITHUB),
+        ("CLAUDE_CODE_OAUTH_TOKEN", opts.claude_oauth_token.clone(), login::CLAUDE),
+        ("GITHUB_WRITER_TOKEN", writer, login::GITHUB_WRITER),
+    ] {
+        println!("secret {}", login::describe(name, env, fnox, &creds, cred));
+    }
+}
+
 /// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
 /// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
 /// the server.
@@ -604,6 +618,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
+    print_secret_sources(&plan.opts, &fnox, &paths);
     for spec in &plan.specs {
         let slug = spec.slug();
         let project = &spec.config.repo.project;
@@ -931,6 +946,11 @@ pub enum Command {
     /// Save a secret in the OS keyring (read from stdin), so the server's control plane needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
+    /// Remove a secret saved by `login` (from the keyring and the file). The environment and fnox are untouched.
+    Logout {
+        #[arg(value_enum)]
+        name: login::Secret,
+    },
 }
 
 /// Sets up logging to the terminal and runs `cmd`.
@@ -944,6 +964,11 @@ pub async fn command(cmd: Command) -> Result<()> {
         Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
         Command::Allowed => allowed(),
         Command::Login(cmd) => login(cmd).await,
+        Command::Logout { name } => {
+            let paths = Paths::from_env().ok_or(Error::NoDirs)?;
+            println!("{}", login::logout(&paths.creds(), name)?);
+            Ok(())
+        }
     }
 }
 
