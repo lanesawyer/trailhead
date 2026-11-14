@@ -831,6 +831,24 @@ async fn a_breach_park_finished_from_open_claims_the_task_first() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_task_whose_breach_park_failed_is_not_started_as_rework() {
+    let (r, key, _) = breaching_rig().await;
+    r.tracker.fail_next("factory", TrackerOp::Claim, 1);
+    let _ = r.factory.reconcile().await;
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    // The task is Open and ready, but its park is owed: no worker starts on it.
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let started = r.factory.tick().await.unwrap();
+    assert!(started.is_empty(), "{started:?}");
+    assert_eq!(r.tracker.task(&key).status, Status::Open);
+
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.breached, std::slice::from_ref(&key.0));
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_breach_park_is_finished_while_the_code_host_is_paused() {
     let (r, key, _) = breaching_rig().await;
     r.tracker.fail_next("factory", TrackerOp::Claim, 1);
