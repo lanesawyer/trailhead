@@ -248,6 +248,18 @@ impl Resume {
         *self.0.lock().expect("resume lock") = point;
     }
 
+    /// Marks a position as held, for tests that check it is forgotten.
+    #[cfg(test)]
+    pub fn hold_for_test(&self) {
+        self.set(Some(ResumePoint { last: 1, down_since: None }));
+    }
+
+    /// Whether a position is held.
+    #[cfg(test)]
+    pub fn is_held(&self) -> bool {
+        self.point().is_some()
+    }
+
     /// Forgets the position: the next sync starts from a snapshot.
     pub fn clear(&self) {
         self.set(None);
