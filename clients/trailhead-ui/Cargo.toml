@@ -11,6 +11,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `test_support`: key-press helpers for tests of apps built on the kit.
+test-support = []
+
 [dependencies]
 # Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a UI needs.
 bevy = { version = "0.20", default-features = false, features = [
