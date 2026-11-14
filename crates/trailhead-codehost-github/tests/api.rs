@@ -154,7 +154,11 @@ async fn create_blob(State(g): State<Shared>, Json(b): Json<Value>) -> Response 
     let mut g = g.lock().unwrap();
     assert_eq!(b["encoding"], "base64");
     let bytes = base64::engine::general_purpose::STANDARD.decode(b["content"].as_str().unwrap()).unwrap();
-    let sha = g.id("blob");
+    // Content-addressed, like git: the same bytes are the same blob.
+    let sha = match g.blobs.iter().find(|(_, b)| **b == bytes) {
+        Some((sha, _)) => sha.clone(),
+        None => g.id("blob"),
+    };
     g.blobs.insert(sha.clone(), bytes);
     (StatusCode::CREATED, Json(json!({ "sha": sha }))).into_response()
 }
@@ -171,7 +175,10 @@ async fn create_tree(State(g): State<Shared>, Json(b): Json<Value>) -> Response 
             None => files.remove(&path),
         };
     }
-    let sha = g.id("tree");
+    let sha = match g.trees.iter().find(|(_, t)| **t == files) {
+        Some((sha, _)) => sha.clone(),
+        None => g.id("tree"),
+    };
     g.trees.insert(sha.clone(), files);
     (StatusCode::CREATED, Json(json!({ "sha": sha }))).into_response()
 }
@@ -527,6 +534,12 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
     // A retry after a ref write that landed behind a 5xx finds its own commits on the branch: done, not a conflict.
     gh.publish(&repo(), &branch, "factory/trail-1", std::slice::from_ref(&second)).await.unwrap();
     assert_eq!(head(&git, "factory/trail-1"), published_head, "the retry changed nothing");
+
+    // The same messages over a different change aren't this publish's work, whatever the branch holds.
+    let other = Commit { changes: vec![change("tests/greet.rs", Some(b"different\n"))], ..second.clone() };
+    let differs = gh.publish(&repo(), &branch, "factory/trail-1", &[other]).await.unwrap_err();
+    assert!(matches!(&differs, Error::Conflict(m) if m.contains("would overwrite")), "{differs:?}");
+    assert_eq!(head(&git, "factory/trail-1"), published_head);
 
     let missing = gh.publish(&repo(), "nope", "factory/trail-2", &[first]).await.unwrap_err();
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");

@@ -46,7 +46,7 @@ pub trait Workspace: Send + Sync {
     /// Whether `commit` is an ancestor of (or is) the checkout's HEAD.
     async fn contains(&self, commit: &str) -> Result<bool>;
     /// The files that have `<<<<<<<` or `>>>>>>>` lines added since `start`, committed or not.
-    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>>;
+    async fn conflict_markers(&self, start: &str, base: &str) -> Result<Vec<String>>;
     /// The files the checkout changes against the base branch's remote head (`origin/<base>`), committed or not.
     async fn changed_files(&self, base: &str) -> Result<Vec<String>>;
     /// Whether the checkout has uncommitted changes or commits that are not on `origin/<remote_branch>`.
@@ -128,7 +128,7 @@ impl Runner {
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`. A cancel during the
     /// checks stops them before anything is published; once publishing starts, the step runs to the end.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
-        let key = &req.task.key.0;
+        let key = &req.task.key;
         self.workspace.set_env(&req.env);
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
@@ -184,8 +184,8 @@ impl Runner {
             lost_merge = Some(before.clone());
         }
         let mut merging = now.or(merging_before).filter(|_| lost_merge.is_none());
-        // One the agent both started and committed leaves no MERGE_HEAD to see, only a merge commit with the base as a
-        // parent.
+        // One the agent both started and committed leaves no MERGE_HEAD to see, only the base's commits in HEAD's
+        // history that the run's start didn't have (a merge commit, a fast-forward, or a merge of an older tip).
         if merging.is_none() && lost_merge.is_none() && matches!(outcome, RunOutcome::Changes { .. }) {
             merging = self.workspace.merged_base(&start, &req.base_branch).await?;
         }
@@ -468,7 +468,7 @@ impl Runner {
                 }
                 // The checks only catch markers in files they compile, so look for them in everything changed.
                 if merge == Merge::Merged {
-                    let files = self.workspace.conflict_markers(start).await?;
+                    let files = self.workspace.conflict_markers(start, &req.base_branch).await?;
                     if !files.is_empty() {
                         let (reason, note) = messages::conflict_markers_left(&files);
                         tracker.note(key, &note).await?;

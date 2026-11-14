@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxSpec, Task,
+    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxId, SandboxSpec, Task,
     install_host_allowed, label,
 };
 
@@ -18,7 +18,19 @@ impl Factory {
     /// first says which hosts the `[stack]` tools it will install need; exactly
     /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
     /// confirmed closed again before any agent runs.
-    async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
+    async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest, cold: bool) -> Result<()> {
+        let began = Instant::now();
+        tracing::info!(sandbox = %sandbox.name, cold, setup = req.setup.as_ref().map(|c| c.command.as_str()), "preparing the sandbox");
+        let result = self.prepare_checkout(p, sandbox, req).await;
+        let took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(()) => tracing::info!(sandbox = %sandbox.name, cold, took_ms, "sandbox prepared"),
+            Err(e) => tracing::info!(sandbox = %sandbox.name, cold, took_ms, error = %e, "sandbox prepare failed"),
+        }
+        result
+    }
+
+    async fn prepare_checkout(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
         let needs = p.daemon.install_hosts(&sandbox.id, &req).await?;
         if !needs.is_empty() {
             let mut egress = self.install_egress();
@@ -65,7 +77,7 @@ impl Factory {
         let sandbox = p.compute.create(&spec).await?;
         self.status.sandbox(&sandbox);
         let ready = async {
-            self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch)).await?;
+            self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch), true).await?;
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await
         };
         if let Err(e) = ready.await {
@@ -123,7 +135,7 @@ impl Factory {
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
         // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
-        let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
+        let recorded = task.run.host.as_deref();
         idle.sort_by_key(|s| Some(s.name.as_str()) != recorded);
         let held = idle.clone();
         idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);
@@ -136,12 +148,15 @@ impl Factory {
             }
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
-            if let Err(e) = p.compute.destroy(&s.id).await {
-                // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
-                // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
-                // is the task's own busy sandbox it did count, so this also frees that place.
-                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
-                self.mark_broken(&s).await;
+            match p.compute.destroy(&s.id).await {
+                Ok(()) => self.forget_sandbox(&s.id),
+                Err(e) => {
+                    // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
+                    // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
+                    // is the task's own busy sandbox it did count, so this also frees that place.
+                    tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
+                    self.mark_broken(&s).await;
+                }
             }
         }
         let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
@@ -197,7 +212,7 @@ impl Factory {
         let rework = branch.is_some() && !branch_if_present;
         let prepare =
             PrepareRequest { merge_base, branch_if_present, ..self.config.prepare_request(Role::Worker, branch) };
-        let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
+        let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone(), warm.is_none()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
         // starts anyway: the checkout is otherwise ready, and prepares again without `setup` to finish it (TRAIL-649).
@@ -236,8 +251,11 @@ impl Factory {
             }
             tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
             self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
-            if let Err(d) = p.compute.destroy(&sandbox.id).await {
-                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            match p.compute.destroy(&sandbox.id).await {
+                Ok(()) => self.forget_sandbox(&sandbox.id),
+                Err(d) => {
+                    tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+                }
             }
             return Err(e);
         }
@@ -339,8 +357,16 @@ impl Factory {
         Ok(())
     }
 
+    /// Drops what the control plane keeps per sandbox, for one that no longer exists, so the maps don't grow
+    /// with every sandbox a long-running server has destroyed (TRAIL-1251).
+    pub(crate) fn forget_sandbox(&self, id: &SandboxId) {
+        self.pool.prepare_failures.lock().unwrap().remove(id);
+        self.pool.warm_cost.lock().unwrap().remove(id);
+    }
+
     async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
         p.compute.destroy(&sandbox.id).await?;
+        self.forget_sandbox(&sandbox.id);
         self.status.sandbox_gone(&sandbox.name);
         Ok(())
     }
@@ -422,6 +448,7 @@ impl Factory {
             t.abandoned = true;
         }
         if p.compute.destroy(&sandbox.id).await.is_ok() {
+            self.forget_sandbox(&sandbox.id);
             self.status.sandbox_gone(name);
             self.pool.troubled.lock().unwrap().remove(name);
             return;

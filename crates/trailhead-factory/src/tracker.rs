@@ -326,8 +326,10 @@ pub struct ChangesRequested {
     /// host couldn't say.
     #[serde(default)]
     pub head: Option<String>,
-    /// A person has taken the request over: the task was parked on it and then answered or reopened, which settles
-    /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
+    /// The request no longer needs a worker: either a person took it over (the task was parked on it and then
+    /// answered or reopened, which settles it whether or not they pushed), or the factory saw the host stop
+    /// reporting the conflict before its rework ran (`settle_gone_conflict`, TRAIL-952). A settled request is kept
+    /// for the record but is no longer pending.
     #[serde(default)]
     pub settled: bool,
 }
