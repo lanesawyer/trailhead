@@ -145,6 +145,7 @@ impl Factory {
             }
             match self.target_of(sandbox).compute.destroy(&sandbox.id).await {
                 Ok(()) => {
+                    self.forget_sandbox(&sandbox.id);
                     self.status.sandbox_gone(&sandbox.name);
                     done.destroyed.push(sandbox.name.clone());
                 }
