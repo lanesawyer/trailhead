@@ -69,13 +69,22 @@ pub fn rig_on(config: &str, host: Arc<Host>) -> Rig {
 /// [`rig_with`] with the daemon's harness picked by the worker profile's `adapter` from the testkit's registry, as
 /// the real daemon picks its own, instead of handed over.
 pub fn rig_selecting(config: &str) -> Rig {
-    let adapter = FactoryConfig::parse_table(config, "TRAIL", None).unwrap().plugins().unwrap().0.to_string();
+    let adapter = load_selecting(config).unwrap();
     rig_built(config, Host::new(&HostConfig::default()), move |harness, codehost, tracker| {
         let heads = codehost.clone();
         LocalDaemon::from_registry(&trailhead_testkit::harnesses(harness), &adapter, Arc::new(codehost), tracker)
             .unwrap()
             .with_heads(move |repo, branch| heads.head(repo, branch))
     })
+}
+
+/// The load-time check the server runs on each repo's config (`check_plugins` against its registries), here against
+/// the testkit's harnesses and the one provider the rig's `FakeProvider` stands in for. Returns the worker's adapter.
+pub fn load_selecting(config: &str) -> trailhead_factory::Result<String> {
+    let parsed = FactoryConfig::parse_table(config, "TRAIL", None)?;
+    let harnesses = trailhead_testkit::harnesses(Arc::new(ScriptedHarness::new()));
+    parsed.check_plugins(&harnesses.names(), &["anthropic"])?;
+    Ok(parsed.plugins().expect("a worker profile").0.to_string())
 }
 
 fn rig_built(
