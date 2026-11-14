@@ -699,7 +699,7 @@ impl Factory {
         if !owed {
             // CI may have finished, or Lane approved, since the gates were last looked at.
             self.evaluate_gates(&task.key).await?;
-        } else if self.rework_if_ci_failed(&task.key).await? {
+        } else if self.rework_if_ci_failed(task).await? {
             // A failed CI is reworked without waiting for the review, which would only look at a head that is about
             // to change.
             return Ok(false);
