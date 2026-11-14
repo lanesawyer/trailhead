@@ -206,3 +206,105 @@ fn a_second_server_on_the_same_data_dir_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("another Trailhead process is using this data directory"), "{err}");
 }
+
+/// A server whose `/v1/me` reports an `agent_id` with no `agent`, the answer for a valid agent token whose agent can't
+/// be looked up. The real server can't be put in that state (a token whose agent row is gone is refused outright), so
+/// this stands in for it, and records the request lines it gets.
+struct UnresolvedAgentServer {
+    url: String,
+    agent_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl UnresolvedAgentServer {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (agent_id, user_id) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    continue;
+                }
+                // Drain the headers; none of the requests this serves has a body.
+                loop {
+                    let mut h = String::new();
+                    if reader.read_line(&mut h).unwrap_or(0) <= 2 {
+                        break;
+                    }
+                }
+                let target = line.split_whitespace().nth(1).unwrap_or_default().to_string();
+                log.lock().unwrap().push(target.clone());
+                let body = if target.starts_with("/v1/me") {
+                    serde_json::json!({
+                        "workspace_id": uuid::Uuid::now_v7(),
+                        "user": {
+                            "id": user_id,
+                            "workspace_id": uuid::Uuid::now_v7(),
+                            "name": "lane",
+                            "email": null,
+                            "created_at": "2026-01-01T00:00:00Z",
+                        },
+                        "agent_id": agent_id,
+                        "agent": null,
+                    })
+                    .to_string()
+                } else if target.starts_with("/v1/events") {
+                    "[]".to_string()
+                } else {
+                    "{}".to_string()
+                };
+                let res = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = reader.get_mut().write_all(res.as_bytes());
+            }
+        });
+        UnresolvedAgentServer { url, agent_id, user_id, requests }
+    }
+}
+
+#[test]
+fn login_refuses_and_undo_uses_the_id_when_the_tokens_agent_doesnt_resolve() {
+    let server = UnresolvedAgentServer::start();
+    let secret = "th_unresolved";
+
+    // Login refuses and saves nothing, not even as the user's token.
+    let th = Instance::new();
+    let pasted = th.dir.path().join("pasted");
+    std::fs::write(&pasted, format!("{secret}\n")).unwrap();
+    let out = output(th.command().args(["--url", &server.url, "login"]).stdin(std::fs::File::open(&pasted).unwrap()));
+    assert!(!out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&server.agent_id.to_string()) && stderr.contains("can't look that agent up"), "{stderr}");
+    let saved: Vec<_> = walk(&th.dir.path().join("config"))
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n != "config.toml"))
+        .collect();
+    assert!(saved.is_empty(), "nothing should be saved, found {saved:?}");
+
+    // Undo with no arguments looks for the caller's last batch by the agent's id, not its owner's.
+    server.requests.lock().unwrap().clear();
+    let out = output(th.command().args(["--url", &server.url, "undo"]).env("TRAILHEAD_TOKEN", secret));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nothing to undo"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let requests = server.requests.lock().unwrap();
+    let events = requests.iter().find(|r| r.starts_with("/v1/events")).unwrap_or_else(|| panic!("{requests:?}"));
+    assert!(events.contains(&server.agent_id.to_string()), "{events}");
+    assert!(!events.contains(&server.user_id.to_string()), "{events}");
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries.flatten().flat_map(|e| if e.path().is_dir() { walk(&e.path()) } else { vec![e.path()] }).collect()
+}
