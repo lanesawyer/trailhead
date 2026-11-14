@@ -43,6 +43,9 @@ pub enum FactoryUpdate {
     /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
     /// message to show, which says when the next try is.
     Refused(String),
+    /// The control plane was dropped (a Connect that failed): forget everything heard from it, so the map doesn't
+    /// show the old factory's state, and say it is unreachable.
+    Reset,
 }
 
 /// A [`FactoryUpdate`] on its way to the mirror.
@@ -455,6 +458,25 @@ pub fn apply_factory(
                     status.control = state;
                 }
             }
+            FactoryUpdate::Reset => {
+                for (_, (e, _)) in mirror.campsites.drain() {
+                    commands.entity(e).despawn();
+                }
+                for (_, (e, _)) in mirror.runs.drain() {
+                    commands.entity(e).despawn();
+                }
+                mirror.seqs.clear();
+                if !status.repos.is_empty() {
+                    status.repos.clear();
+                }
+                if status.control.is_some() {
+                    status.control = None;
+                }
+                if !activity.0.is_empty() {
+                    activity.0.clear();
+                }
+                set_link(&mut status, FactoryLink::Unreachable);
+            }
             FactoryUpdate::Unreachable => set_link(&mut status, FactoryLink::Unreachable),
             FactoryUpdate::TooOld(why) => set_link(&mut status, FactoryLink::TooOld(why)),
             FactoryUpdate::Refused(why) => set_link(&mut status, FactoryLink::Refused(why)),
@@ -718,6 +740,21 @@ mod tests {
         send(&mut app, [snapshot(1, vec![])]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory running");
         assert!(campsites(&mut app).is_empty());
+    }
+
+    #[test]
+    fn a_reset_forgets_the_old_factory() {
+        let mut app = app();
+        send(&mut app, [snapshot(3, vec![sandbox("a", SandboxState::Idle)])]);
+        assert_eq!(campsites(&mut app).len(), 1);
+        send(&mut app, [FactoryUpdate::Reset]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert_eq!(status.label(), "unreachable");
+        assert!(status.repos.is_empty());
+        assert!(campsites(&mut app).is_empty());
+        // A later snapshot starts afresh, whatever its sequence.
+        send(&mut app, [snapshot(1, vec![sandbox("b", SandboxState::Idle)])]);
+        assert_eq!(campsites(&mut app), [("b".into(), SandboxState::Idle)]);
     }
 
     #[test]
