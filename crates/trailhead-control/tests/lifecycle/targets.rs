@@ -42,7 +42,13 @@ fn two() -> Two {
 
 /// `two` with the given target tables, and the file its factory keeps the day's spend in.
 fn two_with(targets: &str, spend_file: Option<std::path::PathBuf>) -> Two {
-    let config = CONFIG.replace("name = \"trailhead\"\n", "name = \"trailhead\"\nmax_sandboxes = 3\n");
+    two_capped_at(3, targets, spend_file)
+}
+
+/// `two_with` with the repo's `max_sandboxes` set to `repo_max`.
+fn two_capped_at(repo_max: usize, targets: &str, spend_file: Option<std::path::PathBuf>) -> Two {
+    let config =
+        CONFIG.replace("name = \"trailhead\"\n", &format!("name = \"trailhead\"\nmax_sandboxes = {repo_max}\n"));
     let config = FactoryConfig::parse_table(&format!("{config}{targets}"), "TRAIL", None).unwrap();
     let tracker = FakeTracker::new("factory");
     let codehost = FakeCodeHost::new();
@@ -282,8 +288,12 @@ daily_usd = 5
 "#;
 
 fn spend_file(dir: &tempfile::TempDir, cloud_micros: u64, day: &str) -> std::path::PathBuf {
+    spend_file_for(dir, "cloud", cloud_micros, day)
+}
+
+fn spend_file_for(dir: &tempfile::TempDir, target: &str, micros: u64, day: &str) -> std::path::PathBuf {
     let path = dir.path().join("spend.json");
-    std::fs::write(&path, format!(r#"{{"day":"{day}","spent":{{"cloud":{cloud_micros}}}}}"#)).unwrap();
+    std::fs::write(&path, format!(r#"{{"day":"{day}","spent":{{"{target}":{micros}}}}}"#)).unwrap();
     path
 }
 
@@ -376,4 +386,77 @@ async fn the_spend_board_shows_while_the_factory_is_full() {
     assert_eq!(board.len(), 1, "{board:?}");
     assert_eq!((board[0].target.as_str(), board[0].capped), ("cloud", true));
     assert_eq!((board[0].spent, board[0].cap), (Usd(5_000_000), Usd(5_000_000)));
+}
+
+/// Local first by priority, with `local_extra` in its table, then the cloud.
+fn local_holds(local_extra: &str) -> String {
+    format!(
+        "[targets.local]\nkind = \"docker\"\npriority = 1\n{local_extra}\n[targets.cloud]\nkind = \"sprites\"\npriority = 2\n"
+    )
+}
+
+/// With the repo's `max_sandboxes` at 1, a task that overran its budget and parked on local, then answered: it is ready
+/// again and still holds the repo's one sandbox, which hasn't been released yet. Local being down or capped must not
+/// send it to the cloud, which would put the repo at two sandboxes.
+async fn answered_holder_on_local(t: &Two) -> TaskKey {
+    let key = t.tracker.add_task("TRAIL", "Parked", "");
+    t.local.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    t.factory.tick().await.unwrap();
+    assert_eq!(t.tracker.task(&key).status, Status::NeedsInput);
+    assert_eq!(t.tracker.task(&key).run.target.as_deref(), Some("local"));
+    t.tracker.answer(&key, "Go on.");
+    for side in [&t.local, &t.cloud] {
+        side.harness.push(Role::Worker, Script::new(changes()));
+        side.harness.push(Role::Reviewer, Script::new(approve()));
+    }
+    key
+}
+
+#[tokio::test]
+async fn a_holder_on_a_down_target_does_not_start_elsewhere_over_the_repo_cap() {
+    let t = two_capped_at(1, &local_holds(""), None);
+    let key = answered_holder_on_local(&t).await;
+    t.local.compute.set_unreachable(true);
+    // Only local is down, so the tick succeeds; it just has nowhere safe to start the task.
+    t.factory.tick().await.unwrap();
+    assert!(ran(&t.cloud, Role::Worker).is_empty(), "starting on the cloud would put the repo at two sandboxes");
+    assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()], "only the parked run ever ran there");
+
+    // Local answers again: the task resumes in the sandbox it holds.
+    t.local.compute.set_unreachable(false);
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone(); 2]);
+    assert!(ran(&t.cloud, Role::Worker).is_empty());
+}
+
+#[tokio::test]
+async fn a_task_on_a_down_target_starts_elsewhere_when_the_repo_has_room_for_both() {
+    let t = two_capped_at(3, &local_holds(""), None);
+    let key = answered_holder_on_local(&t).await;
+    t.local.compute.set_unreachable(true);
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.cloud, Role::Worker), vec![key.0.clone()], "room for the new sandbox and the unseen one");
+}
+
+#[tokio::test]
+async fn a_holder_on_a_capped_target_waits_for_room_then_starts_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut t = two_capped_at(1, &local_holds("daily_usd = 5\n"), None);
+    let key = answered_holder_on_local(&t).await;
+    // Local reaches its daily cap while the task waits, and its sandbox can't be released just now.
+    t.factory = t.factory.with_spend_file(spend_file_for(&dir, "local", 5_000_000, &today()));
+    let held = t.local.compute.sandboxes().into_iter().next().unwrap();
+    t.local.compute.fail(&held.name, "set_egress");
+
+    assert!(t.factory.tick().await.unwrap().is_empty());
+    let board = t.factory.status().snapshot().targets;
+    assert!(board.iter().any(|b| b.target == "local" && b.capped), "{board:?}");
+    assert!(ran(&t.cloud, Role::Worker).is_empty(), "starting on the cloud would put the repo at two sandboxes");
+    assert_eq!(ran(&t.local, Role::Worker), vec![key.0.clone()], "local is at its daily cap");
+
+    // The held sandbox goes: the repo has room, and the task starts on the one target that takes runs.
+    t.local.compute.heal(&held.name);
+    t.local.compute.destroy(&held.id).await.unwrap();
+    t.factory.tick().await.unwrap();
+    assert_eq!(ran(&t.cloud, Role::Worker), vec![key.0.clone()]);
 }
