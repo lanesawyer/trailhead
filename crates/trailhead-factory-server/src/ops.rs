@@ -14,7 +14,7 @@ use trailhead_factory::{
 };
 use trailhead_tracker_rest::RestTracker;
 
-use crate::{Opts, computes, config_dir, load_config, resolve_opts, saved_endpoint_id, surface};
+use crate::{Opts, computes, load_config, repos, resolve_opts, saved_endpoint_id, surface};
 
 /// The program the control plane starts the daemon as, whose service log `logs` prints.
 const DAEMON_PROGRAM: &str = "trailhead-daemon";
@@ -48,7 +48,7 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
     let opts = &status.opts;
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
     let (config_path, _, config) = load_config(opts)?;
-    let (opts, fnox) = resolve_opts(opts, &paths, &config_dir(&config_path))?;
+    let (opts, fnox) = resolve_opts(opts, &paths, &repos::parent(&config_path))?;
     let tracker = api_tracker(&opts, &paths)?;
 
     // A running control plane knows its sandboxes and runs itself, so it is asked first; the compute is only read when
@@ -108,7 +108,7 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
 pub async fn logs(logs: &LogsOpts) -> Result<()> {
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
     let (config_path, _, config) = load_config(&logs.opts)?;
-    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &config_dir(&config_path))?;
+    let (opts, fnox) = resolve_opts(&logs.opts, &paths, &repos::parent(&config_path))?;
 
     let tracker = api_tracker(&opts, &paths)?;
     let key = TaskKey(logs.task.to_ascii_uppercase());
@@ -216,13 +216,41 @@ fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if let Some(rest) = log.strip_prefix(printed) {
         return rest;
     }
-    for at in 1..printed.len() {
-        if !printed.is_char_boundary(at) {
-            continue;
+    if log.is_empty() {
+        return log;
+    }
+    // Longest suffix of `printed` that starts `log`, found in one linear KMP pass (the failure function of `log`,
+    // run over `printed`), so a long repetitive log costs O(n + m), not a prefix comparison at every offset.
+    let (p, l) = (printed.as_bytes(), log.as_bytes());
+    let mut fail = vec![0usize; l.len()];
+    let mut k = 0;
+    for i in 1..l.len() {
+        while k > 0 && l[i] != l[k] {
+            k = fail[k - 1];
         }
-        if let Some(new) = log.strip_prefix(&printed[at..]) {
-            return new;
+        if l[i] == l[k] {
+            k += 1;
         }
+        fail[i] = k;
+    }
+    let mut k = 0;
+    for &b in p {
+        if k == l.len() {
+            k = fail[k - 1];
+        }
+        while k > 0 && b != l[k] {
+            k = fail[k - 1];
+        }
+        if b == l[k] {
+            k += 1;
+        }
+    }
+    // Longest first, which is the smallest scroll; skip overlaps that begin inside a character of `printed`.
+    while k > 0 {
+        if k < p.len() && printed.is_char_boundary(p.len() - k) {
+            return &log[k..];
+        }
+        k = fail[k - 1];
     }
     // Nothing in common (the log was restarted): print it all.
     log
@@ -456,6 +484,8 @@ mod tests {
         assert_eq!(new_output(printed, "3\n4\n5\n6\n7\n8\n"), "7\n8\n");
         // Nothing in common (the log was restarted): print it all.
         assert_eq!(new_output("old\n", "fresh\n"), "fresh\n");
+        // An empty log after something was printed (a reset sandbox) prints nothing, and doesn't panic.
+        assert_eq!(new_output("a\n", ""), "");
         // Repeated lines: a growing window's new copies are new, and an unchanged one prints nothing.
         assert_eq!(new_output("hb\nhb\n", "hb\nhb\nhb\n"), "hb\n");
         assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\nhb\nhb\n"), "hb\nhb\n");
@@ -464,6 +494,12 @@ mod tests {
         assert_eq!(new_output("a\nb\nhb\n", "b\nhb\nhb\n"), "hb\n");
         // The window starts partway through a line.
         assert_eq!(new_output("abc\nd\n", "c\nd\ne\n"), "e\n");
+        // A long repetitive log stays linear, and multibyte text never splits.
+        let long = "hb\n".repeat(200_000);
+        assert_eq!(new_output(&long, &format!("{}x\n", &long[3..])), "x\n");
+        assert_eq!(new_output(&long, &long), "");
+        assert_eq!(new_output("é\nx\n", "\nx\ny\n"), "y\n");
+        assert_eq!(new_output("aé", "éz"), "z");
     }
 
     #[test]

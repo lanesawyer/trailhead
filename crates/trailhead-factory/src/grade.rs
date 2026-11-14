@@ -208,7 +208,7 @@ fn cargo_line_ok(line: &str) -> bool {
 /// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
 /// `requires-dist`. A table that says where to fetch from is a new source.
 fn uv_line_ok(line: &str) -> bool {
-    const SOURCES: [&str; 7] = ["url", "git", "path", "registry", "directory", "editable", "virtual"];
+    const SOURCES: [&str; 8] = ["url", "git", "path", "registry", "directory", "editable", "virtual", "index"];
     let entry = line.starts_with("{ name = \"")
         && line.trim_end_matches(',').ends_with('}')
         && !SOURCES.iter().any(|k| line.contains(&format!(", {k} = ")));
@@ -268,7 +268,9 @@ impl Grader<'_> {
             })
             .collect();
         for f in files {
-            let lock_edit = f.patch.as_deref().is_some_and(|p| is_dependency_list_only(&f.path, p));
+            // Only in place, like a comment edit: a renamed lockfile now pins a different project.
+            let lock_edit = f.status == FileStatus::Modified
+                && f.patch.as_deref().is_some_and(|p| is_dependency_list_only(&f.path, p));
             let rule = rules
                 .iter()
                 .filter(|(_, all, rest)| if lock_edit { rest } else { all }.is_match(&f.path))
@@ -509,9 +511,17 @@ mod tests {
         };
         let uv = "@@ -9,6 +9,7 @@\n dependencies = [\n+    { name = \"requests\" },\n ]\n+requires-dist = [\n+    { name = \"requests\", specifier = \">=2\" },\n+]";
         assert_eq!(grade("uv.lock", uv), gr(1));
+        // A lockfile moved to another directory is not an edit in place, whatever its patch says.
+        let moved = ChangedFile {
+            patch: Some(uv.into()),
+            previous_path: Some("a/uv.lock".into()),
+            ..file("b/uv.lock", FileStatus::Renamed, 1)
+        };
+        assert_eq!(grader(&r).grade(Some(gr(1)), &[moved]).grade, gr(4));
         for bad in [
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
+            "+    { name = \"x\", index = \"https://x/simple\" },",
             "+version = \"1.0.0\"",
             "+[[package]]",
         ] {

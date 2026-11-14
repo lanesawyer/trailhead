@@ -123,6 +123,7 @@ bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/lookout"
 q='"'
 mkdir -p ~/.local/share/applications
 sed "s|^Exec=lookout$|Exec=$q$bin$q|" clients/trailhead-lookout/assets/lookout.desktop > ~/.local/share/applications/lookout.desktop
+grep -qF "Exec=$q$bin$q" ~/.local/share/applications/lookout.desktop || { echo 'lookout.desktop: Exec line not rewritten (the asset must have exactly "Exec=lookout")' >&2; exit 1; }
 chmod 644 ~/.local/share/applications/lookout.desktop
 for size in 32 64 128 256; do
   install -Dm644 clients/trailhead-lookout/assets/icon/$size.png ~/.local/share/icons/hicolor/${size}x${size}/apps/lookout.png

@@ -522,7 +522,7 @@ impl TrailheadMcp {
         let filter = TaskFilter {
             project: a.project,
             statuses,
-            parent: a.parent,
+            parent: a.parent.map(trailhead_core::TaskKey),
             sort: if scheduled_through.is_some() { TaskSort::Scheduled } else { TaskSort::Priority },
             scheduled_through,
             grade: attempt!(parse_grade_filter(a.grade.as_deref())),

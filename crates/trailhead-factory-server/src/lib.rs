@@ -200,11 +200,6 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
-/// The directory of the repo whose config is at `config_path`.
-fn config_dir(config_path: &Path) -> PathBuf {
-    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
-}
-
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
     let config_path = match &opts.config {
@@ -212,25 +207,48 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
         None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
     let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = config_dir(&config_path);
+    let repo_dir = repos::parent(&config_path);
     let remote = find::remote(&repo_dir);
     let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
     Ok((config_path, remote, config))
 }
 
-/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
-/// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
-fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
+/// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it is
+/// re-read live) and need a restart, unless that same edit was already `warned` about, so it is reported once, not on every
+/// merge decision. Empty when there is nothing to report.
+fn changed_without_restart(
+    started: &FactoryConfig,
+    now: FactoryConfig,
+    warned: &mut Option<FactoryConfig>,
+) -> Vec<&'static str> {
     let now = FactoryConfig { merge: Default::default(), ..now };
-    if now == *started {
+    // Destructured so that a new section can't be left out of the comparison.
+    let FactoryConfig { repo, stack, checks, profiles, gates, grades, egress, compute, targets, daemon, merge: _ } =
+        started;
+    let changed: Vec<&'static str> = [
+        ("repo", *repo != now.repo),
+        ("stack", *stack != now.stack),
+        ("checks", *checks != now.checks),
+        ("profiles", *profiles != now.profiles),
+        ("gates", *gates != now.gates),
+        ("grades", *grades != now.grades),
+        ("egress", *egress != now.egress),
+        ("compute", *compute != now.compute),
+        ("targets", *targets != now.targets),
+        ("daemon", *daemon != now.daemon),
+    ]
+    .into_iter()
+    .filter_map(|(name, differs)| differs.then_some(name))
+    .collect();
+    if changed.is_empty() {
         *warned = None;
-        return false;
+        return changed;
     }
     if warned.as_ref() == Some(&now) {
-        return false;
+        return Vec::new();
     }
     *warned = Some(now);
-    true
+    changed
 }
 
 /// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
@@ -409,9 +427,11 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 let config =
                     FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
                 let mode = config.merge.mode;
-                if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
+                let changed = changed_without_restart(&started, config, &mut warned.lock().unwrap());
+                if !changed.is_empty() {
                     tracing::warn!(
                         path = %config_path.display(),
+                        changed = %changed.join(", "),
                         "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
@@ -461,6 +481,7 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
+            entry.factory.status().control(trailhead_factory::ControlState::Stopped);
             feed.set_stopped(&entry.slug, e.to_string());
             true
         }
@@ -638,13 +659,17 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     check_result(failed)
 }
 
-/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+/// Logs a repo loop that panicked and marks it stopped on its status board and in the feed, since the loop never got
+/// to say so itself.
 fn loop_panicked(
     e: &tokio::task::JoinError,
+    feed: &surface::Feed,
     boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
 ) {
     let repo = boards.get(&e.id()).map(|(slug, board)| {
         board.control(trailhead_factory::ControlState::Stopped);
+        feed.set_stopped(slug, e.to_string());
+        board.error(format!("loop panicked: {e}"));
         slug.as_str()
     });
     tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
@@ -676,7 +701,7 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                loop_panicked(&e, &boards);
+                loop_panicked(&e, &feed, &boards);
             }
         }
     }
@@ -972,11 +997,11 @@ mod tests {
         let started = super::started_baseline(&base);
         let mut warned = None;
         // A mode change is applied live, so it isn't a reason to restart.
-        assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
+        assert!(super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned).is_empty());
         let edited = parse("[checks]\nfmt = \"cargo fmt\"");
-        assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
-        assert!(!super::changed_without_restart(&started, edited, &mut warned));
-        assert!(!super::changed_without_restart(&started, base, &mut warned));
+        assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks"]);
+        assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
+        assert!(super::changed_without_restart(&started, base, &mut warned).is_empty());
     }
 
     #[test]
@@ -988,7 +1013,7 @@ mod tests {
         // What `wire` does in subscription mode, after the baseline is taken.
         config.egress.always.push("api.anthropic.com".into());
         let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
-        assert!(!super::changed_without_restart(&started, reread, &mut None));
+        assert!(super::changed_without_restart(&started, reread, &mut None).is_empty());
         assert_ne!(started.egress, config.egress);
     }
 
@@ -1005,8 +1030,16 @@ mod tests {
         let id = loops.spawn(std::future::pending::<()>()).id();
         boards.insert(id, ("o/m".to_string(), other.clone()));
         let e = loops.join_next().await.unwrap().unwrap_err();
-        super::loop_panicked(&e, &boards);
+        let feed = super::surface::Feed::new(trailhead_factory::FactoryState::Running);
+        feed.set_boards(vec![("o/n".to_string(), up.clone()), ("o/m".to_string(), other.clone())]);
+        super::loop_panicked(&e, &feed, &boards);
+        let reply = feed.reply();
+        assert!(reply.repos[0].stopped.as_ref().is_some_and(|m| m.contains("panic")));
+        assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(up.snapshot().control, ControlState::Stopped);
+        let (_, message) = up.snapshot().last_error.unwrap();
+        assert!(message.starts_with("loop panicked: "), "{message}");
+        assert!(other.snapshot().last_error.is_none());
         assert_eq!(other.snapshot().control, ControlState::Up);
     }
 

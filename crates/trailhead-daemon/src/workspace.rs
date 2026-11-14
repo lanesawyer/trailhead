@@ -295,7 +295,6 @@ impl Workspace for GitWorkspace {
         let Ok(have) = self.git_output(&self.dir, &["merge-base", "HEAD", &tip]).await else {
             return Ok(None);
         };
-        let have = have.trim().to_string();
         Ok((!self.is_ancestor(&have, start).await?).then_some(have))
     }
 
@@ -341,12 +340,13 @@ impl Workspace for GitWorkspace {
     async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
         // New files count, as in conflict_markers.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
-        let remote = format!("origin/{base}");
-        // While the rework's merge of the base is in progress, diff against the base tip itself: against the
-        // merge-base, every base change since the branch point would count as the PR's and trigger scoped checks.
-        let from = if self.merge_head().await?.is_some() {
-            remote
+        // While the rework's merge of the base is in progress, diff against the commit being merged (MERGE_HEAD, not
+        // `origin/<base>`, which a `git fetch` in the session moves on): against the merge-base, every base change
+        // since the branch point would count as the PR's and trigger scoped checks.
+        let from = if let Some(head) = self.merge_head().await? {
+            head.trim().to_string()
         } else {
+            let remote = format!("origin/{base}");
             self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?
         };
         let names =

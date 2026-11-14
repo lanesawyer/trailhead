@@ -1156,6 +1156,32 @@ async fn conflict_reworks_up_to_the_cap_park_the_task() {
     assert!(question.body.contains("max_conflict_reworks") && question.body.contains('5'), "{}", question.body);
 }
 
+/// A conflict that goes away before its rework runs doesn't reset the count: alternating those with reworks that
+/// run still reaches the cap.
+#[tokio::test]
+async fn vanished_conflicts_between_conflict_reworks_still_park_at_the_cap() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    for round in 0..2 {
+        conflict_and_rework(&r, &key, &pr, 1).await;
+        assert_eq!(r.show(&key).await.run.conflict_reworks, Some(2 * round + 1));
+        // A conflict that clears before the tick has nothing to rework.
+        r.codehost.set_mergeable(&pr, Some(false));
+        assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+        r.codehost.set_mergeable(&pr, Some(true));
+        r.factory.tick().await.unwrap();
+        let task = r.show(&key).await;
+        assert_eq!(task.status, Status::InReview);
+        assert_eq!(task.run.conflict_reworks, Some(2 * round + 2), "a vanished conflict keeps the count");
+    }
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("max_conflict_reworks"), "{}", question.body);
+}
+
 #[tokio::test]
 async fn a_request_for_changes_after_conflicts_counts_as_one_round() {
     let r = rig().await;
@@ -1681,13 +1707,13 @@ async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again(
 
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 1, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 1, "{}", logs.text());
 
     r.store.update_task(&r.human, &task.0, reparent(Some(queue.clone())), None).await.unwrap();
     alpha.reconcile().await.unwrap();
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 2, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 2, "{}", logs.text());
 }
 
 #[tokio::test]
@@ -1768,6 +1794,37 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
     r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.merging.as_deref(), None);
+}
+
+#[tokio::test]
+async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new =
+        NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Approved);
+
+    // The intent names the current head, and the head stays put: only the gates change (a grade
+    // raised to one that needs a person).
+    let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
     r.factory.reconcile().await.unwrap();
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
