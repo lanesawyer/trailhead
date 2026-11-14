@@ -311,6 +311,12 @@ impl Factory {
         self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
     }
 
+    /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
+    #[doc(hidden)]
+    pub fn sandbox_entries(&self) -> usize {
+        self.pool.prepare_failures.lock().unwrap().len() + self.pool.warm_cost.lock().unwrap().len()
+    }
+
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {

@@ -1609,3 +1609,13 @@ async fn a_daemon_that_errors_after_a_run_that_finished_at_once_still_records_th
     assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the spend is recorded: {:?}", task.run.spend);
     assert_eq!(task.run.infra_failures, Some(1));
 }
+
+#[tokio::test]
+async fn a_fresh_sandbox_destroyed_after_a_failed_prepare_leaves_nothing_in_the_per_sandbox_maps() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fails on a new sandbox", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm label, so it is destroyed");
+    assert_eq!(r.factory.sandbox_entries(), 0);
+}
