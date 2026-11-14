@@ -130,10 +130,16 @@ pub fn check(provider: &str, labels: &Labels, method: &str, path: &str) -> Resul
     {
         return Err("the path isn't allowed".to_string());
     }
+    // An empty segment (`//`, a trailing `/`) is dropped for prefix rules, but an exact rule wants the path as
+    // written, so it refuses one rather than match a spelling the upstream may read differently.
+    let has_empty = path[1..].split('/').any(str::is_empty);
     let segments: Vec<&str> = segments.into_iter().filter(|s| !s.is_empty()).collect();
     let method = method.to_ascii_uppercase();
     let role = labels.get(label::ROLE).map(String::as_str).unwrap_or_default();
-    if rules.iter().any(|r| r.methods.contains(&method.as_str()) && matches_rule(r, &segments)) {
+    if rules
+        .iter()
+        .any(|r| r.methods.contains(&method.as_str()) && !(r.exact && has_empty) && matches_rule(r, &segments))
+    {
         Ok(())
     } else {
         Err(format!("role {role:?} may not {method} {path} through {provider}"))
@@ -157,5 +163,28 @@ pub fn check_body(provider: &str, labels: &Labels, method: &str, path: &str, bod
         (Some(named), Some(own)) if named == own => Ok(()),
         (_, Some(own)) => Err(format!("this sandbox may only create {own}")),
         (_, None) => Err("this sandbox has no task, so it may not create a ref".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn labels(pairs: &[(&str, &str)]) -> Labels {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn exact_rules_refuse_empty_segments() {
+        let l = labels(&[("role", "worker"), ("repo", "lane/trail"), ("task", "TRAIL-7")]);
+        assert!(check("github", &l, "POST", "/repos/lane/trail/git/blobs").is_ok());
+        for path in [
+            "/repos/lane/trail/git/blobs/",
+            "/repos/lane/trail//git/blobs",
+            "//repos/lane/trail/git/blobs",
+            "/repos/lane/trail/git/blobs//",
+        ] {
+            assert!(check("github", &l, "POST", path).is_err(), "{path}");
+        }
     }
 }
