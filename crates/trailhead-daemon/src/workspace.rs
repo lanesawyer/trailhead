@@ -295,7 +295,6 @@ impl Workspace for GitWorkspace {
         let Ok(have) = self.git_output(&self.dir, &["merge-base", "HEAD", &tip]).await else {
             return Ok(None);
         };
-        let have = have.trim().to_string();
         Ok((!self.is_ancestor(&have, start).await?).then_some(have))
     }
 

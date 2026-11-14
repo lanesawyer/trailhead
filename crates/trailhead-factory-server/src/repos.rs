@@ -45,7 +45,8 @@ pub fn dirs(
     Ok(vec![parent(&find::config(cwd)?)])
 }
 
-fn parent(file: &Path) -> PathBuf {
+/// The directory holding `file`, or `.` when its path has no directory part.
+pub(crate) fn parent(file: &Path) -> PathBuf {
     file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
 }
 
