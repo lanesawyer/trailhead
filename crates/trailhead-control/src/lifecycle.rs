@@ -49,9 +49,9 @@ impl Factory {
                 }
             }
             match state {
-                PrState::Open { mergeable: Some(true), .. } if conflict_rework => {
+                PrState::Open { mergeable: Some(true), head } if conflict_rework => {
                     tracing::info!(task = %task.key, pr = %pr.url, "the host no longer reports a conflict; back to review");
-                    if !self.settle_gone_conflict(task, pr).await? {
+                    if !self.settle_gone_conflict(task, pr, head).await? {
                         return Ok(Outcome::Settled { reason: messages::settled_conflict_superseded(&pr.url) });
                     }
                     return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
@@ -139,8 +139,10 @@ impl Factory {
             };
             let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
-            // to open: it resumes from it when the remote has it (TRAIL-751).
-            let resume = !rework && task.run.released.is_some();
+            // to open: it resumes from it when the remote has it (TRAIL-751). `started` clears `released`, so an
+            // attempt that fails before preparing would lose the marker: any earlier run counts too (TRAIL-1291). A
+            // run that never pushed finds no branch on the remote and starts fresh.
+            let resume = !rework && (task.run.released.is_some() || task.run.started.is_some());
             let (sandbox, setup_failure) = self
                 .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
                 .await?;
@@ -222,8 +224,9 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
-    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: reconcile
-    /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
+    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: a parked
+    /// task's sandbox is otherwise left alone, so that loses the suspended state, which beats leaving it reachable.
+    /// If the destroy fails too the sandbox is `Stuck`: reconcile destroys it, and the status board shows it broken.
     pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
         let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
         tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
@@ -232,6 +235,7 @@ impl Factory {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
+        self.forget_sandbox(&sandbox.id);
         BreachedSandbox::Destroyed
     }
 
@@ -772,11 +776,11 @@ impl Factory {
     ///
     /// The task is read again first, and so is its newest review: a review may have asked for changes since `task`
     /// was read, and its request, not the conflict's, is the one standing then. A handoff would count as answering
-    /// it and the request would be lost (TRAIL-1418), so nothing is written. The next tick's `reworks()` starts
-    /// it once it is recorded, and reconcile takes it up if it never was. The verdict is the check because the
-    /// reviewer's request is recorded on the task only after the verdict, the sandbox's teardown and the gates.
-    /// False when the settle was skipped.
-    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<bool> {
+    /// it and the request would be lost (TRAIL-1418), so no handoff is written: the verdict is taken up as the
+    /// request instead, as reconcile does, so the next tick's `reworks()` starts it and the task isn't settled again
+    /// (TRAIL-1466). The verdict is the check because the reviewer's request is recorded on the task only after the
+    /// verdict, the sandbox's teardown and the gates. False when the settle was skipped.
+    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef, head: Option<String>) -> Result<bool> {
         let task = &self.tracker.show(&task.key).await?;
         let Some(conflict) = task.run.pending_changes().filter(|c| c.kind == RequestKind::Conflict) else {
             return Ok(false);
@@ -786,13 +790,27 @@ impl Factory {
         // the one who did the work, which core then lets it neither approve nor finish (TRAIL-1468).
         let in_review = task.status == Status::InReview;
         // The conflict request's own verdict is the factory's, with the request's body.
-        let superseded = in_review
-            && self
+        let superseded = match in_review {
+            true => self
                 .tracker
                 .last_review(&task.key)
                 .await?
-                .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim());
-        if superseded {
+                .filter(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim()),
+            false => None,
+        };
+        if let Some(verdict) = superseded {
+            // Taken up as the request, as reconcile does, so the task stops being listed as a conflict rework and
+            // isn't settled again on every tick until reconcile runs (TRAIL-1466).
+            let requested = ChangesRequested {
+                reviewer: verdict.reviewer,
+                body: verdict.body,
+                attempt: task.run.attempt.unwrap_or(1),
+                kind: RequestKind::Review,
+                head,
+                settled: false,
+            };
+            let round = task.run.review_rounds.unwrap_or(0) + 1;
+            self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
             return Ok(false);
         }
         // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
