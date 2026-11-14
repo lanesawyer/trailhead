@@ -38,7 +38,7 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
-/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `blocked_by_hidden` are present only when named in `include`.
+/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review` and `blocked_by` are present only when named in `include`; `blocked_by_hidden` comes with `blocked_by`.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
