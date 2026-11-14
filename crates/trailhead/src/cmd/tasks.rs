@@ -235,6 +235,7 @@ const FACTORY_FIELDS: &[(&str, Kind)] = &[
     ("stale_head", Kind::String),
     ("concluded", Kind::String),
     ("ungraded", Kind::Bool),
+    ("spend", Kind::Unsigned64),
 ];
 
 #[derive(Clone, Copy)]
@@ -245,6 +246,7 @@ enum Kind {
     String,
     Bool,
     Object,
+    Array,
 }
 
 impl Kind {
@@ -256,6 +258,7 @@ impl Kind {
             Kind::String => v.is_string(),
             Kind::Bool => v.is_boolean(),
             Kind::Object => v.is_object(),
+            Kind::Array => v.is_array(),
         }
     }
 
@@ -266,6 +269,7 @@ impl Kind {
             Kind::String => "a string",
             Kind::Bool => "true or false",
             Kind::Object => "an object",
+            Kind::Array => "a list",
         }
     }
 }
@@ -281,7 +285,8 @@ fn field_kind(field: &str) -> Option<Kind> {
     FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field).map(|(_, k)| *k)
 }
 
-/// `pr`, the one structured field whose leaves have a fixed kind, and those leaves, by dotted path.
+/// The structured fields (`pr`, `merged`, `grade`, `merge`, `changes_requested`, `review_breach`, `worker_breach`)
+/// and their leaves, by dotted path. A test checks this table against what the factory's types serialize.
 const FACTORY_NESTED: &[(&str, Kind)] = &[
     ("pr", Kind::Object),
     ("pr.repo", Kind::Object),
@@ -289,6 +294,49 @@ const FACTORY_NESTED: &[(&str, Kind)] = &[
     ("pr.url", Kind::String),
     ("pr.repo.owner", Kind::String),
     ("pr.repo.name", Kind::String),
+    ("merged", Kind::Object),
+    ("merged.by", Kind::String),
+    ("merged.pr", Kind::Object),
+    ("merged.pr.repo", Kind::Object),
+    ("merged.pr.number", Kind::Unsigned64),
+    ("merged.pr.url", Kind::String),
+    ("merged.pr.repo.owner", Kind::String),
+    ("merged.pr.repo.name", Kind::String),
+    ("merged.commit", Kind::String),
+    ("grade", Kind::Object),
+    ("grade.grade", Kind::Unsigned),
+    ("grade.task", Kind::Unsigned),
+    ("grade.reasons", Kind::Array),
+    ("merge", Kind::Object),
+    ("merge.grade", Kind::Unsigned),
+    ("merge.head", Kind::String),
+    ("merge.passed", Kind::Array),
+    ("merge.waiting", Kind::Array),
+    ("merge.would_merge", Kind::Bool),
+    ("merge.approved_head", Kind::String),
+    ("merge.human_head", Kind::String),
+    ("merge.problem", Kind::String),
+    ("merge.refused", Kind::String),
+    ("merge.comment", Kind::Unsigned64),
+    ("merge.message", Kind::String),
+    ("merge.history", Kind::Array),
+    ("changes_requested", Kind::Object),
+    ("changes_requested.reviewer", Kind::String),
+    ("changes_requested.body", Kind::String),
+    ("changes_requested.attempt", Kind::Unsigned),
+    ("changes_requested.kind", Kind::String),
+    ("changes_requested.head", Kind::String),
+    ("changes_requested.settled", Kind::Bool),
+    ("review_breach", Kind::Object),
+    ("review_breach.round", Kind::Unsigned),
+    ("review_breach.attempt", Kind::Unsigned),
+    ("review_breach.reason", Kind::String),
+    ("review_breach.parked", Kind::Bool),
+    ("worker_breach", Kind::Object),
+    ("worker_breach.run", Kind::String),
+    ("worker_breach.reason", Kind::String),
+    ("worker_breach.parked", Kind::Bool),
+    ("worker_breach.stuck", Kind::Bool),
 ];
 
 /// Rejects a value for a known `factory.<field>` key (or nested path, like `factory.pr.number`) of the wrong kind,
@@ -407,7 +455,7 @@ mod tests {
                 Kind::Unsigned | Kind::Unsigned64 | Kind::Integer => json!(3),
                 Kind::String => json!("x"),
                 Kind::Bool => json!(true),
-                Kind::Object => unreachable!(),
+                Kind::Object | Kind::Array => unreachable!(),
             };
             assert!(kind.accepts(&sample), "{field}");
             let run: trailhead_factory::RunRecord = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
@@ -427,7 +475,7 @@ mod tests {
 
     /// Fields of `RunRecord` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
     const STRUCTURED: &[&str] =
-        &["pr", "spend", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach"];
+        &["pr", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach"];
 
     /// A new scalar field on `RunRecord` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
     /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
@@ -494,16 +542,58 @@ mod tests {
         }
     }
 
-    /// `FACTORY_NESTED` matches the leaves of `PrRef`.
+    /// `FACTORY_NESTED` matches what the factory's structured types serialize: every path they write is listed with
+    /// a kind that accepts it, and every listed path is written.
     #[test]
-    fn factory_nested_match_pr_ref() {
+    fn factory_nested_match_structured_types() {
         let pr = json!({ "repo": { "owner": "o", "name": "n" }, "number": 3, "url": "u" });
-        let parsed: trailhead_factory::PrRef = serde_json::from_value(pr.clone()).unwrap();
-        assert_eq!(serde_json::to_value(parsed).unwrap(), pr);
+        let merged = json!({ "by": "merger", "pr": pr, "commit": "c" });
+        let grade = json!({ "grade": 2, "task": 1, "reasons": ["r"] });
+        let merge = json!({
+            "grade": 2, "head": "h", "passed": ["ci"], "waiting": ["human"], "would_merge": false,
+            "approved_head": "a", "human_head": "b", "problem": "p", "refused": "r", "comment": 5,
+            "message": "m", "history": [{ "at": "t", "message": "m" }]
+        });
+        let requested = json!({
+            "reviewer": "r", "body": "b", "attempt": 1, "kind": "ci", "head": "h", "settled": false
+        });
+        let review_breach = json!({ "round": 1, "attempt": 1, "reason": "x", "parked": false });
+        let worker_breach = json!({ "run": "x", "reason": "x", "parked": false, "stuck": true });
+        // Each value round-trips through its type unchanged, so the leaves below are what the factory writes.
+        fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(v: &Value) -> Value {
+            serde_json::to_value(serde_json::from_value::<T>(v.clone()).unwrap()).unwrap()
+        }
+        assert_eq!(round_trip::<trailhead_factory::PrRef>(&pr), pr);
+        assert_eq!(round_trip::<trailhead_factory::Merged>(&merged), merged);
+        assert_eq!(round_trip::<trailhead_factory::PrGrade>(&grade), grade);
+        assert_eq!(round_trip::<trailhead_factory::MergeDecision>(&merge), merge);
+        assert_eq!(round_trip::<trailhead_factory::ChangesRequested>(&requested), requested);
+        assert_eq!(round_trip::<trailhead_factory::ReviewBreach>(&review_breach), review_breach);
+        assert_eq!(round_trip::<trailhead_factory::WorkerBreach>(&worker_breach), worker_breach);
+        let root = json!({
+            "pr": pr, "merged": merged, "grade": grade, "merge": merge, "changes_requested": requested,
+            "review_breach": review_breach, "worker_breach": worker_breach,
+        });
         for (path, kind) in FACTORY_NESTED {
-            let root = json!({ "pr": pr });
             let leaf = path.split('.').fold(&root, |v, k| &v[k]);
             assert!(kind.accepts(leaf), "{path}");
+        }
+        fn paths(prefix: &str, v: &Value, out: &mut Vec<String>) {
+            if let Value::Object(map) = v {
+                for (k, v) in map {
+                    let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    out.push(path.clone());
+                    paths(&path, v, out);
+                }
+            }
+        }
+        let mut written = Vec::new();
+        paths("", &root, &mut written);
+        for path in &written {
+            assert!(FACTORY_NESTED.iter().any(|(p, _)| p == path), "{path} is written but not in FACTORY_NESTED");
+        }
+        for (path, _) in FACTORY_NESTED {
+            assert!(written.contains(&path.to_string()), "FACTORY_NESTED lists {path}, which isn't written");
         }
     }
 
@@ -523,6 +613,15 @@ mod tests {
         assert!(bad(r#"factory.pr.repo="x""#).contains("factory.pr.repo"));
         assert!(bad(r#"factory={"pr":5}"#).contains("factory.pr"));
         assert!(bad("factory=3").contains("factory"));
+        assert!(bad("factory.spend=x").contains("factory.spend"));
+        assert!(bad(r#"factory.grade={"grade":"high"}"#).contains("factory.grade.grade"));
+        assert!(bad(r#"factory={"merged":{"by":1}}"#).contains("factory.merged.by"));
+        assert!(bad("factory.merge.would_merge=yes").contains("factory.merge.would_merge"));
+        assert!(bad("factory.merge.passed=1").contains("factory.merge.passed"));
+        assert!(bad(r#"factory.changes_requested.attempt="x""#).contains("factory.changes_requested.attempt"));
+        assert!(bad(r#"factory={"review_breach":{"parked":"no"}}"#).contains("factory.review_breach.parked"));
+        assert!(bad("factory.worker_breach.stuck=1").contains("factory.worker_breach.stuck"));
+        assert!(bad("factory.merge=5").contains("factory.merge"));
         assert!(meta_patch(&[r#"factory={"attempt_base":3,"pr":{"number":7},"other":"x"}"#.into()]).is_ok());
         assert!(meta_patch(&["factory.pr=null".into(), "factory=null".into()]).is_ok());
     }
