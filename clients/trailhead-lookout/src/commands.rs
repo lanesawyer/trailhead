@@ -26,9 +26,36 @@ pub const MAX_ATTEMPTS: u32 = 5;
 /// The longest the outbox waits on a `Retry-After` before sending again.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
-/// The net thread's answer when a request reached it before it was `Live`. Nothing was sent, so it isn't a failed
-/// attempt and doesn't count toward [`MAX_ATTEMPTS`].
-pub const NOT_CONNECTED: &str = "not connected";
+/// Why an attempt got no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The request reached the net thread before it was `Live`. Nothing was sent, so it isn't a failed attempt and
+    /// doesn't count toward [`MAX_ATTEMPTS`].
+    NotConnected,
+    /// The request was tried and got no usable answer (the link dropped, timed out, a server error).
+    Failed(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => f.write_str("not connected"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<String> for SendError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl From<&str> for SendError {
+    fn from(why: &str) -> Self {
+        Self::Failed(why.to_owned())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u64);
@@ -101,7 +128,7 @@ pub struct Reply {
     /// Which send this answers: a stale "no answer" doesn't undo a later send.
     pub attempt: u32,
     /// `Err` when the request got no usable answer (the link dropped, timed out): retry.
-    pub result: Result<Outcome, String>,
+    pub result: Result<Outcome, SendError>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -215,7 +242,7 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
             Err(_) if outbox.pending[at].attempts != reply.attempt => {}
             Err(why) => {
                 let p = &mut outbox.pending[at];
-                if why != NOT_CONNECTED {
+                if *why != SendError::NotConnected {
                     p.failures += 1;
                 }
                 if p.failures >= MAX_ATTEMPTS {

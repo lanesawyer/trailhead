@@ -52,7 +52,7 @@ fn step(app: &mut App) -> (Vec<(CommandId, u32, Request)>, Vec<CommandDone>) {
     (sent, done)
 }
 
-fn reply(app: &mut App, id: CommandId, attempt: u32, result: Result<Outcome, String>) {
+fn reply(app: &mut App, id: CommandId, attempt: u32, result: Result<Outcome, SendError>) {
     app.world_mut().write_message(Reply { id, attempt, result });
 }
 
@@ -221,7 +221,7 @@ fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts()
     // The net thread isn't live yet either.
     for _ in 0..MAX_ATTEMPTS + 2 {
         let (id, n, _) = sent[0].clone();
-        reply(&mut app, id, n, Err(NOT_CONNECTED.into()));
+        reply(&mut app, id, n, Err(SendError::NotConnected));
         let (again, done) = step(&mut app);
         assert!(done.is_empty(), "not a failure");
         sent = again;
@@ -232,6 +232,27 @@ fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts()
     for _ in 0..20 {
         let (id, n, _) = sent[0].clone();
         reply(&mut app, id, n, Err("timed out".into()));
+        let (again, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        sent = again;
+    }
+    assert!(matches!(finished.expect("reported").outcome, Outcome::Failed(_)));
+}
+
+#[test]
+fn a_failure_whose_text_reads_not_connected_still_counts() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let mut sent = step(&mut app).0;
+    let mut finished = None;
+    for _ in 0..20 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Err(SendError::Failed("not connected".into())));
         let (again, done) = step(&mut app);
         if let Some(d) = done.into_iter().next() {
             finished = Some(d);

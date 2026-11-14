@@ -927,10 +927,12 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err(commands::NOT_CONNECTED.into()));
+            return reply(Err(commands::SendError::NotConnected));
         };
         let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
-        tokio::spawn(async move { reply(commands::execute(&api, &request).await) });
+        tokio::spawn(
+            async move { reply(commands::execute(&api, &request).await.map_err(commands::SendError::Failed)) },
+        );
     }
 
     /// Searches on its own task, like [`Self::request`], and says so if it can't.
