@@ -2,6 +2,7 @@
 //! (`docs/factory/seams.md`). Vendor crates implement the traits; the control
 //! plane and the in-sandbox daemon depend only on this crate.
 
+pub mod clock;
 pub mod codehost;
 pub mod compute;
 pub mod config;
