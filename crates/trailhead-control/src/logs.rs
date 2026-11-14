@@ -295,6 +295,22 @@ mod tests {
     }
 
     #[test]
+    fn an_optional_str_task_field_is_plain_text_or_absent() {
+        let buffer = LogBuffer::with_capacity(10);
+        let subscriber = tracing_subscriber::registry().with(buffer.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(task = Some("TRAIL-7"), "x");
+            tracing::info!(task = None::<&str>, "y");
+        });
+        let (lines, _) = buffer.subscribe();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].task.as_deref(), Some("TRAIL-7"));
+        assert!(!lines[0].message.contains("Some(") && !lines[0].message.contains('"'), "{}", lines[0].message);
+        assert_eq!(lines[1].task, None);
+        assert!(!lines[1].message.contains("task"), "{}", lines[1].message);
+    }
+
+    #[test]
     fn token_like_fields_and_values_never_get_out() {
         let buffer = LogBuffer::with_capacity(10);
         let subscriber = tracing_subscriber::registry().with(buffer.layer());
