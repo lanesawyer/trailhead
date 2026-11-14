@@ -1607,7 +1607,7 @@ async fn a_park_that_fails_still_keeps_the_backoff() {
 async fn a_daemon_that_errors_after_a_run_that_finished_at_once_still_records_the_spend() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Finished before the drop", "");
-    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).no_yield());
     r.daemon.fail_runs_midway(1, "connection lost");
     let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     assert!(err.to_string().contains("connection lost"), "{err}");
