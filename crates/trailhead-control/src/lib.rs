@@ -90,11 +90,27 @@ pub struct Host {
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
     queueless_projects: Mutex<HashSet<String>>,
+    /// The projects some repo works through a queue, so a project in both sets is reported once.
+    queued_projects: Mutex<HashSet<String>>,
     /// Per project, the stray runs already warned about, so each is logged once per stretch outside the queues.
     strays_logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Host {
+    /// Records that a repo works `project` with or without a queue. The first time a project has both kinds of repo,
+    /// logs that the stray check is off for it, since runs re-parented out of a queue go unseen there.
+    fn note_queue_use(&self, project: &str, queueless: bool) {
+        let (own, other) = if queueless {
+            (&self.queueless_projects, &self.queued_projects)
+        } else {
+            (&self.queued_projects, &self.queueless_projects)
+        };
+        let new = own.lock().unwrap().insert(project.to_string());
+        if new && other.lock().unwrap().contains(project) {
+            tracing::info!(project, "stray check is off: another repo works this project without a queue");
+        }
+    }
+
     /// The shared state for the host settings in the user config's `[factory]`.
     pub fn new(config: &HostConfig) -> Arc<Host> {
         Arc::new(Host { max_sandboxes: config.max_sandboxes, pause_at: config.pause_at.clone(), ..Host::default() })
@@ -361,9 +377,7 @@ impl Factory {
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
-        if config.repo.queue.is_empty() {
-            host.queueless_projects.lock().unwrap().insert(config.repo.project.clone());
-        }
+        host.note_queue_use(&config.repo.project, config.repo.queue.is_empty());
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));
