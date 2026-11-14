@@ -107,6 +107,56 @@ mod tests {
         assert!(guard.saved.is_some() || guard.old_sigint.is_none());
     }
 
+    /// ECHO state of the terminal behind a pty master (Linux reports the slave's settings).
+    fn echo_on(master: libc::c_int) -> bool {
+        // SAFETY: `tcgetattr` fills a zeroed termios for a valid fd.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(master, &mut t), 0);
+            t.c_lflag & libc::ECHO != 0
+        }
+    }
+
+    #[test]
+    fn ctrl_c_on_a_terminal_restores_echo_and_dies_of_sigint() {
+        // SAFETY: the child only makes plain libc calls before `_exit` or dying of the signal.
+        unsafe {
+            let (mut master, mut slave) = (0, 0);
+            let none = std::ptr::null_mut();
+            assert_eq!(libc::openpty(&mut master, &mut slave, none, none.cast(), none.cast()), 0);
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                // Child: the pty is its controlling terminal and stdin, then it waits for Ctrl-C.
+                libc::setsid();
+                libc::ioctl(slave, libc::TIOCSCTTY, 0);
+                libc::dup2(slave, libc::STDIN_FILENO);
+                let guard = NoEcho::new();
+                if guard.saved.is_none() {
+                    libc::_exit(2);
+                }
+                loop {
+                    libc::sleep(1);
+                }
+            }
+            libc::close(slave);
+            // Wait for the child to turn echo off.
+            let mut tries = 0;
+            while echo_on(master) {
+                tries += 1;
+                assert!(tries < 500, "child never disabled echo");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(libc::kill(pid, libc::SIGINT), 0);
+            let mut status = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            assert!(libc::WIFSIGNALED(status), "child exited instead of dying of a signal: {status}");
+            assert_eq!(libc::WTERMSIG(status), libc::SIGINT);
+            assert!(echo_on(master), "echo was not restored");
+            libc::close(master);
+        }
+    }
+
     #[test]
     fn handler_without_saved_settings_is_inert() {
         // Disarmed, the handler must not touch the terminal; we only check the flag the handler reads.
