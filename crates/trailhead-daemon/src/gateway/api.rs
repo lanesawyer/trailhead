@@ -126,10 +126,6 @@ impl Gateway {
             return respond_with(client, 403, "text/plain", &why).await;
         }
         // Discovery must name upload-pack; the upload-pack POST itself takes no query.
-        // Smart-HTTP paths are exact: an empty segment (`info/refs/`, `//`) passes the policy but not this check.
-        if provider == "git" && (upstream_path.contains("//") || upstream_path.ends_with('/')) {
-            return respond_with(client, 403, "text/plain", "the path isn't allowed").await;
-        }
         let want_query = upstream_path.ends_with("/info/refs").then_some("service=git-upload-pack");
         if provider == "git" && query != want_query {
             return respond_with(client, 403, "text/plain", "only git-upload-pack is allowed").await;
@@ -604,13 +600,15 @@ mod tests {
             (refs, r#"{"sha":"abc"}"#),
             (refs, "not json"),
             (refs, ""),
-            // The same path spelled with empty segments is read the same way.
-            ("/repos/lane/trail/git/refs/", r#"{"ref":"refs/heads/main","sha":"abc"}"#),
-            ("/repos/lane/trail//git/refs", r#"{"ref":"refs/heads/main","sha":"abc"}"#),
         ] {
             let (status, why) = create(path, body).await;
             assert_eq!(status, 403, "{path} {body}");
             assert!(why.contains("refs/heads/factory/trail-7"), "{why}");
+        }
+        // The same path spelled with empty segments is refused by the policy itself.
+        for path in ["/repos/lane/trail/git/refs/", "/repos/lane/trail//git/refs"] {
+            let (status, _) = create(path, r#"{"ref":"refs/heads/factory/trail-7","sha":"abc"}"#).await;
+            assert_eq!(status, 403, "{path}");
         }
 
         // Between tasks, or with a task label that isn't a key, a worker writes objects but no ref.
