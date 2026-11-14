@@ -200,6 +200,8 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
+            // A rate limit for an earlier attempt: a later one is in flight, and requeuing would send a third beside it.
+            Ok(Outcome::RateLimited { .. }) if outbox.pending[at].attempts != reply.attempt => {}
             // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
             Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
