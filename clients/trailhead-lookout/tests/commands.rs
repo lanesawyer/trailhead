@@ -339,3 +339,33 @@ async fn a_bad_token_is_a_failure_not_a_retry() {
     let out = rig.run("not-a-token", &retitle("x", None)).await.unwrap();
     assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
 }
+
+#[test]
+fn resends_after_reconnects_do_not_use_up_rate_limit_retries() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let mut sent = step(&mut app).0;
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        set(&mut app, Connection::Syncing);
+        set(&mut app, Connection::Live);
+        sent = step(&mut app).0;
+    }
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::ZERO), message: "slow".into() };
+    let mut limits = 0;
+    let mut finished = None;
+    for _ in 0..20 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Ok(limited.clone()));
+        limits += 1;
+        let (again, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        sent = again;
+    }
+    assert_eq!(limits, MAX_ATTEMPTS);
+    assert_eq!(finished.expect("handed back").outcome, limited);
+}
