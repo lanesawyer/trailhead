@@ -15,8 +15,9 @@
 //! `done` for the same reason.
 //!
 //! [`build`] is a pure function from the mirror's JSON to an [`InspectorView`], and [`plan`] turns an [`Action`] into
-//! the [`Request`] it sends, so both are tested without a window. "answer" opens the answer form from
-//! [`crate::author`], as the board's does; "resolve" closes a question without one.
+//! the [`Request`] it sends, so both are tested without a window. "answer" sends an `OpenComposer`, which
+//! opens the task modal's comment box set to answer the question (`compose.rs`), as the board's does; "resolve" closes
+//! a question without an answer.
 
 use std::collections::{HashMap, HashSet};
 
