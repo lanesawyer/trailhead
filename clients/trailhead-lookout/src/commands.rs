@@ -8,8 +8,8 @@
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
 //! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
-//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] it is reported failed (a rate
-//! limit is handed back as `RateLimited`) rather than tried forever.
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] failures (or as many rate-limit
+//! answers) it is reported failed (a rate limit is handed back as `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,9 @@ use trailhead_client::http::{Call, Client};
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
 
-/// How many times a command is sent before it is reported failed.
+/// How many failed attempts a command gets before it is reported failed, and, counted separately, how many
+/// rate-limit answers it is retried through before `RateLimited` is handed back. Sends that never reached the
+/// server (see [`NOT_CONNECTED`]) count toward neither.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The longest the outbox waits on a `Retry-After` before sending again.
@@ -200,7 +202,8 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
-            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until the attempts run
+            // out.
             Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
                 let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
