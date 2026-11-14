@@ -954,3 +954,74 @@ async fn a_resumed_task_whose_first_prepare_fails_still_resumes_from_its_branch(
         .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
     assert!(resumed, "the retry resumes on the branch it pushed");
 }
+
+/// A rework task with a pooled sandbox it ran on (`trailhead-w1`, recorded as its host) and a second, left over from an
+/// earlier attempt (`trailhead-w2`), both busy and labelled with its key. `w2` has a warm checkpoint when `warm`.
+async fn rework_holding_two_sandboxes(warm: bool) -> (Rig, TaskKey) {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"\nmax_sandboxes = 3");
+    let mut r = rig_with(&format!(
+        "{config}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n[merge]\nmode = \"on\"\n"
+    ));
+    let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/0.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.codehost.set_conflicts(true);
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| !c.kind.is_review()));
+
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::ROLE.into(), Role::Worker.as_str().into());
+    labels.insert(label::TASK.into(), key.0.clone());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    labels.remove(label::WARM);
+    let spec = SandboxSpec { name: "trailhead-w2".into(), labels: labels.clone(), egress: Default::default() };
+    let stale = r.compute.create(&spec).await.unwrap();
+    if warm {
+        let cp = r.compute.checkpoint(&stale.id, "warm").await.unwrap();
+        labels.insert(label::WARM.into(), cp.0);
+        r.compute.set_labels(&stale.id, &labels).await.unwrap();
+    }
+    let host = r.tracker.task(&key).run.host;
+    assert_eq!(host.as_deref(), Some("trailhead-w1"), "the run recorded the sandbox it ran on");
+    (r, key)
+}
+
+async fn rework_in_recorded_sandbox(r: &Rig, key: &TaskKey) {
+    // The tick's first release of `w2` (in `occupied_after_release`, before any task is placed) fails on its first
+    // call, `set_egress`, so `w2` is still busy and held for the task when `acquire_worker` places it. That is the
+    // stale-release loop under test; without the fault `occupied_after_release` releases `w2` and the loop never runs.
+    r.compute.fail_once_after("trailhead-w2", "set_egress", 0);
+    r.codehost.set_conflicts(false);
+    let pr = r.tracker.task(key).run.pr.expect("a PR");
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/0.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, o)| &t.key == key && !matches!(o, Outcome::Settled { .. })), "the rework ran: {ran:?}");
+    assert_eq!(r.tracker.task(key).run.host.as_deref(), Some("trailhead-w1"), "the rework ran in its recorded sandbox");
+}
+
+#[tokio::test]
+async fn a_rework_runs_in_its_recorded_sandbox_and_destroys_a_cold_stale_one() {
+    let (r, key) = rework_holding_two_sandboxes(false).await;
+    rework_in_recorded_sandbox(&r, &key).await;
+    let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["trailhead-w1"], "the cold stale sandbox was destroyed");
+}
+
+#[tokio::test]
+async fn a_rework_runs_in_its_recorded_sandbox_and_restores_a_warm_stale_one_to_idle() {
+    let (r, key) = rework_holding_two_sandboxes(true).await;
+    rework_in_recorded_sandbox(&r, &key).await;
+    let stale = r.compute.get("trailhead-w2").expect("the warm stale sandbox is kept");
+    assert_eq!(stale.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert_eq!(stale.labels.get(label::TASK), None, "no longer held for the task");
+    assert_eq!(r.compute.restores("trailhead-w2").len(), 1, "restored to its warm checkpoint");
+}
