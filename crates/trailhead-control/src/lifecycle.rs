@@ -230,6 +230,7 @@ impl Factory {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
+        self.forget_warm_cost(&sandbox.id);
         BreachedSandbox::Destroyed
     }
 

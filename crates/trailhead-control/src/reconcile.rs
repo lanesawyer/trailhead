@@ -144,7 +144,10 @@ impl Factory {
                 continue;
             }
             match self.target_of(sandbox).compute.destroy(&sandbox.id).await {
-                Ok(()) => done.destroyed.push(sandbox.name.clone()),
+                Ok(()) => {
+                    self.forget_warm_cost(&sandbox.id);
+                    done.destroyed.push(sandbox.name.clone());
+                }
                 Err(e) => tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't destroy an orphaned sandbox"),
             }
         }

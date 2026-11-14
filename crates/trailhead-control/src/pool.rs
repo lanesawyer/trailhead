@@ -349,8 +349,13 @@ impl Factory {
     /// outlives its sandbox. A failed destroy keeps the entry: the sandbox is still there.
     async fn destroy_forgetting_cost(&self, p: &Placed, id: &SandboxId) -> Result<()> {
         p.compute.destroy(id).await?;
-        self.pool.warm_cost.lock().unwrap().remove(id);
+        self.forget_warm_cost(id);
         Ok(())
+    }
+
+    /// Drops a destroyed sandbox's warm-cost figure.
+    pub(crate) fn forget_warm_cost(&self, id: &SandboxId) {
+        self.pool.warm_cost.lock().unwrap().remove(id);
     }
 
     /// The first free `<repo>-w<n>` name.
