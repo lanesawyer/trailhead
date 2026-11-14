@@ -745,6 +745,14 @@ async fn changed_files_leaves_out_base_changes_merged_in_by_a_rework() {
     assert!(ws.merge_head().await.unwrap().is_some());
     assert!(ws.dir().join("base.txt").exists(), "the merge brought the base change in");
     assert_eq!(ws.changed_files("main").await.unwrap(), ["pr.txt"]);
+
+    // The agent fetches mid-session and the base moves on: the diff stays pinned to the commit that was merged.
+    std::fs::write(src.join("later.txt"), "later\n").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "later"]);
+    git(&src, &["push", "--quiet", bare.to_str().unwrap(), "main"]);
+    git(&ws.dir(), &["fetch", "--quiet", "origin"]);
+    assert_eq!(ws.changed_files("main").await.unwrap(), ["pr.txt"]);
 }
 
 #[tokio::test]
