@@ -101,12 +101,24 @@ impl RestTracker {
     }
 }
 
+/// An error and its sources, `a: b: c`, since `Display` names only the outermost layer.
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut next = e.source();
+    while let Some(s) = next {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        next = s.source();
+    }
+    out
+}
+
 /// The factory's error for a failed call.
 fn error(e: ApiError) -> Error {
     let ApiError::Api { status, error } = e else {
         return match &e {
-            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {e}")),
-            _ => Error::Other(format!("trailhead: {e}")),
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {}", chain(&e))),
+            _ => Error::Other(format!("trailhead: {}", chain(&e))),
         };
     };
     let msg = format!("trailhead {status} {}: {}", error.code, error.message);
