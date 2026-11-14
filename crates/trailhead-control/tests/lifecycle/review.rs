@@ -1104,14 +1104,46 @@ async fn a_reviewer_sandbox_short_of_room_is_waited_out_not_counted() {
     r.daemon.unavailable_runs(3, "out of disk");
     let secs = std::time::Duration::from_secs;
     for n in 1..=3 {
+        // Past the setback the last failure left, so this pass runs a review.
+        tokio::time::advance(secs(3600)).await;
+        let before = r.daemon.requests().len();
         r.factory.reconcile().await.unwrap();
+        assert_eq!(r.daemon.requests().len(), before + 1, "wait {n} ran a review");
         let task = r.tracker.task(&key);
         assert_eq!(task.status, Status::InReview, "wait {n} doesn't park, though max_infra_failures is 2");
         assert_eq!(task.run.infra_failures, Some(1), "a wait adds nothing to the count the first failure left");
         assert_eq!(task.run.review_rounds, rounds, "the round is given back");
-        tokio::time::advance(secs(3600)).await;
     }
     assert!(r.tracker.comments(&key).iter().all(|c| c.kind != "question"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reviewer_sandbox_short_of_room_for_too_long_parks_with_the_resource_wait_question() {
+    // `infra::MAX_RESOURCE_WAITS`.
+    const WAITS: usize = 12;
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
+    let key = r.tracker.add_task("TRAIL", "Never finds room", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(RunOutcome::Failed { reason: "control plane died".into() }));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+
+    r.daemon.unavailable_runs(WAITS, "out of disk");
+    for n in 1..=WAITS {
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        let before = r.daemon.requests().len();
+        r.factory.reconcile().await.unwrap();
+        assert_eq!(r.daemon.requests().len(), before + 1, "wait {n} ran a review");
+        if n < WAITS {
+            assert_eq!(r.tracker.task(&key).status, Status::InReview, "wait {n} doesn't park");
+        }
+    }
+    let task = r.tracker.task(&key);
+    assert_ne!(task.status, Status::InReview, "{WAITS} waits in a row park the task");
+    let question = trailhead_factory::messages::resource_wait_question(WAITS as u32, "unavailable: out of disk");
+    let asked: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].body.contains(&question), "{:?}", asked[0].body);
 }
 
 #[tokio::test(start_paused = true)]
