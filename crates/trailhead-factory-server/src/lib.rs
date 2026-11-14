@@ -202,15 +202,7 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
 
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
-    let config_path = match &opts.config {
-        Some(path) => path.clone(),
-        None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
-    };
-    let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = repos::parent(&config_path);
-    let remote = find::remote(&repo_dir);
-    let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-    Ok((config_path, remote, config))
+    find::load_config(opts.config.as_deref())
 }
 
 /// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it is
