@@ -139,8 +139,10 @@ impl Factory {
             };
             let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
-            // to open: it resumes from it when the remote has it (TRAIL-751).
-            let resume = !rework && task.run.released.is_some();
+            // to open: it resumes from it when the remote has it (TRAIL-751). `started` clears `released`, so an
+            // attempt that fails before preparing would lose the marker: any earlier run counts too (TRAIL-1291). A
+            // run that never pushed finds no branch on the remote and starts fresh.
+            let resume = !rework && (task.run.released.is_some() || task.run.started.is_some());
             let (sandbox, setup_failure) = self
                 .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
                 .await?;
