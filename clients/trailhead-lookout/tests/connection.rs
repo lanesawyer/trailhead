@@ -26,7 +26,12 @@ use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, Ui
 use trailhead_wire::{read_frame, write_frame};
 
 /// One repo, "o/r", with an idle sandbox, whose later events the test sends.
-struct TestFeed(broadcast::Sender<Sequenced>, Arc<std::sync::Mutex<Option<FactoryState>>>, watch::Sender<()>);
+struct TestFeed(
+    broadcast::Sender<Sequenced>,
+    Arc<std::sync::Mutex<Option<FactoryState>>>,
+    watch::Sender<()>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
     SandboxStatus { name: name.into(), target: None, state, task: None, role: None, warm: false, own: false }
@@ -35,7 +40,8 @@ fn sandbox(name: &str, state: SandboxState) -> SandboxStatus {
 impl StatusFeed for TestFeed {
     fn subscribe(&self) -> Vec<RepoFeed> {
         // Like the real feed, which has no repos until the control plane runs.
-        if self.state().is_some_and(|s| s != FactoryState::Running) {
+        if !self.3.load(std::sync::atomic::Ordering::SeqCst) || self.state().is_some_and(|s| s != FactoryState::Running)
+        {
             return Vec::new();
         }
         let snapshot = FactorySnapshot {
@@ -96,6 +102,7 @@ async fn control_plane(key: SecretKey, lookup: &Arc<MemoryLookup>, rig: &Rig) ->
         rig.events.clone(),
         rig.control.clone(),
         rig.changed.clone(),
+        rig.repos.clone(),
     )));
     if let Some(logs) = &rig.logs {
         ui = ui.with_logs(Arc::new(TestLogs(logs.clone())));
@@ -121,6 +128,8 @@ struct Rig {
     control: Arc<std::sync::Mutex<Option<FactoryState>>>,
     /// Notified when `control` changes, as the real feed does.
     changed: watch::Sender<()>,
+    /// Whether the feed has repos while running; none means the stream ends on a change.
+    repos: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Rig {
@@ -154,6 +163,7 @@ impl Rig {
             logs: Some(broadcast::channel(16).0),
             control: Arc::new(std::sync::Mutex::new(Some(FactoryState::Running))),
             changed: watch::channel(()).0,
+            repos: Arc::new(true.into()),
         }
     }
 
@@ -749,4 +759,28 @@ async fn a_server_without_the_factory_is_shown_like_one_with_no_status_feed() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(matches!(link(&app), FactoryLink::Refused(_)), "{:?}", link(&app));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_control_plane_that_stops_is_never_shown_unreachable() {
+    let rig = Rig::new().await;
+    rig.repos.store(false, std::sync::atomic::Ordering::SeqCst);
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    allowed_and_live(&mut app, &rig).await;
+    until(&mut app, "running", |a| link(a) == FactoryLink::Running).await;
+
+    // The feed changing ends the stream cleanly; that's a resync, so Lookout redials without a flash of Unreachable.
+    *rig.control.lock().unwrap() = Some(FactoryState::Stopped);
+    rig.changed.send_modify(|_| {});
+    for _ in 0..100 {
+        app.update();
+        assert_ne!(link(&app), FactoryLink::Unreachable);
+        if matches!(link(&app), FactoryLink::Control(_)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("never showed the stopped control plane: {:?}", link(&app));
 }

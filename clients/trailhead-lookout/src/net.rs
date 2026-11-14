@@ -15,7 +15,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
-use trailhead_factory::FactoryState;
 use trailhead_factory::logs::LogLine;
 use trailhead_wire::ui::{
     CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
@@ -335,9 +334,26 @@ struct Progress {
     stopped: bool,
     /// Whether the connection has served a frame, which means the factory isn't refusing us.
     heard: bool,
-    /// Whether the last snapshot said the control plane isn't running. The server ends the stream then, having no
-    /// repos to feed, and the link is still up: the next try picks up the change.
-    waiting: bool,
+}
+
+/// How the status task treats the end of a connection.
+#[derive(Debug, PartialEq, Eq)]
+enum Resync {
+    /// Not a resync: a drop, reported and retried after a gap.
+    No,
+    /// The first clean end after serving a snapshot: redial at once, report nothing.
+    Now,
+    /// Clean ends in a row: redial after a gap, still reporting nothing.
+    Slowly,
+}
+
+/// Whether a connection's end is a resync, given whether it ended cleanly after being heard and whether the one before did.
+fn resync_after(clean_and_heard: bool, previous_was_resync: bool) -> Resync {
+    match (clean_and_heard, previous_was_resync) {
+        (false, _) => Resync::No,
+        (true, false) => Resync::Now,
+        (true, true) => Resync::Slowly,
+    }
 }
 
 /// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
@@ -529,7 +545,6 @@ async fn stream_status(
     while let Some(frame) = stream.next().await? {
         let update = match frame {
             StatusFrame::Snapshot { control, repos } => {
-                progress.waiting = control.as_ref().is_some_and(|c| *c != FactoryState::Running);
                 if events.send(NetEvent::Factory(FactoryUpdate::Control(control))).is_err() {
                     return Ok(None);
                 }
@@ -838,9 +853,9 @@ impl Net {
         let mut backoff = Backoff::new(self.config.status_retry);
         self.status = Some(tokio::spawn(async move {
             let mut progress = Progress::default();
+            let mut resynced = false;
             loop {
                 progress.heard = false;
-                progress.waiting = false;
                 let followed = follow_status(&endpoint, id, &events, &mut progress).await;
                 if progress.heard {
                     backoff.reset();
@@ -867,7 +882,16 @@ impl Net {
                     tokio::time::sleep(wait).await;
                     continue;
                 }
-                if !progress.stopped && !(ended_cleanly && progress.waiting) {
+                // A clean end is the server asking for a resync (its feed changed, or we lagged), not a drop:
+                // redial at once and don't report Unreachable; the next snapshot says what changed.
+                // A second clean end in a row is a server that ends every stream (one from before TRAIL-761
+                // while stopped), so it waits like a drop, without reporting Unreachable.
+                let resync = resync_after(ended_cleanly && progress.heard, resynced);
+                resynced = resync != Resync::No;
+                if resync == Resync::Now {
+                    continue;
+                }
+                if resync == Resync::No && !progress.stopped {
                     progress.stopped = true;
                     if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
                         return;
@@ -1159,6 +1183,14 @@ mod tests {
     #[tokio::test]
     async fn an_agent_token_shows_bare_then_waits_between_retries() {
         refusal_sequence(Some(serde_json::json!({"agent_id": "claude"})), Reason::AgentToken).await;
+    }
+
+    #[test]
+    fn clean_ends_in_a_row_are_slowed_down() {
+        assert_eq!(resync_after(true, false), Resync::Now);
+        assert_eq!(resync_after(true, true), Resync::Slowly);
+        assert_eq!(resync_after(false, true), Resync::No, "a drop resets the run");
+        assert_eq!(resync_after(false, false), Resync::No);
     }
 
     #[tokio::test]
