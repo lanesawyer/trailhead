@@ -661,6 +661,16 @@ async fn worker_infrastructure_failures_keep_counting_across_a_control_plane_res
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+
+    // Lane answers, and a new factory sees one more failure: the streak starts again at 1, so it's retried.
+    r.tracker.answer(&key, "the daemon is back");
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "not found: run trail-1 on this daemon");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("not found: run"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the reopened task's streak starts over");
+    assert_eq!(task.status, Status::Open, "retried, not parked");
 }
 
 #[tokio::test(start_paused = true)]
