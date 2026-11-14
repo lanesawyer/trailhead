@@ -424,14 +424,22 @@ impl Factory {
             *self.starved.lock().unwrap() = None;
             return;
         }
+        // A task holding two sandboxes is looked up once, then counted once per sandbox.
+        let mut looked_up: HashMap<&TaskKey, bool> = HashMap::new();
         let mut holders: Vec<(TaskKey, bool)> = Vec::new();
         for key in others.0.iter().flatten() {
-            let parked = match self.tracker.show(key).await {
-                Ok(task) => task.status == Status::NeedsInput,
-                Err(e) => {
-                    tracing::warn!(task = %key, error = %e, "couldn't look up the task holding a sandbox");
-                    false
-                }
+            let parked = if let Some(parked) = looked_up.get(key) {
+                *parked
+            } else {
+                let parked = match self.tracker.show(key).await {
+                    Ok(task) => task.status == Status::NeedsInput,
+                    Err(e) => {
+                        tracing::warn!(task = %key, error = %e, "couldn't look up the task holding a sandbox");
+                        false
+                    }
+                };
+                looked_up.insert(key, parked);
+                parked
             };
             holders.push((key.clone(), parked));
         }
