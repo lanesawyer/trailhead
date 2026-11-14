@@ -15,7 +15,6 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
-use trailhead_factory::FactoryState;
 use trailhead_factory::logs::LogLine;
 use trailhead_wire::ui::{
     CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
@@ -335,9 +334,6 @@ struct Progress {
     stopped: bool,
     /// Whether the connection has served a frame, which means the factory isn't refusing us.
     heard: bool,
-    /// Whether the last snapshot said the control plane isn't running. The server ends the stream then, having no
-    /// repos to feed, and the link is still up: the next try picks up the change.
-    waiting: bool,
 }
 
 /// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
@@ -529,7 +525,6 @@ async fn stream_status(
     while let Some(frame) = stream.next().await? {
         let update = match frame {
             StatusFrame::Snapshot { control, repos } => {
-                progress.waiting = control.as_ref().is_some_and(|c| *c != FactoryState::Running);
                 if events.send(NetEvent::Factory(FactoryUpdate::Control(control))).is_err() {
                     return Ok(None);
                 }
@@ -840,7 +835,6 @@ impl Net {
             let mut progress = Progress::default();
             loop {
                 progress.heard = false;
-                progress.waiting = false;
                 let followed = follow_status(&endpoint, id, &events, &mut progress).await;
                 if progress.heard {
                     backoff.reset();
@@ -867,7 +861,12 @@ impl Net {
                     tokio::time::sleep(wait).await;
                     continue;
                 }
-                if !progress.stopped && !(ended_cleanly && progress.waiting) {
+                // A clean end is the server asking for a resync (its feed changed, or we lagged), not a drop:
+                // redial at once and don't report Unreachable; the next snapshot says what changed.
+                if ended_cleanly && progress.heard {
+                    continue;
+                }
+                if !progress.stopped {
                     progress.stopped = true;
                     if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
                         return;
