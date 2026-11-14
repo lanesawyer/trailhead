@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
-use trailhead_testkit::{Script, unix_now};
+use trailhead_testkit::{Script, TrackerOp, unix_now};
 
 use crate::common::*;
 use crate::logs::Logs;
@@ -794,6 +794,33 @@ async fn taking_a_parked_task_off_its_queue_frees_its_place() {
     let ran = r.factory.tick().await.unwrap();
     assert!(ran.iter().any(|(t, _)| t.key == next), "the next task started in the released place");
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the detached task is left to its new owner");
+}
+
+#[tokio::test]
+async fn a_failed_in_flight_listing_doesnt_release_a_parked_tasks_sandbox() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Ambiguous", "");
+    r.tracker.set_grade(&key, 3);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+
+    // The task is off its queue, which a good listing would show, but the listing fails: the guard keeps the sandbox.
+    r.tracker.detach(&key);
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 100);
+    let next = r.tracker.add_subtask(&queue, "Next", "");
+    r.tracker.set_grade(&next, 3);
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "a tracker hiccup frees no parked sandbox");
+    assert_eq!(r.compute.get("trailhead-w1").unwrap().labels.get(label::TASK), Some(&key.0));
+    assert_eq!(r.tracker.task(&next).status, Status::Open, "the one place is still taken");
+
+    // Once the listing works again the detached task's sandbox is released.
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 0);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == next), "the next task started in the released place");
 }
 
 #[tokio::test(start_paused = true)]
