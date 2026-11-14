@@ -18,7 +18,19 @@ impl Factory {
     /// first says which hosts the `[stack]` tools it will install need; exactly
     /// those are opened on top of the install set for the prepare, each logged with the tool that asked, and
     /// confirmed closed again before any agent runs.
-    async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
+    async fn prepare_sandbox(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest, cold: bool) -> Result<()> {
+        let began = Instant::now();
+        tracing::info!(sandbox = %sandbox.name, cold, setup = req.setup.as_ref().map(|c| c.command.as_str()), "preparing the sandbox");
+        let result = self.prepare_checkout(p, sandbox, req).await;
+        let took_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(()) => tracing::info!(sandbox = %sandbox.name, cold, took_ms, "sandbox prepared"),
+            Err(e) => tracing::info!(sandbox = %sandbox.name, cold, took_ms, error = %e, "sandbox prepare failed"),
+        }
+        result
+    }
+
+    async fn prepare_checkout(&self, p: &Placed, sandbox: &Sandbox, req: PrepareRequest) -> Result<()> {
         let needs = p.daemon.install_hosts(&sandbox.id, &req).await?;
         if !needs.is_empty() {
             let mut egress = self.install_egress();
@@ -65,7 +77,7 @@ impl Factory {
         let sandbox = p.compute.create(&spec).await?;
         self.status.sandbox(&sandbox);
         let ready = async {
-            self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch)).await?;
+            self.prepare_sandbox(p, &sandbox, self.config.prepare_request(role, branch), true).await?;
             p.compute.set_egress(&sandbox.id, &self.agent_egress()).await
         };
         if let Err(e) = ready.await {
@@ -200,7 +212,7 @@ impl Factory {
         let rework = branch.is_some() && !branch_if_present;
         let prepare =
             PrepareRequest { merge_base, branch_if_present, ..self.config.prepare_request(Role::Worker, branch) };
-        let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone()).await;
+        let mut prepared = self.prepare_sandbox(p, &sandbox, prepare.clone(), warm.is_none()).await;
         let mut setup_failure = None;
         // On a rework the failed `setup` is the code's doing, probably what the worker is there to fix, so the agent
         // starts anyway: the checkout is otherwise ready, and prepares again without `setup` to finish it (TRAIL-649).
