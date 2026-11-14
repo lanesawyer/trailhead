@@ -814,8 +814,8 @@ fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
     labels.and_then(|l| l.get(CHECKPOINT_ENV)).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default()
 }
 
-/// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
-/// largest of all of them.
+/// `images` as `(of, size, name)` tuples for [`pick_checkpoint`], each image named by its first checkpoint tag, or by
+/// its ID when it has none.
 fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)> {
     let sized = images
         .iter()
@@ -836,6 +836,8 @@ fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> (u64, Option<&(u64,
     }
 }
 
+/// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
+/// largest of all of them.
 fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
     let largest = |own: bool| {
         images
