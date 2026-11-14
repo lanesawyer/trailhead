@@ -144,6 +144,27 @@ impl Visit for EventFields {
     }
 }
 
+/// Targets whose events the buffer skips: the transport the log is served over, and the serving path itself. Writing a
+/// line to the stream can make the transport log at debug or trace, and keeping that would feed the log back into itself.
+const TRANSPORT_TARGETS: &[&str] = &[
+    "iroh",
+    "iroh_base",
+    "iroh_relay",
+    "quinn",
+    "quinn_proto",
+    "quinn_udp",
+    "netwatch",
+    "portmapper",
+    "trailhead_wire::ui",
+];
+
+/// Whether an event's target is one of [`TRANSPORT_TARGETS`] or a module under it.
+fn is_transport_target(target: &str) -> bool {
+    TRANSPORT_TARGETS
+        .iter()
+        .any(|t| target.strip_prefix(t).is_some_and(|rest| rest.is_empty() || rest.starts_with("::")))
+}
+
 /// Whether a field is named like a credential.
 fn secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
@@ -213,6 +234,9 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        if is_transport_target(event.metadata().target()) {
+            return;
+        }
         let mut fields = EventFields::default();
         event.record(&mut fields);
         let (mut repo, mut task) = (None, fields.task.clone());
@@ -252,6 +276,24 @@ mod tests {
             task: None,
             message: format!("line {n}"),
         }
+    }
+
+    #[test]
+    fn transport_events_are_not_buffered() {
+        let buffer = LogBuffer::with_capacity(10);
+        let subscriber = tracing_subscriber::registry().with(buffer.layer());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "quinn_proto::connection", "packet sent");
+            tracing::trace!(target: "iroh", "tick");
+            tracing::debug!(target: "trailhead_wire::ui", "wrote line");
+            tracing::info!(target: "iroh_like_but_not", "kept");
+            tracing::info!(target: "trailhead_wire::other", "kept too");
+        });
+        let (kept, _) = buffer.subscribe();
+        assert_eq!(
+            kept.iter().map(|l| l.target.as_str()).collect::<Vec<_>>(),
+            ["iroh_like_but_not", "trailhead_wire::other"]
+        );
     }
 
     #[test]
