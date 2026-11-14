@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     /// What `/v1/me` answers on the stub: `None` is a 401, `Some` the JSON of an identity.
-    type Me = Arc<Mutex<Option<serde_json::Value>>>;
+    type Me = Option<serde_json::Value>;
 
     /// A stub of the server behind the tunnel: `/v1/health` answers, `/v1/me` as `me` says.
     async fn stub(me: Me) -> SocketAddr {
@@ -1053,7 +1053,7 @@ mod tests {
         let app = Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({})) })).route(
             "/v1/me",
             get(move || {
-                let answer = me.lock().unwrap().clone();
+                let answer = me.clone();
                 async move {
                     match answer {
                         Some(identity) => (StatusCode::OK, Json(identity)),
@@ -1116,7 +1116,7 @@ mod tests {
     /// Runs the refusal sequence for a token the stub turns down in the way `refused` names.
     async fn refusal_sequence(me: Option<serde_json::Value>, refused: Reason) {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(me))).await;
+        let addr = stub(me).await;
         let (mut net, rx) = net_for(dir.path(), addr).await;
         let offline = |reason: Reason| (Link::Offline, Some(reason));
         let connecting = (Link::Syncing, Some(Reason::Dialing));
@@ -1164,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_the_probe_resets_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let addr = stub(None).await;
         let (mut net, _rx) = net_for(dir.path(), addr).await;
         net.token = Some("saved".into());
         net.check().await;
