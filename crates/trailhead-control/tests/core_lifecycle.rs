@@ -1801,6 +1801,37 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
 }
 
 #[tokio::test]
+async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
+    );
+    let r = rig_with(&config).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let new =
+        NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::Approved);
+
+    // The intent names the current head, and the head stays put: only the gates change (a grade
+    // raised to one that needs a person).
+    let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.merging.as_deref(), None);
+}
+
+#[tokio::test]
 async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_a_queue() {
     let r = rig().await;
     let q = r.task("Beta's queue").await;
