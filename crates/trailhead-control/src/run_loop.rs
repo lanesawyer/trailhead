@@ -544,8 +544,8 @@ impl Factory {
         Ok(names.len())
     }
 
-    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
-    /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
+    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished, or taken
+    /// off the queue by hand (re-parented while parked or running, TRAIL-1147), are released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
     /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
     /// A task holds one pooled sandbox: any other still labelled for it is left over from an earlier attempt and is
     /// released too (TRAIL-1185).
