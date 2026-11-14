@@ -690,6 +690,16 @@ impl Net {
         self.set(Link::Offline, Some(Reason::Waiting(Box::new(reason), wait.as_secs().max(1))));
     }
 
+    /// Shows a token turned down. A token just pasted is a new answer to wait for, and with nothing saved to try
+    /// again nothing is retried; both show the bare cause. Otherwise it is tried again, so the probe waits.
+    fn refuse(&mut self, reason: Reason, pasted: bool, has_saved: bool) {
+        if pasted || !has_saved {
+            self.set(Link::Offline, Some(reason));
+        } else {
+            self.refused(reason);
+        }
+    }
+
     /// Forgets the control plane a failed Connect was meant to replace, so the probe doesn't go back to it and bury
     /// the error.
     fn drop_target(&mut self) {
@@ -772,6 +782,7 @@ impl Net {
 
         let store = self.config.creds(health.instance.as_deref());
         let saved = store.as_ref().and_then(|s| s.read(Cred::User)).map(|(t, _)| t);
+        let has_saved = saved.is_some();
         let pasted = self.pasted.take();
         let Some(token) = pasted.clone().or_else(|| self.token.clone()).or(saved) else {
             // A refusal stays on show until a new login, rather than decaying into "needs login".
@@ -787,11 +798,7 @@ impl Net {
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.token = None;
                 self.resume.clear();
-                // A token just pasted is a new answer to wait for; one tried again will be rejected again.
-                return match pasted {
-                    Some(_) => self.set(Link::Offline, Some(Reason::TokenRejected)),
-                    None => self.refused(Reason::TokenRejected),
-                };
+                return self.refuse(Reason::TokenRejected, pasted.is_some(), has_saved);
             }
             Ok(r) => {
                 return self
@@ -803,10 +810,7 @@ impl Net {
         if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
-            return match pasted {
-                Some(_) => self.set(Link::Offline, Some(Reason::AgentToken)),
-                None => self.refused(Reason::AgentToken),
-            };
+            return self.refuse(Reason::AgentToken, pasted.is_some(), has_saved);
         }
         self.release_probe();
         if pasted.is_some()
@@ -1134,7 +1138,9 @@ mod tests {
         assert_eq!(states(&rx), [connecting.clone(), offline(refused.clone())]);
         assert!(net.probe_hold.is_none());
 
-        // A token tried again is refused again, so the probe backs off from the base gap, doubling.
+        // A token tried again is refused again, so the probe backs off from the base gap, doubling. Only a saved
+        // token is tried again.
+        save_token(&net);
         net.token = Some("saved".into());
         net.check().await;
         let waiting = |secs| offline(Reason::Waiting(Box::new(refused.clone()), secs));
@@ -1145,10 +1151,30 @@ mod tests {
         net.check().await;
         assert_eq!(states(&rx), [connecting.clone(), signing_in, waiting(20)]);
 
-        // Without a token the wait is dropped from the display, and the refusal is not forgotten.
+        // Without a token (none held, none saved) the wait is dropped from the display, and the refusal is not
+        // forgotten.
+        std::fs::remove_file(net.config.creds(None).unwrap().file(Cred::User)).unwrap();
         net.check().await;
         assert_eq!(states(&rx), [connecting, offline(refused.clone())]);
         assert_eq!(net.state.as_ref().and_then(|(_, r)| r.as_ref()), Some(&refused));
+    }
+
+    fn save_token(net: &Net) {
+        net.config.creds(None).unwrap().save(Cred::User, "saved").unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_with_nothing_saved_is_not_waited_for() {
+        let agent = serde_json::json!({"agent_id": "claude"});
+        for (me, cause) in [(None, Reason::TokenRejected), (Some(agent), Reason::AgentToken)] {
+            let dir = tempfile::tempdir().unwrap();
+            let addr = stub(Arc::new(Mutex::new(me))).await;
+            let (mut net, rx) = net_for(dir.path(), addr).await;
+            net.token = Some("held".into());
+            net.check().await;
+            assert_eq!(states(&rx).pop(), Some((Link::Offline, Some(cause))));
+            assert!(net.probe_hold.is_none());
+        }
     }
 
     #[tokio::test]
@@ -1166,6 +1192,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let addr = stub(Arc::new(Mutex::new(None))).await;
         let (mut net, _rx) = net_for(dir.path(), addr).await;
+        save_token(&net);
         net.token = Some("saved".into());
         net.check().await;
         assert!(net.probe_hold.is_some());
