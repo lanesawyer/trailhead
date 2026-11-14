@@ -27,7 +27,9 @@ use crate::board::View;
 use crate::claims::live_claims;
 use crate::factory::{Campsite, FactoryStatus, Run};
 use crate::mirror::{Mirrored, Rev, rows};
-use crate::widgets::{self, BackgroundTone, sandbox_token, size, space, status_label, status_tone, text_toned, token};
+use crate::widgets::{
+    self, BackgroundTone, Keyed, TextTone, sandbox_token, size, space, status_label, status_tone, text_toned, token,
+};
 
 /// Campsites sit on a grid on the left, this many to a row.
 const CAMP_COLUMNS: usize = 3;
@@ -344,14 +346,13 @@ impl Plugin for MapUiPlugin {
 #[derive(Component)]
 struct MapPanel;
 
-/// Camps, waypoints and their text: despawned and drawn again whenever the model changes.
+/// The layer holding the camps, waypoints and their text, under the tokens.
 #[derive(Component)]
 struct Terrain;
 
 /// An agent's token, which outlives redraws so it can walk to where the model now puts it.
 #[derive(Component)]
 struct Token {
-    id: String,
     target: Vec2,
 }
 
@@ -383,98 +384,142 @@ fn plot(pos: Vec2, size: Vec2, tone: widgets::Token) -> impl Bundle {
     )
 }
 
-fn line(commands: &mut Commands, parent: Entity, text: String, tone: widgets::Token) {
-    commands.spawn_scene(text_toned(text, size::SECONDARY, tone)).insert(ChildOf(parent));
-}
-
-/// Tokens sit above the terrain, which is respawned (as later siblings) on every redraw.
+/// Tokens sit above the terrain, which lives in one layer under them.
 const TOKEN_Z: i32 = 1;
 
-/// Redraws the terrain when the model or the factory's link changes, and moves tokens' targets; [`glide`] walks them.
-#[allow(clippy::too_many_arguments)]
-fn redraw(
-    map: Res<TrailMap>,
-    factory: Res<FactoryStatus>,
-    panel: Single<(Entity, Option<&Children>), With<MapPanel>>,
-    mut tokens: Query<(Entity, &mut Token)>,
-    terrain: Query<Entity, With<Terrain>>,
-    mut commands: Commands,
-    mut drawn: Local<Option<Entity>>,
-) {
-    let (panel, _) = *panel;
-    let fresh = *drawn != Some(panel);
-    if !(fresh || map.is_changed() || factory.is_changed()) {
-        return;
+/// A box of the terrain: the bar of notes on top, or a camp or waypoint at a map position.
+#[derive(Clone, PartialEq)]
+enum Block {
+    Bar,
+    Spot { pos: Vec2, size: Vec2, tone: widgets::Token },
+}
+
+/// One line of text in a block: its words, size and tone.
+type Line = (String, widgets::Size, widgets::Token);
+
+/// What the terrain has drawn: the layer it lives in and the entities of its blocks and their lines.
+#[derive(Default)]
+struct Drawn {
+    panel: Option<Entity>,
+    layer: Option<Entity>,
+    token_layer: Option<Entity>,
+    tokens: Keyed<Walker>,
+    blocks: Keyed<Block>,
+    lines: Keyed<Line>,
+}
+
+fn spawn_block(commands: &mut Commands, block: &Block) -> Entity {
+    match block {
+        Block::Bar => commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(ORIGIN.x),
+                    top: px(space::PANEL_INSET),
+                    flex_direction: FlexDirection::Column,
+                    row_gap: px(space::ROWS),
+                    ..default()
+                },
+                Name::new("terrain bar"),
+            ))
+            .id(),
+        Block::Spot { pos, size, tone } => commands.spawn(plot(*pos, *size, tone.clone())).id(),
     }
-    let holds = factory.holds();
-    *drawn = Some(panel);
-    for e in &terrain {
-        commands.entity(e).despawn();
+}
+
+fn update_block(commands: &mut Commands, entity: Entity, block: &Block) {
+    if let Block::Spot { pos, size, tone } = block {
+        commands.entity(entity).insert(plot(*pos, *size, tone.clone()));
     }
+}
+
+/// The blocks the map and the link ask for, each with its lines.
+fn terrain(map: &MapModel, factory: &FactoryStatus) -> Vec<(String, Block, Vec<Line>)> {
     let stopped = factory.link != crate::factory::FactoryLink::Running;
-    let bar = commands
-        .spawn((
-            Terrain,
-            Node {
-                position_type: PositionType::Absolute,
-                left: px(ORIGIN.x),
-                top: px(space::PANEL_INSET),
-                flex_direction: FlexDirection::Column,
-                row_gap: px(space::ROWS),
-                ..default()
-            },
-            ChildOf(panel),
-        ))
-        .id();
     let note = if factory.link == crate::factory::FactoryLink::Unreachable {
         format!("{}: showing the last known state", factory.label())
     } else {
         factory.label()
     };
-    let tone = if stopped { token::STATUS_WARN } else { token::TEXT_DIM };
-    commands.spawn_scene(text_toned(note, size::BODY, tone)).insert(ChildOf(bar));
-    for hold in holds {
-        commands.spawn_scene(text_toned(hold, size::BODY, token::STATUS_WARN)).insert(ChildOf(bar));
-    }
-
-    for c in &map.0.camps {
+    let mut bar = vec![(note, size::BODY, if stopped { token::STATUS_WARN } else { token::TEXT_DIM })];
+    bar.extend(factory.holds().into_iter().map(|hold| (hold, size::BODY, token::STATUS_WARN)));
+    let mut out = vec![("bar".to_string(), Block::Bar, bar)];
+    for c in &map.camps {
         // A stopped factory's camps are grayed out: their state is the last known, not live.
-        let tint = if stopped { token::SURFACE_RAISED } else { sandbox_token(c.state) };
-        let node = commands.spawn((Terrain, plot(c.pos, CAMP_SIZE, tint), ChildOf(panel))).id();
-        for l in camp_lines(c) {
-            line(&mut commands, node, l, token::TEXT);
-        }
+        let tone = if stopped { token::SURFACE_RAISED } else { sandbox_token(c.state) };
+        let lines = camp_lines(c).into_iter().map(|l| (l, size::SECONDARY, token::TEXT)).collect();
+        out.push((format!("camp/{}/{}", c.repo, c.name), Block::Spot { pos: c.pos, size: CAMP_SIZE, tone }, lines));
     }
-    for w in &map.0.waypoints {
-        let node = commands.spawn((Terrain, plot(w.pos, WAY_SIZE, token::SURFACE_RAISED), ChildOf(panel))).id();
-        line(&mut commands, node, format!("{} {}", w.key, w.title), token::TEXT);
-        for (l, c) in w.markers.iter().map(marker_line) {
-            line(&mut commands, node, l, c);
-        }
+    for w in &map.waypoints {
+        let mut lines = vec![(format!("{} {}", w.key, w.title), size::SECONDARY, token::TEXT)];
+        lines.extend(w.markers.iter().map(marker_line).map(|(l, tone)| (l, size::SECONDARY, tone)));
+        let spot = Block::Spot { pos: w.pos, size: WAY_SIZE, tone: token::SURFACE_RAISED };
+        out.push((format!("way/{}", w.key), spot, lines));
     }
+    out
+}
 
-    // Tokens: move the ones the model still has, drop the rest, add the new at their spot.
-    let mut have: HashMap<String, Entity> = HashMap::new();
-    for (e, mut t) in &mut tokens {
-        match map.0.walkers.iter().find(|w| w.id == t.id) {
-            Some(w) => {
-                t.target = w.pos;
-                have.insert(t.id.clone(), e);
-            }
-            None => commands.entity(e).despawn(),
-        }
+/// Brings the terrain to the model and the factory's link, changing only what differs, and moves tokens' targets,
+/// which [`glide`] walks.
+#[allow(clippy::too_many_arguments)]
+fn redraw(
+    map: Res<TrailMap>,
+    factory: Res<FactoryStatus>,
+    panel: Single<Entity, With<MapPanel>>,
+    mut commands: Commands,
+    mut drawn: Local<Drawn>,
+) {
+    let panel = *panel;
+    let fresh = drawn.panel != Some(panel);
+    if !(fresh || map.is_changed() || factory.is_changed()) {
+        return;
     }
-    for w in &map.0.walkers {
-        if have.contains_key(&w.id) {
-            continue;
-        }
+    if fresh {
+        // A new panel: the old one took its terrain with it.
+        drawn.blocks.forget();
+        drawn.lines.forget();
+        drawn.tokens.forget();
+        drawn.panel = Some(panel);
+        let fill =
+            Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() };
+        drawn.layer = Some(commands.spawn((Terrain, fill.clone(), ChildOf(panel))).id());
+        drawn.token_layer = Some(commands.spawn((fill, ChildOf(panel))).id());
+    }
+    let (layer, token_layer) = (drawn.layer.expect("spawned with the panel"), drawn.token_layer.expect("likewise"));
+    let wanted = terrain(&map.0, &factory);
+    let blocks: Vec<(String, Block)> = wanted.iter().map(|(k, b, _)| (k.clone(), b.clone())).collect();
+    let Drawn { blocks: block_entities, lines: line_entities, .. } = &mut *drawn;
+    block_entities.sync(&mut commands, &[(layer, blocks)], |c, _, b| spawn_block(c, b), update_block);
+    let per_block: Vec<(Entity, Vec<(String, Line)>)> = wanted
+        .into_iter()
+        .filter_map(|(key, _, lines)| {
+            let parent = block_entities.entity(&key)?;
+            Some((parent, lines.into_iter().enumerate().map(|(i, l)| (format!("{key}/{i}"), l)).collect()))
+        })
+        .collect();
+    line_entities.sync(
+        &mut commands,
+        &per_block,
+        |c, _, (text, size, tone)| c.spawn_scene(text_toned(text.clone(), *size, tone.clone())).id(),
+        |c, e, (text, _, tone)| {
+            c.entity(e).insert((Text(text.clone()), TextTone(tone.clone())));
+        },
+    );
+
+    // Tokens: the model's walkers, keyed by claim holder; a known one gets its new target and glides there.
+    let walkers: Vec<(String, Walker)> = map.0.walkers.iter().map(|w| (w.id.clone(), w.clone())).collect();
+    let spawn = |c: &mut Commands, w: &Walker| {
         let name = Name::new(format!("agent {}", w.name));
-        let node =
-            commands.spawn((Token { id: w.id.clone(), target: w.pos }, name, ZIndex(TOKEN_Z), ChildOf(panel))).id();
-        commands.entity(node).insert(plot(w.pos, AGENT_SIZE, token::AGENT));
+        let node = c.spawn((Token { target: w.pos }, name, ZIndex(TOKEN_Z))).id();
+        c.entity(node).insert(plot(w.pos, AGENT_SIZE, token::AGENT));
         let initial = w.name.rsplit(['/', '-']).next().unwrap_or("a").to_string();
-        commands.spawn_scene(text_toned(initial, size::SMALL, token::AGENT_TEXT)).insert(ChildOf(node));
-    }
+        c.spawn_scene(text_toned(initial, size::SMALL, token::AGENT_TEXT)).insert(ChildOf(node));
+        node
+    };
+    let retarget = |c: &mut Commands, e: Entity, w: &Walker| {
+        c.entity(e).insert(Token { target: w.pos });
+    };
+    drawn.tokens.sync(&mut commands, &[(token_layer, walkers)], |c, _, w| spawn(c, w), retarget);
 }
 
 /// Eases each token toward its target.
@@ -827,6 +872,52 @@ mod tests {
             app.update();
         }
         assert!(hold_tones(&mut app).is_empty());
+    }
+
+    /// Every entity under the map's terrain layer, in order.
+    fn terrain_entities(app: &mut App) -> Vec<Entity> {
+        let world = app.world_mut();
+        let layer = world.query_filtered::<Entity, With<Terrain>>().single(world).unwrap();
+        let mut found = vec![layer];
+        let mut at = 0;
+        while at < found.len() {
+            if let Some(children) = world.get::<Children>(found[at]) {
+                found.extend(children.iter());
+            }
+            at += 1;
+        }
+        found
+    }
+
+    #[test]
+    fn a_change_of_model_or_link_leaves_the_terrain_entities_as_they_were() {
+        use crate::factory::{FactoryLink, FactoryStatus};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_resource::<FactoryStatus>()
+            .init_asset::<bevy::text::Font>()
+            .add_systems(Update, redraw);
+        app.world_mut().spawn(MapPanel);
+        app.insert_resource(TrailMap(world().model()));
+        let settle = |app: &mut App| (0..4).for_each(|_| app.update());
+        settle(&mut app);
+        let before = terrain_entities(&mut app);
+        assert!(before.len() > 10);
+
+        // A camp changes state and a waypoint's spend moves: same entities, new words.
+        let mut w = world();
+        w.campsites[0].status.state = SandboxState::Busy;
+        w.runs[0] = run("TRAIL-42", Some("a"), RunPhase::Agent, 2.5);
+        app.insert_resource(TrailMap(w.model()));
+        // The link going down changes the note and the camps' tint.
+        app.world_mut().resource_mut::<FactoryStatus>().link = FactoryLink::Unreachable;
+        settle(&mut app);
+        assert_eq!(terrain_entities(&mut app), before);
+        let mut texts = app.world_mut().query::<&Text>();
+        assert!(texts.iter(app.world()).any(|t| t.0 == "$2.50"));
+        assert!(texts.iter(app.world()).any(|t| t.0.ends_with("showing the last known state")));
     }
 
     #[test]

@@ -30,7 +30,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     ("hint.rs", "show_hint", "opens a hint, first closing any other still shown"),
     ("select.rs", "set_toned", "a select's rows, respawned only when its options changed; the select and popup stay"),
     ("project_form.rs", "redraw_form", "opens and closes the new project form's modal"),
-    ("map.rs", "redraw", "the trail map's terrain is respawned on every model change; in place is a follow-up"),
 ];
 
 /// The text after `fn ` when the line starts a function, past any visibility
