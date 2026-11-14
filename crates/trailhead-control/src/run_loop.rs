@@ -255,6 +255,12 @@ impl Factory {
         let mut survey = self.survey().await;
         let mut placed = Vec::new();
         for task in startable {
+            // A task last run on a target that is down may still hold a sandbox there, unseen: starting it elsewhere
+            // could put the repo over `max_sandboxes`. It waits for its target, whose sandboxes are unknown, not gone.
+            if task.run.target.as_ref().is_some_and(|t| survey.down.contains(t)) {
+                tracing::info!(task = %task.key, "its target is down, so its sandbox can't be counted; not starting it elsewhere");
+                continue;
+            }
             // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
             // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
             if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
