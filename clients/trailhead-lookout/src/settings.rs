@@ -314,7 +314,7 @@ fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local
 fn factory_page(commands: &mut Commands, page: Entity) {
     commands.spawn_scene(value(Value::Status, "Status")).insert(ChildOf(page));
     commands.spawn_scene(value(Value::Repos, "Repos it serves")).insert(ChildOf(page));
-    commands.spawn_scene(value(Value::Queue, "Queue task")).insert(ChildOf(page));
+    commands.spawn_scene(value(Value::Queue, "Queue tasks")).insert(ChildOf(page));
 }
 
 /// A tab was picked: select it and show its page.
