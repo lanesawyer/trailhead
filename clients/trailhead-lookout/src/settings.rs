@@ -185,6 +185,8 @@ struct StartPage(Option<Page>);
 fn on_open_logs(
     open: On<OpenLogs>,
     modals: Query<(), With<SettingsModal>>,
+    strips: Query<Entity, With<SettingsStrip>>,
+    tabs: Query<(Entity, &SettingsTab)>,
     mut filter: ResMut<LogFilter>,
     mut start: ResMut<StartPage>,
     mut commands: Commands,
@@ -193,6 +195,10 @@ fn on_open_logs(
     if modals.is_empty() {
         start.0 = Some(Page::Logs);
         open_modal(&mut commands, SettingsModal);
+    } else if let Some(strip) = strips.iter().next() {
+        // Already open: pick the tab as a click would, so on_tab shows the page.
+        let logs = tabs.iter().find(|(_, t)| t.0 == Page::Logs).map(|(e, _)| e);
+        commands.trigger(ValueChange { source: strip, value: logs, is_final: true });
     }
 }
 
@@ -514,6 +520,22 @@ mod tests {
         let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
         assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
     }
+    #[test]
+    fn opening_the_logs_while_settings_is_open_switches_to_the_logs_tab() {
+        let mut app = app();
+        open(&mut app);
+        assert_eq!(shown(&mut app), [Page::General]);
+        app.world_mut().trigger(OpenLogs("TRAIL-9".into()));
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 1);
+        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-9"));
+        let world = app.world_mut();
+        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
+        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
+        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+    }
+
     #[test]
     fn escape_closes_it() {
         let mut app = app();
