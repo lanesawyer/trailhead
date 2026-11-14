@@ -152,6 +152,7 @@ impl GradesConfig {
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
     /// A `tracing` filter for the daemon's log, such as `info,iroh=debug`. The daemon's default when unset.
+    #[serde(default, deserialize_with = "valid_log_filter")]
     pub log: Option<String>,
     /// Warn when the sandbox's filesystem uses more than this after setup and trim, before the warm checkpoint is
     /// taken; 0 for no warning. Stack-neutral, so a new stack's caches can't fill the disk unnoticed.
@@ -216,6 +217,16 @@ fn check_memory_mib(mib: Option<u64>) -> std::result::Result<Option<u64>, String
         )),
         other => Ok(other),
     }
+}
+
+/// Refuses a `[factory.daemon] log` the daemon would reject at start (it parses `--log` with `EnvFilter::try_new`).
+fn valid_log_filter<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<String>, D::Error> {
+    let spec = Option::<String>::deserialize(d)?;
+    if let Some(s) = &spec {
+        tracing_subscriber::EnvFilter::try_new(s)
+            .map_err(|e| serde::de::Error::custom(format!("`log` is `{s}`, not a valid tracing filter: {e}")))?;
+    }
+    Ok(spec)
 }
 
 fn memory_mib_at_least_min<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u64>, D::Error> {
@@ -1479,6 +1490,8 @@ require = ["checks", "agent_review", "human"]
         let with = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=debug\"\n");
         assert_eq!(parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
         let bad = format!("{SAMPLE}\n[daemon]\nlogg = \"x\"\n");
+        assert!(matches!(parse(&bad), Err(Error::Config(_))));
+        let bad = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=loud\"\n");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
     }
 
