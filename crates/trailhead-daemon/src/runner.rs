@@ -128,7 +128,7 @@ impl Runner {
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`. A cancel during the
     /// checks stops them before anything is published; once publishing starts, the step runs to the end.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
-        let key = &req.task.key.0;
+        let key = &req.task.key;
         self.workspace.set_env(&req.env);
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
