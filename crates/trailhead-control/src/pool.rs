@@ -141,6 +141,8 @@ impl Factory {
         idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);
         let stack = self.config.stack.tag();
         let mut current = Vec::new();
+        // Sandboxes the stack check destroyed or labelled broken: the release of the task's held ones below mustn't relabel them.
+        let mut dealt_with = HashSet::new();
         for s in idle {
             if s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack {
                 current.push(s);
@@ -148,6 +150,7 @@ impl Factory {
             }
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
+            dealt_with.insert(s.name.clone());
             match p.compute.destroy(&s.id).await {
                 Ok(()) => self.forget_sandbox(&s.id),
                 Err(e) => {
@@ -180,7 +183,7 @@ impl Factory {
             return Err(e);
         }
         // A task holds one pooled sandbox: another still labelled for it would fill the cap for nothing (TRAIL-1185).
-        for stale in held.iter().filter(|s| s.name != sandbox.name) {
+        for stale in held.iter().filter(|s| s.name != sandbox.name && !dealt_with.contains(&s.name)) {
             if let Err(e) = self.release_worker(stale).await {
                 tracing::warn!(sandbox = %stale.name, task = %task.key.0, error = %e, "couldn't release a stale sandbox held for the task; reconcile will");
             }
