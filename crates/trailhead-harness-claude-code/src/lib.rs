@@ -278,11 +278,6 @@ pub fn schema(role: Role) -> Value {
     })
 }
 
-/// The most the human-context section of a prompt may take, in bytes.
-const HUMAN_CONTEXT_CAP: usize = 6000;
-/// The most the answers may take of the human-context section, so notes keep the rest.
-const ANSWERS_CAP: usize = 4000;
-
 /// How many open follow-ups a reviewer is shown.
 const FOLLOW_UPS_CAP: usize = 40;
 
@@ -307,6 +302,11 @@ fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
     }
     out
 }
+
+/// The most the human-context section of a prompt may take, in bytes.
+const HUMAN_CONTEXT_CAP: usize = 6000;
+/// The most the answers may take of the human-context section, so notes keep the rest.
+const ANSWERS_CAP: usize = 4000;
 
 /// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
