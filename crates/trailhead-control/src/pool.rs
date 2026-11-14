@@ -135,7 +135,7 @@ impl Factory {
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
         // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
-        let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
+        let recorded = task.run.host.as_deref();
         idle.sort_by_key(|s| Some(s.name.as_str()) != recorded);
         let held = idle.clone();
         idle.extend(p.list(&self.pooled(None, label::IDLE, None, None)).await?);

@@ -779,7 +779,8 @@ fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
 }
 
 /// Whether `sandbox` is the one pooled sandbox `task` keeps among `candidates` labelled for it: the one it last ran
-/// on, as the tracker recorded it (the same choice `acquire_worker` makes), else the first by name.
+/// on, as the tracker recorded it (`run.host`, the same choice `acquire_worker` makes). When that names none of them
+/// (no host recorded, or it sits on a target that isn't listed), nothing says which holds the latest work: keep all.
 fn keeps(task: &Task, sandbox: &Sandbox, candidates: &[&Sandbox]) -> bool {
     let mine: Vec<&str> = candidates
         .iter()
@@ -789,9 +790,10 @@ fn keeps(task: &Task, sandbox: &Sandbox, candidates: &[&Sandbox]) -> bool {
     if mine.len() < 2 {
         return true;
     }
-    let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
-    let kept = recorded.filter(|r| mine.contains(r)).or_else(|| mine.iter().copied().min());
-    kept == Some(sandbox.name.as_str())
+    match task.run.host.as_deref().filter(|h| mine.contains(h)) {
+        Some(kept) => kept == sandbox.name,
+        None => true,
+    }
 }
 
 #[cfg(test)]
@@ -875,5 +877,53 @@ mod holder_tests {
         assert_eq!(describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42))), "TRAIL-1087 (retrying in 42s)");
         assert_eq!(describe_holder("TRAIL-1", false, None), "TRAIL-1 (in flight)");
         assert_eq!(describe_holder("TRAIL-2", true, None), "TRAIL-2 (parked)");
+    }
+}
+
+#[cfg(test)]
+mod keeps_tests {
+    use super::keeps;
+    use trailhead_factory::{Labels, Priority, RunRecord, Sandbox, SandboxId, Status, Task, TaskKey, label};
+
+    fn sandbox(name: &str) -> Sandbox {
+        let labels: Labels = [(label::TASK.to_string(), "TRAIL-7".to_string())].into_iter().collect();
+        Sandbox { id: SandboxId(name.into()), name: name.into(), labels }
+    }
+
+    fn task(host: Option<&str>) -> Task {
+        Task {
+            key: TaskKey("TRAIL-7".into()),
+            project: "TRAIL".into(),
+            title: String::new(),
+            description: String::new(),
+            status: Status::NeedsInput,
+            grade: None,
+            priority: Priority::default(),
+            holder: None,
+            changes_requested: false,
+            run: RunRecord {
+                sandbox: Some("trail-7-a1".into()),
+                host: host.map(str::to_string),
+                ..RunRecord::default()
+            },
+        }
+    }
+
+    fn kept(task: &Task, all: &[Sandbox]) -> Vec<String> {
+        let refs: Vec<&Sandbox> = all.iter().collect();
+        all.iter().filter(|s| keeps(task, s, &refs)).map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn the_recorded_host_is_the_one_kept() {
+        let all = [sandbox("w-a"), sandbox("w-b")];
+        assert_eq!(kept(&task(Some("w-b")), &all), ["w-b"]);
+    }
+
+    #[test]
+    fn nothing_is_released_when_the_host_is_missing_or_unlisted() {
+        let all = [sandbox("w-a"), sandbox("w-b")];
+        assert_eq!(kept(&task(None), &all), ["w-a", "w-b"]);
+        assert_eq!(kept(&task(Some("elsewhere")), &all), ["w-a", "w-b"]);
     }
 }
