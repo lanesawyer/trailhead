@@ -713,6 +713,10 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
     for path in names.split(|b| *b == 0).filter(|p| !p.is_empty()) {
         read_change(dir, String::from_utf8_lossy(path).into_owned(), &mut changes).await?;
     }
+    // A tracked directory that became an embedded repository is listed as its old files and as the gitlink, which
+    // expands to the same files again: publish each path once.
+    let mut seen = std::collections::HashSet::new();
+    changes.retain(|c| seen.insert(c.path.clone()));
     Ok(changes)
 }
 
@@ -885,6 +889,27 @@ mod tests {
         std::fs::remove_file(inner.join("gone")).unwrap();
         let paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
         assert_eq!(paths, ["inner/keep"]);
+    }
+
+    #[tokio::test]
+    async fn a_tracked_directory_that_becomes_an_embedded_repository_lists_each_path_once() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(&["init", "-q"], dir.path());
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("x"), "a").unwrap();
+        std::fs::write(inner.join("y"), "b").unwrap();
+        run_git(&["add", "--all"], dir.path());
+        run_git(&["commit", "-q", "-m", "start"], dir.path());
+        let start = git_head(dir.path()).await.unwrap();
+        run_git(&["init", "-q"], &inner);
+        std::fs::write(inner.join("x"), "changed").unwrap();
+        run_git(&["add", "--all"], &inner);
+        run_git(&["commit", "-q", "-m", "inner"], &inner);
+        run_git(&["rm", "-r", "-q", "--cached", "inner"], dir.path());
+        let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        paths.sort();
+        assert_eq!(paths, ["inner/x", "inner/y"].map(String::from));
     }
 
     fn only(changes: Vec<FileChange>) -> FileChange {
