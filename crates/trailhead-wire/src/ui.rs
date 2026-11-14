@@ -30,9 +30,13 @@ pub const UI_ALPN: &[u8] = b"trailhead/ui/0";
 
 /// The application close code on a connection from an endpoint that isn't on the allowlist, so a UI can say so.
 pub const CLOSE_NOT_ALLOWED: u32 = 1;
+/// Why a UI closes its own connection: it dropped its tunnel.
+const CLOSE_TUNNEL_DROPPED: u32 = 2;
 
 /// How long a UI waits to reach the control plane before a request fails.
 const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// How long a dropped tunnel keeps its endpoint alive so the close it just sent goes out.
+const CLOSE_FLUSH: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// The first frame on every stream a UI opens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -569,6 +573,8 @@ impl LogStream {
 pub struct UiTunnel {
     addr: SocketAddr,
     task: tokio::task::JoinHandle<()>,
+    conn: Arc<tokio::sync::Mutex<Option<Connection>>>,
+    endpoint: Endpoint,
 }
 
 impl UiTunnel {
@@ -587,6 +593,19 @@ impl std::fmt::Display for UiTunnel {
 impl Drop for UiTunnel {
     fn drop(&mut self) {
         self.task.abort();
+        // Dropping an endpoint doesn't tell the peer, so close the cached connection, keeping the endpoint up to flush the
+        // close, in a task of its own (the lock is free once the aborted forwards are gone).
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let (conn, endpoint) = (self.conn.clone(), self.endpoint.clone());
+            runtime.spawn(async move {
+                if let Some(conn) = conn.lock().await.take() {
+                    conn.close(CLOSE_TUNNEL_DROPPED.into(), b"tunnel closed");
+                }
+                // Keep the endpoint (the caller may still use it) alive long enough to send the close.
+                tokio::time::sleep(CLOSE_FLUSH).await;
+                drop(endpoint);
+            });
+        }
     }
 }
 
@@ -595,6 +614,7 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
     let conn: Arc<tokio::sync::Mutex<Option<Connection>>> = Arc::default();
+    let (cached, spare) = (conn.clone(), endpoint.clone());
     // The forwarders live in a JoinSet the accept task owns, so aborting that task ends them too.
     let task = tokio::spawn(async move {
         let mut forwards = tokio::task::JoinSet::new();
@@ -633,7 +653,7 @@ pub async fn open_ui_tunnel(endpoint: Endpoint, control_plane: EndpointId) -> Re
             });
         }
     });
-    Ok(UiTunnel { addr, task })
+    Ok(UiTunnel { addr, task, conn: cached, endpoint: spare })
 }
 
 #[cfg(test)]
