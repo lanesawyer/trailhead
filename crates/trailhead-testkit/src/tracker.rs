@@ -929,6 +929,39 @@ mod tests {
         assert!(matches!(tracker.report(&key, RunPatch::default()).await, Err(Error::Conflict(_))));
     }
 
+    fn verdict(kind: VerdictKind) -> Verdict {
+        Verdict { kind, body: "b".into(), reviewer: "r".into(), model: None, raise_grade: None }
+    }
+
+    /// A rework claimed from review, then a lapsed lease: `expire_claim` returns it to review while the review still
+    /// asks for changes, and to open once it doesn't (core's `reap_expired` through `unclaimed_status`).
+    #[tokio::test]
+    async fn expire_claim_returns_a_rework_to_review_only_while_changes_are_requested_like_core() {
+        for (kind, back) in [(VerdictKind::RequestChanges, Status::InReview), (VerdictKind::Approve, Status::Open)] {
+            let tracker = FakeTracker::new("factory");
+            let key = tracker.add_task("TRAIL", "t", "d");
+            tracker.set_status(&key, Status::InReview);
+            tracker.record_verdict(&key, &verdict(kind)).await.unwrap();
+            tracker.claim(&key).await.unwrap();
+            tracker.expire_claim(&key);
+            let t = tracker.task(&key);
+            assert_eq!(t.status, back, "{kind:?}");
+            assert_eq!(t.holder, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn expire_claim_returns_a_rework_to_open_once_a_handoff_answers_the_review() {
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "t", "d");
+        tracker.set_status(&key, Status::InReview);
+        tracker.record_verdict(&key, &verdict(VerdictKind::RequestChanges)).await.unwrap();
+        tracker.claim(&key).await.unwrap();
+        tracker.comment(&key, "handoff", "reworked");
+        tracker.expire_claim(&key);
+        assert_eq!(tracker.task(&key).status, Status::Open);
+    }
+
     #[tokio::test]
     async fn reopen_clears_the_callers_own_claim() {
         let tracker = FakeTracker::new("factory");
