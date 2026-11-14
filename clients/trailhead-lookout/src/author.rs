@@ -21,7 +21,7 @@ use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
 use crate::board::View;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
-use crate::factory::FactoryStatus;
+use crate::factory::{FactoryStatus, project_of};
 use crate::form::{self, FormState};
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
@@ -153,11 +153,6 @@ impl Open {
         };
         Open { draft }
     }
-}
-
-/// The project a key belongs to: `TRAIL` for `TRAIL-102`.
-fn project_of(key: &str) -> Option<&str> {
-    key.rsplit_once('-').map(|(project, _)| project).filter(|p| !p.is_empty())
 }
 
 /// The factory's queue tasks in `project`: the one `LOOKOUT_QUEUE` pins first, then those the factory reports.
