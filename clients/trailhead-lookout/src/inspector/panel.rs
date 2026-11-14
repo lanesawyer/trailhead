@@ -424,6 +424,20 @@ mod tests {
     }
 
     #[test]
+    fn notification_events_are_not_a_tasks_last_change() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        for (id, kind) in [(3, "task.updated"), (4, "task.due_soon"), (5, "task.overdue")] {
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
+                "id": id, "entity": "task", "entity_id": sid("t7"), "kind": kind,
+                "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7"})),
+            })));
+        }
+        app.update();
+        assert_eq!(app.world().resource::<Latest>().0.get(&sid("t7")), Some(&3));
+    }
+
+    #[test]
     fn the_status_dropdown_shows_words_for_the_api_values() {
         let statuses = vec![Status::NeedsInput, Status::InProgress];
         assert_eq!(status_labels(&statuses), ["Needs Input", "In Progress"]);

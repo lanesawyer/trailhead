@@ -128,9 +128,17 @@ pub struct Latest(pub HashMap<String, i64>);
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct InspectorState(pub Option<InspectorView>);
 
+/// Notifications about a task, not changes to it; the server's `changes_only` leaves them out, and undo can't revert them.
+fn is_notification(kind: &str) -> bool {
+    matches!(kind, "task.due_soon" | "task.overdue")
+}
+
 fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) {
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
+        if is_notification(&e.kind) {
+            continue;
+        }
         if let Some(task) = crate::sync::task_of(e) {
             latest.0.insert(task.to_string(), e.id);
         }
