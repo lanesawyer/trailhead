@@ -296,10 +296,17 @@ impl Factory {
             // again every pass (TRAIL-706, TRAIL-1462).
             Err(Error::Forbidden(why)) => {
                 tracing::warn!(task = %task.key, %why, "the PR is merged but the task can't be finished; parking for a person to finish it");
-                self.tracker
+                // The marker only lets a later pass finish a cut-short park. If writing it fails, park anyway: a task
+                // left claimed without it lapses to open, and the next pass would let core close it unparked (TRAIL-1378).
+                let marker = self
+                    .tracker
                     .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
-                    .await?;
-                return self.park_unfinished_merge(task, &question).await;
+                    .await;
+                if let Err(e) = &marker {
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the unapproved merge; parking anyway");
+                }
+                let parked = self.park_unfinished_merge(task, &question).await;
+                return parked;
             }
             finished => finished?,
         }
