@@ -1029,6 +1029,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn counts_unregistered_refusals_per_host() {
+        let (gw, proxy) = setup(&["example.com"]).await;
+        gw.handle(GatewayRequest::Register {
+            name: "a".into(),
+            address: "10.9.9.9".parse().unwrap(),
+            labels: Labels::new(),
+        })
+        .await;
+        for host in ["example.com:443", "other.example:443", "example.com:443"] {
+            let (_s, status) = connect_via(proxy, host).await;
+            assert!(status.contains("403"), "{status}");
+        }
+        let state = gw.state();
+        let hosts = &state.unregistered_refusals["127.0.0.1"];
+        assert_eq!(hosts.len(), 2, "{hosts:?}");
+        assert_eq!(hosts["example.com"], 2);
+        assert_eq!(hosts["other.example"], 1);
+    }
+
+    #[tokio::test]
     async fn narrowing_closes_tunnels_before_returning() {
         let port = origin().await;
         let (gw, proxy) = setup(&["127.0.0.1", "example.com"]).await;
