@@ -24,6 +24,13 @@ async fn a_profile_selects_the_scripted_harness_by_adapter_name() {
     assert_eq!(r.codehost.prs().len(), 1);
 }
 
+#[test]
+fn an_unknown_adapter_is_rejected_when_the_config_loads() {
+    let err = load_selecting(CONFIG).unwrap_err().to_string();
+    assert!(err.contains("unknown adapter `claude-code`"), "{err}");
+    assert!(err.contains(trailhead_testkit::SCRIPTED), "{err}");
+}
+
 #[tokio::test]
 async fn spec_to_reviewed_pr_then_human_merge() {
     let r = rig();
