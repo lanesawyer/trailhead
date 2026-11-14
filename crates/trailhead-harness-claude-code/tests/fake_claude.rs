@@ -43,6 +43,10 @@ nothing)
   asst n1 '{"type":"text","text":"Done."}'
   echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"done","summary":"Nothing to do."}}'
   ;;
+already)
+  asst a1 '{"type":"text","text":"Already there."}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","structured_output":{"outcome":"already_done","summary":"abc123 src/lib.rs:10"}}'
+  ;;
 badtitle)
   asst b1 '{"type":"text","text":"Done."}'
   echo 'v3' > README.md
@@ -164,6 +168,7 @@ async fn claude_code_sessions() {
     approving_review_carries_follow_ups().await;
     questions_park_the_task().await;
     no_changes_is_a_failure().await;
+    already_done_parks_with_the_evidence().await;
     invalid_titles_fall_back().await;
     rework_commits_are_conventional().await;
     step_limit_kills_the_agent().await;
@@ -311,6 +316,13 @@ async fn no_changes_is_a_failure() {
     let r = rig();
     let (out, _) = play(&r, "nothing", ctx(&r, Role::Worker, 10)).await;
     assert!(matches!(out, RunOutcome::Failed { ref reason } if reason.contains("changed nothing")), "{out:?}");
+}
+
+async fn already_done_parks_with_the_evidence() {
+    let r = rig();
+    let (out, _) = play(&r, "already", ctx(&r, Role::Worker, 10)).await;
+    let RunOutcome::NeedsInput { question } = out else { panic!("{out:?}") };
+    assert!(question.contains("abc123 src/lib.rs:10") && question.contains("already done"), "{question}");
 }
 
 async fn invalid_titles_fall_back() {

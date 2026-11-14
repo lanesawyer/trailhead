@@ -236,7 +236,7 @@ impl Harness for ClaudeCode {
 pub fn schema(role: Role) -> Value {
     let outcomes = match role {
         Role::Reviewer => json!(["approve", "request_changes"]),
-        _ => json!(["done", "needs_input", "failed"]),
+        _ => json!(["done", "already_done", "needs_input", "failed"]),
     };
     json!({
         "type": "object",
@@ -244,7 +244,7 @@ pub fn schema(role: Role) -> Value {
             "outcome": { "enum": outcomes },
             "summary": {
                 "type": "string",
-                "description": "For done: the PR description. For a review: the review comment. Otherwise: why.",
+                "description": "For done: the PR description. For a review: the review comment. For already_done: the evidence (commit, file and line). Otherwise: why.",
             },
             "title": {
                 "type": "string",
@@ -477,7 +477,9 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
              so say what is missing. If the task can't be done for another reason, give failed and say \
-             why. When you finish, give `title`: a conventional commit title for the change, like \
+             why. If the task's work is already on the base branch, or no longer applies, change nothing and give \
+             already_done, with the evidence (the commit, file and line) in `summary`; a person is asked to close \
+             the task. When you finish, give `title`: a conventional commit title for the change, like \
              `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
              perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
              scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip \
@@ -673,6 +675,9 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
         "needs_input" => {
             let question = answer["question"].as_str().filter(|q| !q.is_empty()).unwrap_or(&summary).to_string();
             RunOutcome::NeedsInput { question }
+        }
+        "already_done" => {
+            RunOutcome::NeedsInput { question: trailhead_factory::messages::already_done_question(&summary) }
         }
         "done" => {
             let changes = changes_since(&ctx.workdir, start).await?;
