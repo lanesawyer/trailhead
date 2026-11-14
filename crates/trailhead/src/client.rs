@@ -533,6 +533,11 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
     )
 }
 
+/// True when a server started from here would get its own scope, so `server restart` can fix a shared one.
+pub fn can_start_scoped() -> bool {
+    current_scope_env().is_some()
+}
+
 /// `scope_env`, then a probe: a runtime directory doesn't mean a manager, so when its sockets can be named and
 /// none of them `connects`, the answer is `None` (unscoped).
 fn scope_env_probed(
