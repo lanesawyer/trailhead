@@ -366,7 +366,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     // binds, so a failure here leaves no endpoint to close.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
-    let built = computes(shared, opts, &fnox, paths, binary.clone(), false)?;
+    let built = computes(shared, opts, &fnox, paths, binary.clone(), false, !harness_secrets.is_empty())?;
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(key)
         .bind()
@@ -495,7 +495,7 @@ pub(crate) type Built = (Arc<dyn Compute>, Target);
 type Wired = (Target, Arc<dyn Compute>, Arc<dyn Daemon>);
 
 /// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
-/// [`compute`].
+/// [`compute`]. `has_model_credential` is whether the harness secrets the sandboxes get are non-empty.
 fn computes(
     config: &FactoryConfig,
     opts: &Opts,
@@ -503,13 +503,15 @@ fn computes(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<Vec<Built>> {
     config
         .target_specs()
         .into_iter()
         .map(|spec| {
-            let (compute, target) = compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only)
-                .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
+            let (compute, target) =
+                compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only, has_model_credential)
+                    .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
             Ok((compute, target.listed(&spec)))
         })
         .collect()
@@ -526,6 +528,7 @@ fn compute(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<(Arc<dyn Compute>, Target)> {
     match config {
         ComputeConfig::Sprites => {
@@ -542,9 +545,9 @@ fn compute(
                     "no GitHub writer token (GITHUB_WRITER_TOKEN or `trailhead factory login github-writer`): Docker sandboxes can't publish"
                 );
             }
-            if opts.claude_oauth_token.is_none() {
+            if !read_only && !has_model_credential {
                 tracing::warn!(
-                    "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
+                    "no harness credential (no Claude subscription token, or the harness cannot use it): Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
             trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
@@ -644,7 +647,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     }
     let first = &plan.specs[0].config;
     let specs = first.target_specs();
-    match computes(first, &opts, &fnox, &paths, Default::default(), true) {
+    match computes(first, &opts, &fnox, &paths, Default::default(), true, true) {
         Ok(built) => {
             for ((compute, target), spec) in built.iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
                 match compute.list(&Default::default()).await {
