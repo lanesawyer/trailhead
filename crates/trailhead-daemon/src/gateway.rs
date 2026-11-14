@@ -416,7 +416,9 @@ async fn pipe_plain(
             if body.done() {
                 break;
             }
-            let got = client_r.read(&mut chunk).await?;
+            let got = tokio::time::timeout(BODY_IDLE_TIMEOUT, client_r.read(&mut chunk))
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request body idle too long"))??;
             if got == 0 {
                 break;
             }
@@ -926,6 +928,20 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
         assert!(out.contains("GET /x?y=1 HTTP/1.1"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("proxy-authorization"), "{out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plain_request_body_that_stalls_is_dropped() {
+        let port = origin().await;
+        let (gw, proxy) = setup(&["127.0.0.1"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(format!("POST http://127.0.0.1:{port}/ HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc").as_bytes())
+            .await
+            .unwrap();
+        // The client goes quiet with the body unfinished; the proxy closes on it instead of waiting for the lease.
+        let mut out = Vec::new();
+        tokio::time::timeout(BODY_IDLE_TIMEOUT * 2, s.read_to_end(&mut out)).await.unwrap().ok();
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 0);
     }
 
     #[test]
