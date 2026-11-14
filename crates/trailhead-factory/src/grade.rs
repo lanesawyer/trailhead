@@ -206,13 +206,52 @@ fn cargo_line_ok(line: &str) -> bool {
 }
 
 /// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
-/// `requires-dist`. A table that says where to fetch from is a new source.
+/// `requires-dist`. Only the keys that narrow an already-locked dependency are allowed (`name`, `specifier`, `marker`,
+/// `extra`, `extras`); a table that says where to fetch from, or carries a `source` or `version`, is a new source.
 fn uv_line_ok(line: &str) -> bool {
-    const SOURCES: [&str; 8] = ["url", "git", "path", "registry", "directory", "editable", "virtual", "index"];
-    let entry = line.starts_with("{ name = \"")
-        && line.trim_end_matches(',').ends_with('}')
-        && !SOURCES.iter().any(|k| line.contains(&format!(", {k} = ")));
-    entry || matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]")
+    matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]") || uv_entry_ok(line)
+}
+
+/// Whether `line` is one inline table whose keys are all known and whose first is `name`, however it is spaced.
+fn uv_entry_ok(line: &str) -> bool {
+    const KEYS: [&str; 5] = ["name", "specifier", "marker", "extra", "extras"];
+    let line = line.strip_suffix(',').unwrap_or(line);
+    let Some(inner) = line.strip_prefix('{').and_then(|l| l.strip_suffix('}')) else { return false };
+    // Split on the commas outside strings and brackets. A `{` outside a string is a nested table: refused.
+    let mut fields: Vec<&str> = Vec::new();
+    let (mut start, mut depth) = (0, 0usize);
+    let mut quote: Option<char> = None;
+    let mut chars = inner.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match (quote, c) {
+            (Some('"'), '\\') => {
+                chars.next();
+            }
+            (Some(q), _) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[') => depth += 1,
+            (None, ']') => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return false,
+            },
+            (None, '{' | '}') => return false,
+            (None, ',') if depth == 0 => {
+                fields.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return false;
+    }
+    fields.push(&inner[start..]);
+    let mut keys = fields.iter().map(|f| f.split_once('=').map(|(k, _)| k.trim()));
+    keys.next() == Some(Some("name")) && keys.all(|k| k.is_some_and(|k| KEYS.contains(&k)))
 }
 
 /// `package-lock.json` lists a dependency as `"name": "range"` inside a `dependencies` object. A `version` or
@@ -511,6 +550,14 @@ mod tests {
         };
         let uv = "@@ -9,6 +9,7 @@\n dependencies = [\n+    { name = \"requests\" },\n ]\n+requires-dist = [\n+    { name = \"requests\", specifier = \">=2\" },\n+]";
         assert_eq!(grade("uv.lock", uv), gr(1));
+        // Known keys, spaced any way, with commas and quotes inside values.
+        for ok in [
+            "+    { name = \"x\",specifier=\">=1,<2\" },",
+            "+    { name = \"x\", marker = \"python_full_version >= '3.9' and sys_platform == 'linux'\" },",
+            "+    { name = \"x\", extra = [\"a\", \"b\"], marker = \"url = 1\" },",
+        ] {
+            assert_eq!(grade("uv.lock", ok), gr(1), "{ok}");
+        }
         // A lockfile moved to another directory is not an edit in place, whatever its patch says.
         let moved = ChangedFile {
             patch: Some(uv.into()),
@@ -522,6 +569,12 @@ mod tests {
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
             "+    { name = \"x\", index = \"https://x/simple\" },",
+            "+    { name = \"x\",url=\"https://x\" },",
+            "+    { name = \"x\", source = { url = \"https://x\" } },",
+            "+    { name = \"x\", version = \"9\" },",
+            "+    { name = \"x\", specifier = \"a, url = b\" , path = \"u\" },",
+            "+    { specifier = \">=1\", name = \"x\" },",
+            "+    { name = \"x\" } junk",
             "+version = \"1.0.0\"",
             "+[[package]]",
         ] {
