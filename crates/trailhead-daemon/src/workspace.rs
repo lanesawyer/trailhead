@@ -302,7 +302,7 @@ impl Workspace for GitWorkspace {
         self.is_ancestor(commit, "HEAD").await
     }
 
-    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>> {
+    async fn conflict_markers(&self, start: &str, base: &str) -> Result<Vec<String>> {
         // Tracked files only, but a merge's result is all tracked once added; the agent's new files are added too.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
         let diff = self.git_output(&self.dir, &["diff", "--unified=0", "--no-color", "--no-ext-diff", start]).await?;
@@ -315,6 +315,8 @@ impl Workspace for GitWorkspace {
         if let Some(head) = self.merge_head().await? {
             sides.push(head);
         }
+        // A fast-forward to the base leaves no merge commit, so the base's own commit is a side too.
+        sides.extend(self.merged_base(start, base).await?);
         let range = format!("{start}..HEAD");
         let merges = self.git_output(&self.dir, &["rev-list", "--merges", "--parents", &range]).await?;
         for line in merges.lines() {
