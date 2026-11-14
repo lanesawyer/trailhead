@@ -37,12 +37,14 @@ impl Factory {
             let mut state = codehost.pr_state(pr).await?;
             // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
             // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
+            // The read above was the first, so the zero wait leading the list is skipped: every re-read follows a
+            // real backoff (TRAIL-1341).
             if conflict_rework {
-                for wait in MERGEABLE_WAITS {
+                for wait in MERGEABLE_WAITS.iter().skip(1) {
                     if !matches!(state, PrState::Open { mergeable: None, .. }) {
                         break;
                     }
-                    tokio::time::sleep(wait).await;
+                    tokio::time::sleep(*wait).await;
                     state = codehost.pr_state(pr).await?;
                 }
             }
@@ -845,7 +847,8 @@ impl Factory {
     }
 }
 
-/// The waits before each reading of a just-pushed PR's `mergeable`: GitHub usually has it within a few seconds.
+/// The waits before each reading of a PR's `mergeable`, for a just-pushed PR and for one whose base has just moved
+/// (before a conflict rework): GitHub usually has it within a few seconds.
 const MERGEABLE_WAITS: [Duration; 4] =
     [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(5)];
 

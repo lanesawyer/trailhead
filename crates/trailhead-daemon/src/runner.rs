@@ -128,7 +128,7 @@ impl Runner {
     /// Runs one step until it finishes or `cancel` fires, which ends it with `Error::Cancelled`. A cancel during the
     /// checks stops them before anything is published; once publishing starts, the step runs to the end.
     pub async fn run(&self, req: RunRequest, events: EventSink, cancel: Arc<Notify>) -> Result<RunReport> {
-        let key = &req.task.key.0;
+        let key = &req.task.key;
         self.workspace.set_env(&req.env);
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
@@ -184,8 +184,8 @@ impl Runner {
             lost_merge = Some(before.clone());
         }
         let mut merging = now.or(merging_before).filter(|_| lost_merge.is_none());
-        // One the agent both started and committed leaves no MERGE_HEAD to see, only a merge commit with the base as a
-        // parent.
+        // One the agent both started and committed leaves no MERGE_HEAD to see, only the base's commits in HEAD's
+        // history that the run's start didn't have (a merge commit, a fast-forward, or a merge of an older tip).
         if merging.is_none() && lost_merge.is_none() && matches!(outcome, RunOutcome::Changes { .. }) {
             merging = self.workspace.merged_base(&start, &req.base_branch).await?;
         }

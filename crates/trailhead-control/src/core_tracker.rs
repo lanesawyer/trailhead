@@ -186,7 +186,7 @@ impl CoreTracker {
             waiting = self.list_all(ctx, base).await?;
         } else {
             for q in queue {
-                let filter = TaskFilter { parent: Some(q.0.clone()), ..base.clone() };
+                let filter = TaskFilter { parent: Some(q.clone()), ..base.clone() };
                 waiting.extend(self.list_all(ctx, filter).await?);
             }
             let mut seen = std::collections::HashSet::new();
@@ -326,7 +326,7 @@ impl Tracker for CoreTracker {
                 for q in queue {
                     let filter = TaskFilter {
                         project: Some(project.to_string()),
-                        parent: Some(q.0.clone()),
+                        parent: Some(q.clone()),
                         ..TaskFilter::default()
                     };
                     queued.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
@@ -399,8 +399,8 @@ impl Tracker for CoreTracker {
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let parents: Vec<Option<String>> =
-            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.0.clone())).collect() };
+        let parents: Vec<Option<TaskKey>> =
+            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.clone())).collect() };
         let mut tasks = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for parent in parents {
@@ -421,11 +421,8 @@ impl Tracker for CoreTracker {
         let all = self.list_all(&ctx, filter).await?;
         let mut inside = std::collections::HashSet::new();
         for queue in queues {
-            let filter = TaskFilter {
-                project: Some(project.to_string()),
-                parent: Some(queue.0.clone()),
-                ..TaskFilter::default()
-            };
+            let filter =
+                TaskFilter { project: Some(project.to_string()), parent: Some(queue.clone()), ..TaskFilter::default() };
             inside.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
         }
         self.tasks(&ctx, all.into_iter().filter(|t| t.metadata.get(METADATA_KEY).is_some() && !inside.contains(&t.id)))

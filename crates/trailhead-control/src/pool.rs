@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxSpec, Task,
+    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxId, SandboxSpec, Task,
     install_host_allowed, label,
 };
 
@@ -136,12 +136,15 @@ impl Factory {
             }
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
-            if let Err(e) = p.compute.destroy(&s.id).await {
-                // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
-                // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
-                // is the task's own busy sandbox it did count, so this also frees that place.
-                tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
-                self.mark_broken(&s).await;
+            match p.compute.destroy(&s.id).await {
+                Ok(()) => self.forget_sandbox(&s.id),
+                Err(e) => {
+                    // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
+                    // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
+                    // is the task's own busy sandbox it did count, so this also frees that place.
+                    tracing::warn!(sandbox = %s.name, error = %e, "couldn't destroy a sandbox built for another stack; labelling it broken");
+                    self.mark_broken(&s).await;
+                }
             }
         }
         let (sandbox, warm) = match current.into_iter().find(|s| !self.abandoned(&s.name)) {
@@ -236,8 +239,11 @@ impl Factory {
             }
             tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
             self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
-            if let Err(d) = p.compute.destroy(&sandbox.id).await {
-                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            match p.compute.destroy(&sandbox.id).await {
+                Ok(()) => self.forget_sandbox(&sandbox.id),
+                Err(d) => {
+                    tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+                }
             }
             return Err(e);
         }
@@ -339,8 +345,16 @@ impl Factory {
         Ok(())
     }
 
+    /// Drops what the control plane keeps per sandbox, for one that no longer exists, so the maps don't grow
+    /// with every sandbox a long-running server has destroyed (TRAIL-1251).
+    pub(crate) fn forget_sandbox(&self, id: &SandboxId) {
+        self.pool.prepare_failures.lock().unwrap().remove(id);
+        self.pool.warm_cost.lock().unwrap().remove(id);
+    }
+
     async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
         p.compute.destroy(&sandbox.id).await?;
+        self.forget_sandbox(&sandbox.id);
         self.status.sandbox_gone(&sandbox.name);
         Ok(())
     }
@@ -422,6 +436,7 @@ impl Factory {
             t.abandoned = true;
         }
         if p.compute.destroy(&sandbox.id).await.is_ok() {
+            self.forget_sandbox(&sandbox.id);
             self.status.sandbox_gone(name);
             self.pool.troubled.lock().unwrap().remove(name);
             return;
