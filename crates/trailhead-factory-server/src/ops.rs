@@ -216,6 +216,9 @@ fn new_output<'a>(printed: &str, log: &'a str) -> &'a str {
     if let Some(rest) = log.strip_prefix(printed) {
         return rest;
     }
+    if log.is_empty() {
+        return log;
+    }
     // Longest suffix of `printed` that starts `log`, found in one linear KMP pass (the failure function of `log`,
     // run over `printed`), so a long repetitive log costs O(n + m), not a prefix comparison at every offset.
     let (p, l) = (printed.as_bytes(), log.as_bytes());
@@ -481,6 +484,8 @@ mod tests {
         assert_eq!(new_output(printed, "3\n4\n5\n6\n7\n8\n"), "7\n8\n");
         // Nothing in common (the log was restarted): print it all.
         assert_eq!(new_output("old\n", "fresh\n"), "fresh\n");
+        // An empty log after something was printed (a reset sandbox) prints nothing, and doesn't panic.
+        assert_eq!(new_output("a\n", ""), "");
         // Repeated lines: a growing window's new copies are new, and an unchanged one prints nothing.
         assert_eq!(new_output("hb\nhb\n", "hb\nhb\nhb\n"), "hb\n");
         assert_eq!(new_output("x\nhb\nhb\n", "x\nhb\nhb\nhb\nhb\n"), "hb\nhb\n");
