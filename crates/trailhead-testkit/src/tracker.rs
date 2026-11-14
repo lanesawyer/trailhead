@@ -66,6 +66,7 @@ pub enum TrackerOp {
     Note,
     Finish,
     RevokeSubAgent,
+    InFlight,
 }
 
 impl std::fmt::Display for TrackerOp {
@@ -80,6 +81,7 @@ impl std::fmt::Display for TrackerOp {
             Self::Note => "note",
             Self::Finish => "finish",
             Self::RevokeSubAgent => "revoke_sub_agent",
+            Self::InFlight => "in_flight",
         })
     }
 }
@@ -526,6 +528,7 @@ impl Tracker for FakeTracker {
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         self.check_live()?;
+        self.inject(TrackerOp::InFlight)?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
