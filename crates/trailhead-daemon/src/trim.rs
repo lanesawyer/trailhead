@@ -123,6 +123,7 @@ fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
     let deps = profile.join("deps");
     if deps.is_dir() {
         let links = outside_links(profile)?;
+        let mut counted: HashSet<(String, (u64, u64))> = HashSet::new();
         for entry in fs::read_dir(&deps)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -131,15 +132,17 @@ fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
                 Some(rest) if !units.contains_key(&stem) && units.contains_key(rest) => rest.to_string(),
                 _ => stem,
             };
+            let meta = entry.metadata()?;
+            let linked = (meta.is_file() && meta.nlink() > 1).then(|| (meta.dev(), meta.ino()));
+            // Two `deps/` files of a unit can share one inode: its bytes count once.
+            let first = linked.is_none_or(|id| counted.insert((key.clone(), id)));
             let unit = units.entry(key).or_insert_with(fresh);
-            unit.size += dir_size(&entry.path())?;
+            if first {
+                unit.size += dir_size(&entry.path())?;
+            }
             unit.paths.push(entry.path());
             // Deleting a `deps/` file frees nothing while another hard link survives, so those go with it.
-            let meta = entry.metadata()?;
-            if meta.is_file()
-                && meta.nlink() > 1
-                && let Some(paths) = links.get(&(meta.dev(), meta.ino()))
-            {
+            if let Some(paths) = linked.and_then(|id| links.get(&id)) {
                 unit.paths.extend(paths.iter().cloned());
             }
         }
@@ -365,6 +368,28 @@ mod tests {
         assert_eq!(present(&p, "old-1"), [false; 3]);
         assert!(!p.join("deps/old-1.copy").exists());
         assert_eq!(present(&p, "new-2"), [true; 3]);
+    }
+
+    #[test]
+    fn a_units_linked_deps_files_count_once_in_its_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("debug");
+        unit(&p, "old-1", 300, 300);
+        unit(&p, "mid-2", 300, 200);
+        unit(&p, "new-3", 300, 100);
+        // Two deps files of old-1 share one inode.
+        fs::hard_link(p.join("deps/libold-1.rlib"), p.join("deps/old-1.copy")).unwrap();
+        let units = units_of(&p).unwrap();
+        let old = units.iter().find(|u| u.paths.iter().any(|x| x.ends_with(".fingerprint/old-1"))).unwrap();
+        assert_eq!(old.size, 630);
+        let before = dir_size(dir.path()).unwrap();
+        // Dropping old-1 frees 630 bytes, short of the cap: mid-2 has to go too.
+        let cap = before - 700;
+        let t = trim_target(dir.path(), cap).unwrap();
+        assert!(t.after <= cap);
+        assert_eq!(present(&p, "old-1"), [false; 3]);
+        assert_eq!(present(&p, "mid-2"), [false; 3]);
+        assert_eq!(present(&p, "new-3"), [true; 3]);
     }
 
     #[test]
