@@ -341,6 +341,7 @@ pub struct SelectEdit<'w, 's> {
     children: Query<'w, 's, &'static Children>,
     rows: Query<'w, 's, (&'static OptionIndex, Has<Selected>)>,
     areas: Query<'w, 's, (), With<ScrollArea>>,
+    texts: Query<'w, 's, (), With<Text>>,
     popups: Query<'w, 's, &'static Visibility, With<FeathersMenuPopup>>,
     buttons: Query<'w, 's, Has<InteractionDisabled>, With<FeathersMenuButton>>,
     commands: Commands<'w, 's>,
@@ -402,34 +403,95 @@ impl SelectEdit<'_, '_> {
         }
         let rows: Vec<_> = self.children.iter_descendants(select).filter(|e| self.rows.contains(*e)).collect();
         let same_tones = self.tones.get(select).map_or(tones.is_empty(), |t| t.0 == tones);
-        if self.options.get(select).is_ok_and(|o| o.0 == options) && same_tones {
-            for row in rows {
-                let Ok((index, is_selected)) = self.rows.get(row) else { continue };
-                let want = Some(index.0) == selected;
-                if want && !is_selected {
-                    self.commands.entity(row).insert(Selected);
-                } else if !want && is_selected {
-                    self.commands.entity(row).remove::<Selected>();
-                }
-            }
+        let old = self.options.get(select).map(|o| o.0.clone()).ok();
+        if old.as_deref() == Some(options) && same_tones {
+            self.select_rows(&rows, selected, &[]);
             return true;
         }
         let Some(area) = self.children.iter_descendants(select).find(|e| self.areas.contains(*e)) else {
             return true;
         };
-        for row in rows {
-            self.commands.entity(row).despawn();
+        let old = old.unwrap_or_default();
+        let old_tones = self.tones.get(select).map(|t| t.0.clone()).unwrap_or_default();
+        // Rows are kept by index: relabelled and retoned where they differ, the surplus despawned, the shortfall
+        // spawned. The select, its popup and the rows that remain are the same entities.
+        let mut redone = Vec::new();
+        let mut present = Vec::new();
+        let mut surplus = Vec::new();
+        for &row in &rows {
+            let Ok((index, _)) = self.rows.get(row) else { continue };
+            let i = index.0;
+            if i >= options.len() {
+                surplus.push(row);
+                continue;
+            }
+            present.push(i);
+            if old.get(i) != Some(&options[i]) {
+                self.relabel(row, &options[i]);
+                redone.push(row);
+            }
+            let tone = tones.get(i).cloned().flatten();
+            if old_tones.get(i).cloned().flatten() != tone {
+                self.retone(row, tone.unwrap_or(token::TEXT));
+                redone.push(row);
+            }
         }
+        let kept: Vec<Entity> =
+            rows.iter().copied().filter(|r| self.rows.get(*r).is_ok_and(|(i, _)| i.0 < options.len())).collect();
+        self.drop_rows(&surplus);
+        self.select_rows(&kept, selected, &redone);
         let icons = self.icons.get(select).map(|i| i.0.clone()).unwrap_or_default();
         // Each row is a child of the list from the start, so a select despawned before its rows' scenes resolve takes
         // them with it. Queued as related scenes, they would arrive after it had gone, as roots drawn over the
         // window's top left corner.
-        for i in 0..options.len() {
+        for i in (0..options.len()).filter(|i| !present.contains(i)) {
             let row = option_row(options, tones, &icons, selected, i);
             self.commands.spawn_scene(bsn! { @{row} }).insert(ChildOf(area));
         }
         self.commands.entity(select).insert((SelectOptions(options.to_vec()), SelectTones(tones.to_vec())));
         true
+    }
+
+    /// Removes rows the options no longer have.
+    fn drop_rows(&mut self, rows: &[Entity]) {
+        for &row in rows {
+            self.commands.entity(row).despawn();
+        }
+    }
+
+    /// Marks `selected`'s row as the selected one and no other. A row in `redone` (new words or tone) that stays
+    /// selected is selected afresh, so feathers copies its new words and tone into the select's caption.
+    fn select_rows(&mut self, rows: &[Entity], selected: Option<usize>, redone: &[Entity]) {
+        for &row in rows {
+            let Ok((index, is_selected)) = self.rows.get(row) else { continue };
+            let want = Some(index.0) == selected;
+            if want && (!is_selected || redone.contains(&row)) {
+                if is_selected {
+                    self.commands.entity(row).remove::<Selected>();
+                }
+                self.commands.entity(row).insert(Selected);
+            } else if !want && is_selected {
+                self.commands.entity(row).remove::<Selected>();
+            }
+        }
+    }
+
+    /// Sets the words of `row`'s caption, its first direct child with text.
+    fn relabel(&mut self, row: Entity, label: &str) {
+        let caption = self.children.get(row).ok().and_then(|kids| kids.iter().find(|k| self.texts.contains(*k)));
+        if let Some(caption) = caption {
+            let label = label.to_string();
+            self.commands.entity(caption).entry::<Text>().and_modify(move |mut text| text.0 = label);
+        }
+    }
+
+    /// Paints everything written in `row` (its words and its icon) in `tone`.
+    fn retone(&mut self, row: Entity, tone: Token) {
+        for e in self.children.iter_descendants(row) {
+            if self.texts.contains(e) {
+                self.commands.entity(e).insert(TextTone(tone.clone()));
+            }
+        }
     }
 }
 
@@ -503,6 +565,39 @@ mod tests {
         assert!(area_children(&mut app).iter().all(|(_, row)| *row));
     }
 
+    #[test]
+    fn changed_options_reuse_the_rows_they_already_have() {
+        let mut app = app();
+        let tones = vec![None, Some(token::STATUS_OK), None];
+        let select = app
+            .world_mut()
+            .commands()
+            .spawn_scene(select_toned(vec!["a".into(), "b".into(), "c".into()], tones, Some(1), 8))
+            .id();
+        settle(&mut app);
+        let before: Vec<Entity> = area_children(&mut app).iter().map(|(e, _)| *e).collect();
+        let edit = |app: &mut App, options: Vec<&'static str>, tones: Vec<Option<Token>>, sel: usize| {
+            app.world_mut()
+                .run_system_once(move |mut edit: SelectEdit| {
+                    let options: Vec<String> = options.iter().map(|s| s.to_string()).collect();
+                    edit.set_toned(select, &options, &tones, Some(sel))
+                })
+                .unwrap()
+        };
+        // Relabelled, retoned and shortened: the first two rows stay, the third goes.
+        assert!(edit(&mut app, vec!["x", "y"], vec![Some(token::STATUS_WARN), None], 1));
+        settle(&mut app);
+        let after: Vec<Entity> = area_children(&mut app).iter().map(|(e, _)| *e).collect();
+        assert_eq!(after, before[..2]);
+        assert_eq!(button_texts(&mut app), vec!["y"]);
+        // Grown again: the two stay, one is added.
+        assert!(edit(&mut app, vec!["x", "y", "z"], vec![], 2));
+        settle(&mut app);
+        let grown: Vec<Entity> = area_children(&mut app).iter().map(|(e, _)| *e).collect();
+        assert_eq!(grown.len(), 3);
+        assert_eq!(grown[..2], before[..2]);
+        assert_eq!(button_texts(&mut app), vec!["z"]);
+    }
     #[test]
     fn rows_queued_for_a_select_despawned_before_they_spawn_leave_nothing_behind() {
         let mut app = app();
