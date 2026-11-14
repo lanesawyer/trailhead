@@ -33,6 +33,9 @@ const LEVELS: [LogLevel; 3] = [LogLevel::Info, LogLevel::Warn, LogLevel::Error];
 pub struct Entry {
     pub id: u64,
     pub line: LogLine,
+    /// Whether this marks lines Lookout missed rather than a line the factory logged. A filter never hides it, since
+    /// the missed lines could have been of any level or task.
+    pub gap: bool,
 }
 
 /// A [`LogUpdate`] on its way to the log.
@@ -74,12 +77,16 @@ impl LogState {
     }
 
     fn push(&mut self, line: LogLine) {
+        self.push_entry(line, false);
+    }
+
+    fn push_entry(&mut self, line: LogLine, gap: bool) {
         if let Some(task) = &line.task {
             self.tasks.insert(task.clone());
         }
         let id = self.next;
         self.next += 1;
-        self.entries.push_back(Entry { id, line });
+        self.entries.push_back(Entry { id, line, gap });
         while self.entries.len() > MAX_LINES {
             self.entries.pop_front();
         }
@@ -100,7 +107,7 @@ impl LogState {
                 }
             }
             LogUpdate::Line(line) => self.push(line),
-            LogUpdate::Skipped(count) => self.push(gap(count)),
+            LogUpdate::Skipped(count) => self.push_entry(gap(count), true),
             LogUpdate::Dropped => {}
             LogUpdate::TooOld(why) => self.note = Some(why),
         }
@@ -135,14 +142,15 @@ impl Default for LogFilter {
 }
 
 impl LogFilter {
-    pub fn allows(&self, line: &LogLine) -> bool {
-        line.level >= self.level && self.task.as_ref().is_none_or(|t| line.task.as_ref() == Some(t))
+    pub fn allows(&self, entry: &Entry) -> bool {
+        let line = &entry.line;
+        entry.gap || (line.level >= self.level && self.task.as_ref().is_none_or(|t| line.task.as_ref() == Some(t)))
     }
 }
 
 /// The lines the list shows: those the filter allows, oldest first.
 pub fn visible<'a>(state: &'a LogState, filter: &LogFilter) -> Vec<&'a Entry> {
-    state.entries().filter(|e| filter.allows(&e.line)).collect()
+    state.entries().filter(|e| filter.allows(e)).collect()
 }
 
 /// Whether the list sticks to its bottom.
@@ -549,6 +557,16 @@ mod tests {
             task_options(&state, &LogFilter { level: LogLevel::Info, task: Some("TRAIL-9".into()) }),
             ["All tasks", "TRAIL-1", "TRAIL-2", "TRAIL-9"]
         );
+    }
+
+    #[test]
+    fn a_gap_marker_shows_under_any_filter() {
+        let mut state = open();
+        state.push(line(1, LogLevel::Info, Some("TRAIL-1")));
+        state.apply(LogUpdate::Skipped(3));
+        let filter = LogFilter { level: LogLevel::Error, task: Some("TRAIL-2".into()) };
+        let shown: Vec<_> = visible(&state, &filter).iter().map(|e| e.line.message.as_str()).collect();
+        assert_eq!(shown, ["3 log lines skipped: Lookout fell behind"]);
     }
 
     #[test]
