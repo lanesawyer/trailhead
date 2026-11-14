@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
-    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxSpec, Task,
+    CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxId, SandboxSpec, Task,
     install_host_allowed, label,
 };
 
@@ -136,7 +136,7 @@ impl Factory {
             }
             // Built for another stack: reinstalling on top would keep the old tools, so start over.
             tracing::info!(sandbox = %s.name, "[stack] changed; destroying the pooled sandbox to reinstall");
-            if let Err(e) = p.compute.destroy(&s.id).await {
+            if let Err(e) = self.destroy_forgetting_cost(p, &s.id).await {
                 // An idle one doesn't count toward `max_sandboxes` (only a role or a busy state does), but left as it
                 // is it would be retried on every acquire. Broken, it isn't retried and reconcile destroys it. If it
                 // is the task's own busy sandbox it did count, so this also frees that place.
@@ -236,7 +236,7 @@ impl Factory {
             }
             tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
             self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
-            if let Err(d) = p.compute.destroy(&sandbox.id).await {
+            if let Err(d) = self.destroy_forgetting_cost(p, &sandbox.id).await {
                 tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
             }
             return Err(e);
@@ -340,8 +340,16 @@ impl Factory {
     }
 
     async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
-        p.compute.destroy(&sandbox.id).await?;
+        self.destroy_forgetting_cost(p, &sandbox.id).await?;
         self.status.sandbox_gone(&sandbox.name);
+        Ok(())
+    }
+
+    /// Destroys a pooled sandbox and drops its warm-cost figure, so the map stays bounded and a stale cost never
+    /// outlives its sandbox. A failed destroy keeps the entry: the sandbox is still there.
+    async fn destroy_forgetting_cost(&self, p: &Placed, id: &SandboxId) -> Result<()> {
+        p.compute.destroy(id).await?;
+        self.pool.warm_cost.lock().unwrap().remove(id);
         Ok(())
     }
 
@@ -421,7 +429,7 @@ impl Factory {
         if let Some(t) = self.pool.troubled.lock().unwrap().get_mut(name) {
             t.abandoned = true;
         }
-        if p.compute.destroy(&sandbox.id).await.is_ok() {
+        if self.destroy_forgetting_cost(p, &sandbox.id).await.is_ok() {
             self.status.sandbox_gone(name);
             self.pool.troubled.lock().unwrap().remove(name);
             return;

@@ -317,6 +317,12 @@ impl Factory {
         self.merger.updating.lock().unwrap().contains_key(task)
     }
 
+    /// How many sandboxes have a recorded warm-checkpoint cost (for tests).
+    #[doc(hidden)]
+    pub fn warm_costs_tracked(&self) -> usize {
+        self.pool.warm_cost.lock().unwrap().len()
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,
