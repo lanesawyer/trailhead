@@ -1294,3 +1294,19 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     assert_eq!(warned(&logs), 1, "{}", logs.text());
     assert!(!r.codehost.prs()[0].merged, "still held");
 }
+
+#[tokio::test]
+async fn a_failed_marker_write_still_parks_a_pr_merged_before_approval() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    sent_to_review_by_the_factory(&r, &key).await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    // The merge record is the first report; the unapproved-merge marker is the second.
+    r.tracker.fail_after("factory", TrackerOp::Report, 1, 1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked though the marker wasn't written, not left claimed");
+    assert_eq!(r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count(), 1);
+}
