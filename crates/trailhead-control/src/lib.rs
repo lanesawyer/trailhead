@@ -211,6 +211,10 @@ struct MergerState {
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
+    /// What the host last said about whether a task's PR head is only a clean merge of the base into the reviewed
+    /// head, keyed by that (reviewed, head) pair: the answer for a pair doesn't change, so a pass's several
+    /// questions about it (the stale check, the gates) cost one round trip (TRAIL-1220).
+    carried: Mutex<HashMap<TaskKey, (String, String, bool)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
     /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
@@ -301,6 +305,7 @@ impl Factory {
     pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
         self.merger.updating.lock().unwrap().remove(task);
         self.merger.listed.lock().unwrap().remove(task);
+        self.merger.carried.lock().unwrap().remove(task);
     }
 
     /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
@@ -309,6 +314,7 @@ impl Factory {
     pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
         self.merger.updating.lock().unwrap().retain(|k, _| keep.contains(k));
         self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.carried.lock().unwrap().retain(|k, _| keep.contains(k));
     }
 
     /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
