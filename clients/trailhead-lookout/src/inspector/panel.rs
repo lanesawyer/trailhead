@@ -702,4 +702,66 @@ mod tests {
         settle(&mut app);
         assert_eq!(stamps(&mut app), before);
     }
+
+    #[test]
+    fn a_change_in_the_projects_human_grades_relabels_the_open_picker_and_another_projects_does_not() {
+        use crate::factory::{FactoryStatus, RepoState};
+        use trailhead_factory::status::ControlState;
+        use trailhead_ui::SelectOptions;
+        let mut app = app();
+        // The task's project is only known once the mirror has it.
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 6,
+            projects: vec![crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"}))],
+            tasks: vec![task_json(
+                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
+            )],
+            agents: vec![],
+            ..Default::default()
+        }));
+        settle(&mut app);
+        let options = |app: &mut App| {
+            let world = app.world_mut();
+            let found: Vec<Vec<String>> = world
+                .query::<&SelectOptions>()
+                .iter(world)
+                .filter(|o| o.0[0].starts_with("none (the factory"))
+                .map(|o| o.0.clone())
+                .collect();
+            assert_eq!(found.len(), 1, "the task's grade select is open");
+            found.into_iter().next().unwrap()
+        };
+        let say = |app: &mut App, repo: &str, queue: &str, grades: Vec<i64>| {
+            let human = grades.into_iter().map(|g| Grade::try_from(g).unwrap()).collect();
+            app.world_mut().resource_mut::<FactoryStatus>().repos.insert(
+                repo.into(),
+                RepoState {
+                    control: ControlState::Up,
+                    queue: vec![queue.into()],
+                    last_error: None,
+                    human_grades: Some(human),
+                    holding: None,
+                    usage: Vec::new(),
+                },
+            );
+            settle(app);
+        };
+        let marked = |o: &[String]| o.iter().filter(|s| s.ends_with("above Treeline")).count();
+
+        say(&mut app, "o/r", "TRAIL-102", vec![3, 4]);
+        let first = options(&mut app);
+        assert_eq!(marked(&first), 2);
+        assert!(first[3].ends_with("above Treeline") && first[4].ends_with("above Treeline"));
+
+        // The task's own project's repo changes its mind: the open picker is relabelled.
+        say(&mut app, "o/r", "TRAIL-102", vec![1]);
+        let second = options(&mut app);
+        assert_ne!(second, first);
+        assert!(second[1].ends_with("above Treeline"));
+        assert_eq!(marked(&second), 1);
+
+        // Another project's repo changing leaves it as it was.
+        say(&mut app, "o/other", "OPS-3", vec![2, 3, 4]);
+        assert_eq!(options(&mut app), second);
+    }
 }
