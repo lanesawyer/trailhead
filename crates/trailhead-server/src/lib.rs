@@ -156,7 +156,7 @@ pub struct LocalConfig {
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
 /// and returns the store with the user's context.
-pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::error::Error>> {
+pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(dir) = cfg.db.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -183,7 +183,8 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
     Ok((store, ctx))
 }
 
-/// The factory's configuration is broken, so the server won't start. Keeps the factory's typed error as its source.
+/// The factory's configuration is broken, so the server won't start. Keeps the factory's typed error as its source;
+/// `Display` leaves it out, so a chain printer (`{:#}`) shows it once.
 #[cfg(feature = "factory")]
 #[derive(Debug)]
 struct FactoryConfigBroken {
@@ -196,8 +197,7 @@ impl std::fmt::Display for FactoryConfigBroken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the factory's configuration is broken, so the server won't start: {}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
-            self.source,
+            "the factory's configuration is broken, so the server won't start (fix it, or run `trailhead factory disable` to run without the factory; it edits {}); the cause is",
             self.user_config.display()
         )
     }
@@ -212,7 +212,7 @@ impl std::error::Error for FactoryConfigBroken {
 
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first, or until SIGUSR1 asks it to
 /// restart onto a new binary.
-pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error>> {
+pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error + Send + Sync>> {
     let lock = match &cfg.lock_file {
         Some(path) => Some(trailhead_client::paths::lock(path, &format!("a server at {}", cfg.bind))?),
         None => None,
@@ -474,6 +474,25 @@ impl Signals {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "factory")]
+    #[test]
+    fn a_broken_factory_config_names_its_cause_once_in_the_chain() {
+        let cause = trailhead_factory_server::Error::NoAgent { agent: "factory" };
+        let cause_text = cause.to_string();
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(super::FactoryConfigBroken { source: cause, user_config: "/cfg/config.toml".into() });
+        let mut chain = vec![err.to_string()];
+        let mut next = err.source();
+        while let Some(e) = next {
+            chain.push(e.to_string());
+            next = e.source();
+        }
+        assert_eq!(chain.len(), 2, "the typed cause is the source: {chain:?}");
+        assert_eq!(chain[1], cause_text);
+        assert!(!chain[0].contains(&cause_text), "Display leaves the cause to the chain: {chain:?}");
+        assert!(chain[0].contains("/cfg/config.toml"));
+    }
+
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     #[test]
     fn a_trim_gives_back_what_a_burst_of_small_allocations_freed() {

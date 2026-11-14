@@ -154,7 +154,7 @@ pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: boo
         instance: Some(paths.instance_or_create()?),
         factory: Some(paths.clone()),
     };
-    match trailhead_server::serve_local(cfg).await.map_err(|e| anyhow::anyhow!("{e}"))? {
+    match trailhead_server::serve_local(cfg).await.map_err(anyhow::Error::from_boxed)? {
         trailhead_server::Exit::Stopped => Ok(()),
         trailhead_server::Exit::Restart => restart_onto_new_binary(),
     }
