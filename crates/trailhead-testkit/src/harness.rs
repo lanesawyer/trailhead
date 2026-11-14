@@ -21,11 +21,21 @@ pub struct Script {
     pub quota: Vec<(String, u32, i64)>,
     /// A tool call that takes this long after the steps, sending no events meanwhile.
     pub slow_tool: Option<Duration>,
+    /// Sends every event and finishes in one poll, never yielding between steps.
+    pub no_yield: bool,
 }
 
 impl Script {
     pub fn new(outcome: RunOutcome) -> Script {
-        Script { steps: Vec::new(), outcome, hang: false, gate: None, quota: Vec::new(), slow_tool: None }
+        Script {
+            steps: Vec::new(),
+            outcome,
+            hang: false,
+            gate: None,
+            quota: Vec::new(),
+            slow_tool: None,
+            no_yield: false,
+        }
     }
 
     pub fn hang(mut self) -> Script {
@@ -42,6 +52,12 @@ impl Script {
     /// Runs a tool call that takes `time` after the steps and sends no events until it's done, like `cargo test`.
     pub fn slow_tool(mut self, time: Duration) -> Script {
         self.slow_tool = Some(time);
+        self
+    }
+
+    /// Sends all its events and finishes without yielding, so a caller sees them and the outcome in one poll.
+    pub fn no_yield(mut self) -> Script {
+        self.no_yield = true;
         self
     }
 
@@ -115,7 +131,9 @@ impl Harness for ScriptedHarness {
             let _ = events.send(RunEvent::StepStarted { step: i as u32 + 1 });
             let _ = events.send(RunEvent::Usage { model: ctx.model.clone(), usage });
             // Lets a canceller act between steps, as a real model call would.
-            tokio::task::yield_now().await;
+            if !script.no_yield {
+                tokio::task::yield_now().await;
+            }
         }
         if let Some(time) = script.slow_tool {
             let _ = events.send(RunEvent::ToolCall { name: "Bash".into(), detail: Some("cargo test".into()) });
