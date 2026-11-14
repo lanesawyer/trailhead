@@ -996,6 +996,24 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_r
     assert_eq!(reviewers, 2, "no third reviewer");
 }
 
+/// TRAIL-1466: the tick that finds the conflict gone under a newer verdict takes the verdict up as the request, so the
+/// next tick doesn't settle the same task again.
+#[tokio::test(start_paused = true)]
+async fn a_superseded_gone_conflict_takes_the_verdict_up_on_the_tick_and_isnt_settled_again() {
+    let r = conflicted_in_review().await;
+    let key = TaskKey("TRAIL-2".into());
+    interrupted_request_for_changes(&r, &key).await;
+
+    r.factory.tick().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert!(task.run.pending_changes().is_some_and(|c| c.kind.is_review()), "{:?}", task.run);
+    let again = r.factory.tick().await.unwrap();
+    assert!(
+        !again.iter().any(|(k, o)| k.key == key && matches!(o, Outcome::Settled { .. })),
+        "settled again: {again:?}"
+    );
+}
+
 #[tokio::test]
 async fn reconciling_a_reviewed_task_at_its_reviewed_head_looks_up_the_head_once() {
     let mut r = rig();
