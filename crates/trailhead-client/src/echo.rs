@@ -124,10 +124,15 @@ mod tests {
             let (mut master, mut slave) = (0, 0);
             let none = std::ptr::null_mut();
             assert_eq!(libc::openpty(&mut master, &mut slave, none, none.cast(), none.cast()), 0);
+            // The child writes one byte once `NoEcho::new` has returned with the handler armed.
+            let mut ready = [0; 2];
+            assert_eq!(libc::pipe(ready.as_mut_ptr()), 0);
             let pid = libc::fork();
             assert!(pid >= 0);
             if pid == 0 {
                 // Child: the pty is its controlling terminal and stdin, then it waits for Ctrl-C.
+                // The alarm keeps a failed run from leaking the child.
+                libc::alarm(30);
                 libc::setsid();
                 libc::ioctl(slave, libc::TIOCSCTTY, 0);
                 libc::dup2(slave, libc::STDIN_FILENO);
@@ -135,17 +140,26 @@ mod tests {
                 if guard.saved.is_none() {
                     libc::_exit(2);
                 }
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
                 loop {
                     libc::sleep(1);
                 }
             }
             libc::close(slave);
-            // Wait for the child to turn echo off.
-            let mut tries = 0;
-            while echo_on(master) {
-                tries += 1;
-                assert!(tries < 500, "child never disabled echo");
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            libc::close(ready[1]);
+            let fail = |msg: &str| -> ! {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+                panic!("{msg}");
+            };
+            // Block until the child is armed; EOF means it exited without arming.
+            let mut byte = 0u8;
+            if libc::read(ready[0], std::ptr::addr_of_mut!(byte).cast(), 1) != 1 {
+                fail("child exited before arming the SIGINT handler");
+            }
+            libc::close(ready[0]);
+            if echo_on(master) {
+                fail("child armed but echo is still on");
             }
             assert_eq!(libc::kill(pid, libc::SIGINT), 0);
             let mut status = 0;
