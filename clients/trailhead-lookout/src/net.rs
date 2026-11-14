@@ -336,6 +336,26 @@ struct Progress {
     heard: bool,
 }
 
+/// How the status task treats the end of a connection.
+#[derive(Debug, PartialEq, Eq)]
+enum Resync {
+    /// Not a resync: a drop, reported and retried after a gap.
+    No,
+    /// The first clean end after serving a snapshot: redial at once, report nothing.
+    Now,
+    /// Clean ends in a row: redial after a gap, still reporting nothing.
+    Slowly,
+}
+
+/// Whether a connection's end is a resync, given whether it ended cleanly after being heard and whether the one before did.
+fn resync_after(clean_and_heard: bool, previous_was_resync: bool) -> Resync {
+    match (clean_and_heard, previous_was_resync) {
+        (false, _) => Resync::No,
+        (true, false) => Resync::Now,
+        (true, true) => Resync::Slowly,
+    }
+}
+
 /// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
 struct Backoff {
     base: Duration,
@@ -833,6 +853,7 @@ impl Net {
         let mut backoff = Backoff::new(self.config.status_retry);
         self.status = Some(tokio::spawn(async move {
             let mut progress = Progress::default();
+            let mut resynced = false;
             loop {
                 progress.heard = false;
                 let followed = follow_status(&endpoint, id, &events, &mut progress).await;
@@ -863,10 +884,14 @@ impl Net {
                 }
                 // A clean end is the server asking for a resync (its feed changed, or we lagged), not a drop:
                 // redial at once and don't report Unreachable; the next snapshot says what changed.
-                if ended_cleanly && progress.heard {
+                // A second clean end in a row is a server that ends every stream (one from before TRAIL-761
+                // while stopped), so it waits like a drop, without reporting Unreachable.
+                let resync = resync_after(ended_cleanly && progress.heard, resynced);
+                resynced = resync != Resync::No;
+                if resync == Resync::Now {
                     continue;
                 }
-                if !progress.stopped {
+                if resync == Resync::No && !progress.stopped {
                     progress.stopped = true;
                     if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
                         return;
@@ -1158,6 +1183,14 @@ mod tests {
     #[tokio::test]
     async fn an_agent_token_shows_bare_then_waits_between_retries() {
         refusal_sequence(Some(serde_json::json!({"agent_id": "claude"})), Reason::AgentToken).await;
+    }
+
+    #[test]
+    fn clean_ends_in_a_row_are_slowed_down() {
+        assert_eq!(resync_after(true, false), Resync::Now);
+        assert_eq!(resync_after(true, true), Resync::Slowly);
+        assert_eq!(resync_after(false, true), Resync::No, "a drop resets the run");
+        assert_eq!(resync_after(false, false), Resync::No);
     }
 
     #[tokio::test]
