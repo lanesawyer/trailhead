@@ -925,3 +925,32 @@ async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branc
         .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
     assert!(resumed, "it resumes on the branch it pushed");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_task_whose_first_prepare_fails_still_resumes_from_its_branch() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    r.daemon.set_remote_branches(&["main", "factory/trail-1"]);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting));
+    assert!(r.tracker.task(&parked).run.released.is_some_and(|at| at > 0));
+
+    // The first attempt after the answer fails while preparing; the retry must still resume.
+    r.tracker.answer(&parked, "Go on.");
+    r.daemon.fail_prepares(1, "boom");
+    r.factory.run_task(&r.tracker.task(&parked)).await.unwrap_err();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&parked)).await.unwrap();
+    let resumed = r
+        .daemon
+        .prepared()
+        .into_iter()
+        .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
+    assert!(resumed, "the retry resumes on the branch it pushed");
+}
