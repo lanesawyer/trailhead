@@ -840,6 +840,11 @@ impl FactoryConfig {
 
     fn validate(&self) -> Result<()> {
         self.stack.validate()?;
+        if let Some(log) = &self.daemon.log
+            && let Err(e) = tracing_subscriber::EnvFilter::try_new(log)
+        {
+            return Err(Error::Config(format!("[factory.daemon] log `{log}` isn't a valid tracing filter: {e}")));
+        }
         for (name, target) in &self.targets {
             // Names go into sandbox names and labels.
             let ok = !name.is_empty()
@@ -1480,6 +1485,9 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(parse(&with).unwrap().daemon.log.as_deref(), Some("info,iroh=debug"));
         let bad = format!("{SAMPLE}\n[daemon]\nlogg = \"x\"\n");
         assert!(matches!(parse(&bad), Err(Error::Config(_))));
+        let typo = format!("{SAMPLE}\n[daemon]\nlog = \"info,iroh=bogus\"\n");
+        let Err(Error::Config(msg)) = parse(&typo) else { panic!("a bad filter should be refused") };
+        assert!(msg.contains("[factory.daemon] log"), "{msg}");
     }
 
     #[test]
