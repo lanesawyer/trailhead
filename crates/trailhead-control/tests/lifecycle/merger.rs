@@ -1006,12 +1006,14 @@ async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1023,11 +1025,13 @@ async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.codehost.close(&pr);
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 /// The factory's own identity takes the task and sends it to review again, as it does when a conflict it was to
@@ -1257,10 +1261,12 @@ async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.set_status(&key, Status::Cancelled);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1272,10 +1278,12 @@ async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.detach(&key);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
