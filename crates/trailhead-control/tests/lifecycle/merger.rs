@@ -1295,6 +1295,32 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     assert!(!r.codehost.prs()[0].merged, "still held");
 }
 
+/// TRAIL-1304: "once per head" must not become "once ever": a new head that still conflicts is warned about again.
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_again_when_its_head_moves() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let (logs, _capture) = crate::logs::Logs::capture();
+    let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+
+    r.codehost.push_to(&mine);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "the new head, still conflicting, is warned about: {}", logs.text());
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "but only once for it");
+    assert!(!r.codehost.prs()[0].merged, "still held");
+}
+
 #[tokio::test]
 async fn a_failed_marker_write_still_parks_a_pr_merged_before_approval() {
     let (r, queue) = queued_rig_with(SHADOW);
