@@ -575,12 +575,30 @@ async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chain
     assert!(done.merged.is_empty() && done.closed.is_empty(), "an open PR leaves the task parked");
     assert_eq!(r.show(&key).await.status, Status::NeedsInput);
 
+    let parked_at = r.store.latest_event_id(&r.human).await.unwrap();
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::Done);
+    // The parked task is claimed where it stands and finished: it never passes through `open`, and
+    // nothing releases a claim before the one taken for the close.
+    let filter = trailhead_core::EventFilter {
+        task: Some(trailhead_core::TaskKey(key.0.clone())),
+        after_id: Some(parked_at),
+        ..Default::default()
+    };
+    let events = r.store.list_events(&r.human, filter).await.unwrap();
+    let steps: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e.kind.as_str() {
+            "task.updated" => e.after.as_ref().and_then(|a| a["status"].as_str()).map(|s| format!("status:{s}")),
+            "claim.released" => Some(e.kind.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, ["status:needs_input", "status:in_progress", "claim.released", "status:done"], "{steps:?}");
     assert_eq!(task.run.merged.expect("merge recorded").by, trailhead_factory::MergedBy::Human);
     assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
 }
