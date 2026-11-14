@@ -15,7 +15,9 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
     ControlState, FactoryEvent, FactorySnapshot, FactoryState, SandboxState, SandboxStatus, Sequenced,
 };
-use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, ConnectionStatus, LocalEndpoint, SendNet};
+use trailhead_lookout::connection::{
+    Api, Connection, ConnectionPlugin, ConnectionStatus, Dialed, LocalEndpoint, SendNet,
+};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::logs::LogState;
 use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
@@ -178,6 +180,10 @@ fn state(app: &App) -> Connection {
     *app.world().resource::<State<Connection>>().get()
 }
 
+fn dialed(app: &App) -> Option<String> {
+    app.world().resource::<Dialed>().0.clone()
+}
+
 fn reason(app: &App) -> Option<Reason> {
     app.world().resource::<ConnectionStatus>().reason.as_ref().map(|r| r.cause().clone())
 }
@@ -203,7 +209,9 @@ async fn connects_signs_in_and_goes_live() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
-    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    // The start target is padded, so `Dialed` equals the bare id only once the net thread has parsed and reported it.
+    let mut app = app(rig.config(&lookup), Some(format!("  {}\n", addr.id)));
+    assert_ne!(dialed(&app), Some(addr.id.to_string()));
 
     // Its own id shows up so a person can allow it, and until they do the refusal says so.
     until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
@@ -223,6 +231,7 @@ async fn connects_signs_in_and_goes_live() {
     send(&mut app, NetCommand::Login(rig.token.clone()));
     until(&mut app, "live", |a| state(a) == Connection::Live).await;
     assert_eq!(reason(&app), None);
+    assert_eq!(dialed(&app), Some(addr.id.to_string()));
     let api = &app.world().resource::<Api>().0;
     assert_eq!((api.token.as_str(), api.user.as_str()), (rig.token.as_str(), "Lane"));
     let me = reqwest::Client::new().get(format!("{}/v1/me", api.base)).bearer_auth(&api.token).send().await.unwrap();
@@ -317,7 +326,8 @@ async fn goes_offline_when_the_control_plane_stops_and_comes_back() {
     let lookup = Arc::new(MemoryLookup::new());
     let key = SecretKey::generate();
     let (router, addr) = control_plane(key.clone(), &lookup, &rig).await;
-    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    // Padded, so `Dialed` only equals the bare id once the net thread has parsed and reported it.
+    let mut app = app(rig.config(&lookup), Some(format!("  {}\n", addr.id)));
     until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
     rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
     send(&mut app, NetCommand::Login(rig.token.clone()));
@@ -330,6 +340,7 @@ async fn goes_offline_when_the_control_plane_stops_and_comes_back() {
     let (_router, _) = control_plane(key, &lookup, &rig).await;
     until(&mut app, "live again", |a| state(a) == Connection::Live).await;
     assert_eq!(reason(&app), None);
+    assert_eq!(dialed(&app), Some(addr.id.to_string()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,6 +352,7 @@ async fn a_bad_endpoint_id_is_explained() {
     send(&mut app, NetCommand::Connect("not an id".into()));
     until(&mut app, "bad target", |a| matches!(reason(a), Some(Reason::BadTarget(_)))).await;
     assert_eq!(state(&app), Connection::Offline);
+    assert_eq!(dialed(&app), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -363,6 +375,7 @@ async fn a_bad_connect_replaces_the_old_target_and_its_error_stays() {
     }
     assert_eq!(state(&app), Connection::Offline);
     assert!(matches!(reason(&app), Some(Reason::BadTarget(_))), "{:?}", reason(&app));
+    assert_eq!(dialed(&app), None);
 }
 
 fn campsites(app: &mut App) -> Vec<(String, SandboxState)> {
