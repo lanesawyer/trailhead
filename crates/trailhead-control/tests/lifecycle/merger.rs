@@ -1310,3 +1310,23 @@ async fn a_failed_marker_write_still_parks_a_pr_merged_before_approval() {
     assert_eq!(task.status, Status::NeedsInput, "parked though the marker wasn't written, not left claimed");
     assert_eq!(r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count(), 1);
 }
+
+/// TRAIL-1220: the stale check and the gates both ask whether an updated head still carries the verdict; the host is
+/// asked once, and not again while the head stays where it is.
+#[tokio::test]
+async fn a_head_updated_from_the_base_is_asked_about_once() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    r.codehost.set_behind(&pr, true);
+    r.codehost.update_branch(&pr).await.unwrap();
+    let before = r.codehost.calls("carries_verdict");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved, "the approval survives the update");
+    assert_eq!(r.codehost.calls("carries_verdict"), before + 1, "one ask for the pass");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.calls("carries_verdict"), before + 1, "none while the head hasn't moved");
+}

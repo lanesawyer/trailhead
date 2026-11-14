@@ -42,6 +42,34 @@ impl Factory {
         self.rework_ci_failure(&task, pr, &ci.head, checks).await
     }
 
+    /// Whether the PR's `head` is only a clean merge of the base branch into the `reviewed` head, so the verdict on
+    /// `reviewed` stands. The answer for a (reviewed, head) pair is remembered per task, so asking again in the same
+    /// pass, or in the next while the head hasn't moved, needn't go to the host (TRAIL-1220). Without a known `head`
+    /// the host is asked every time. A failed ask isn't remembered.
+    pub(crate) async fn carries_verdict(
+        &self,
+        key: &TaskKey,
+        pr: &PrRef,
+        reviewed: &str,
+        head: Option<&str>,
+    ) -> Result<bool> {
+        let Some(codehost) = &self.codehost else { return Ok(false) };
+        if let Some(head) = head {
+            let known = self.merger.carried.lock().unwrap().get(key).cloned();
+            if let Some((r, h, carried)) = known
+                && r == reviewed
+                && h == head
+            {
+                return Ok(carried);
+            }
+        }
+        let carried = codehost.carries_verdict(pr, reviewed).await?;
+        if let Some(head) = head {
+            self.merger.carried.lock().unwrap().insert(key.clone(), (reviewed.to_string(), head.to_string(), carried));
+        }
+        Ok(carried)
+    }
+
     async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
@@ -78,7 +106,7 @@ impl Factory {
             // A clean merge of the base branch the host made since (the merger's own update) keeps the approval, Lane's
             // included, as it keeps the verdict; CI on the new head is the gate.
             let carried = match &given_on {
-                Some(given) if *given != head => codehost.carries_verdict(pr, given).await?,
+                Some(given) if *given != head => self.carries_verdict(&task.key, pr, given, Some(&head)).await?,
                 _ => false,
             };
             if carried {
@@ -102,7 +130,7 @@ impl Factory {
                 if *reviewed == head
                     || (task.run.reviewed.is_some()
                         && task.run.reviewed == task.run.attempt
-                        && codehost.carries_verdict(pr, reviewed).await?) =>
+                        && self.carries_verdict(key, pr, reviewed, Some(&head)).await?) =>
             {
                 // The reviewer's verdict, not a rework the control plane asked for since: a conflict request that
                 // was settled without a push leaves the review of this head standing (TRAIL-1468).

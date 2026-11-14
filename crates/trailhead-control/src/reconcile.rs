@@ -395,7 +395,7 @@ impl Factory {
             return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
-            Some(reviewed) if reviewed != head && codehost.carries_verdict(pr, reviewed).await? => {
+            Some(reviewed) if reviewed != head && self.carries_verdict(&task.key, pr, reviewed, Some(head)).await? => {
                 // Only CI seen passing on the reviewed head says the merge brought the failure in. A host that
                 // can't be asked gets the softer wording.
                 match codehost.ci_at(pr, reviewed).await {
@@ -609,11 +609,11 @@ impl Factory {
         if unreviewed(task) {
             return Ok(true);
         }
-        let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head) else {
+        let (Some(pr), Some(reviewed)) = (&task.run.pr, &task.run.reviewed_head) else {
             return Ok(false);
         };
         // The head the host showed is the one reviewed: nothing to ask.
-        Ok(head != Some(reviewed) && !codehost.carries_verdict(pr, reviewed).await?)
+        Ok(head != Some(reviewed) && !self.carries_verdict(&task.key, pr, reviewed, head.map(String::as_str)).await?)
     }
 
     /// True when the PR is due a review.
