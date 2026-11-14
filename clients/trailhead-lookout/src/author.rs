@@ -1382,6 +1382,40 @@ mod tests {
     }
 
     #[test]
+    fn the_grade_dropdown_follows_the_drafts_project() {
+        use crate::factory::RepoState;
+        let g = |n| Grade::new(n).unwrap();
+        let mut app = ui_app();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: Some(human),
+            usage: Vec::new(),
+        };
+        {
+            let mut status = app.world_mut().resource_mut::<FactoryStatus>();
+            status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+            status.repos.insert("o/b".into(), repo("ZED-1", vec![g(2), g(4)]));
+        }
+        open_new_form(&mut app);
+        settle(&mut app);
+        let options = |app: &mut App| {
+            let world = app.world_mut();
+            let mut selects = world.query::<(&FormChoice, &crate::widgets::SelectOptions)>();
+            selects.iter(world).find(|(c, _)| **c == FormChoice::Grade).map(|(_, o)| o.0.clone()).unwrap()
+        };
+        let gates = [("TRAIL", vec![g(3), g(4)]), ("ZED", vec![g(2), g(4)])];
+        assert_ne!(grade_options(&gates[0].1), grade_options(&gates[1].1));
+        for (project, human) in gates.iter().cycle().take(3) {
+            app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.project = project.to_string();
+            settle(&mut app);
+            assert_eq!(options(&mut app), grade_options(human), "{project}");
+        }
+    }
+
+    #[test]
     fn a_form_with_a_save_in_flight_ignores_a_click_outside() {
         let mut app = ui_app();
         open_new_form(&mut app);

@@ -687,6 +687,47 @@ mod tests {
     }
 
     #[test]
+    fn a_task_is_labelled_from_the_gates_of_its_own_projects_repo() {
+        use crate::factory::{FactoryStatus, RepoState};
+        let mut app = app();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: Some(human),
+            usage: Vec::new(),
+        };
+        let g = |n| Grade::new(n).unwrap();
+        {
+            let mut status = app.world_mut().resource_mut::<FactoryStatus>();
+            status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+            status.repos.insert("o/b".into(), repo("OPS-1", vec![g(2), g(4)]));
+        }
+        for (i, (id, key)) in [("pa", "TRAIL"), ("pb", "OPS")].into_iter().enumerate() {
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
+                "id": 400 + i as i64, "entity": "project", "entity_id": sid(id), "kind": "project.created",
+                "after": crate::fixture::project_json(json!({"id": id, "key": key, "name": key})),
+            })));
+        }
+        for (i, (id, key, project)) in [("t20", "TRAIL-20", "pa"), ("t21", "OPS-21", "pb")].into_iter().enumerate() {
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
+                "id": 410 + i as i64, "entity": "task", "entity_id": sid(id), "kind": "task.created",
+                "after": task_json(json!({"id": id, "key": key, "project_id": project, "grade": 2})),
+            })));
+        }
+        let treeline = |app: &mut App, id: &str| {
+            app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid(id)));
+            settle(app);
+            texts(app).into_iter().filter(|t| t.contains(" Treeline:")).collect::<Vec<_>>()
+        };
+        // The same grade falls on either side of Treeline, by the gates of the repo that works the task's project.
+        assert_eq!(treeline(&mut app, "t20"), ["Below Treeline: merges once its gates pass"]);
+        assert_eq!(treeline(&mut app, "t21"), ["Above Treeline: a person merges it"]);
+        assert_eq!(treeline(&mut app, "t20"), ["Below Treeline: merges once its gates pass"]);
+    }
+
+    #[test]
     fn a_factory_event_that_leaves_the_human_grades_alone_dresses_nothing_again() {
         use crate::factory::FactoryStatus;
         let mut app = app();
