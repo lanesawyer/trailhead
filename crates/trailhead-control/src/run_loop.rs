@@ -11,6 +11,7 @@ use tracing::Instrument;
 use trailhead_factory::messages;
 use trailhead_factory::{ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Status, Task, TaskKey, label};
 
+use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
 
@@ -237,6 +238,8 @@ impl Factory {
             .await?
             .into_iter()
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
+            // A reviewer's breach whose park was cut short isn't rework: reconcile finishes the park for a human first.
+            .filter(|t| !matches!(phase(t, self.tracker.agent(), false), Phase::ReviewBreachUnparked { .. }))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
             if starvation_is_parked_tasks(running, reviewing, others.len(), self.config.repo.max_sandboxes) {
