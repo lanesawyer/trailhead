@@ -120,6 +120,11 @@ pub struct FactoryStatus {
 #[derive(Resource, Debug, Default)]
 pub struct FactoryActivity(pub VecDeque<Activity>);
 
+/// The project a key belongs to: `TRAIL` for `TRAIL-102`; none when nothing precedes the dash.
+pub fn project_of(key: &str) -> Option<&str> {
+    key.rsplit_once('-').map(|(project, _)| project).filter(|p| !p.is_empty())
+}
+
 impl FactoryStatus {
     /// What the map shows beside the factory: why it isn't running, or that the server can't be reached.
     pub fn label(&self) -> String {
@@ -146,7 +151,7 @@ impl FactoryStatus {
     /// tasks go to those repos' gates. When none of them has said (or no repo works the project, or it isn't known),
     /// every repo's.
     pub fn human_grades_for(&self, project: Option<&str>) -> Vec<Grade> {
-        let in_project = |key: &String| key.rsplit_once('-').is_some_and(|(p, _)| Some(p) == project);
+        let in_project = |key: &String| project.is_some() && project_of(key) == project;
         let said: Vec<&Vec<Grade>> = self
             .repos
             .values()
@@ -686,6 +691,12 @@ mod tests {
         // A project no repo works gets every repo's.
         assert_eq!(status.human_grades_for(Some("NONE")), [g(2), g(3), g(4)]);
         assert_eq!(status.human_grades_for(None), [g(2), g(3), g(4)]);
+        // A queue key with no project prefix belongs to no project, not to the empty one.
+        status.repos.insert("o/c".into(), repo("-5", vec![g(2)]));
+        assert_eq!(status.human_grades_for(Some("")), [g(2), g(3), g(4)]);
+        assert_eq!(project_of("-5"), None);
+        assert_eq!(project_of("TRAIL-5"), Some("TRAIL"));
+        status.repos.remove("o/c");
         // A project whose repo hasn't said gets what the others say.
         status.repos.get_mut("o/b").unwrap().human_grades = None;
         assert_eq!(status.human_grades_for(Some("OTHER")), [g(3), g(4)]);
