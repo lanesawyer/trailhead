@@ -205,11 +205,22 @@ fn settle(mut done: MessageReader<CommandDone>, mut controls: Query<&mut Control
 fn tidy_controls(
     mut controls: ResMut<Controls>,
     mut settled: ResMut<Settled>,
-    tasks: Query<&Mirrored<Task>>,
-    agents: Query<&Mirrored<Agent>>,
+    (tasks, agents): (Query<&Mirrored<Task>>, Query<&Mirrored<Agent>>),
     mut states: Query<&mut Control>,
     mut commands: Commands,
+    (mirror, revs): (Res<Mirror>, Query<(), Changed<Rev>>),
+    mut removed: RemovedComponents<Rev>,
 ) {
+    // Nothing to tidy unless the mirror or a control moved; this builds maps of every mirrored row.
+    let gone = removed.read().count() > 0;
+    if !(controls.is_changed()
+        || mirror.is_changed()
+        || gone
+        || !revs.is_empty()
+        || states.iter_mut().any(|c| bevy::ecs::change_detection::DetectChanges::is_changed(&c)))
+    {
+        return;
+    }
     let versions: HashMap<String, i64> = tasks.iter().map(|t| (t.0.id.to_string(), t.0.version)).collect();
     for ((subject, _), entity) in &controls.0 {
         let Subject::Task(id) = subject else { continue };
@@ -232,7 +243,8 @@ fn tidy_controls(
     if live.is_empty() {
         return;
     }
-    controls.0.retain(|(subject, _), entity| {
+    // Pruning must not count as a change to `Controls`, or this system would wake itself every frame.
+    controls.bypass_change_detection().0.retain(|(subject, _), entity| {
         let (Subject::Task(id) | Subject::Agent(id)) = subject;
         let keep = live.contains(id);
         if !keep {
