@@ -2,17 +2,20 @@
 # Supervises the programs `Compute::start` puts in a Docker sandbox, the way Sprites services are supervised.
 # Each lives in $PROGRAMS/<name>: `run` is its command, `log` its output, `exits` one exit code per line.
 #
-#   supervise <name>   (re)starts one program and keeps restarting it when it exits
-#   supervise          at container start: starts every program, then waits as the container's main process
+#   supervise <programs dir> <name>   (re)starts one program and keeps restarting it when it exits
+#   supervise <programs dir>          at container start: starts every program, then waits as the main process
+#
+# The programs dir is the one `Compute::logs` reads, passed in so the writers and the reader share one source.
 set -u
-PROGRAMS="$HOME/.trailhead/programs"
+PROGRAMS="$1"
+shift
 
 if [ $# -eq 0 ]; then
   mkdir -p "$PROGRAMS"
   # Pids from before a restart may now belong to other processes.
   rm -f "$PROGRAMS"/*/pid
   for dir in "$PROGRAMS"/*/; do
-    [ -x "${dir}run" ] && setsid "$0" "$(basename "$dir")" &
+    [ -x "${dir}run" ] && setsid "$0" "$PROGRAMS" "$(basename "$dir")" &
   done
   while :; do sleep 3600; done
 fi
