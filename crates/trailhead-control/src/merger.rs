@@ -29,17 +29,44 @@ impl Factory {
     /// Sends a PR whose CI failed on its current head back for a rework, and does nothing else: no approving, no
     /// merging, no word on the PR. For a task whose review is owed, whether backed off after an infrastructure failure
     /// (TRAIL-263) or due now, where the gates aren't evaluated but a failed CI needn't wait for the review. True only
-    /// when a rework was requested; one already asked for on this attempt leaves the owed review to its usual handling.
-    pub(crate) async fn rework_if_ci_failed(&self, key: &TaskKey) -> Result<bool> {
+    /// when a rework was requested (the caller's `task` is used as it is, not read again, TRAIL-1241); one already asked for on this attempt leaves the owed review to its usual handling.
+    pub(crate) async fn rework_if_ci_failed(&self, task: &Task) -> Result<bool> {
         let Some(codehost) = &self.codehost else { return Ok(false) };
-        let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(false) };
         if !matches!(task.status, Status::InReview | Status::Approved) {
             return Ok(false);
         }
         let ci = codehost.ci(pr).await?;
         let CiState::Failed { checks } = &ci.state else { return Ok(false) };
-        self.rework_ci_failure(&task, pr, &ci.head, checks).await
+        self.rework_ci_failure(task, pr, &ci.head, checks).await
+    }
+
+    /// Whether the PR's `head` is only a clean merge of the base branch into the `reviewed` head, so the verdict on
+    /// `reviewed` stands. The answer for a (reviewed, head) pair is remembered per task, so asking again in the same
+    /// pass, or in the next while the head hasn't moved, needn't go to the host (TRAIL-1220). Without a known `head`
+    /// the host is asked every time. A failed ask isn't remembered.
+    pub(crate) async fn carries_verdict(
+        &self,
+        key: &TaskKey,
+        pr: &PrRef,
+        reviewed: &str,
+        head: Option<&str>,
+    ) -> Result<bool> {
+        let Some(codehost) = &self.codehost else { return Ok(false) };
+        if let Some(head) = head {
+            let known = self.merger.carried.lock().unwrap().get(key).cloned();
+            if let Some((r, h, carried)) = known
+                && r == reviewed
+                && h == head
+            {
+                return Ok(carried);
+            }
+        }
+        let carried = codehost.carries_verdict(pr, reviewed).await?;
+        if let Some(head) = head {
+            self.merger.carried.lock().unwrap().insert(key.clone(), (reviewed.to_string(), head.to_string(), carried));
+        }
+        Ok(carried)
     }
 
     async fn evaluate(&self, key: &TaskKey, act: bool, parks: bool) -> Result<()> {
@@ -78,7 +105,7 @@ impl Factory {
             // A clean merge of the base branch the host made since (the merger's own update) keeps the approval, Lane's
             // included, as it keeps the verdict; CI on the new head is the gate.
             let carried = match &given_on {
-                Some(given) if *given != head => codehost.carries_verdict(pr, given).await?,
+                Some(given) if *given != head => self.carries_verdict(&task.key, pr, given, Some(&head)).await?,
                 _ => false,
             };
             if carried {
@@ -102,7 +129,7 @@ impl Factory {
                 if *reviewed == head
                     || (task.run.reviewed.is_some()
                         && task.run.reviewed == task.run.attempt
-                        && codehost.carries_verdict(pr, reviewed).await?) =>
+                        && self.carries_verdict(key, pr, reviewed, Some(&head)).await?) =>
             {
                 // The reviewer's verdict, not a rework the control plane asked for since: a conflict request that
                 // was settled without a push leaves the review of this head standing (TRAIL-1468).
@@ -285,7 +312,7 @@ impl Factory {
                 if times >= crate::UPDATE_ASKS {
                     tracing::warn!(task = %task.key, pr = %pr.url, times, "the branch update never landed; reworking");
                     self.merger.updating.lock().unwrap().remove(&task.key);
-                    return self.rework_conflict(task, pr, attempt).await;
+                    return self.rework_dropped_update(task, pr, attempt).await;
                 }
                 tracing::warn!(task = %task.key, pr = %pr.url, "the branch update never landed; asking again");
                 asked = times;
@@ -323,13 +350,17 @@ impl Factory {
                 let mut merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
                 push_said(&mut merged.history, merged_message);
                 let body = messages::status_comment(&merged.message, &merged.history);
+                // Said before recording, so a comment `say` had to post anew is the one the record keeps.
+                match self.say(pr, decision.comment, &body).await {
+                    Ok(id) => merged.comment = Some(id),
+                    Err(e) => {
+                        tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
+                    }
+                }
                 if let Err(e) =
                     self.tracker.report(&task.key, RunPatch { merge: Patch::Set(merged), ..RunPatch::default() }).await
                 {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
-                }
-                if let Err(e) = self.say(pr, decision.comment, &body).await {
-                    tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,

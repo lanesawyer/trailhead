@@ -702,6 +702,9 @@ async fn an_update_the_host_keeps_dropping_is_sent_to_rework() {
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.codehost.update_requests(), trailhead_control::UPDATE_ASKS as usize, "no further ask");
     assert_eq!(r.tracker.task(&key).run.conflict_reworks, Some(1), "sent to a conflict rework");
+    let asked = r.tracker.task(&key).run.pending_changes().cloned().expect("a request");
+    assert_eq!(asked.kind, trailhead_factory::RequestKind::Conflict);
+    assert!(asked.body.contains("kept dropping"), "the worker is told the host dropped the update: {}", asked.body);
 }
 
 #[tokio::test]
@@ -1003,12 +1006,14 @@ async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::Done);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1020,11 +1025,13 @@ async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.codehost.close(&pr);
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 /// The factory's own identity takes the task and sends it to review again, as it does when a conflict it was to
@@ -1254,10 +1261,12 @@ async fn a_queued_update_is_forgotten_when_the_task_is_cancelled() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.set_status(&key, Status::Cancelled);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1269,10 +1278,12 @@ async fn a_queued_update_is_forgotten_when_the_task_leaves_the_queue() {
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
 
     r.tracker.detach(&key);
     r.factory.reconcile().await.unwrap();
     assert!(!r.factory.awaiting_branch_update(&key));
+    assert!(!r.factory.caches_pr_files(&key));
 }
 
 #[tokio::test]
@@ -1293,4 +1304,81 @@ async fn a_persons_pr_that_conflicts_is_warned_about_once_per_head() {
     let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
     assert_eq!(warned(&logs), 1, "{}", logs.text());
     assert!(!r.codehost.prs()[0].merged, "still held");
+}
+
+/// TRAIL-1304: "once per head" must not become "once ever": a new head that still conflicts is warned about again.
+#[tokio::test]
+async fn a_persons_pr_that_conflicts_is_warned_about_again_when_its_head_moves() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (_key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let mine = person_pr(&r).await;
+    r.codehost.set_auto_merge(&mine, true);
+    r.codehost.set_behind(&mine, true);
+    r.codehost.set_conflicts(true);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    let (logs, _capture) = crate::logs::Logs::capture();
+    let warned = |logs: &crate::logs::Logs| logs.text().matches("conflicts with its base; auto-merge stays on").count();
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 1, "{}", logs.text());
+
+    r.codehost.push_to(&mine);
+    r.codehost.set_ci(&mine, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "the new head, still conflicting, is warned about: {}", logs.text());
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(warned(&logs), 2, "but only once for it");
+    assert!(!r.codehost.prs()[0].merged, "still held");
+}
+
+#[tokio::test]
+async fn a_failed_marker_write_still_parks_a_pr_merged_before_approval() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    sent_to_review_by_the_factory(&r, &key).await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.codehost.merge(&pr, &head).await.unwrap();
+
+    // The merge record is the first report; the unapproved-merge marker is the second.
+    r.tracker.fail_after("factory", TrackerOp::Report, 1, 1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked though the marker wasn't written, not left claimed");
+    assert_eq!(r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count(), 1);
+}
+
+/// TRAIL-1220: the stale check and the gates both ask whether an updated head still carries the verdict; the host is
+/// asked once, and not again while the head stays where it is.
+#[tokio::test]
+async fn a_head_updated_from_the_base_is_asked_about_once() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved);
+
+    r.codehost.set_behind(&pr, true);
+    r.codehost.update_branch(&pr).await.unwrap();
+    let before = r.codehost.calls("carries_verdict");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::Approved, "the approval survives the update");
+    assert_eq!(r.codehost.calls("carries_verdict"), before + 1, "one ask for the pass");
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.codehost.calls("carries_verdict"), before + 1, "none while the head hasn't moved");
+}
+
+#[tokio::test]
+async fn a_status_comment_posted_anew_when_the_merge_is_announced_is_the_one_recorded() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let id = r.tracker.task(&key).run.merge.unwrap().comment.unwrap();
+    r.codehost.delete_comment(&pr, id);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    let new = task.run.merge.unwrap().comment.unwrap();
+    assert_ne!(new, id, "the comment posted after the merge is recorded");
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; merged.");
 }

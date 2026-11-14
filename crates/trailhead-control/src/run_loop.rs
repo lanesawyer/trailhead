@@ -11,6 +11,7 @@ use tracing::Instrument;
 use trailhead_factory::messages;
 use trailhead_factory::{ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Status, Task, TaskKey, label};
 
+use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
 
@@ -237,6 +238,8 @@ impl Factory {
             .await?
             .into_iter()
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
+            // A reviewer's breach whose park was cut short isn't rework: reconcile finishes the park for a human first.
+            .filter(|t| !matches!(phase(t, self.tracker.agent(), false), Phase::ReviewBreachUnparked { .. }))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
             if starvation_is_parked_tasks(running, reviewing, others.len(), self.config.repo.max_sandboxes) {
@@ -252,9 +255,19 @@ impl Factory {
         let mut survey = self.survey().await;
         let mut placed = Vec::new();
         for task in startable {
-            // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
-            // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
-            if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
+            // A task last run on a target that is down may still hold a sandbox there that `others` can't see.
+            // Starting it elsewhere is safe only if the repo has room for the new sandbox and for that one, which
+            // stays reserved; otherwise it waits for its target, whose sandboxes are unknown, not gone.
+            let unseen = task.run.target.as_ref().is_some_and(|t| survey.down.contains(t));
+            if unseen {
+                if room < 2 {
+                    tracing::info!(task = %task.key, "its target is down, so a sandbox it may hold can't be counted; not starting it elsewhere without room for both");
+                    continue;
+                }
+                room -= 2;
+            } else if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
+                // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
+                // target is capped gets a new sandbox elsewhere while the old stays held, so it takes room.
                 if room == 0 {
                     continue;
                 }
@@ -448,7 +461,6 @@ impl Factory {
             );
             tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
         }
-        *last = Some(holders);
     }
 
     /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
@@ -743,14 +755,18 @@ fn starvation_is_parked_tasks(running: usize, reviewing: usize, others: usize, m
     running <= reviewing && parked_fill_repo_cap(others, max_sandboxes)
 }
 
-/// Updates the last-said holders and returns whether the starvation is to be said now: not with nothing waiting
-/// (which forgets the last warning), and not again for the same holders.
+/// Returns whether the starvation is to be said now: not with nothing waiting (which forgets the last warning), and
+/// not again for the same holders. When it is, records `holders` as the last said.
 fn should_say_starved(last: &mut Option<Vec<(TaskKey, bool)>>, holders: &[(TaskKey, bool)], waiting: usize) -> bool {
     if waiting == 0 {
         *last = None;
         return false;
     }
-    last.as_deref() != Some(holders)
+    if last.as_deref() == Some(holders) {
+        return false;
+    }
+    *last = Some(holders.to_vec());
+    true
 }
 
 /// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
@@ -799,7 +815,6 @@ mod starvation_tests {
         let (a, ab) = (holders(&[("T-1", true)]), holders(&[("T-1", true), ("T-2", true)]));
         let mut last = None;
         assert!(should_say_starved(&mut last, &a, 1));
-        last = Some(a.clone());
         assert!(!should_say_starved(&mut last, &a, 3), "the same holders aren't said again");
         assert!(should_say_starved(&mut last, &ab, 1), "a new set of holders is");
         assert!(should_say_starved(&mut last, &holders(&[("T-1", false)]), 1), "so is a holder no longer parked");

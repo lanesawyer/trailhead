@@ -39,6 +39,23 @@ extern "C" fn restore_on_sigint(_: libc::c_int) {
     }
 }
 
+/// Installs `restore_on_sigint` and returns the disposition it replaced. Returns `None`, leaving
+/// SIGINT alone, when it was ignored (`nohup`, a background job): Ctrl-C did nothing before, so it must not kill now.
+#[cfg(unix)]
+fn install_sigint_handler() -> Option<libc::sigaction> {
+    // SAFETY: plain `sigaction` calls on zeroed structs; a null `act` only reads the current disposition.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) != 0 || old.sa_sigaction == libc::SIG_IGN {
+            return None;
+        }
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = restore_on_sigint as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&mut act.sa_mask);
+        (libc::sigaction(libc::SIGINT, &act, &mut old) == 0).then_some(old)
+    }
+}
+
 impl NoEcho {
     #[cfg(unix)]
     pub fn new() -> Self {
@@ -56,13 +73,13 @@ impl NoEcho {
                 return Self { saved: None, old_sigint: None };
             }
             // Ctrl-C would otherwise kill the process before `Drop` runs and leave echo off.
+            // Write the termios first: the handler may run as soon as it is installed.
             (*HANDLER_TERMIOS.0.get()).write(t);
             HANDLER_ARMED.store(true, std::sync::atomic::Ordering::Release);
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = restore_on_sigint as extern "C" fn(libc::c_int) as usize;
-            libc::sigemptyset(&mut act.sa_mask);
-            let mut old: libc::sigaction = std::mem::zeroed();
-            let old_sigint = (libc::sigaction(libc::SIGINT, &act, &mut old) == 0).then_some(old);
+            let old_sigint = install_sigint_handler();
+            if old_sigint.is_none() {
+                HANDLER_ARMED.store(false, std::sync::atomic::Ordering::Release);
+            }
             Self { saved: Some(t), old_sigint }
         }
     }
@@ -105,6 +122,90 @@ mod tests {
         let guard = NoEcho::new();
         assert!(guard.saved.is_none() || std::io::IsTerminal::is_terminal(&std::io::stdin()));
         assert!(guard.saved.is_some() || guard.old_sigint.is_none());
+    }
+
+    /// ECHO state of the terminal behind a pty master (Linux reports the slave's settings).
+    fn echo_on(master: libc::c_int) -> bool {
+        // SAFETY: `tcgetattr` fills a zeroed termios for a valid fd.
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(master, &mut t), 0);
+            t.c_lflag & libc::ECHO != 0
+        }
+    }
+
+    #[test]
+    fn ctrl_c_on_a_terminal_restores_echo_and_dies_of_sigint() {
+        // SAFETY: the child only makes plain libc calls before `_exit` or dying of the signal.
+        unsafe {
+            let (mut master, mut slave) = (0, 0);
+            let none = std::ptr::null_mut();
+            assert_eq!(libc::openpty(&mut master, &mut slave, none, none.cast(), none.cast()), 0);
+            // The child writes one byte once `NoEcho::new` has returned with the handler armed.
+            let mut ready = [0; 2];
+            assert_eq!(libc::pipe(ready.as_mut_ptr()), 0);
+            let pid = libc::fork();
+            assert!(pid >= 0);
+            if pid == 0 {
+                // Child: the pty is its controlling terminal and stdin, then it waits for Ctrl-C.
+                // The alarm keeps a failed run from leaking the child.
+                libc::alarm(30);
+                libc::setsid();
+                libc::ioctl(slave, libc::TIOCSCTTY, 0);
+                libc::dup2(slave, libc::STDIN_FILENO);
+                let guard = NoEcho::new();
+                if guard.saved.is_none() {
+                    libc::_exit(2);
+                }
+                libc::write(ready[1], b"r".as_ptr().cast(), 1);
+                loop {
+                    libc::sleep(1);
+                }
+            }
+            libc::close(slave);
+            libc::close(ready[1]);
+            let fail = |msg: &str| -> ! {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+                panic!("{msg}");
+            };
+            // Block until the child is armed; EOF means it exited without arming.
+            let mut byte = 0u8;
+            if libc::read(ready[0], std::ptr::addr_of_mut!(byte).cast(), 1) != 1 {
+                fail("child exited before arming the SIGINT handler");
+            }
+            libc::close(ready[0]);
+            if echo_on(master) {
+                fail("child armed but echo is still on");
+            }
+            assert_eq!(libc::kill(pid, libc::SIGINT), 0);
+            let mut status = 0;
+            assert_eq!(libc::waitpid(pid, &mut status, 0), pid);
+            assert!(libc::WIFSIGNALED(status), "child exited instead of dying of a signal: {status}");
+            assert_eq!(libc::WTERMSIG(status), libc::SIGINT);
+            assert!(echo_on(master), "echo was not restored");
+            libc::close(master);
+        }
+    }
+
+    #[test]
+    fn ignored_sigint_stays_ignored() {
+        // The only test that touches SIGINT's disposition, so nothing races it.
+        // SAFETY: plain `sigaction` calls; the original disposition is put back at the end.
+        unsafe {
+            let mut ign: libc::sigaction = std::mem::zeroed();
+            ign.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&mut ign.sa_mask);
+            let mut orig: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(libc::SIGINT, &ign, &mut orig), 0);
+
+            assert!(install_sigint_handler().is_none());
+            let mut now: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGINT, std::ptr::null(), &mut now);
+            assert_eq!(now.sa_sigaction, libc::SIG_IGN);
+
+            libc::sigaction(libc::SIGINT, &orig, std::ptr::null_mut());
+        }
     }
 
     #[test]

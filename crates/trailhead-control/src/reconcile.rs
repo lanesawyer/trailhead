@@ -84,13 +84,21 @@ impl Factory {
         let (live, down) = self.list_all(&self.base_labels()).await?;
         let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await;
         // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
-        let parked: HashSet<String> = in_flight
-            .iter()
-            .flatten()
-            .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
-            .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
-            .collect();
-        self.status.sync_sandboxes(&live, &down, &parked);
+        // A sandbox a breach left stuck (cut-off and destroy both failed) is shown apart: waiting to be destroyed,
+        // not suspended.
+        let held = |stuck: bool| -> HashSet<String> {
+            in_flight
+                .iter()
+                .flatten()
+                .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
+                .filter(|t| {
+                    let breach = t.run.worker_breach.as_ref();
+                    breach.is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) == stuck
+                })
+                .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
+                .collect()
+        };
+        self.status.sync_sandboxes(&live, &down, &held(false), &held(true));
         self.warn_strays().await;
         let in_flight = in_flight?;
         // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
@@ -296,10 +304,17 @@ impl Factory {
             // again every pass (TRAIL-706, TRAIL-1462).
             Err(Error::Forbidden(why)) => {
                 tracing::warn!(task = %task.key, %why, "the PR is merged but the task can't be finished; parking for a person to finish it");
-                self.tracker
+                // The marker only lets a later pass finish a cut-short park. If writing it fails, park anyway: a task
+                // left claimed without it lapses to open, and the next pass would let core close it unparked (TRAIL-1378).
+                let marker = self
+                    .tracker
                     .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
-                    .await?;
-                return self.park_unfinished_merge(task, &question).await;
+                    .await;
+                if let Err(e) = &marker {
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the unapproved merge; parking anyway");
+                }
+                let parked = self.park_unfinished_merge(task, &question).await;
+                return parked;
             }
             finished => finished?,
         }
@@ -341,10 +356,26 @@ impl Factory {
     /// conflicts, then goes through the checks and review again. It counts toward `max_conflict_reworks`, not review
     /// rounds, so a PR that keeps conflicting is parked for a human without using up its reviews (TRAIL-199, TRAIL-221).
     pub(crate) async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::conflict_feedback).await
+    }
+
+    /// Like `rework_conflict`, for a branch update the host kept dropping: no conflict was reported, so the worker
+    /// is told to merge the base in and resolve whatever comes up (TRAIL-1271).
+    pub(crate) async fn rework_dropped_update(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::dropped_update_feedback).await
+    }
+
+    async fn rework_behind(
+        &self,
+        task: &Task,
+        pr: &PrRef,
+        attempt: u32,
+        feedback: fn(&str, &str) -> String,
+    ) -> Result<()> {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
         let base = &self.config.repo.base_branch;
-        let body = messages::conflict_feedback(&pr.url, base);
+        let body = feedback(&pr.url, base);
         tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
@@ -380,7 +411,7 @@ impl Factory {
             return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
-            Some(reviewed) if reviewed != head && codehost.carries_verdict(pr, reviewed).await? => {
+            Some(reviewed) if reviewed != head && self.carries_verdict(&task.key, pr, reviewed, Some(head)).await? => {
                 // Only CI seen passing on the reviewed head says the merge brought the failure in. A host that
                 // can't be asked gets the softer wording.
                 match codehost.ci_at(pr, reviewed).await {
@@ -594,11 +625,11 @@ impl Factory {
         if unreviewed(task) {
             return Ok(true);
         }
-        let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head) else {
+        let (Some(pr), Some(reviewed)) = (&task.run.pr, &task.run.reviewed_head) else {
             return Ok(false);
         };
         // The head the host showed is the one reviewed: nothing to ask.
-        Ok(head != Some(reviewed) && !codehost.carries_verdict(pr, reviewed).await?)
+        Ok(head != Some(reviewed) && !self.carries_verdict(&task.key, pr, reviewed, head.map(String::as_str)).await?)
     }
 
     /// True when the PR is due a review.
@@ -653,8 +684,10 @@ impl Factory {
             // that no longer stands (the PR was pushed to, or a person settled the park) is answered here, and the
             // PR is looked at as it is.
             let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
-            let stale =
-                recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some()) && standing.is_none();
+            // A settled request is answered whatever `reviewed` says: a conflict or CI request doesn't move `reviewed`,
+            // so `last_changes()` can hide one on an attempt not yet reviewed, and a person's settling must still be
+            // answered (TRAIL-466).
+            let stale = recorded.is_some_and(|c| c.settled || task.run.last_changes().is_some()) && standing.is_none();
             let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
             self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
         }
@@ -684,7 +717,7 @@ impl Factory {
         if !owed {
             // CI may have finished, or Lane approved, since the gates were last looked at.
             self.evaluate_gates(&task.key).await?;
-        } else if self.rework_if_ci_failed(&task.key).await? {
+        } else if self.rework_if_ci_failed(task).await? {
             // A failed CI is reworked without waiting for the review, which would only look at a head that is about
             // to change.
             return Ok(false);

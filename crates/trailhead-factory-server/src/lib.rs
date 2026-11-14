@@ -366,7 +366,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     // binds, so a failure here leaves no endpoint to close.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
-    let built = computes(shared, opts, &fnox, paths, binary.clone(), false)?;
+    let built = computes(shared, opts, &fnox, paths, binary.clone(), false, !harness_secrets.is_empty())?;
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(key)
         .bind()
@@ -495,7 +495,7 @@ pub(crate) type Built = (Arc<dyn Compute>, Target);
 type Wired = (Target, Arc<dyn Compute>, Arc<dyn Daemon>);
 
 /// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
-/// [`compute`].
+/// [`compute`]. `has_model_credential` is whether the harness secrets the sandboxes get are non-empty.
 fn computes(
     config: &FactoryConfig,
     opts: &Opts,
@@ -503,13 +503,15 @@ fn computes(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<Vec<Built>> {
     config
         .target_specs()
         .into_iter()
         .map(|spec| {
-            let (compute, target) = compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only)
-                .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
+            let (compute, target) =
+                compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only, has_model_credential)
+                    .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
             Ok((compute, target.listed(&spec)))
         })
         .collect()
@@ -526,6 +528,7 @@ fn compute(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<(Arc<dyn Compute>, Target)> {
     match config {
         ComputeConfig::Sprites => {
@@ -542,9 +545,9 @@ fn compute(
                     "no GitHub writer token (GITHUB_WRITER_TOKEN or `trailhead factory login github-writer`): Docker sandboxes can't publish"
                 );
             }
-            if opts.claude_oauth_token.is_none() {
+            if !read_only && !has_model_credential {
                 tracing::warn!(
-                    "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
+                    "no harness credential (no Claude subscription token, or the harness cannot use it): Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
             trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
@@ -595,6 +598,20 @@ fn check_result(failed: usize) -> Result<()> {
     }
 }
 
+/// Where each secret comes from (env, fnox, keyring or file), never its value. `opts` holds what the environment set.
+fn print_secret_sources(opts: &Opts, fnox: &fnox::Fnox, paths: &Paths) {
+    let creds = paths.creds();
+    let writer = std::env::var("GITHUB_WRITER_TOKEN").ok();
+    for (name, env, cred) in [
+        ("SPRITES_TOKEN", opts.sprites_token.clone(), login::SPRITES),
+        ("GITHUB_TOKEN", opts.github_token.clone(), login::GITHUB),
+        ("CLAUDE_CODE_OAUTH_TOKEN", opts.claude_oauth_token.clone(), login::CLAUDE),
+        ("GITHUB_WRITER_TOKEN", writer, login::GITHUB_WRITER),
+    ] {
+        println!("secret {}", login::describe(name, env, fnox, &creds, cred));
+    }
+}
+
 /// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
 /// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
 /// the server.
@@ -604,6 +621,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
+    print_secret_sources(&plan.opts, &fnox, &paths);
     for spec in &plan.specs {
         let slug = spec.slug();
         let project = &spec.config.repo.project;
@@ -629,7 +647,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     }
     let first = &plan.specs[0].config;
     let specs = first.target_specs();
-    match computes(first, &opts, &fnox, &paths, Default::default(), true) {
+    match computes(first, &opts, &fnox, &paths, Default::default(), true, true) {
         Ok(built) => {
             for ((compute, target), spec) in built.iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
                 match compute.list(&Default::default()).await {
@@ -931,6 +949,11 @@ pub enum Command {
     /// Save a secret in the OS keyring (read from stdin), so the server's control plane needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
+    /// Remove a secret saved by `login` (from the keyring and the file). The environment and fnox are untouched.
+    Logout {
+        #[arg(value_enum)]
+        name: login::Secret,
+    },
 }
 
 /// Sets up logging to the terminal and runs `cmd`.
@@ -944,6 +967,11 @@ pub async fn command(cmd: Command) -> Result<()> {
         Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
         Command::Allowed => allowed(),
         Command::Login(cmd) => login(cmd).await,
+        Command::Logout { name } => {
+            let paths = Paths::from_env().ok_or(Error::NoDirs)?;
+            println!("{}", login::logout(&paths.creds(), name)?);
+            Ok(())
+        }
     }
 }
 

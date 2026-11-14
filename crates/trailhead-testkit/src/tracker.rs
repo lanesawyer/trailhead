@@ -38,6 +38,8 @@ struct State {
     sent_to_review: HashMap<TaskKey, String>,
     /// Agent and operation to how many of that agent's calls to let through, then how many more fail.
     failing: HashMap<(String, TrackerOp), (usize, usize)>,
+    /// The error an injected failure of that agent and operation carries, where it isn't a plain `Error::Other`.
+    failing_with: HashMap<(String, TrackerOp), Error>,
     /// Whether every `report`, by any agent, fails.
     reports_fail: bool,
     /// Whether `create_sub_agent` fails with a plain error, not `Forbidden`.
@@ -49,6 +51,8 @@ struct State {
     renews: HashMap<TaskKey, usize>,
     /// How many times each task has been reported on, failed or not.
     reports: HashMap<TaskKey, usize>,
+    /// How many times each task has had a review requested, failed or not.
+    review_requests: HashMap<TaskKey, usize>,
     /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
@@ -66,6 +70,7 @@ pub enum TrackerOp {
     Note,
     Finish,
     RevokeSubAgent,
+    InFlight,
 }
 
 impl std::fmt::Display for TrackerOp {
@@ -80,6 +85,7 @@ impl std::fmt::Display for TrackerOp {
             Self::Note => "note",
             Self::Finish => "finish",
             Self::RevokeSubAgent => "revoke_sub_agent",
+            Self::InFlight => "in_flight",
         })
     }
 }
@@ -175,7 +181,16 @@ impl FakeTracker {
 
     /// Like `fail_next`, but lets the first `skip` calls through, for a failure that should hit a later caller of `op` acting as the same agent.
     pub fn fail_after(&self, agent: &str, op: TrackerOp, skip: usize, times: usize) {
-        self.state.lock().unwrap().failing.insert((agent.to_string(), op), (skip, times));
+        let mut s = self.state.lock().unwrap();
+        s.failing_with.remove(&(agent.to_string(), op));
+        s.failing.insert((agent.to_string(), op), (skip, times));
+    }
+
+    /// Like `fail_next`, but the calls fail with `error` (`Forbidden` or `Rejected`, say) instead of a plain
+    /// `Error::Other`, for the paths that treat a refusal differently from an outage.
+    pub fn fail_next_with(&self, agent: &str, op: TrackerOp, times: usize, error: Error) {
+        self.fail_next(agent, op, times);
+        self.state.lock().unwrap().failing_with.insert((agent.to_string(), op), error);
     }
 
     /// Makes every `report`, whichever agent makes it, fail (or heal), as the tracker write outage of 2026-10-28 did.
@@ -205,7 +220,8 @@ impl FakeTracker {
             }
             Some((_, left)) if *left > 0 => {
                 *left -= 1;
-                Err(Error::Other(format!("injected {op} failure")))
+                let custom = s.failing_with.get(&(self.agent.clone(), op)).cloned();
+                Err(custom.unwrap_or_else(|| Error::Other(format!("injected {op} failure"))))
             }
             _ => Ok(()),
         }
@@ -264,6 +280,11 @@ impl FakeTracker {
     /// How many times `report` has been called on the task, failed or not.
     pub fn reports(&self, key: &TaskKey) -> usize {
         self.state.lock().unwrap().reports.get(key).copied().unwrap_or(0)
+    }
+
+    /// How many times `request_review` has been called on the task, failed or not.
+    pub fn review_requests(&self, key: &TaskKey) -> usize {
+        self.state.lock().unwrap().review_requests.get(key).copied().unwrap_or(0)
     }
 
     pub fn task(&self, key: &TaskKey) -> Task {
@@ -526,6 +547,7 @@ impl Tracker for FakeTracker {
 
     async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
         self.check_live()?;
+        self.inject(TrackerOp::InFlight)?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
@@ -628,6 +650,7 @@ impl Tracker for FakeTracker {
     }
 
     async fn request_review(&self, task: &TaskKey, handoff: &str) -> Result<()> {
+        *self.state.lock().unwrap().review_requests.entry(task.clone()).or_default() += 1;
         self.inject(TrackerOp::RequestReview)?;
         self.write(task, |t, me| {
             held_by_me(t, me)?;

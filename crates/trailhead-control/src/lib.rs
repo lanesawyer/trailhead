@@ -90,11 +90,27 @@ pub struct Host {
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
     queueless_projects: Mutex<HashSet<String>>,
+    /// The projects some repo works through a queue, so a project in both sets is reported once.
+    queued_projects: Mutex<HashSet<String>>,
     /// Per project, the stray runs already warned about, so each is logged once per stretch outside the queues.
     strays_logged: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl Host {
+    /// Records that a repo works `project` with or without a queue. The first time a project has both kinds of repo,
+    /// logs that the stray check is off for it, since runs re-parented out of a queue go unseen there.
+    fn note_queue_use(&self, project: &str, queueless: bool) {
+        let (own, other) = if queueless {
+            (&self.queueless_projects, &self.queued_projects)
+        } else {
+            (&self.queued_projects, &self.queueless_projects)
+        };
+        let new = own.lock().unwrap().insert(project.to_string());
+        if new && other.lock().unwrap().contains(project) {
+            tracing::info!(project, "stray check is off: another repo works this project without a queue");
+        }
+    }
+
     /// The shared state for the host settings in the user config's `[factory]`.
     pub fn new(config: &HostConfig) -> Arc<Host> {
         Arc::new(Host { max_sandboxes: config.max_sandboxes, pause_at: config.pause_at.clone(), ..Host::default() })
@@ -211,6 +227,10 @@ struct MergerState {
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
+    /// What the host last said about whether a task's PR head is only a clean merge of the base into the reviewed
+    /// head, keyed by that (reviewed, head) pair: the answer for a pair doesn't change, so a pass's several
+    /// questions about it (the stale check, the gates) cost one round trip (TRAIL-1220).
+    carried: Mutex<HashMap<TaskKey, (String, String, bool)>>,
     /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
     /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
     /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
@@ -301,6 +321,7 @@ impl Factory {
     pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
         self.merger.updating.lock().unwrap().remove(task);
         self.merger.listed.lock().unwrap().remove(task);
+        self.merger.carried.lock().unwrap().remove(task);
     }
 
     /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
@@ -309,6 +330,7 @@ impl Factory {
     pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
         self.merger.updating.lock().unwrap().retain(|k, _| keep.contains(k));
         self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.carried.lock().unwrap().retain(|k, _| keep.contains(k));
     }
 
     /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
@@ -321,6 +343,13 @@ impl Factory {
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
         self.merger.updating.lock().unwrap().contains_key(task)
+    }
+
+    /// Whether the merger holds the files it listed for this task's PR, so a pass at the same head can skip the
+    /// listing (for tests).
+    #[doc(hidden)]
+    pub fn caches_pr_files(&self, task: &TaskKey) -> bool {
+        self.merger.listed.lock().unwrap().contains_key(task)
     }
 
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
@@ -348,9 +377,7 @@ impl Factory {
         targets.sort_by(|a, b| (a.target.priority, &a.target.name).cmp(&(b.target.priority, &b.target.name)));
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
-        if config.repo.queue.is_empty() {
-            host.queueless_projects.lock().unwrap().insert(config.repo.project.clone());
-        }
+        host.note_queue_use(&config.repo.project, config.repo.queue.is_empty());
         let merge_mode = Mutex::new(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));

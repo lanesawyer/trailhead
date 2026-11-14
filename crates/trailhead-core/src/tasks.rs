@@ -699,6 +699,52 @@ impl Store {
         .await
     }
 
+    /// The parent cycles already in the table (the API refuses to build one, but older data may hold them), each as
+    /// the keys of its tasks in parent order, starting from the lowest key. Deleted tasks count, since walks pass
+    /// through them. Cycles that touch a project outside the context's scope are left out.
+    pub async fn parent_cycles(&self, ctx: &Ctx) -> Result<Vec<Vec<String>>> {
+        use std::collections::{HashMap, HashSet};
+        let conn = self.reader()?;
+        let mut rows = conn
+            .query(
+                "SELECT id, key, parent_id, project_id FROM tasks WHERE workspace_id = ?1",
+                [ctx.workspace_id.to_string()],
+            )
+            .await?;
+        // id -> (key, parent id, project id)
+        let mut nodes: HashMap<String, (String, Option<String>, String)> = HashMap::new();
+        while let Some(row) = rows.next().await? {
+            nodes.insert(row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?));
+        }
+        // A task has at most one parent, so a walk up either ends or runs into a cycle (or a walk already done).
+        let mut done: HashSet<&String> = HashSet::new();
+        let mut cycles = Vec::new();
+        for start in nodes.keys() {
+            let mut path: Vec<&String> = Vec::new();
+            let mut at = Some(start);
+            while let Some(id) = at {
+                if done.contains(id) {
+                    break;
+                }
+                if let Some(i) = path.iter().position(|p| *p == id) {
+                    let mut cycle: Vec<&String> = path[i..].to_vec();
+                    let lowest = (0..cycle.len()).min_by_key(|&j| &nodes[cycle[j]].0).unwrap_or(0);
+                    cycle.rotate_left(lowest);
+                    let visible = cycle.iter().all(|c| nodes[*c].2.parse::<Uuid>().is_ok_and(|p| ctx.in_scope(p)));
+                    if visible {
+                        cycles.push(cycle.iter().map(|c| nodes[*c].0.clone()).collect::<Vec<_>>());
+                    }
+                    break;
+                }
+                path.push(id);
+                at = nodes.get(id).and_then(|n| n.1.as_ref()).filter(|p| nodes.contains_key(*p));
+            }
+            done.extend(path);
+        }
+        cycles.sort();
+        Ok(cycles)
+    }
+
     pub async fn get_task(&self, ctx: &Ctx, task: &str) -> Result<Task> {
         let conn = self.reader()?;
         find_task(&conn, ctx, task, false).await

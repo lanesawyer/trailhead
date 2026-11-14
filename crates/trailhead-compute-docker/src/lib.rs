@@ -15,7 +15,7 @@
 //! - A sandbox's way out is the gateway (`gateway.rs`): each sandbox has its own `--internal` network shared only
 //!   with the gateway's container, and egress is the gateway's allowlist for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,9 +106,14 @@ fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
     Err(Error::NotFound("log archive holds no file".into()))
 }
 
+/// Where programs live under the target's `dir`: the supervisor writes there and `logs` reads there.
+fn programs_dir(dir: &str) -> String {
+    format!("{dir}/programs")
+}
+
 /// A program's log under the target's `dir`, quoted for the shell.
 fn program_log(dir: &str, program: &str) -> String {
-    shell_quote(&format!("{dir}/programs/{program}/log"))
+    shell_quote(&format!("{}/{program}/log", programs_dir(dir)))
 }
 
 /// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
@@ -156,6 +161,13 @@ pub fn build(
 
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
+
+/// The supervisor's command line: the programs dir (the one `logs` reads), then `args` (a program name, or none).
+fn supervisor_cmd(args: &[&str]) -> Vec<String> {
+    let mut cmd = vec![SUPERVISE_PATH.to_string(), programs_dir(&target().dir)];
+    cmd.extend(args.iter().map(|a| a.to_string()));
+    cmd
+}
 
 /// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`). A floor: a sandbox with a
 /// big filesystem needs more ([`disk_needed`]).
@@ -323,12 +335,11 @@ impl DockerCompute {
         env
     }
 
-    /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
-    /// already has it.
-    async fn run_container(&self, name: &str, image: &str, fresh: bool, extra_env: Vec<String>) -> Result<()> {
+    /// Creates and starts the sandbox's container from `image`, with the current supervisor uploaded first.
+    async fn run_container(&self, name: &str, image: &str, extra_env: Vec<String>) -> Result<()> {
         let body = ContainerCreateBody {
             image: Some(image.into()),
-            cmd: Some(vec![SUPERVISE_PATH.into()]),
+            cmd: Some(supervisor_cmd(&[])),
             entrypoint: Some(vec![]),
             env: Some([self.sandbox_env(), extra_env].concat()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
@@ -351,11 +362,15 @@ impl DockerCompute {
         };
         let opts = CreateContainerOptions { name: Some(name.into()), ..Default::default() };
         self.docker.create_container(Some(opts), body).await.map_err(docker_err)?;
-        if fresh {
-            let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
-            self.upload(name, "/", tar).await?;
-        }
+        self.upload_supervisor(name).await?;
         self.docker.start_container(name, None).await.map_err(docker_err)
+    }
+
+    /// Puts the current supervisor in the container. A checkpoint holds the one from when it was taken, whose calling
+    /// convention may be older, so every restore and `start` refreshes it.
+    async fn upload_supervisor(&self, name: &str) -> Result<()> {
+        let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
+        self.upload(name, "/", tar).await
     }
 
     async fn upload(&self, name: &str, dir: &str, tar: Vec<u8>) -> Result<()> {
@@ -480,7 +495,20 @@ impl DockerCompute {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
-        Ok(checkpoint_of(&id.0, &self.docker.list_images(Some(opts)).await?))
+        let images = self.docker.list_images(Some(opts)).await?;
+        let containers = ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([("label".to_string(), vec![MARKER.to_string()])])),
+            ..Default::default()
+        };
+        let live: HashSet<String> = self
+            .docker
+            .list_containers(Some(containers))
+            .await?
+            .into_iter()
+            .filter_map(|c| c.labels.and_then(|mut l| l.remove(MARKER)))
+            .collect();
+        Ok(checkpoint_of(&id.0, &images, &live))
     }
 
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
@@ -499,7 +527,7 @@ impl Compute for DockerCompute {
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
         self.attach(&spec.name, &state).await?;
-        match self.run_container(&spec.name, &self.config.image, true, Vec::new()).await {
+        match self.run_container(&spec.name, &self.config.image, Vec::new()).await {
             // Lost a race with another create of the same name.
             Err(Error::Conflict(_)) => {}
             other => other?,
@@ -599,7 +627,7 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false, multi_line).await?;
+        self.run_container(&id.0, &cp.0, multi_line).await?;
         // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
         if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
@@ -613,12 +641,13 @@ impl Compute for DockerCompute {
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
         self.writable()?;
         let name = &id.0;
-        let (code, out) = self.exec(name, None, "id -u; id -g; echo \"$HOME\"").await?;
-        let [uid, gid, home] = out.lines().collect::<Vec<_>>()[..] else {
+        let (code, out) = self.exec(name, None, "id -u; id -g").await?;
+        let [uid, gid] = out.lines().collect::<Vec<_>>()[..] else {
             return Err(Error::Other(format!("sandbox {name}: unexpected identity ({code}): {out}")));
         };
         let (uid, gid) = (parse_id(uid)?, parse_id(gid)?);
-        let dir = format!("{home}/.trailhead/programs/{}", program.name);
+        let programs = programs_dir(&target().dir);
+        let dir = format!("{programs}/{}", program.name);
         let run = run_script(&program.cmd, &program.args);
         let mut files: Vec<(&str, &[u8], u32)> =
             program.files.iter().map(|f| (f.path.as_str(), f.contents.as_ref(), f.mode)).collect();
@@ -643,7 +672,8 @@ impl Compute for DockerCompute {
             return Err(Error::Other(format!("sandbox {name}: moving files into place ({code}): {}", out.trim())));
         }
 
-        self.spawn(name, vec!["setsid".into(), SUPERVISE_PATH.into(), program.name.clone()]).await?;
+        self.upload_supervisor(name).await?;
+        self.spawn(name, [vec!["setsid".to_string()], supervisor_cmd(&[&program.name])].concat()).await?;
         tokio::time::sleep(START_WATCH).await;
         let check = format!("cat {0}/exits; echo ---; tail -n 50 {0}/log", shell_quote(&dir));
         let (_, out) = self.exec(name, None, &check).await?;
@@ -696,7 +726,7 @@ impl Compute for DockerCompute {
             let (_, out) = self.exec(&id.0, None, &format!("tail -n {LOG_LINES} {log}")).await?;
             return Ok(out);
         }
-        let path = format!("{}/programs/{program}/log", target().dir);
+        let path = format!("{}/{program}/log", programs_dir(&target().dir));
         let opts = DownloadFromContainerOptions { path };
         let mut stream = self.docker.download_from_container(&id.0, Some(opts));
         let mut raw = Vec::new();
@@ -816,8 +846,8 @@ fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
 }
 
 /// `images` as `(of, size, name)` tuples for [`pick_checkpoint`], each image named by its first checkpoint tag, or by
-/// its ID when it has none.
-fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)> {
+/// its ID when it has none. `live` names the sandboxes whose containers still exist.
+fn checkpoint_of(sandbox: &str, images: &[ImageSummary], live: &HashSet<String>) -> Option<(u64, String)> {
     let sized = images
         .iter()
         .map(|i| {
@@ -825,7 +855,7 @@ fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)
             (i.labels.get(CHECKPOINT_OF).map(String::as_str), i.size.max(0) as u64, name.clone())
         })
         .collect();
-    pick_checkpoint(sandbox, sized)
+    pick_checkpoint(sandbox, sized, live)
 }
 
 /// The size the disk need follows: the larger of the container's own `fs` size and the checkpoint image's.
@@ -834,12 +864,16 @@ fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> u64 {
 }
 
 /// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
-/// largest of all of them.
-fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
+/// largest of those of sandboxes in `live` (an image whose sandbox is gone must not hold a new one back).
+fn pick_checkpoint(
+    sandbox: &str,
+    images: Vec<(Option<&str>, u64, String)>,
+    live: &HashSet<String>,
+) -> Option<(u64, String)> {
     let largest = |own: bool| {
         images
             .iter()
-            .filter(|(of, _, _)| !own || *of == Some(sandbox))
+            .filter(|(of, _, _)| if own { *of == Some(sandbox) } else { of.is_some_and(|o| live.contains(o)) })
             .max_by_key(|(_, size, _)| *size)
             .map(|(_, size, name)| (*size, name.clone()))
     };
@@ -1152,9 +1186,16 @@ mod tests {
             (Some("sb"), 100, "cp:a".to_string()),
             (Some("sb"), 200, "cp:b".to_string()),
         ];
-        assert_eq!(pick_checkpoint("sb", images.clone()), Some((200, "cp:b".into())));
-        assert_eq!(pick_checkpoint("new", images), Some((900, "cp:old".into())), "falls back to the host's largest");
-        assert_eq!(pick_checkpoint("sb", vec![]), None);
+        let live: HashSet<String> = ["sb", "old", "new"].map(String::from).into();
+        assert_eq!(pick_checkpoint("sb", images.clone(), &live), Some((200, "cp:b".into())));
+        assert_eq!(pick_checkpoint("new", images.clone(), &live), Some((900, "cp:old".into())), "falls back");
+        let gone: HashSet<String> = ["sb", "new"].map(String::from).into();
+        assert_eq!(pick_checkpoint("new", images, &gone), Some((200, "cp:b".into())), "skips removed sandboxes");
+        assert_eq!(pick_checkpoint("sb", vec![], &live), None);
+    }
+
+    fn sb() -> HashSet<String> {
+        HashSet::from(["sb".to_string()])
     }
 
     fn image(id: &str, tags: &[&str], size: i64, of: Option<&str>) -> ImageSummary {
@@ -1171,24 +1212,24 @@ mod tests {
     fn a_checkpoint_image_is_named_by_its_first_checkpoint_tag() {
         let tag = format!("{CHECKPOINT_REPO}:a");
         let images = [image("sha:1", &["other:1", &tag, &format!("{CHECKPOINT_REPO}:b")], 10, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((10, tag)));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((10, tag)));
     }
 
     #[test]
     fn a_checkpoint_image_without_a_matching_tag_is_named_by_its_id() {
         let images = [image("sha:1", &["other:1"], 10, Some("sb")), image("sha:2", &[], 5, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((10, "sha:1".into())));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((10, "sha:1".into())));
     }
 
     #[test]
     fn a_negative_image_size_counts_as_zero() {
         let images = [image("sha:1", &[], -5, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((0, "sha:1".into())));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((0, "sha:1".into())));
     }
 
     #[test]
     fn no_images_means_no_checkpoint() {
-        assert_eq!(checkpoint_of("sb", &[]), None);
+        assert_eq!(checkpoint_of("sb", &[], &sb()), None);
     }
 
     #[test]
@@ -1280,7 +1321,18 @@ mod tests {
     }
 
     #[test]
+    fn the_supervisor_is_given_the_programs_dir_the_logs_read() {
+        let programs = programs_dir(&target().dir);
+        assert_eq!(supervisor_cmd(&[]), vec![SUPERVISE_PATH.to_string(), programs.clone()]);
+        assert_eq!(
+            supervisor_cmd(&["trailhead-daemon"]),
+            vec![SUPERVISE_PATH.to_string(), programs, "trailhead-daemon".into()]
+        );
+    }
+
+    #[test]
     fn a_program_log_is_under_the_target_dir() {
+        assert_eq!(programs_dir(&target().dir), "/home/trailhead/.trailhead/programs");
         assert_eq!(program_log(&target().dir, "it's"), r"'/home/trailhead/.trailhead/programs/it'\''s/log'");
     }
 
