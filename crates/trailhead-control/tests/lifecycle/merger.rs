@@ -1330,3 +1330,18 @@ async fn a_head_updated_from_the_base_is_asked_about_once() {
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.codehost.calls("carries_verdict"), before + 1, "none while the head hasn't moved");
 }
+
+#[tokio::test]
+async fn a_status_comment_posted_anew_when_the_merge_is_announced_is_the_one_recorded() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    let id = r.tracker.task(&key).run.merge.unwrap().comment.unwrap();
+    r.codehost.delete_comment(&pr, id);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::Done);
+    let new = task.run.merge.unwrap().comment.unwrap();
+    assert_ne!(new, id, "the comment posted after the merge is recorded");
+    assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; merged.");
+}
