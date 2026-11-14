@@ -29,17 +29,16 @@ impl Factory {
     /// Sends a PR whose CI failed on its current head back for a rework, and does nothing else: no approving, no
     /// merging, no word on the PR. For a task whose review is owed, whether backed off after an infrastructure failure
     /// (TRAIL-263) or due now, where the gates aren't evaluated but a failed CI needn't wait for the review. True only
-    /// when a rework was requested; one already asked for on this attempt leaves the owed review to its usual handling.
-    pub(crate) async fn rework_if_ci_failed(&self, key: &TaskKey) -> Result<bool> {
+    /// when a rework was requested (the caller's `task` is used as it is, not read again, TRAIL-1241); one already asked for on this attempt leaves the owed review to its usual handling.
+    pub(crate) async fn rework_if_ci_failed(&self, task: &Task) -> Result<bool> {
         let Some(codehost) = &self.codehost else { return Ok(false) };
-        let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(false) };
         if !matches!(task.status, Status::InReview | Status::Approved) {
             return Ok(false);
         }
         let ci = codehost.ci(pr).await?;
         let CiState::Failed { checks } = &ci.state else { return Ok(false) };
-        self.rework_ci_failure(&task, pr, &ci.head, checks).await
+        self.rework_ci_failure(task, pr, &ci.head, checks).await
     }
 
     /// Whether the PR's `head` is only a clean merge of the base branch into the `reviewed` head, so the verdict on
@@ -351,13 +350,17 @@ impl Factory {
                 let mut merged = MergeDecision { message: merged_message.to_string(), ..decision.clone() };
                 push_said(&mut merged.history, merged_message);
                 let body = messages::status_comment(&merged.message, &merged.history);
+                // Said before recording, so a comment `say` had to post anew is the one the record keeps.
+                match self.say(pr, decision.comment, &body).await {
+                    Ok(id) => merged.comment = Some(id),
+                    Err(e) => {
+                        tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
+                    }
+                }
                 if let Err(e) =
                     self.tracker.report(&task.key, RunPatch { merge: Patch::Set(merged), ..RunPatch::default() }).await
                 {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
-                }
-                if let Err(e) = self.say(pr, decision.comment, &body).await {
-                    tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                 }
                 let commit = match codehost.pr_state(pr).await? {
                     PrState::Merged { commit } => commit,
