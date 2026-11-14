@@ -121,6 +121,9 @@ struct Pending {
     /// Attempts that really failed. A resend after the link dropped, or a send the net thread refused for want of a
     /// connection, isn't one.
     failures: u32,
+    /// `RateLimited` answers so far, counted apart from `attempts` so resends over a flaky link don't use up the
+    /// retries a rate limit gets.
+    rate_limits: u32,
     not_before: Option<Instant>,
 }
 
@@ -190,6 +193,7 @@ fn accept(
             stage: Stage::Queued,
             attempts: 0,
             failures: 0,
+            rate_limits: 0,
             not_before: None,
         });
     }
@@ -200,10 +204,11 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
-            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
-            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until its rate-limit answers reach [`MAX_ATTEMPTS`].
+            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].rate_limits + 1 < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
-                let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
+                p.rate_limits += 1;
+                let wait = retry_after.map_or(backoff * p.rate_limits, |after| after.min(MAX_RETRY_AFTER));
                 p.stage = Stage::Queued;
                 p.not_before = Some(Instant::now() + wait);
             }
