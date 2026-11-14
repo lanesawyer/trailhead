@@ -668,8 +668,10 @@ impl Factory {
             // that no longer stands (the PR was pushed to, or a person settled the park) is answered here, and the
             // PR is looked at as it is.
             let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
-            let stale =
-                recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some()) && standing.is_none();
+            // A settled request is answered whatever `reviewed` says: a conflict or CI request doesn't move `reviewed`,
+            // so `last_changes()` can hide one on an attempt not yet reviewed, and a person's settling must still be
+            // answered (TRAIL-466).
+            let stale = recorded.is_some_and(|c| c.settled || task.run.last_changes().is_some()) && standing.is_none();
             let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
             self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
         }
