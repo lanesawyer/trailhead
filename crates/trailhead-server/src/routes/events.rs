@@ -125,7 +125,7 @@ pub(crate) struct RevertBody {
 #[utoipa::path(
     post, path = "/v1/revert", tag = "undo", request_body = RevertBody,
     responses(
-        (status = 200, description = "What was reverted and what was skipped because someone else changed it later. A `since` older than 90 days is clamped to the undo window", body = UndoReport),
+        (status = 200, description = "What was reverted and what was skipped, either because someone else changed it later (`later_event` names that event) or because restoring a task would form a parent cycle (`later_event` is null, the cause is in `reason`). A `since` older than 90 days is clamped to the undo window", body = UndoReport),
         (status = 403, description = "`forbidden`: humans only", body = ErrorBody),
     )
 )]
