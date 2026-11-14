@@ -481,11 +481,16 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
-            entry.factory.status().control(trailhead_factory::ControlState::Stopped);
-            feed.set_stopped(&entry.slug, e.to_string());
+            loop_stopped(&entry.slug, entry.factory.status(), &feed, &e.to_string());
             true
         }
     }
+}
+
+/// Marks a repo whose loop returned an error stopped, on its status board and in the feed.
+fn loop_stopped(slug: &str, board: &trailhead_control::StatusBoard, feed: &surface::Feed, error: &str) {
+    board.control(trailhead_factory::ControlState::Stopped);
+    feed.set_stopped(slug, error.to_string());
 }
 
 /// A target's `Compute` and launch facts.
@@ -1068,6 +1073,22 @@ mod tests {
         let (_, message) = up.snapshot().last_error.unwrap();
         assert!(message.starts_with("loop panicked: "), "{message}");
         assert!(other.snapshot().last_error.is_none());
+        assert_eq!(other.snapshot().control, ControlState::Up);
+    }
+
+    #[test]
+    fn a_loop_that_returned_an_error_is_marked_stopped_on_its_board_and_in_the_feed() {
+        use trailhead_factory::ControlState;
+        let (down, other) = (trailhead_control::StatusBoard::new(), trailhead_control::StatusBoard::new());
+        down.control(ControlState::Up);
+        other.control(ControlState::Up);
+        let feed = super::surface::Feed::new(trailhead_factory::FactoryState::Running);
+        feed.set_boards(vec![("o/n".to_string(), down.clone()), ("o/m".to_string(), other.clone())]);
+        super::loop_stopped("o/n", &down, &feed, "the store is gone");
+        assert_eq!(down.snapshot().control, ControlState::Stopped);
+        let reply = feed.reply();
+        assert_eq!(reply.repos[0].stopped.as_deref(), Some("the store is gone"));
+        assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(other.snapshot().control, ControlState::Up);
     }
 
