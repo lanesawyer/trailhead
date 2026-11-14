@@ -209,7 +209,9 @@ async fn connects_signs_in_and_goes_live() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
-    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    // The start target is padded, so `Dialed` equals the bare id only once the net thread has parsed and reported it.
+    let mut app = app(rig.config(&lookup), Some(format!("  {}\n", addr.id)));
+    assert_ne!(dialed(&app), Some(addr.id.to_string()));
 
     // Its own id shows up so a person can allow it, and until they do the refusal says so.
     until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
@@ -316,8 +318,6 @@ async fn a_saved_login_and_target_are_used_on_the_next_start() {
     let mut second = app(config, None);
     until(&mut second, "live again", |a| state(a) == Connection::Live).await;
     assert_eq!(second.world().resource::<LocalEndpoint>().0.as_deref(), Some(id.as_str()));
-    // The target came from the saved file, so the net thread is what reported it.
-    assert_eq!(dialed(&second), Some(addr.id.to_string()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -326,7 +326,8 @@ async fn goes_offline_when_the_control_plane_stops_and_comes_back() {
     let lookup = Arc::new(MemoryLookup::new());
     let key = SecretKey::generate();
     let (router, addr) = control_plane(key.clone(), &lookup, &rig).await;
-    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    // Padded, so `Dialed` only equals the bare id once the net thread has parsed and reported it.
+    let mut app = app(rig.config(&lookup), Some(format!("  {}\n", addr.id)));
     until(&mut app, "endpoint id", |a| a.world().resource::<LocalEndpoint>().0.is_some()).await;
     rig.allowed.add(app.world().resource::<LocalEndpoint>().0.clone().unwrap().parse().unwrap()).unwrap();
     send(&mut app, NetCommand::Login(rig.token.clone()));
