@@ -893,9 +893,7 @@ pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
     use trailhead_client::http::Error;
     match e {
         Error::Api { error, .. } => error.into(),
-        Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
-        Error::Decode { status, source } => {
-            anyhow::Error::new(source).context(format!("Trailhead answered {status} but the response didn't decode"))
-        }
+        // Display names this layer and source() the cause, so the chain prints each once.
+        e @ (Error::Transport(_) | Error::Decode { .. }) => anyhow::Error::new(e),
     }
 }

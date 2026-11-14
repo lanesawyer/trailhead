@@ -151,6 +151,18 @@ impl Error {
         }
     }
 
+    /// The error and its sources, `a: b: c`, for a place that shows one string: `Display` names only this layer.
+    pub fn chain(&self) -> String {
+        let mut out = self.to_string();
+        let mut next = std::error::Error::source(self);
+        while let Some(s) = next {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            next = s.source();
+        }
+        out
+    }
+
     pub fn status(&self) -> Option<u16> {
         match self {
             Error::Api { status, .. } | Error::Decode { status, .. } => Some(*status),
@@ -162,8 +174,9 @@ impl Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Transport(e) => write!(f, "{e}"),
-            Error::Decode { status, source } => write!(f, "{status} response body didn't decode: {source}"),
+            // The reqwest error is the `source()`, so each layer says only its own part.
+            Error::Transport(_) => write!(f, "request to Trailhead failed"),
+            Error::Decode { status, .. } => write!(f, "{status} response body didn't decode"),
             Error::Api { status, error } => write!(f, "{status} {error}"),
         }
     }
@@ -887,6 +900,7 @@ mod tests {
         let err = Client::new(base, "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Decode { status: 200, .. }), "{err}");
         assert_eq!(err.status(), Some(200));
+        assert_eq!(err.to_string(), "200 response body didn't decode");
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
 
@@ -895,6 +909,7 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let err = Client::new(format!("http://127.0.0.1:{port}"), "t").ready(&ReadyQuery::default()).await.unwrap_err();
         assert!(matches!(err, Error::Transport(_)), "{err}");
+        assert_eq!(err.to_string(), "request to Trailhead failed");
         assert!(std::error::Error::source(&err).is_some_and(|s| s.is::<reqwest::Error>()));
     }
 
