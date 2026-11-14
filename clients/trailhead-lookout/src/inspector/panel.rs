@@ -702,4 +702,65 @@ mod tests {
         settle(&mut app);
         assert_eq!(stamps(&mut app), before);
     }
+
+    #[test]
+    fn changed_human_grades_rebuild_the_grade_pickers_options() {
+        use crate::author::grade_options;
+        use crate::factory::{FactoryItem, FactoryPlugin, FactoryStatus, FactoryUpdate};
+        use trailhead_factory::{ControlState, FactorySnapshot};
+        use trailhead_ui::SelectOptions;
+        use trailhead_wire::ui::RepoSnapshot;
+
+        let mut app = app();
+        app.add_plugins(FactoryPlugin);
+        settle(&mut app);
+        let options = |app: &mut App| {
+            let world = app.world_mut();
+            let fields: Vec<Entity> = world
+                .query::<(Entity, &Edits)>()
+                .iter(world)
+                .filter(|(_, e)| e.field == Field::Grade)
+                .map(|(e, _)| e)
+                .collect();
+            assert_eq!(fields.len(), 1, "the open task has one grade picker");
+            let selects: Vec<Vec<String>> = world
+                .query::<(Entity, &SelectOptions)>()
+                .iter(world)
+                .filter(|(s, _)| {
+                    let mut at = *s;
+                    while let Some(parent) = world.get::<ChildOf>(at) {
+                        at = parent.parent();
+                        if at == fields[0] {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .map(|(_, o)| o.0.clone())
+                .collect();
+            assert_eq!(selects.len(), 1, "the grade picker has one select");
+            selects.into_iter().next().unwrap()
+        };
+        let before = options(&mut app);
+        assert_eq!(before, grade_options(&app.world().resource::<FactoryStatus>().human_grades()));
+
+        let human = vec![Grade::new(1).unwrap(), Grade::new(2).unwrap()];
+        assert_ne!(grade_options(&human), before);
+        let snapshot = FactorySnapshot {
+            control: ControlState::Up,
+            last_error: None,
+            sandboxes: vec![],
+            runs: vec![],
+            holding: None,
+            targets: Vec::new(),
+            human_grades: Some(human.clone()),
+            queue: Vec::new(),
+            usage: Vec::new(),
+            seq: 1,
+        };
+        let repos = vec![RepoSnapshot { repo: "o/r".into(), snapshot }];
+        app.world_mut().write_message(FactoryItem(FactoryUpdate::Snapshot(repos)));
+        settle(&mut app);
+        assert_eq!(options(&mut app), grade_options(&human));
+    }
 }
