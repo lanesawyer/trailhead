@@ -248,3 +248,30 @@ fn values_keep_their_types_and_formats() {
     json(&th, &["ask", "JS-1", "a or b?"]);
     assert_shape(&json(&th, &["answer", "JS-1", "a"]), &comment_shape("question", "a or b?", json!("<timestamp>")));
 }
+
+fn with_keys(mut shape: Value, extra: Value) -> Value {
+    shape.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    shape
+}
+
+#[test]
+fn verdict_handoff_and_renew_keep_their_types_and_formats() {
+    let th = setup();
+
+    let bare = json(&th, &["verdict", "JS-1", "approve", "ok"]);
+    assert_shape(&bare, &with_keys(comment_shape("review", "ok", Value::Null), json!({"verdict": "approve"})));
+
+    let modelled = json(&th, &["verdict", "JS-1", "request-changes", "no", "--model", "m"]);
+    assert_shape(
+        &modelled,
+        &with_keys(comment_shape("review", "no", Value::Null), json!({"verdict": "request_changes", "model": "m"})),
+    );
+
+    th.stdout(&["claim", "JS-1"]);
+    th.stdout(&["handoff", "JS-1", "left off here"]);
+    th.stdout(&["release", "JS-1"]);
+    let claimed = json(&th, &["claim", "JS-1"]);
+    assert_shape(&claimed["handoff"], &comment_shape("handoff", "left off here", Value::Null));
+
+    assert_shape(&json(&th, &["renew", "JS-1"]), &claim_shape());
+}
