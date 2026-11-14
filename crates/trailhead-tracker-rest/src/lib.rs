@@ -101,24 +101,12 @@ impl RestTracker {
     }
 }
 
-/// An error and its sources, `a: b: c`, since `Display` names only the outermost layer.
-fn chain(e: &dyn std::error::Error) -> String {
-    let mut out = e.to_string();
-    let mut next = e.source();
-    while let Some(s) = next {
-        out.push_str(": ");
-        out.push_str(&s.to_string());
-        next = s.source();
-    }
-    out
-}
-
 /// The factory's error for a failed call.
 fn error(e: ApiError) -> Error {
     let ApiError::Api { status, error } = e else {
         return match &e {
-            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {}", chain(&e))),
-            _ => Error::Other(format!("trailhead: {}", chain(&e))),
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {}", e.chain())),
+            _ => Error::Other(format!("trailhead: {}", e.chain())),
         };
     };
     let msg = format!("trailhead {status} {}: {}", error.code, error.message);
@@ -337,6 +325,8 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let cred = Credential { agent: "x".into(), token: "t".into() };
         let err = RestTracker::new(format!("http://127.0.0.1:{port}"), cred).show(&TaskKey("TRAIL-1".into())).await;
-        assert!(matches!(err, Err(Error::Unreachable(_))), "{err:?}");
+        let Err(Error::Unreachable(msg)) = err else { panic!("{err:?}") };
+        let head = "trailhead: request to Trailhead failed: ";
+        assert!(msg.starts_with(head) && msg.len() > head.len(), "the source's text is kept: {msg}");
     }
 }

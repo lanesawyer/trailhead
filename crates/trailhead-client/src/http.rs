@@ -151,6 +151,18 @@ impl Error {
         }
     }
 
+    /// The error and its sources, `a: b: c`, for a place that shows one string: `Display` names only this layer.
+    pub fn chain(&self) -> String {
+        let mut out = self.to_string();
+        let mut next = std::error::Error::source(self);
+        while let Some(s) = next {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            next = s.source();
+        }
+        out
+    }
+
     pub fn status(&self) -> Option<u16> {
         match self {
             Error::Api { status, .. } | Error::Decode { status, .. } => Some(*status),
