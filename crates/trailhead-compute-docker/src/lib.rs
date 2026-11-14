@@ -15,7 +15,7 @@
 //! - A sandbox's way out is the gateway (`gateway.rs`): each sandbox has its own `--internal` network shared only
 //!   with the gateway's container, and egress is the gateway's allowlist for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -495,7 +495,20 @@ impl DockerCompute {
             filters: Some(HashMap::from([("reference".to_string(), filter)])),
             ..Default::default()
         };
-        Ok(checkpoint_of(&id.0, &self.docker.list_images(Some(opts)).await?))
+        let images = self.docker.list_images(Some(opts)).await?;
+        let containers = ListContainersOptions {
+            all: true,
+            filters: Some(HashMap::from([("label".to_string(), vec![MARKER.to_string()])])),
+            ..Default::default()
+        };
+        let live: HashSet<String> = self
+            .docker
+            .list_containers(Some(containers))
+            .await?
+            .into_iter()
+            .filter_map(|c| c.labels.and_then(|mut l| l.remove(MARKER)))
+            .collect();
+        Ok(checkpoint_of(&id.0, &images, &live))
     }
 
     async fn sandbox(&self, name: &str) -> Result<Sandbox> {
@@ -833,8 +846,8 @@ fn multi_line_env(labels: Option<&HashMap<String, String>>) -> Vec<String> {
 }
 
 /// `images` as `(of, size, name)` tuples for [`pick_checkpoint`], each image named by its first checkpoint tag, or by
-/// its ID when it has none.
-fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)> {
+/// its ID when it has none. `live` names the sandboxes whose containers still exist.
+fn checkpoint_of(sandbox: &str, images: &[ImageSummary], live: &HashSet<String>) -> Option<(u64, String)> {
     let sized = images
         .iter()
         .map(|i| {
@@ -842,7 +855,7 @@ fn checkpoint_of(sandbox: &str, images: &[ImageSummary]) -> Option<(u64, String)
             (i.labels.get(CHECKPOINT_OF).map(String::as_str), i.size.max(0) as u64, name.clone())
         })
         .collect();
-    pick_checkpoint(sandbox, sized)
+    pick_checkpoint(sandbox, sized, live)
 }
 
 /// The size the disk need follows: the larger of the container's own `fs` size and the checkpoint image's.
@@ -851,12 +864,16 @@ fn disk_size(fs: u64, checkpoint: Option<&(u64, String)>) -> u64 {
 }
 
 /// The largest of `images` (the sandbox each is a checkpoint of, its size and its name) made by `sandbox`, or else the
-/// largest of all of them.
-fn pick_checkpoint(sandbox: &str, images: Vec<(Option<&str>, u64, String)>) -> Option<(u64, String)> {
+/// largest of those of sandboxes in `live` (an image whose sandbox is gone must not hold a new one back).
+fn pick_checkpoint(
+    sandbox: &str,
+    images: Vec<(Option<&str>, u64, String)>,
+    live: &HashSet<String>,
+) -> Option<(u64, String)> {
     let largest = |own: bool| {
         images
             .iter()
-            .filter(|(of, _, _)| !own || *of == Some(sandbox))
+            .filter(|(of, _, _)| if own { *of == Some(sandbox) } else { of.is_some_and(|o| live.contains(o)) })
             .max_by_key(|(_, size, _)| *size)
             .map(|(_, size, name)| (*size, name.clone()))
     };
@@ -1169,9 +1186,16 @@ mod tests {
             (Some("sb"), 100, "cp:a".to_string()),
             (Some("sb"), 200, "cp:b".to_string()),
         ];
-        assert_eq!(pick_checkpoint("sb", images.clone()), Some((200, "cp:b".into())));
-        assert_eq!(pick_checkpoint("new", images), Some((900, "cp:old".into())), "falls back to the host's largest");
-        assert_eq!(pick_checkpoint("sb", vec![]), None);
+        let live: HashSet<String> = ["sb", "old", "new"].map(String::from).into();
+        assert_eq!(pick_checkpoint("sb", images.clone(), &live), Some((200, "cp:b".into())));
+        assert_eq!(pick_checkpoint("new", images.clone(), &live), Some((900, "cp:old".into())), "falls back");
+        let gone: HashSet<String> = ["sb", "new"].map(String::from).into();
+        assert_eq!(pick_checkpoint("new", images, &gone), Some((200, "cp:b".into())), "skips removed sandboxes");
+        assert_eq!(pick_checkpoint("sb", vec![], &live), None);
+    }
+
+    fn sb() -> HashSet<String> {
+        HashSet::from(["sb".to_string()])
     }
 
     fn image(id: &str, tags: &[&str], size: i64, of: Option<&str>) -> ImageSummary {
@@ -1188,24 +1212,24 @@ mod tests {
     fn a_checkpoint_image_is_named_by_its_first_checkpoint_tag() {
         let tag = format!("{CHECKPOINT_REPO}:a");
         let images = [image("sha:1", &["other:1", &tag, &format!("{CHECKPOINT_REPO}:b")], 10, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((10, tag)));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((10, tag)));
     }
 
     #[test]
     fn a_checkpoint_image_without_a_matching_tag_is_named_by_its_id() {
         let images = [image("sha:1", &["other:1"], 10, Some("sb")), image("sha:2", &[], 5, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((10, "sha:1".into())));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((10, "sha:1".into())));
     }
 
     #[test]
     fn a_negative_image_size_counts_as_zero() {
         let images = [image("sha:1", &[], -5, Some("sb"))];
-        assert_eq!(checkpoint_of("sb", &images), Some((0, "sha:1".into())));
+        assert_eq!(checkpoint_of("sb", &images, &sb()), Some((0, "sha:1".into())));
     }
 
     #[test]
     fn no_images_means_no_checkpoint() {
-        assert_eq!(checkpoint_of("sb", &[]), None);
+        assert_eq!(checkpoint_of("sb", &[], &sb()), None);
     }
 
     #[test]

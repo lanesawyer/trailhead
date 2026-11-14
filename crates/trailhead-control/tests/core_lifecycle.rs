@@ -366,6 +366,7 @@ async fn with_a_queue_only_its_subtasks_run() {
     };
     let handed = r.store.create_task(&r.human, sub).await.unwrap().key;
     r.factory.config.repo.queue = vec![queue.0.clone()];
+    r.factory.config.repo.max_sandboxes = 2;
 
     let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
@@ -509,6 +510,78 @@ async fn requested_changes_past_the_cap_park_on_the_real_engine() {
     assert!(question.body.contains("after 1 review rounds") && question.body.contains("Still wrong."));
 }
 
+/// TRAIL-1203: `reworks` narrows by queue parent in SQL and drops blocked tasks, on the real engine.
+#[tokio::test]
+async fn reworks_under_a_queue_skip_other_tasks_and_blocked_ones_and_list_a_twice_listed_queue_once() {
+    let mut r = rig().await;
+    // Outside any queue, a task a reviewer asked changes of.
+    let outside = r.task("Outside the queue").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    assert!(r.show(&outside).await.changes_requested);
+
+    let queue = r.task("Factory queue").await;
+    let sub = |title: &str| NewTask {
+        project: "TRAIL".into(),
+        title: title.into(),
+        parent: Some(queue.clone()),
+        grade: Some(gr(1)),
+        ..Default::default()
+    };
+    let plain = r.store.create_task(&r.human, sub("Plain rework")).await.unwrap().key;
+    let blocked = r.store.create_task(&r.human, sub("Blocked rework")).await.unwrap().key;
+    r.factory.config.repo.queue = vec![queue.0.clone()];
+    r.factory.config.repo.max_sandboxes = 2;
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    }
+    r.factory.tick().await.unwrap();
+    for key in [&plain, &blocked] {
+        let task = r.show(key).await;
+        assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "{key:?}");
+    }
+
+    // `reworks` is private, so read through `ready`, which lists them with new work.
+    async fn reworks(r: &Rig, queue: &[TaskKey]) -> Vec<TaskKey> {
+        let ready = r.tracker.ready("TRAIL", queue, 50).await.unwrap();
+        ready.into_iter().filter(|t| t.changes_requested).map(|t| t.key).collect()
+    }
+    let all = reworks(&r, &[]).await;
+    assert!(all.contains(&outside) && all.contains(&plain) && all.contains(&blocked), "no queue lists every one");
+
+    let listed = reworks(&r, &[queue.clone(), queue.clone()]).await;
+    assert!(listed.contains(&plain) && listed.contains(&blocked));
+    assert!(!listed.contains(&outside), "a task outside the queue isn't reworked");
+    assert_eq!(listed.len(), 2, "a queue listed twice reads each task once: {listed:?}");
+
+    // An open blocker keeps the rework from starting until it is done.
+    let blocker = r.task("Blocker").await;
+    r.store.add_dependency(&r.human, &blocker.0, &blocked.0).await.unwrap();
+    let listed = reworks(&r, std::slice::from_ref(&queue)).await;
+    assert_eq!(listed, std::slice::from_ref(&plain), "the blocked rework is skipped");
+
+    let done = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &blocker.0, done, None).await.unwrap();
+    let listed = reworks(&r, std::slice::from_ref(&queue)).await;
+    assert_eq!(listed.len(), 2);
+    assert!(listed.contains(&blocked), "a done blocker lets the rework start");
+
+    // The factory itself starts each queue rework once, and leaves the outside one.
+    r.factory.config.repo.queue = vec![queue.0.clone(), queue.0.clone()];
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Again.")));
+    }
+    let ran = r.factory.tick().await.unwrap();
+    let mut started: Vec<_> = ran.iter().map(|(t, _)| t.key.clone()).collect();
+    started.sort_by_key(|k| k.0.clone());
+    let mut want = vec![plain, blocked];
+    want.sort_by_key(|k| k.0.clone());
+    assert_eq!(started, want, "each queue rework starts once, the outside one not at all");
+}
+
 /// Runs a task to a reviewed PR, leaving it in review. Lane has added the factory to the project's reviewers, as the
 /// merger needs, so it can finish a task whose PR merged.
 async fn in_review(r: &Rig, title: &str) -> (TaskKey, trailhead_factory::PrRef) {
@@ -575,12 +648,30 @@ async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chain
     assert!(done.merged.is_empty() && done.closed.is_empty(), "an open PR leaves the task parked");
     assert_eq!(r.show(&key).await.status, Status::NeedsInput);
 
+    let parked_at = r.store.latest_event_id(&r.human).await.unwrap();
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::Done);
+    // The parked task is claimed where it stands and finished: it never passes through `open`, and
+    // nothing releases a claim before the one taken for the close.
+    let filter = trailhead_core::EventFilter {
+        task: Some(trailhead_core::TaskKey(key.0.clone())),
+        after_id: Some(parked_at),
+        ..Default::default()
+    };
+    let events = r.store.list_events(&r.human, filter).await.unwrap();
+    let steps: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e.kind.as_str() {
+            "task.updated" => e.after.as_ref().and_then(|a| a["status"].as_str()).map(|s| format!("status:{s}")),
+            "claim.released" => Some(e.kind.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, ["status:needs_input", "status:in_progress", "claim.released", "status:done"], "{steps:?}");
     assert_eq!(task.run.merged.expect("merge recorded").by, trailhead_factory::MergedBy::Human);
     assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
 }
