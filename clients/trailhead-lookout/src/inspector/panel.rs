@@ -424,6 +424,32 @@ mod tests {
     }
 
     #[test]
+    fn tidying_waits_for_a_change() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
+            ..Default::default()
+        }));
+        app.update();
+        app.update();
+        let e = app.world_mut().spawn(Control::Done).id();
+        app.update();
+        // Slipped in without a change flag: only a quiet frame's skip leaves it alone.
+        let key = (Subject::Task(sid("nope")), Action::Undo);
+        app.world_mut().resource_mut::<Controls>().bypass_change_detection().0.insert(key, e);
+        app.update();
+        assert!(app.world().get_entity(e).is_ok(), "no change, so no tidying");
+        app.world_mut().resource_mut::<Controls>().set_changed();
+        app.update();
+        assert!(app.world().get_entity(e).is_err(), "a change wakes it");
+    }
+    #[test]
     fn the_status_dropdown_shows_words_for_the_api_values() {
         let statuses = vec![Status::NeedsInput, Status::InProgress];
         assert_eq!(status_labels(&statuses), ["Needs Input", "In Progress"]);
