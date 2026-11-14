@@ -1177,7 +1177,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_link_checks_its_token_every_so_many_probes_and_drops_a_revoked_one() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let addr = stub(None).await;
         let (mut net, rx) = net_for(dir.path(), addr).await;
         net.state = Some((Link::Live, None));
         net.token = Some("revoked".into());
@@ -1201,7 +1201,7 @@ mod tests {
     #[tokio::test]
     async fn a_live_link_keeps_an_accepted_token() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(Some(serde_json::json!({"user": {"name": "lane"}}))))).await;
+        let addr = stub(Some(serde_json::json!({"user": {"name": "lane"}}))).await;
         let (mut net, rx) = net_for(dir.path(), addr).await;
         net.state = Some((Link::Live, None));
         net.token = Some("good".into());
@@ -1217,7 +1217,7 @@ mod tests {
     #[tokio::test]
     async fn health_answering_releases_a_not_allowed_hold() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let addr = stub(None).await;
         let (mut net, _rx) = net_for(dir.path(), addr).await;
         net.probe_hold = Some((tokio::time::Instant::now() + Duration::from_secs(60), Reason::NotAllowed));
         net.probe_backoff.refused();
