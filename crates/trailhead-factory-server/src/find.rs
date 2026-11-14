@@ -19,15 +19,22 @@ pub fn config(dir: &Path) -> Result<PathBuf> {
 
 /// The repo the factory works on: the `[factory]` table of `config`, else of the nearest `.trailhead.toml`.
 pub fn repo(config_path: Option<&Path>) -> Result<Repo> {
+    let (_, _, config) = load_config(config_path)?;
+    Ok(config.repo.repo())
+}
+
+/// The factory file's path (`config_path`, else the nearest `.trailhead.toml`), the git remote beside it, and the
+/// `[factory]` settings read from it.
+pub fn load_config(config_path: Option<&Path>) -> Result<(PathBuf, Option<Repo>, trailhead_factory::FactoryConfig)> {
     let path = match config_path {
         Some(path) => path.to_path_buf(),
         None => config(&std::env::current_dir().map_err(Error::backend)?)?,
     };
     let src = std::fs::read_to_string(&path).map_err(|e| Error::at(&path, e))?;
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let remote = remote(&crate::repos::parent(&path));
     let config =
-        trailhead_factory::FactoryConfig::from_repo_file(&src, remote(dir)).map_err(|e| Error::at(&path, e))?;
-    Ok(config.repo.repo())
+        trailhead_factory::FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&path, e))?;
+    Ok((path, remote, config))
 }
 
 /// The owner and name of the GitHub repo that `dir`'s `origin` remote points at.
@@ -90,5 +97,17 @@ mod tests {
         // A tempdir sits under /tmp, which has no .trailhead.toml above it.
         let err = config(dir.path()).unwrap_err().to_string();
         assert!(err.contains("--config"), "{err}");
+    }
+
+    #[test]
+    fn load_config_reads_the_file_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(CONFIG);
+        let src = include_str!("../../../.trailhead.toml")
+            .replace("[factory.repo]", "[factory.repo]\nowner = \"o\"\nname = \"n\"");
+        std::fs::write(&file, src).unwrap();
+        let (path, _, config) = load_config(Some(&file)).unwrap();
+        assert_eq!(path, file);
+        assert_eq!(repo(Some(&file)).unwrap(), config.repo.repo());
     }
 }

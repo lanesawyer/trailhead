@@ -202,15 +202,7 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
 
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
-    let config_path = match &opts.config {
-        Some(path) => path.clone(),
-        None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
-    };
-    let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = repos::parent(&config_path);
-    let remote = find::remote(&repo_dir);
-    let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-    Ok((config_path, remote, config))
+    find::load_config(opts.config.as_deref())
 }
 
 /// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it is
@@ -1035,6 +1027,34 @@ mod tests {
         assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks"]);
         assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
         assert!(super::changed_without_restart(&started, base, &mut warned).is_empty());
+    }
+
+    #[test]
+    fn several_changed_sections_are_listed_in_order() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let started = super::started_baseline(&parse(""));
+        let mut warned = None;
+        // Listed in the order the sections are compared, not the order the file has them.
+        let edited = parse("[egress]\nalways = [\"example.com\"]\n[checks]\nfmt = \"cargo fmt\"");
+        assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks", "egress"]);
+        assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
+    }
+
+    #[test]
+    fn a_follow_up_edit_adding_a_section_warns_again_with_both() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let started = super::started_baseline(&parse(""));
+        let mut warned = None;
+        let first = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert_eq!(super::changed_without_restart(&started, first.clone(), &mut warned), ["checks"]);
+        assert!(super::changed_without_restart(&started, first, &mut warned).is_empty());
+        let second = parse("[checks]\nfmt = \"cargo fmt\"\n[egress]\nalways = [\"example.com\"]");
+        assert_eq!(super::changed_without_restart(&started, second.clone(), &mut warned), ["checks", "egress"]);
+        assert!(super::changed_without_restart(&started, second, &mut warned).is_empty());
     }
 
     #[test]
