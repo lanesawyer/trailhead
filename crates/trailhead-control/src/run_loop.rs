@@ -448,7 +448,6 @@ impl Factory {
             );
             tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
         }
-        *last = Some(holders);
     }
 
     /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
@@ -743,14 +742,18 @@ fn starvation_is_parked_tasks(running: usize, reviewing: usize, others: usize, m
     running <= reviewing && parked_fill_repo_cap(others, max_sandboxes)
 }
 
-/// Updates the last-said holders and returns whether the starvation is to be said now: not with nothing waiting
-/// (which forgets the last warning), and not again for the same holders.
+/// Returns whether the starvation is to be said now: not with nothing waiting (which forgets the last warning), and
+/// not again for the same holders. When it is, records `holders` as the last said.
 fn should_say_starved(last: &mut Option<Vec<(TaskKey, bool)>>, holders: &[(TaskKey, bool)], waiting: usize) -> bool {
     if waiting == 0 {
         *last = None;
         return false;
     }
-    last.as_deref() != Some(holders)
+    if last.as_deref() == Some(holders) {
+        return false;
+    }
+    *last = Some(holders.to_vec());
+    true
 }
 
 /// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
@@ -799,7 +802,6 @@ mod starvation_tests {
         let (a, ab) = (holders(&[("T-1", true)]), holders(&[("T-1", true), ("T-2", true)]));
         let mut last = None;
         assert!(should_say_starved(&mut last, &a, 1));
-        last = Some(a.clone());
         assert!(!should_say_starved(&mut last, &a, 3), "the same holders aren't said again");
         assert!(should_say_starved(&mut last, &ab, 1), "a new set of holders is");
         assert!(should_say_starved(&mut last, &holders(&[("T-1", false)]), 1), "so is a holder no longer parked");
