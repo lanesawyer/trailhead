@@ -312,7 +312,7 @@ impl Factory {
                 if times >= crate::UPDATE_ASKS {
                     tracing::warn!(task = %task.key, pr = %pr.url, times, "the branch update never landed; reworking");
                     self.merger.updating.lock().unwrap().remove(&task.key);
-                    return self.rework_conflict(task, pr, attempt).await;
+                    return self.rework_dropped_update(task, pr, attempt).await;
                 }
                 tracing::warn!(task = %task.key, pr = %pr.url, "the branch update never landed; asking again");
                 asked = times;

@@ -702,6 +702,9 @@ async fn an_update_the_host_keeps_dropping_is_sent_to_rework() {
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.codehost.update_requests(), trailhead_control::UPDATE_ASKS as usize, "no further ask");
     assert_eq!(r.tracker.task(&key).run.conflict_reworks, Some(1), "sent to a conflict rework");
+    let asked = r.tracker.task(&key).run.pending_changes().cloned().expect("a request");
+    assert_eq!(asked.kind, trailhead_factory::RequestKind::Conflict);
+    assert!(asked.body.contains("kept dropping"), "the worker is told the host dropped the update: {}", asked.body);
 }
 
 #[tokio::test]
