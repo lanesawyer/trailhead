@@ -9,7 +9,7 @@
 //!
 //! When the server can't be reached everything here stays as it was, and [`FactoryStatus::link`] says
 //! [`FactoryLink::Unreachable`]. The control plane runs inside the server, so one that isn't running in a live server
-//! (no repos, disabled, starting) says so in the status frame's `control`, which is [`FactoryLink::Control`].
+//! (no repos, disabled, starting, stopped) says so in the status frame's `control`, which is [`FactoryLink::Control`].
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
