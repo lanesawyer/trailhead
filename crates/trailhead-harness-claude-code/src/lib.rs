@@ -473,7 +473,8 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. Don't create nested git repositories in \
              the checkout (no `git init` or `git clone` inside it): the parent's `git add --all` warns about an \
-             embedded repository, or fails if it has no commit. If only a human can answer something \
+             embedded repository, or fails if it has no commit. If you need another repository for reference, clone it into a temporary directory outside \
+             the checkout (e.g. under `/tmp`). If only a human can answer something \
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
              so say what is missing. If the task can't be done for another reason, give failed and say \
