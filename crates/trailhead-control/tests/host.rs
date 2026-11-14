@@ -364,6 +364,16 @@ async fn a_malformed_usage_file_is_replaced_by_the_next_reading() {
 }
 
 #[tokio::test]
+async fn the_snapshot_carries_the_repos_queue() {
+    let compute = FakeCompute::new();
+    let host = pausing_host();
+    let listed = repo("alpha", "queue = [\"TRAIL-102\", \"TRAIL-685\"]", &compute, &host);
+    assert_eq!(listed.factory.status().snapshot().queue, [TaskKey("TRAIL-102".into()), TaskKey("TRAIL-685".into())]);
+    let unlisted = repo("beta", "", &compute, &host);
+    assert!(unlisted.factory.status().snapshot().queue.is_empty());
+}
+
+#[tokio::test]
 async fn the_stray_check_being_off_for_a_project_is_logged_once() {
     let (logs, _capture) = logs::Logs::capture();
     let compute = FakeCompute::new();
