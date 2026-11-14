@@ -39,6 +39,23 @@ extern "C" fn restore_on_sigint(_: libc::c_int) {
     }
 }
 
+/// Installs `restore_on_sigint` and returns the disposition it replaced. Returns `None`, leaving
+/// SIGINT alone, when it was ignored (`nohup`, a background job): Ctrl-C did nothing before, so it must not kill now.
+#[cfg(unix)]
+fn install_sigint_handler() -> Option<libc::sigaction> {
+    // SAFETY: plain `sigaction` calls on zeroed structs; a null `act` only reads the current disposition.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old) != 0 || old.sa_sigaction == libc::SIG_IGN {
+            return None;
+        }
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = restore_on_sigint as extern "C" fn(libc::c_int) as usize;
+        libc::sigemptyset(&mut act.sa_mask);
+        (libc::sigaction(libc::SIGINT, &act, &mut old) == 0).then_some(old)
+    }
+}
+
 impl NoEcho {
     #[cfg(unix)]
     pub fn new() -> Self {
@@ -56,13 +73,13 @@ impl NoEcho {
                 return Self { saved: None, old_sigint: None };
             }
             // Ctrl-C would otherwise kill the process before `Drop` runs and leave echo off.
+            // Write the termios first: the handler may run as soon as it is installed.
             (*HANDLER_TERMIOS.0.get()).write(t);
             HANDLER_ARMED.store(true, std::sync::atomic::Ordering::Release);
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = restore_on_sigint as extern "C" fn(libc::c_int) as usize;
-            libc::sigemptyset(&mut act.sa_mask);
-            let mut old: libc::sigaction = std::mem::zeroed();
-            let old_sigint = (libc::sigaction(libc::SIGINT, &act, &mut old) == 0).then_some(old);
+            let old_sigint = install_sigint_handler();
+            if old_sigint.is_none() {
+                HANDLER_ARMED.store(false, std::sync::atomic::Ordering::Release);
+            }
             Self { saved: Some(t), old_sigint }
         }
     }
@@ -168,6 +185,26 @@ mod tests {
             assert_eq!(libc::WTERMSIG(status), libc::SIGINT);
             assert!(echo_on(master), "echo was not restored");
             libc::close(master);
+        }
+    }
+
+    #[test]
+    fn ignored_sigint_stays_ignored() {
+        // The only test that touches SIGINT's disposition, so nothing races it.
+        // SAFETY: plain `sigaction` calls; the original disposition is put back at the end.
+        unsafe {
+            let mut ign: libc::sigaction = std::mem::zeroed();
+            ign.sa_sigaction = libc::SIG_IGN;
+            libc::sigemptyset(&mut ign.sa_mask);
+            let mut orig: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(libc::SIGINT, &ign, &mut orig), 0);
+
+            assert!(install_sigint_handler().is_none());
+            let mut now: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGINT, std::ptr::null(), &mut now);
+            assert_eq!(now.sa_sigaction, libc::SIG_IGN);
+
+            libc::sigaction(libc::SIGINT, &orig, std::ptr::null_mut());
         }
     }
 
