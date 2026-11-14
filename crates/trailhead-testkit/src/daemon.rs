@@ -43,7 +43,7 @@ pub struct FakeWorkspace {
     /// Whether the agent commits the merge itself: `merge_head` sees none after prepare, but HEAD has the base.
     commits_merge: AtomicBool,
     /// Whether the agent starts the merge itself and commits it in the same session: `merge_head` never sees one, but
-    /// `merged_base` finds the merge commit.
+    /// `merged_base` finds the base's commits that HEAD gained.
     merges_and_commits: AtomicBool,
     /// Whether the agent rebases: the run's starting commit is no longer in HEAD's history.
     rebases: AtomicBool,
