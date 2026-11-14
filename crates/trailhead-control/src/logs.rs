@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use trailhead_factory::logs::{LogLevel, LogLine};
@@ -144,19 +144,11 @@ impl Visit for EventFields {
     }
 }
 
-/// Targets whose events the buffer skips: the transport the log is served over, and the serving path itself. Writing a
-/// line to the stream can make the transport log at debug or trace, and keeping that would feed the log back into itself.
-const TRANSPORT_TARGETS: &[&str] = &[
-    "iroh",
-    "iroh_base",
-    "iroh_relay",
-    "quinn",
-    "quinn_proto",
-    "quinn_udp",
-    "netwatch",
-    "portmapper",
-    "trailhead_wire::ui",
-];
+/// Targets whose debug and trace events the buffer skips: the transport the log is served over. Writing a line to the
+/// stream can make the transport log at debug or trace, and keeping that would feed the log back into itself. Info and
+/// above stay, so real connectivity problems still show.
+const TRANSPORT_TARGETS: &[&str] =
+    &["iroh", "iroh_base", "iroh_relay", "quinn", "quinn_proto", "quinn_udp", "netwatch", "portmapper"];
 
 /// Whether an event's target is one of [`TRANSPORT_TARGETS`] or a module under it.
 fn is_transport_target(target: &str) -> bool {
@@ -234,7 +226,7 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        if is_transport_target(event.metadata().target()) {
+        if *event.metadata().level() >= Level::DEBUG && is_transport_target(event.metadata().target()) {
             return;
         }
         let mut fields = EventFields::default();
@@ -285,14 +277,15 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             tracing::debug!(target: "quinn_proto::connection", "packet sent");
             tracing::trace!(target: "iroh", "tick");
-            tracing::debug!(target: "trailhead_wire::ui", "wrote line");
+            tracing::warn!(target: "quinn_proto", "warn kept");
+            tracing::warn!(target: "trailhead_wire::ui", "ui warn kept");
             tracing::info!(target: "iroh_like_but_not", "kept");
             tracing::info!(target: "trailhead_wire::other", "kept too");
         });
         let (kept, _) = buffer.subscribe();
         assert_eq!(
             kept.iter().map(|l| l.target.as_str()).collect::<Vec<_>>(),
-            ["iroh_like_but_not", "trailhead_wire::other"]
+            ["quinn_proto", "trailhead_wire::ui", "iroh_like_but_not", "trailhead_wire::other"]
         );
     }
 
