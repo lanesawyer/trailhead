@@ -164,6 +164,7 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
             );
         } else {
             assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
+            assert_eq!(r.factory.sandbox_entries(), 0, "a destroyed sandbox's per-sandbox entries are forgotten");
         }
     }
 }
