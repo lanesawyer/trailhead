@@ -925,10 +925,10 @@ async fn a_request_from_an_earlier_attempt_costs_no_host_call() {
     r.tracker.set_status(&key, Status::InReview);
     let (heads, cis) = (r.codehost.calls("head"), r.codehost.calls("ci"));
     r.factory.reconcile().await.unwrap();
-    // Asked only for the review's staleness check (one `head`) and the CI state (`ci`, once to see a failed CI and
-    // once to evaluate), not for the old request's recorded head.
-    assert!(r.codehost.calls("head") <= heads + 1, "{} head lookups", r.codehost.calls("head") - heads);
-    assert!(r.codehost.calls("ci") <= cis + 2, "{} ci lookups", r.codehost.calls("ci") - cis);
+    // Measured for one reconcile: no `head` lookup at all (the old request's recorded head is never asked for, and the
+    // review's staleness check needs none here) and two `ci` lookups for the CI state.
+    assert_eq!(r.codehost.calls("head") - heads, 0, "head lookups");
+    assert_eq!(r.codehost.calls("ci") - cis, 2, "ci lookups");
 }
 
 #[tokio::test(start_paused = true)]
@@ -994,9 +994,10 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_r
     assert_eq!(reviewers, 2, "the round-2 reviewer ran");
 }
 
-/// The reviewer's verdict is recorded but its request never was. The tick finds the conflict gone and leaves the
-/// request alone, since a handoff would answer the verdict (TRAIL-1418), and reconcile takes the verdict up as the
-/// request: the round is counted once, with no second review and no use of the revoked reviewer's name.
+/// The reviewer's verdict is recorded but its request never was. The tick finds the conflict gone and
+/// `settle_gone_conflict` records the verdict as the request, since a handoff would
+/// answer the verdict (TRAIL-1418, TRAIL-1466); reconcile then only confirms the round is counted once, with no
+/// second review and no use of the revoked reviewer's name.
 #[tokio::test(start_paused = true)]
 async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
     let r = conflicted_in_review().await;
@@ -1158,6 +1159,31 @@ async fn a_breach_park_bumps_the_retries_the_reviewer_was_named_from_not_the_cal
     let outcome = r.factory.review(&stale, &pr, attempt, &[]).await.unwrap();
     assert!(matches!(outcome, Outcome::Parked { .. }), "{outcome:?}");
     assert_eq!(r.tracker.task(&key).run.retries, Some(3), "the bump lands on the count the reviewer's name used");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_review_rounds_park_bumps_the_retries_the_reviewer_was_named_from_not_the_callers_snapshot() {
+    let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_review_rounds = 1"));
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    let ran = r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(matches!(ran, Outcome::AwaitingReview { .. }), "{ran:?}");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+
+    // The caller's snapshot is older than the tracker's: the reviewer is named from the tracker's count.
+    let stale = r.tracker.task(&key);
+    let update = trailhead_factory::RunPatch { retries: trailhead_factory::Patch::Set(2), ..Default::default() };
+    r.tracker.report(&key, update).await.unwrap();
+
+    let attempt = stale.run.attempt.unwrap_or(1);
+    let outcome = r.factory.review(&stale, &pr, attempt, &[]).await.unwrap();
+    assert!(matches!(outcome, Outcome::Reviewed { .. }), "{outcome:?}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "the round limit parks the task");
+    assert_eq!(task.run.retries, Some(3), "the bump lands on the count the reviewer's name used");
+    assert!(task.run.changes_requested.as_ref().is_some_and(|c| c.settled));
 }
 
 #[tokio::test(start_paused = true)]

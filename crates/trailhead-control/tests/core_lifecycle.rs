@@ -1863,8 +1863,8 @@ async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent, &rework, &same]);
 }
 
-#[tokio::test]
-async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
+/// A rig whose gate 1 auto-merges (in shadow mode), with a task taken to `Approved` and its PR.
+async fn approved_auto_mergeable() -> (Rig, TaskKey, trailhead_factory::PrRef) {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
     );
@@ -1881,6 +1881,12 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.show(&key).await.status, Status::Approved);
+    (r, key, pr)
+}
+
+#[tokio::test]
+async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
+    let (r, key, pr) = approved_auto_mergeable().await;
 
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
@@ -1893,22 +1899,7 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
 
 #[tokio::test]
 async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
-    let config = format!(
-        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
-    );
-    let r = rig_with(&config).await;
-    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
-    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
-    let new =
-        NewTask { project: "TRAIL".into(), title: "Add a greeting".into(), grade: Some(gr(1)), ..Default::default() };
-    let key = r.store.create_task(&r.human, new).await.unwrap().key;
-    r.harness.push(Role::Worker, Script::new(changes()));
-    r.harness.push(Role::Reviewer, Script::new(approve()));
-    r.factory.tick().await.unwrap();
-    let pr = r.show(&key).await.run.pr.unwrap();
-    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
-    r.factory.reconcile().await.unwrap();
-    assert_eq!(r.show(&key).await.status, Status::Approved);
+    let (r, key, pr) = approved_auto_mergeable().await;
 
     // The intent names the current head, and the head stays put: only the gates change (a grade
     // raised to one that needs a person).

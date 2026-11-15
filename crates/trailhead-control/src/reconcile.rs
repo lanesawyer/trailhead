@@ -356,10 +356,26 @@ impl Factory {
     /// conflicts, then goes through the checks and review again. It counts toward `max_conflict_reworks`, not review
     /// rounds, so a PR that keeps conflicting is parked for a human without using up its reviews (TRAIL-199, TRAIL-221).
     pub(crate) async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::conflict_feedback).await
+    }
+
+    /// Like `rework_conflict`, for a branch update the host kept dropping: no conflict was reported, so the worker
+    /// is told to merge the base in and resolve whatever comes up (TRAIL-1271).
+    pub(crate) async fn rework_dropped_update(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::dropped_update_feedback).await
+    }
+
+    async fn rework_behind(
+        &self,
+        task: &Task,
+        pr: &PrRef,
+        attempt: u32,
+        feedback: fn(&str, &str) -> String,
+    ) -> Result<()> {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
         let base = &self.config.repo.base_branch;
-        let body = messages::conflict_feedback(&pr.url, base);
+        let body = feedback(&pr.url, base);
         tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
