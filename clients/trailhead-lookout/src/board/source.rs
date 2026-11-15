@@ -157,6 +157,28 @@ mod tests {
     use crate::sync::{Snapshot, SyncItem};
 
     #[test]
+    fn queue_keys_prefer_the_reported_queues_and_fall_back_to_the_authoring_parent() {
+        use crate::factory::RepoState;
+        let state = |queue: &[&str]| RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: queue.iter().map(ToString::to_string).collect(),
+            last_error: None,
+            human_grades: None,
+            holding: None,
+            usage: Vec::new(),
+        };
+        let authoring = Authoring { queue: "TRAIL-1".into(), ..Default::default() };
+        let mut factory = FactoryStatus::default();
+        assert_eq!(queue_keys(&authoring, None), ["TRAIL-1"], "no factory: the authoring parent");
+        assert_eq!(queue_keys(&authoring, Some(&factory)), ["TRAIL-1"], "no repos: the authoring parent");
+        factory.repos.insert("o/a".into(), state(&[]));
+        assert_eq!(queue_keys(&authoring, Some(&factory)), ["TRAIL-1"], "no reported queue: the authoring parent");
+        factory.repos.insert("o/b".into(), state(&["TRAIL-102", "TRAIL-685"]));
+        factory.repos.insert("o/c".into(), state(&["OPS-3"]));
+        assert_eq!(queue_keys(&authoring, Some(&factory)), ["TRAIL-102", "TRAIL-685", "OPS-3"]);
+    }
+
+    #[test]
     fn an_expired_claim_is_not_a_holder() {
         let live = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-16T00:00:00Z"}))]);
         let gone = typed::<Claim>(vec![claim_json(json!({"task_id": "t103", "expires_at": "2026-10-14T00:00:00Z"}))]);

@@ -816,6 +816,23 @@ mod scope_env_tests {
         assert_eq!(vars.len(), 2);
         let expected = ["/run/user/1000/systemd/private", "/run/user/1000/bus"].map(std::path::PathBuf::from);
         assert_eq!(seen.into_inner(), expected);
+        // Cron with the caller's own bus address: the runtime directory comes from `scope_env`, the bus from the
+        // caller's variable.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let vars = scope_env_probed(
+            None,
+            os("unix:path=/x/bus"),
+            1000,
+            |_| true,
+            |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                p.ends_with("bus")
+            },
+        )
+        .unwrap();
+        assert_eq!(vars, vec![("XDG_RUNTIME_DIR", "/run/user/1000".into())]);
+        let expected = ["/run/user/1000/systemd/private", "/x/bus"].map(std::path::PathBuf::from);
+        assert_eq!(seen.into_inner(), expected);
         // Cron with no manager answering: unscoped.
         assert_eq!(probed(None, None, &|_| false), None);
     }
