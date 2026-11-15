@@ -151,7 +151,13 @@ pub fn repos_text(status: &FactoryStatus) -> String {
 
 /// Every queue task the factory works, one per line, or the one new tasks go under until a status has listed them.
 pub fn queues_text(authoring: &Authoring, status: &FactoryStatus, tasks: &[Task]) -> String {
-    let mut queues = status.queues();
+    let mut queues: Vec<String> = Vec::new();
+    let pinned = authoring.pinned.then(|| authoring.queue.clone());
+    for queue in pinned.into_iter().chain(status.queues()) {
+        if !queues.contains(&queue) {
+            queues.push(queue);
+        }
+    }
     if queues.is_empty() {
         queues.push(authoring.queue.clone());
     }
@@ -314,7 +320,7 @@ fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local
 fn factory_page(commands: &mut Commands, page: Entity) {
     commands.spawn_scene(value(Value::Status, "Status")).insert(ChildOf(page));
     commands.spawn_scene(value(Value::Repos, "Repos it serves")).insert(ChildOf(page));
-    commands.spawn_scene(value(Value::Queue, "Queue task")).insert(ChildOf(page));
+    commands.spawn_scene(value(Value::Queue, "Queue tasks")).insert(ChildOf(page));
 }
 
 /// A tab was picked: select it and show its page.
@@ -642,6 +648,13 @@ mod tests {
             queues_text(&authoring, &status, &tasks),
             "TRAIL-102: 1 not closed, 2 in all\nTRAIL-9: 0 not closed, 0 in all"
         );
+        let pinned = Authoring { queue: "TRAIL-9".into(), pinned: true, ..Authoring::default() };
+        assert_eq!(
+            queues_text(&pinned, &status, &tasks),
+            "TRAIL-9: 0 not closed, 0 in all\nTRAIL-102: 1 not closed, 2 in all"
+        );
+        let pinned = Authoring { queue: "TRAIL-7".into(), pinned: true, ..Authoring::default() };
+        assert!(queues_text(&pinned, &status, &tasks).starts_with("TRAIL-7 (not loaded)\nTRAIL-102"));
     }
 
     #[test]
