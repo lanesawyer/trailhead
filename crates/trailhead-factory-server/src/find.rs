@@ -39,6 +39,8 @@ pub fn load_config(config_path: Option<&Path>) -> Result<(PathBuf, Option<Repo>,
 
 /// The owner and name of the GitHub repo that `dir`'s `origin` remote points at.
 pub fn remote(dir: &Path) -> Option<Repo> {
+    #[cfg(test)]
+    let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
     let out =
         std::process::Command::new("git").arg("-C").arg(dir).args(["remote", "get-url", "origin"]).output().ok()?;
     out.status.success().then(|| parse_remote(String::from_utf8_lossy(&out.stdout).trim())).flatten()
