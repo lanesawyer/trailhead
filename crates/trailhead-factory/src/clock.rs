@@ -24,4 +24,12 @@ mod tests {
         let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
         assert!((unix_now() - wall).abs() <= 1);
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn paused_it_follows_the_tokio_clock() {
+        let before = unix_now();
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        let moved = unix_now() - before;
+        assert!((moved - 3600).abs() <= 1, "moved by {moved}s");
+    }
 }

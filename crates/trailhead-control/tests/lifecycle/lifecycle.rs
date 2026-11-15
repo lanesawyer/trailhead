@@ -24,6 +24,13 @@ async fn a_profile_selects_the_scripted_harness_by_adapter_name() {
     assert_eq!(r.codehost.prs().len(), 1);
 }
 
+#[test]
+fn an_unknown_adapter_is_rejected_when_the_config_loads() {
+    let err = load_selecting(CONFIG).unwrap_err().to_string();
+    assert!(err.contains("unknown adapter `claude-code`"), "{err}");
+    assert!(err.contains(trailhead_testkit::SCRIPTED), "{err}");
+}
+
 #[tokio::test]
 async fn spec_to_reviewed_pr_then_human_merge() {
     let r = rig();
@@ -1607,7 +1614,7 @@ async fn a_park_that_fails_still_keeps_the_backoff() {
 async fn a_daemon_that_errors_after_a_run_that_finished_at_once_still_records_the_spend() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Finished before the drop", "");
-    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).no_yield());
     r.daemon.fail_runs_midway(1, "connection lost");
     let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     assert!(err.to_string().contains("connection lost"), "{err}");
