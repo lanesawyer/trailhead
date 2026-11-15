@@ -63,6 +63,7 @@ The CLI prints one terse line per task; add `--json` for full detail. MCP answer
 
 ## Etiquette
 
+- **Check for duplicates first.** Before filing a task, look for one with the same title: `ls --title "..."` or `list_tasks` with `title` (exact match, ignoring case and surrounding space). `create_task`/`add` also returns `possible_duplicates` for similar titles; check those before carrying on.
 - **Scope.** Follow-ups, bugs and ideas you notice become new tasks, not part of the current one. To get help on your own task, create a subtask that blocks it (`add --blocks KEY-3`, or `create_task` with `blocks`); your task becomes ready again when the subtask is done.
 - **Changes requested** is computed, not a status: an `in_review` task whose newest review verdict is `request_changes` with no handoff after it (`trailhead show` says `in_review (changes requested)`). Claim it like any `in_review` task, fix what the review asked, and finish with a handoff, which answers the review.
 - **Blocked tasks** can't be claimed (`blocked_by` lists what's unfinished). Pick something else or work on a blocker.
