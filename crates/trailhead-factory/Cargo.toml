@@ -13,6 +13,14 @@ description = "Trailhead factory: domain types, daemon contract, the five plugin
 [lints]
 workspace = true
 
+[features]
+default = ["rust", "python", "node", "go"]
+# Programming-language support (`crate::language`): each is one `Language` and nothing else names the language.
+rust = []
+python = []
+node = []
+go = []
+
 [dependencies]
 trailhead-model.workspace = true
 async-trait.workspace = true
