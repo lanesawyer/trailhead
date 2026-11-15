@@ -105,8 +105,8 @@ impl RestTracker {
 fn error(e: ApiError) -> Error {
     let ApiError::Api { status, error } = e else {
         return match &e {
-            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {e}")),
-            _ => Error::Other(format!("trailhead: {e}")),
+            ApiError::Transport(t) if t.is_connect() => Error::Unreachable(format!("trailhead: {}", e.chain())),
+            _ => Error::Other(format!("trailhead: {}", e.chain())),
         };
     };
     let msg = format!("trailhead {status} {}: {}", error.code, error.message);
@@ -325,6 +325,8 @@ mod tests {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let cred = Credential { agent: "x".into(), token: "t".into() };
         let err = RestTracker::new(format!("http://127.0.0.1:{port}"), cred).show(&TaskKey("TRAIL-1".into())).await;
-        assert!(matches!(err, Err(Error::Unreachable(_))), "{err:?}");
+        let Err(Error::Unreachable(msg)) = err else { panic!("{err:?}") };
+        let head = "trailhead: request to Trailhead failed: ";
+        assert!(msg.starts_with(head) && msg.len() > head.len(), "the source's text is kept: {msg}");
     }
 }

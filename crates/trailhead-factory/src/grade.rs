@@ -484,7 +484,11 @@ mod tests {
             ..file("b/uv.lock", FileStatus::Renamed, 1)
         };
         assert_eq!(grader(&r).grade(Some(gr(1)), &[moved]).grade, gr(4));
+        let groups = "@@ -9,6 +9,8 @@\n [package.dev-dependencies]\n dev = [\n+    { name = \"pytest\" },\n ]\n [package.optional-dependencies]\n+extra = [\n+    { name = \"x\" },\n+]\n [package.metadata.requires-dev]\n+dev = [{ name = \"pytest\", specifier = \">=8\" }]";
+        assert_eq!(grade("uv.lock", groups), gr(1));
         for bad in [
+            "+dev = [{ name = \"x\", git = \"https://x\" }]",
+            "+wheels = [{ url = \"https://x\" }]",
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
             "+    { name = \"x\", index = \"https://x/simple\" },",

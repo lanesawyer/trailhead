@@ -34,10 +34,26 @@ impl Language for Python {
 }
 
 /// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
-/// `requires-dist`. Only the keys that narrow an already-locked dependency are allowed (`name`, `specifier`, `marker`,
-/// `extra`, `extras`); a table that says where to fetch from, or carries a `source` or `version`, is a new source.
+/// `requires-dist`, and in the dev groups and extras (`dev = [`, `[package.metadata.requires-dev]`). Only the keys that
+/// narrow an already-locked dependency are allowed (`name`, `specifier`, `marker`, `extra`, `extras`); a table that says
+/// where to fetch from, or carries a `source` or `version`, is a new source.
 fn uv_line_ok(line: &str) -> bool {
-    matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]") || uv_entry_ok(line)
+    const HEADERS: [&str; 4] = [
+        "[package.metadata]",
+        "[package.dev-dependencies]",
+        "[package.optional-dependencies]",
+        "[package.metadata.requires-dev]",
+    ];
+    if line == "]" || HEADERS.contains(&line) || uv_entry_ok(line) {
+        return true;
+    }
+    // `dependencies = [`, `requires-dist = [`, and a dev group or extra's own name (`dev = [`, `"my.extra" = [`),
+    // alone on its line or, as `requires-dev` writes it, with its entry inline. Only entries are accepted, so an
+    // opener for another list (`wheels = [`) still can't smuggle a source in.
+    let Some((name, rest)) = line.split_once(" = [") else { return false };
+    let name = name.trim_matches('"');
+    let name_ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    name_ok && (rest.is_empty() || rest.strip_suffix(']').is_some_and(|inner| uv_entry_ok(inner.trim())))
 }
 
 /// Whether `line` is one inline table whose keys are all known and whose first is `name`, however it is spaced.
