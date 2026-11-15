@@ -146,7 +146,7 @@ pub(super) enum CardPart {
 }
 
 /// Which tool button of a card an entity is, so a changed card keeps the buttons it still has.
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ToolKind {
     Edit,
     Comment,
@@ -331,6 +331,9 @@ fn sync_tools(
     commands: &mut Commands,
 ) {
     let mut wanted: Vec<ToolKind> = card.actions.iter().map(ToolKind::of).collect();
+    if card.holder.is_some() {
+        wanted.push(ToolKind::Holder);
+    }
     if card.pr.is_some() {
         wanted.push(ToolKind::Pull);
     }
@@ -531,6 +534,29 @@ mod in_place_tests {
         assert!(texts(&mut app, shell).contains(&"holder".to_string()));
         let mut tools = app.world_mut().query::<&ToolKind>();
         assert_eq!(tools.iter(app.world()).count(), 2);
+    }
+
+    #[test]
+    fn a_held_card_with_a_pr_keeps_its_tools_when_it_changes() {
+        let mut app = app();
+        let mut first = card("old", &[], vec![CardAction::Edit]);
+        first.holder = Some(HolderLink { id: "a1".into(), name: "claude".into() });
+        first.pr = Some(PrLink { label: "#1".into(), url: "https://example.com/1".into() });
+        let shell = app.world_mut().spawn(BoardCard(first.clone())).id();
+        settle(&mut app);
+        let tools = |app: &mut App| {
+            let mut q = app.world_mut().query::<(Entity, &ToolKind)>();
+            let mut all: Vec<_> = q.iter(app.world()).map(|(e, k)| (e, *k)).collect();
+            all.sort_by_key(|(e, _)| *e);
+            all
+        };
+        let before = tools(&mut app);
+        assert_eq!(before.len(), 3);
+        let mut next = first;
+        next.title = "new".into();
+        app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 = next;
+        settle(&mut app);
+        assert_eq!(tools(&mut app), before, "Inspect and Pull stay, the same entities");
     }
 
     #[test]
