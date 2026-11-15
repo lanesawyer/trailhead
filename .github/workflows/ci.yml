@@ -90,6 +90,25 @@ jobs:
       - run: cargo clippy --profile ci -p trailhead-ui -p trailhead-lookout --all-targets --locked -- -D warnings
       - run: cargo test --profile ci -p trailhead-ui -p trailhead-lookout --locked
 
+  # The daemon is released as a static musl binary (release.yml). Build it here so a dependency that breaks the musl
+  # build (aws-lc-sys, ring) fails the PR, not the release after the tag is pushed.
+  daemon-musl:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The profiles live in the root Cargo.toml, which rust-cache's own key ignores. Without this a profile change
+          # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
+          key: ${{ hashFiles('Cargo.toml') }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --profile ci --locked -p trailhead-daemon --bin trailhead-daemon --target x86_64-unknown-linux-musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
   package:
     runs-on: ubuntu-latest
     steps:
