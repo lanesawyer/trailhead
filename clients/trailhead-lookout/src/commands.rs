@@ -8,8 +8,9 @@
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
 //! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
-//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] it is reported failed (a rate
-//! limit is handed back as `RateLimited`) rather than tried forever.
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] failures, or once a
+//! rate-limited command has been sent that many times in all, it is reported failed (a rate limit is handed back as
+//! `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,10 @@ use trailhead_client::http::{Call, Client};
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
 
-/// How many times a command is sent before it is reported failed.
+/// Caps real failures: a command is reported failed after this many. A send the net thread refused with
+/// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries: a
+/// `RateLimited` answer is retried only while the command has been sent fewer than this many times in all, counting
+/// every send (including those two kinds), before `RateLimited` is handed back.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The longest the outbox waits on a `Retry-After` before sending again.
@@ -200,7 +204,10 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
-            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
+            // A rate limit for an earlier attempt: a later one is in flight, and requeuing would send a third beside it.
+            Ok(Outcome::RateLimited { .. }) if outbox.pending[at].attempts != reply.attempt => {}
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until the attempts run
+            // out.
             Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
                 let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));

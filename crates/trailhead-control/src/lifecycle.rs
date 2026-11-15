@@ -139,8 +139,10 @@ impl Factory {
             };
             let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
-            // to open: it resumes from it when the remote has it (TRAIL-751).
-            let resume = !rework && task.run.released.is_some();
+            // to open: it resumes from it when the remote has it (TRAIL-751). `started` clears `released`, so an
+            // attempt that fails before preparing would lose the marker: any earlier run counts too (TRAIL-1291). A
+            // run that never pushed finds no branch on the remote and starts fresh.
+            let resume = !rework && (task.run.released.is_some() || task.run.started.is_some());
             let (sandbox, setup_failure) = self
                 .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
                 .await?;
@@ -222,8 +224,9 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
-    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: reconcile
-    /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
+    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: a parked
+    /// task's sandbox is otherwise left alone, so that loses the suspended state, which beats leaving it reachable.
+    /// If the destroy fails too the sandbox is `Stuck`: reconcile destroys it, and the status board shows it broken.
     pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
         let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
         tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
@@ -232,6 +235,7 @@ impl Factory {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
+        self.forget_sandbox(&sandbox.id);
         BreachedSandbox::Destroyed
     }
 
