@@ -27,7 +27,7 @@ pub struct Refetch;
 
 /// Asks the server for the task `key` in full.
 pub async fn fetch(api: &Client, key: &str) -> Result<Box<TaskDetail>, String> {
-    api.show_task(&TaskKey(key.to_string())).await.map(Box::new).map_err(|e| e.to_string())
+    api.show_task(&TaskKey(key.to_string())).await.map(Box::new).map_err(|e| e.chain())
 }
 
 /// The selected task in full. It changes only when the selection or the answer does, so a view that rebuilds on its

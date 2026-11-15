@@ -493,13 +493,13 @@ async fn conflict_markers_added_since_the_start_are_found_in_any_file() {
     git(&dir, &["commit", "--quiet", "-m", "one"]);
     let ws = GitWorkspace::new(&dir);
     let start = ws.head().await.unwrap();
-    assert!(ws.conflict_markers(&start).await.unwrap().is_empty());
+    assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty());
 
     std::fs::write(dir.join("a.md"), "a\n=======\n").unwrap();
-    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "a rule alone isn't a marker");
+    assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty(), "a rule alone isn't a marker");
     std::fs::write(dir.join("a.md"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n").unwrap();
     std::fs::write(dir.join("new.toml"), ">>>>>>> main\n").unwrap();
-    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["a.md", "new.toml"]);
+    assert_eq!(ws.conflict_markers(&start, "main").await.unwrap(), ["a.md", "new.toml"]);
 }
 
 #[tokio::test]
@@ -526,12 +526,12 @@ async fn conflict_markers_the_merged_in_side_already_has_are_not_the_agents() {
     let start = ws.head().await.unwrap();
 
     git(&dir, &["merge", "--quiet", "--no-ff", "--no-commit", "main"]);
-    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "uncommitted merge");
+    assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty(), "uncommitted merge");
     std::fs::write(dir.join("pr.txt"), "<<<<<<< HEAD\n").unwrap();
-    assert_eq!(ws.conflict_markers(&start).await.unwrap(), ["pr.txt"]);
+    assert_eq!(ws.conflict_markers(&start, "main").await.unwrap(), ["pr.txt"]);
     std::fs::write(dir.join("pr.txt"), "pr\n").unwrap();
     git(&dir, &["commit", "--quiet", "-am", "merge"]);
-    assert!(ws.conflict_markers(&start).await.unwrap().is_empty(), "committed merge");
+    assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty(), "committed merge");
 }
 
 #[tokio::test]
@@ -837,4 +837,31 @@ async fn merged_base_sees_a_fast_forward_to_the_base() {
     agent_git(&dir, &["merge", "--quiet", "--no-edit", "origin/main"]);
     assert_eq!(ws.head().await.unwrap(), rev(&dir, "origin/main"));
     assert_eq!(ws.merged_base(&start, "main").await.unwrap(), Some(rev(&dir, "origin/main")));
+}
+
+#[tokio::test]
+async fn conflict_markers_the_base_added_are_not_the_agents_after_a_fast_forward() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("work");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "--quiet", "-b", "main"]);
+    git(&dir, &["config", "user.email", "a@b.c"]);
+    git(&dir, &["config", "user.name", "t"]);
+    std::fs::write(dir.join("a.md"), "a\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "one"]);
+    git(&dir, &["checkout", "--quiet", "-b", "pr"]);
+    git(&dir, &["checkout", "--quiet", "main"]);
+    std::fs::write(dir.join("doc.md"), ">>>>>>> quoted\n").unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "--quiet", "-m", "base"]);
+    git(&dir, &["update-ref", "refs/remotes/origin/main", "main"]);
+    git(&dir, &["checkout", "--quiet", "pr"]);
+    let ws = GitWorkspace::new(&dir);
+    let start = ws.head().await.unwrap();
+
+    git(&dir, &["merge", "--quiet", "--ff-only", "origin/main"]);
+    assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty(), "fast-forward");
+    std::fs::write(dir.join("a.md"), "<<<<<<< HEAD\n").unwrap();
+    assert_eq!(ws.conflict_markers(&start, "main").await.unwrap(), ["a.md"]);
 }

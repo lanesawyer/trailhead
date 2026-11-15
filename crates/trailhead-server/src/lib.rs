@@ -180,6 +180,17 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
             cfg.creds.save(creds::Cred::User, &secret)?;
         }
     }
+    match store.parent_cycles(&ctx).await {
+        Ok(cycles) => {
+            for cycle in cycles {
+                tracing::warn!(
+                    "parent cycle in the database: {}; unparent one of them (`trailhead update <key> --parent none`)",
+                    cycle.join(" -> ")
+                );
+            }
+        }
+        Err(e) => tracing::warn!("couldn't check for parent cycles: {e}"),
+    }
     Ok((store, ctx))
 }
 

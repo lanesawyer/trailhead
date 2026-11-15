@@ -21,7 +21,7 @@ use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
 use crate::board::View;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
-use crate::factory::FactoryStatus;
+use crate::factory::{FactoryStatus, project_of};
 use crate::form::{self, FormState};
 use crate::inspector::{OpenComposer, Selection, Subject};
 use crate::mirror::Mirrored;
@@ -153,11 +153,6 @@ impl Open {
         };
         Open { draft }
     }
-}
-
-/// The project a key belongs to: `TRAIL` for `TRAIL-102`.
-fn project_of(key: &str) -> Option<&str> {
-    key.rsplit_once('-').map(|(project, _)| project).filter(|p| !p.is_empty())
 }
 
 /// The factory's queue tasks in `project`: the one `LOOKOUT_QUEUE` pins first, then those the factory reports.
@@ -1379,6 +1374,54 @@ mod tests {
         app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.queued = true;
         settle(&mut app);
         assert!(!shown(&mut app, FormPart::Parent) && shown(&mut app, FormPart::Grade));
+    }
+
+    #[test]
+    fn the_queue_switch_and_dropdown_follow_the_draft_through_other() {
+        let mut app = ui_app();
+        report_queues(&mut app, &["TRAIL-102", "TRAIL-685"]);
+        open_new_form(&mut app);
+        settle(&mut app);
+        let switch = app.world_mut().query_filtered::<Entity, With<QueueToggle>>().single(app.world()).unwrap();
+        let select = {
+            let world = app.world_mut();
+            let mut q = world.query::<(Entity, &FormChoice)>();
+            q.iter(world).find(|(_, c)| **c == FormChoice::Queue).unwrap().0
+        };
+        let checked = |app: &App| app.world().get::<bevy::ui::Checked>(switch).is_some();
+        let shown = |app: &mut App, part: FormPart| {
+            let world = app.world_mut();
+            let mut parts = world.query::<(&FormPart, &Node)>();
+            parts.iter(world).find(|(p, _)| **p == part).map(|(_, n)| n.display != Display::None).unwrap()
+        };
+        let selected = |app: &mut App| {
+            bevy::ecs::system::RunSystemOnce::run_system_once(app.world_mut(), move |edit: SelectEdit| {
+                edit.selected_rows(select)
+            })
+            .unwrap()
+        };
+
+        app.world_mut().trigger(ValueChange { source: switch, value: true, is_final: true });
+        settle(&mut app);
+        let queue = draft(&app).queue;
+        let at = ["TRAIL-102", "TRAIL-685"].iter().position(|q| *q == queue).unwrap();
+        assert!(checked(&app) && shown(&mut app, FormPart::QueuePick));
+        assert_eq!(selected(&mut app), [at]);
+
+        // "other…" is the last row: the draft leaves the queue, the switch goes off and the parent search shows.
+        app.world_mut().trigger(Picked { entity: select, index: 2 });
+        settle(&mut app);
+        assert!(!draft(&app).queued);
+        assert!(!checked(&app), "the switch follows the draft");
+        assert!(shown(&mut app, FormPart::Parent) && shown(&mut app, FormPart::Search));
+        assert_eq!(selected(&mut app), [2], "other… is what the dropdown shows");
+
+        // Switching queueing back on selects the queue again, not "other…".
+        app.world_mut().trigger(ValueChange { source: switch, value: true, is_final: true });
+        settle(&mut app);
+        assert!(draft(&app).queued && checked(&app));
+        assert!(!shown(&mut app, FormPart::Parent));
+        assert_eq!(selected(&mut app), [at]);
     }
 
     #[test]

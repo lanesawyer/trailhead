@@ -43,6 +43,9 @@ pub enum FactoryUpdate {
     /// The control plane refused the status request (this Lookout isn't allowed, or it serves no status). Carries the
     /// message to show, which says when the next try is.
     Refused(String),
+    /// The control plane was dropped (a Connect that failed): forget everything heard from it, so the map doesn't
+    /// show the old factory's state, and say it is unreachable.
+    Reset,
 }
 
 /// A [`FactoryUpdate`] on its way to the mirror.
@@ -120,6 +123,11 @@ pub struct FactoryStatus {
 #[derive(Resource, Debug, Default)]
 pub struct FactoryActivity(pub VecDeque<Activity>);
 
+/// The project a key belongs to: `TRAIL` for `TRAIL-102`; none when nothing precedes the dash.
+pub fn project_of(key: &str) -> Option<&str> {
+    key.rsplit_once('-').map(|(project, _)| project).filter(|p| !p.is_empty())
+}
+
 impl FactoryStatus {
     /// What the map shows beside the factory: why it isn't running, or that the server can't be reached.
     pub fn label(&self) -> String {
@@ -146,7 +154,7 @@ impl FactoryStatus {
     /// tasks go to those repos' gates. When none of them has said (or no repo works the project, or it isn't known),
     /// every repo's.
     pub fn human_grades_for(&self, project: Option<&str>) -> Vec<Grade> {
-        let in_project = |key: &String| key.rsplit_once('-').is_some_and(|(p, _)| Some(p) == project);
+        let in_project = |key: &String| project.is_some() && project_of(key) == project;
         let said: Vec<&Vec<Grade>> = self
             .repos
             .values()
@@ -455,6 +463,25 @@ pub fn apply_factory(
                     status.control = state;
                 }
             }
+            FactoryUpdate::Reset => {
+                for (_, (e, _)) in mirror.campsites.drain() {
+                    commands.entity(e).despawn();
+                }
+                for (_, (e, _)) in mirror.runs.drain() {
+                    commands.entity(e).despawn();
+                }
+                mirror.seqs.clear();
+                if !status.repos.is_empty() {
+                    status.repos.clear();
+                }
+                if status.control.is_some() {
+                    status.control = None;
+                }
+                if !activity.0.is_empty() {
+                    activity.0.clear();
+                }
+                set_link(&mut status, FactoryLink::Unreachable);
+            }
             FactoryUpdate::Unreachable => set_link(&mut status, FactoryLink::Unreachable),
             FactoryUpdate::TooOld(why) => set_link(&mut status, FactoryLink::TooOld(why)),
             FactoryUpdate::Refused(why) => set_link(&mut status, FactoryLink::Refused(why)),
@@ -686,6 +713,12 @@ mod tests {
         // A project no repo works gets every repo's.
         assert_eq!(status.human_grades_for(Some("NONE")), [g(2), g(3), g(4)]);
         assert_eq!(status.human_grades_for(None), [g(2), g(3), g(4)]);
+        // A queue key with no project prefix belongs to no project, not to the empty one.
+        status.repos.insert("o/c".into(), repo("-5", vec![g(2)]));
+        assert_eq!(status.human_grades_for(Some("")), [g(2), g(3), g(4)]);
+        assert_eq!(project_of("-5"), None);
+        assert_eq!(project_of("TRAIL-5"), Some("TRAIL"));
+        status.repos.remove("o/c");
         // A project whose repo hasn't said gets what the others say.
         status.repos.get_mut("o/b").unwrap().human_grades = None;
         assert_eq!(status.human_grades_for(Some("OTHER")), [g(3), g(4)]);
@@ -718,6 +751,21 @@ mod tests {
         send(&mut app, [snapshot(1, vec![])]);
         assert_eq!(app.world().resource::<FactoryStatus>().label(), "factory running");
         assert!(campsites(&mut app).is_empty());
+    }
+
+    #[test]
+    fn a_reset_forgets_the_old_factory() {
+        let mut app = app();
+        send(&mut app, [snapshot(3, vec![sandbox("a", SandboxState::Idle)])]);
+        assert_eq!(campsites(&mut app).len(), 1);
+        send(&mut app, [FactoryUpdate::Reset]);
+        let status = app.world().resource::<FactoryStatus>();
+        assert_eq!(status.label(), "unreachable");
+        assert!(status.repos.is_empty());
+        assert!(campsites(&mut app).is_empty());
+        // A later snapshot starts afresh, whatever its sequence.
+        send(&mut app, [snapshot(1, vec![sandbox("b", SandboxState::Idle)])]);
+        assert_eq!(campsites(&mut app), [("b".into(), SandboxState::Idle)]);
     }
 
     #[test]

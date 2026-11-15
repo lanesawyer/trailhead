@@ -106,9 +106,14 @@ fn log_from_archive(raw: &[u8], lines: usize) -> Result<String> {
     Err(Error::NotFound("log archive holds no file".into()))
 }
 
+/// Where programs live under the target's `dir`: the supervisor writes there and `logs` reads there.
+fn programs_dir(dir: &str) -> String {
+    format!("{dir}/programs")
+}
+
 /// A program's log under the target's `dir`, quoted for the shell.
 fn program_log(dir: &str, program: &str) -> String {
-    shell_quote(&format!("{dir}/programs/{program}/log"))
+    shell_quote(&format!("{}/{program}/log", programs_dir(dir)))
 }
 
 /// A Docker sandbox's launch facts: connectors and model calls both go through the gateway container.
@@ -156,6 +161,13 @@ pub fn build(
 
 const SUPERVISE: &str = include_str!("supervise.sh");
 const SUPERVISE_PATH: &str = "/opt/trailhead/supervise";
+
+/// The supervisor's command line: the programs dir (the one `logs` reads), then `args` (a program name, or none).
+fn supervisor_cmd(args: &[&str]) -> Vec<String> {
+    let mut cmd = vec![SUPERVISE_PATH.to_string(), programs_dir(&target().dir)];
+    cmd.extend(args.iter().map(|a| a.to_string()));
+    cmd
+}
 
 /// The least free disk, in bytes, a run may start with (`DockerConfig::min_free_bytes`). A floor: a sandbox with a
 /// big filesystem needs more ([`disk_needed`]).
@@ -323,12 +335,11 @@ impl DockerCompute {
         env
     }
 
-    /// Creates and starts the sandbox's container from `image`. A fresh image gets the supervisor first; a checkpoint
-    /// already has it.
-    async fn run_container(&self, name: &str, image: &str, fresh: bool, extra_env: Vec<String>) -> Result<()> {
+    /// Creates and starts the sandbox's container from `image`, with the current supervisor uploaded first.
+    async fn run_container(&self, name: &str, image: &str, extra_env: Vec<String>) -> Result<()> {
         let body = ContainerCreateBody {
             image: Some(image.into()),
-            cmd: Some(vec![SUPERVISE_PATH.into()]),
+            cmd: Some(supervisor_cmd(&[])),
             entrypoint: Some(vec![]),
             env: Some([self.sandbox_env(), extra_env].concat()),
             labels: Some(HashMap::from([(MARKER.to_string(), name.to_string())])),
@@ -351,11 +362,15 @@ impl DockerCompute {
         };
         let opts = CreateContainerOptions { name: Some(name.into()), ..Default::default() };
         self.docker.create_container(Some(opts), body).await.map_err(docker_err)?;
-        if fresh {
-            let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
-            self.upload(name, "/", tar).await?;
-        }
+        self.upload_supervisor(name).await?;
         self.docker.start_container(name, None).await.map_err(docker_err)
+    }
+
+    /// Puts the current supervisor in the container. A checkpoint holds the one from when it was taken, whose calling
+    /// convention may be older, so every restore and `start` refreshes it.
+    async fn upload_supervisor(&self, name: &str) -> Result<()> {
+        let tar = tar_of(&[("opt/trailhead/supervise", SUPERVISE.as_bytes(), 0o755, 0, 0)], &["opt/trailhead"])?;
+        self.upload(name, "/", tar).await
     }
 
     async fn upload(&self, name: &str, dir: &str, tar: Vec<u8>) -> Result<()> {
@@ -512,7 +527,7 @@ impl Compute for DockerCompute {
         let state = State { labels: spec.labels.clone(), egress: spec.egress.clone() };
         self.write_state(&spec.name, &state).await?;
         self.attach(&spec.name, &state).await?;
-        match self.run_container(&spec.name, &self.config.image, true, Vec::new()).await {
+        match self.run_container(&spec.name, &self.config.image, Vec::new()).await {
             // Lost a race with another create of the same name.
             Err(Error::Conflict(_)) => {}
             other => other?,
@@ -612,7 +627,7 @@ impl Compute for DockerCompute {
             _ => {}
         }
         self.attach(&id.0, &state).await?;
-        self.run_container(&id.0, &cp.0, false, multi_line).await?;
+        self.run_container(&id.0, &cp.0, multi_line).await?;
         // The container no longer runs from the previous checkpoint, which checkpoint() couldn't remove while it did.
         if let Err(e) = self.prune_checkpoints(id, Some(cp)).await {
             tracing::warn!(sandbox = %id.0, error = %e, "couldn't remove old checkpoints after the restore");
@@ -626,12 +641,13 @@ impl Compute for DockerCompute {
     async fn start(&self, id: &SandboxId, program: &Program) -> Result<()> {
         self.writable()?;
         let name = &id.0;
-        let (code, out) = self.exec(name, None, "id -u; id -g; echo \"$HOME\"").await?;
-        let [uid, gid, home] = out.lines().collect::<Vec<_>>()[..] else {
+        let (code, out) = self.exec(name, None, "id -u; id -g").await?;
+        let [uid, gid] = out.lines().collect::<Vec<_>>()[..] else {
             return Err(Error::Other(format!("sandbox {name}: unexpected identity ({code}): {out}")));
         };
         let (uid, gid) = (parse_id(uid)?, parse_id(gid)?);
-        let dir = format!("{home}/.trailhead/programs/{}", program.name);
+        let programs = programs_dir(&target().dir);
+        let dir = format!("{programs}/{}", program.name);
         let run = run_script(&program.cmd, &program.args);
         let mut files: Vec<(&str, &[u8], u32)> =
             program.files.iter().map(|f| (f.path.as_str(), f.contents.as_ref(), f.mode)).collect();
@@ -656,7 +672,8 @@ impl Compute for DockerCompute {
             return Err(Error::Other(format!("sandbox {name}: moving files into place ({code}): {}", out.trim())));
         }
 
-        self.spawn(name, vec!["setsid".into(), SUPERVISE_PATH.into(), program.name.clone()]).await?;
+        self.upload_supervisor(name).await?;
+        self.spawn(name, [vec!["setsid".to_string()], supervisor_cmd(&[&program.name])].concat()).await?;
         tokio::time::sleep(START_WATCH).await;
         let check = format!("cat {0}/exits; echo ---; tail -n 50 {0}/log", shell_quote(&dir));
         let (_, out) = self.exec(name, None, &check).await?;
@@ -709,7 +726,7 @@ impl Compute for DockerCompute {
             let (_, out) = self.exec(&id.0, None, &format!("tail -n {LOG_LINES} {log}")).await?;
             return Ok(out);
         }
-        let path = format!("{}/programs/{program}/log", target().dir);
+        let path = format!("{}/{program}/log", programs_dir(&target().dir));
         let opts = DownloadFromContainerOptions { path };
         let mut stream = self.docker.download_from_container(&id.0, Some(opts));
         let mut raw = Vec::new();
@@ -1304,7 +1321,18 @@ mod tests {
     }
 
     #[test]
+    fn the_supervisor_is_given_the_programs_dir_the_logs_read() {
+        let programs = programs_dir(&target().dir);
+        assert_eq!(supervisor_cmd(&[]), vec![SUPERVISE_PATH.to_string(), programs.clone()]);
+        assert_eq!(
+            supervisor_cmd(&["trailhead-daemon"]),
+            vec![SUPERVISE_PATH.to_string(), programs, "trailhead-daemon".into()]
+        );
+    }
+
+    #[test]
     fn a_program_log_is_under_the_target_dir() {
+        assert_eq!(programs_dir(&target().dir), "/home/trailhead/.trailhead/programs");
         assert_eq!(program_log(&target().dir, "it's"), r"'/home/trailhead/.trailhead/programs/it'\''s/log'");
     }
 
