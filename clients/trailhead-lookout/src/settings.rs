@@ -151,7 +151,13 @@ pub fn repos_text(status: &FactoryStatus) -> String {
 
 /// Every queue task the factory works, one per line, or the one new tasks go under until a status has listed them.
 pub fn queues_text(authoring: &Authoring, status: &FactoryStatus, tasks: &[Task]) -> String {
-    let mut queues = status.queues();
+    let mut queues: Vec<String> = Vec::new();
+    let pinned = authoring.pinned.then(|| authoring.queue.clone());
+    for queue in pinned.into_iter().chain(status.queues()) {
+        if !queues.contains(&queue) {
+            queues.push(queue);
+        }
+    }
     if queues.is_empty() {
         queues.push(authoring.queue.clone());
     }
@@ -185,6 +191,8 @@ struct StartPage(Option<Page>);
 fn on_open_logs(
     open: On<OpenLogs>,
     modals: Query<(), With<SettingsModal>>,
+    strips: Query<Entity, With<SettingsStrip>>,
+    tabs: Query<(Entity, &SettingsTab)>,
     mut filter: ResMut<LogFilter>,
     mut start: ResMut<StartPage>,
     mut commands: Commands,
@@ -193,6 +201,10 @@ fn on_open_logs(
     if modals.is_empty() {
         start.0 = Some(Page::Logs);
         open_modal(&mut commands, SettingsModal);
+    } else if let Some(strip) = strips.iter().next() {
+        // Already open: pick the tab as a click would, so on_tab shows the page.
+        let logs = tabs.iter().find(|(_, t)| t.0 == Page::Logs).map(|(e, _)| e);
+        commands.trigger(ValueChange { source: strip, value: logs, is_final: true });
     }
 }
 
@@ -515,6 +527,22 @@ mod tests {
         assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
     }
     #[test]
+    fn opening_the_logs_while_settings_is_open_switches_to_the_logs_tab() {
+        let mut app = app();
+        open(&mut app);
+        assert_eq!(shown(&mut app), [Page::General]);
+        app.world_mut().trigger(OpenLogs("TRAIL-9".into()));
+        settle(&mut app);
+        assert_eq!(modals(&mut app), 1);
+        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-9"));
+        let world = app.world_mut();
+        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
+        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
+        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+    }
+
+    #[test]
     fn escape_closes_it() {
         let mut app = app();
         open(&mut app);
@@ -642,6 +670,13 @@ mod tests {
             queues_text(&authoring, &status, &tasks),
             "TRAIL-102: 1 not closed, 2 in all\nTRAIL-9: 0 not closed, 0 in all"
         );
+        let pinned = Authoring { queue: "TRAIL-9".into(), pinned: true, ..Authoring::default() };
+        assert_eq!(
+            queues_text(&pinned, &status, &tasks),
+            "TRAIL-9: 0 not closed, 0 in all\nTRAIL-102: 1 not closed, 2 in all"
+        );
+        let pinned = Authoring { queue: "TRAIL-7".into(), pinned: true, ..Authoring::default() };
+        assert!(queues_text(&pinned, &status, &tasks).starts_with("TRAIL-7 (not loaded)\nTRAIL-102"));
     }
 
     #[test]

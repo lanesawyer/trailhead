@@ -1025,3 +1025,32 @@ async fn a_rework_runs_in_its_recorded_sandbox_and_restores_a_warm_stale_one_to_
     assert_eq!(stale.labels.get(label::TASK), None, "no longer held for the task");
     assert_eq!(r.compute.restores("trailhead-w2").len(), 1, "restored to its warm checkpoint");
 }
+
+#[tokio::test]
+async fn a_task_holding_two_sandboxes_is_looked_up_once_per_starvation_check() {
+    let r = rig_on(
+        &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"),
+        Host::new(&Default::default()),
+    );
+    let parked = r.tracker.add_task("TRAIL", "Parks", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
+
+    // A second sandbox held for the same task fills the repo's cap of two.
+    let labels = trailhead_factory::Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/trailhead".into()),
+        (label::TASK.into(), parked.0.clone()),
+        (label::ROLE.into(), "worker".into()),
+    ]);
+    r.compute.create(&SandboxSpec { name: "trailhead-w2".into(), labels, egress: Default::default() }).await.unwrap();
+    let waiting = r.tracker.add_task("TRAIL", "Waits", "");
+    let (logs, _capture) = Logs::capture();
+
+    let before = r.tracker.shows(&parked);
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open, "no place while both sandboxes are held");
+    assert_eq!(r.tracker.shows(&parked), before + 1, "one lookup for the task, not one per sandbox");
+    assert!(logs.text().contains("held by parked tasks"), "both parked sandboxes still count: {}", logs.text());
+}

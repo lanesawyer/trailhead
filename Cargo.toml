@@ -35,7 +35,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 directories = "6"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-anyhow = "1"
+anyhow = "1.0.96"
 async-trait = "0.1"
 toml = "1"
 trailhead-log = { path = "crates/trailhead-log", version = "0.1.0" }
