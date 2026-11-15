@@ -108,11 +108,21 @@ impl CredStore {
         Ok(Saved::File(path))
     }
 
+    /// Removes the keyring entry and the file copy. Whether either existed; an error only for a file that exists but
+    /// can't be removed.
+    pub fn remove(&self, cred: Cred) -> std::io::Result<bool> {
+        let in_keyring = self.entry(cred).is_some_and(|e| e.delete_credential().is_ok());
+        let in_file = match std::fs::remove_file(self.file(cred)) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => return Err(e),
+        };
+        Ok(in_keyring || in_file)
+    }
+
     #[cfg(test)]
     fn delete(&self, cred: Cred) {
-        if let Some(e) = self.entry(cred) {
-            let _ = e.delete_credential();
-        }
+        let _ = self.remove(cred);
     }
 }
 
@@ -126,6 +136,16 @@ mod tests {
         let b = CredStore { config_dir: "/tmp/b".into(), keyring: true };
         assert_ne!(a.service(), b.service());
         assert_eq!(a.service(), format!("trailhead:{}", std::path::absolute("/tmp/a").unwrap().display()));
+    }
+
+    #[test]
+    fn remove_deletes_the_file_and_says_whether_anything_was_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CredStore { config_dir: dir.path().into(), keyring: false };
+        assert!(!store.remove(Cred::Secret("x")).unwrap());
+        store.save(Cred::Secret("x"), "s").unwrap();
+        assert!(store.remove(Cred::Secret("x")).unwrap());
+        assert!(store.read(Cred::Secret("x")).is_none());
     }
 
     #[test]

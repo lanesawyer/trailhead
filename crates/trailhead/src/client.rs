@@ -524,17 +524,37 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
     let uid = std::fs::metadata("/proc/self").ok()?.uid();
     let xdg = std::env::var_os("XDG_RUNTIME_DIR");
     let dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
-    let vars = scope_env(xdg.as_deref(), dbus.as_deref(), uid, |dir| {
-        std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid)
-    })?;
-    // A runtime directory doesn't mean a manager: probe its bus before choosing the scoped mode.
+    scope_env_probed(
+        xdg,
+        dbus,
+        uid,
+        |dir| std::fs::metadata(dir).is_ok_and(|m| m.is_dir() && m.uid() == uid),
+        |socket| std::os::unix::net::UnixStream::connect(socket).is_ok(),
+    )
+}
+
+/// True when a server started from here would get its own scope, so `server restart` can fix a shared one.
+pub fn can_start_scoped() -> bool {
+    current_scope_env().is_some()
+}
+
+/// `scope_env`, then a probe: a runtime directory doesn't mean a manager, so when its sockets can be named and
+/// none of them `connects`, the answer is `None` (unscoped).
+fn scope_env_probed(
+    xdg: Option<std::ffi::OsString>,
+    dbus: Option<std::ffi::OsString>,
+    uid: u32,
+    run_dir_is_ours: impl Fn(&std::path::Path) -> bool,
+    connects: impl Fn(&std::path::Path) -> bool,
+) -> Option<Vec<(&'static str, std::ffi::OsString)>> {
+    let vars = scope_env(xdg.as_deref(), dbus.as_deref(), uid, run_dir_is_ours)?;
     let var = |name: &str, own: Option<std::ffi::OsString>| {
         vars.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone()).or(own)
     };
     let runtime = var("XDG_RUNTIME_DIR", xdg)?;
     let address = var("DBUS_SESSION_BUS_ADDRESS", dbus);
     match manager_sockets(std::path::Path::new(&runtime), address.as_deref()) {
-        Some(sockets) if !sockets.iter().any(|s| std::os::unix::net::UnixStream::connect(s).is_ok()) => None,
+        Some(sockets) if !sockets.iter().any(|s| connects(s)) => None,
         _ => Some(vars),
     }
 }
@@ -767,6 +787,57 @@ mod scope_env_tests {
     }
 
     #[test]
+    fn probe_chooses_scoped_only_when_a_manager_answers() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        let probed = |xdg, dbus, connects: &dyn Fn(&std::path::Path) -> bool| {
+            scope_env_probed(xdg, dbus, 1000, |_| true, connects)
+        };
+        // No socket connects: unscoped.
+        assert_eq!(probed(os("/run/user/1000"), None, &|_| false), None);
+        // The private socket alone is enough.
+        let private = |p: &std::path::Path| p.ends_with("systemd/private");
+        assert_eq!(probed(os("/run/user/1000"), None, &private), Some(vec![]));
+        // An unprobeable address is taken as usable.
+        let vars = probed(os("/run/user/1000"), os("unix:abstract=/tmp/dbus-1"), &|_| false);
+        assert_eq!(vars, Some(vec![]));
+        // Cron: the merged variables are probed and returned.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let vars = scope_env_probed(
+            None,
+            None,
+            1000,
+            |_| true,
+            |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                p.ends_with("bus")
+            },
+        )
+        .unwrap();
+        assert_eq!(vars.len(), 2);
+        let expected = ["/run/user/1000/systemd/private", "/run/user/1000/bus"].map(std::path::PathBuf::from);
+        assert_eq!(seen.into_inner(), expected);
+        // Cron with the caller's own bus address: the runtime directory comes from `scope_env`, the bus from the
+        // caller's variable.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let vars = scope_env_probed(
+            None,
+            os("unix:path=/x/bus"),
+            1000,
+            |_| true,
+            |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                p.ends_with("bus")
+            },
+        )
+        .unwrap();
+        assert_eq!(vars, vec![("XDG_RUNTIME_DIR", "/run/user/1000".into())]);
+        let expected = ["/run/user/1000/systemd/private", "/x/bus"].map(std::path::PathBuf::from);
+        assert_eq!(seen.into_inner(), expected);
+        // Cron with no manager answering: unscoped.
+        assert_eq!(probed(None, None, &|_| false), None);
+    }
+
+    #[test]
     fn no_run_user_dir_of_ours_means_unscoped() {
         assert_eq!(scope_env(None, None, 1000, |_| false), None);
     }
@@ -839,9 +910,7 @@ pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
     use trailhead_client::http::Error;
     match e {
         Error::Api { error, .. } => error.into(),
-        Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
-        Error::Decode { status, source } => {
-            anyhow::Error::new(source).context(format!("Trailhead answered {status} but the response didn't decode"))
-        }
+        // Display names this layer and source() the cause, so the chain prints each once.
+        e @ (Error::Transport(_) | Error::Decode { .. }) => anyhow::Error::new(e),
     }
 }

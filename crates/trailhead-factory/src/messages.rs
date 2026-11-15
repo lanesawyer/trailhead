@@ -576,6 +576,16 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
     )
 }
 
+/// What a worker is told when the host kept dropping a branch update it was asked for, so no conflict was reported.
+pub fn dropped_update_feedback(pr_url: &str, base: &str) -> String {
+    format!(
+        "{pr_url} is behind `{base}`, and the host kept dropping the update that would bring it up to date without \
+         saying why, so there may be no conflict at all. The base branch is already being merged into your \
+         checkout, uncommitted. Resolve whatever conflicts come up, if any, keeping what both sides intended; \
+         don't discard either side's changes or rebase. Then run the checks and finish."
+    )
+}
+
 /// Whether the base branch was merged into a PR after its review, and what is known of CI before that merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AfterUpdate {

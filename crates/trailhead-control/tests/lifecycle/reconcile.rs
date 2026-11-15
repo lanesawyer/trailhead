@@ -58,6 +58,11 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
     );
     let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
     assert_eq!(names, ["trailhead-w1"], "the pooled sandbox stays, holding the parked task");
+    let board: Vec<String> = factory.status().snapshot().sandboxes.into_iter().map(|s| s.name).collect();
+    assert!(
+        !board.iter().any(|n| n == "trail-99-a1" || n == "trail-1-a1"),
+        "destroyed orphans leave the board: {board:?}"
+    );
     assert_eq!(r.tracker.task(&crashed).status, Status::Open);
     assert!(r.tracker.is_revoked("factory/trail-1-a1"));
     assert_eq!(r.tracker.task(&unreviewed).run.reviewed, Some(1));

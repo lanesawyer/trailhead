@@ -259,7 +259,7 @@ impl NetHandle {
                 let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = event_tx.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(e.to_string()))));
+                        report_unreachable(&event_tx, e.to_string());
                         return;
                     }
                 };
@@ -400,6 +400,13 @@ struct Net {
     timings: SyncTimings,
 }
 
+/// The net thread can't start (no runtime, no endpoint): go `Offline` and say nothing is dialed, so the
+/// Connection page doesn't keep showing the CLI or saved target as dialed.
+fn report_unreachable(events: &mpsc::Sender<NetEvent>, error: String) {
+    let _ = events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(error))));
+    let _ = events.send(NetEvent::Dialed(None));
+}
+
 async fn run(
     config: NetConfig,
     target: Option<String>,
@@ -409,7 +416,7 @@ async fn run(
     let endpoint = match bind(&config).await {
         Ok(e) => e,
         Err(e) => {
-            let _ = events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(format!("no endpoint: {e}")))));
+            report_unreachable(&events, format!("no endpoint: {e}"));
             return;
         }
     };
@@ -696,6 +703,7 @@ impl Net {
         let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
+        let _ = self.events.send(NetEvent::Factory(FactoryUpdate::Reset));
         self.stop_sync();
         self.token = None;
         self.pasted = None;
@@ -1017,6 +1025,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_thread_that_cannot_start_goes_offline_and_clears_the_dialed_target() {
+        let (tx, rx) = mpsc::channel();
+        report_unreachable(&tx, "boom".into());
+        assert!(
+            matches!(rx.try_recv(), Ok(NetEvent::State(Link::Offline, Some(Reason::Unreachable(e)))) if e == "boom")
+        );
+        assert!(matches!(rx.try_recv(), Ok(NetEvent::Dialed(None))));
+    }
+
+    #[test]
     fn too_old_message_names_only_the_op() {
         let u = trailhead_wire::ui::Unsupported {
             got: serde_json::json!({"op": "logs", "task": "x".repeat(500)}),
@@ -1047,7 +1065,7 @@ mod tests {
     }
 
     /// What `/v1/me` answers on the stub: `None` is a 401, `Some` the JSON of an identity.
-    type Me = Arc<Mutex<Option<serde_json::Value>>>;
+    type Me = Option<serde_json::Value>;
 
     /// A stub of the server behind the tunnel: `/v1/health` answers, `/v1/me` as `me` says.
     async fn stub(me: Me) -> SocketAddr {
@@ -1055,7 +1073,7 @@ mod tests {
         let app = Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({})) })).route(
             "/v1/me",
             get(move || {
-                let answer = me.lock().unwrap().clone();
+                let answer = me.clone();
                 async move {
                     match answer {
                         Some(identity) => (StatusCode::OK, Json(identity)),
@@ -1118,7 +1136,7 @@ mod tests {
     /// Runs the refusal sequence for a token the stub turns down in the way `refused` names.
     async fn refusal_sequence(me: Option<serde_json::Value>, refused: Reason) {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(me))).await;
+        let addr = stub(me).await;
         let (mut net, rx) = net_for(dir.path(), addr).await;
         let offline = |reason: Reason| (Link::Offline, Some(reason));
         let connecting = (Link::Syncing, Some(Reason::Dialing));
@@ -1166,7 +1184,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_the_probe_resets_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let addr = stub(None).await;
         let (mut net, _rx) = net_for(dir.path(), addr).await;
         net.token = Some("saved".into());
         net.check().await;
@@ -1174,5 +1192,57 @@ mod tests {
         net.release_probe();
         assert!(net.probe_due());
         assert_eq!(net.probe_backoff.refused(), Duration::from_secs(10), "back to the base gap");
+    }
+
+    #[tokio::test]
+    async fn a_live_link_checks_its_token_every_so_many_probes_and_drops_a_revoked_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (mut net, rx) = net_for(dir.path(), addr).await;
+        net.state = Some((Link::Live, None));
+        net.token = Some("revoked".into());
+        net.resume.hold_for_test();
+
+        // Until the last probe of the round, health alone answers and nothing changes.
+        for _ in 1..TOKEN_CHECK_EVERY {
+            net.check().await;
+            assert!(states(&rx).is_empty());
+            assert!(net.token.is_some());
+            assert!(net.resume.is_held());
+        }
+        // The probe that is due asks /v1/me, which turns the token down.
+        net.check().await;
+        assert_eq!(states(&rx), [(Link::Offline, Some(Reason::TokenRejected))]);
+        assert!(net.token.is_none());
+        assert!(!net.resume.is_held());
+        assert_eq!(net.live_probes, 0);
+    }
+
+    #[tokio::test]
+    async fn a_live_link_keeps_an_accepted_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(Some(serde_json::json!({"user": {"name": "lane"}}))).await;
+        let (mut net, rx) = net_for(dir.path(), addr).await;
+        net.state = Some((Link::Live, None));
+        net.token = Some("good".into());
+        net.resume.hold_for_test();
+        for _ in 0..TOKEN_CHECK_EVERY {
+            net.check().await;
+        }
+        assert!(states(&rx).is_empty());
+        assert_eq!(net.token.as_deref(), Some("good"));
+        assert!(net.resume.is_held());
+    }
+
+    #[tokio::test]
+    async fn health_answering_releases_a_not_allowed_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (mut net, _rx) = net_for(dir.path(), addr).await;
+        net.probe_hold = Some((tokio::time::Instant::now() + Duration::from_secs(60), Reason::NotAllowed));
+        net.probe_backoff.refused();
+        net.check().await;
+        assert!(net.probe_hold.is_none());
+        assert!(net.probe_due());
     }
 }
