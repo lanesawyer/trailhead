@@ -139,7 +139,7 @@ impl Workspace for FakeWorkspace {
         Ok(!self.abandons_merge.load(Ordering::SeqCst))
     }
 
-    async fn conflict_markers(&self, _start: &str) -> Result<Vec<String>> {
+    async fn conflict_markers(&self, _start: &str, _base: &str) -> Result<Vec<String>> {
         Ok(self.markers.lock().unwrap().clone())
     }
 

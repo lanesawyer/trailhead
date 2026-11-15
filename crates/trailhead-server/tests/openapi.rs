@@ -162,7 +162,12 @@ async fn omitted_fields_are_optional_but_not_nullable() {
     let schemas = &doc["components"]["schemas"];
     let created = &schemas["CreatedTask"];
     let listed = &schemas["ListedTask"];
-    for (schema, field) in [(created, "possible_duplicates"), (listed, "open_questions"), (listed, "blocked_by")] {
+    for (schema, field) in [
+        (created, "possible_duplicates"),
+        (listed, "open_questions"),
+        (listed, "blocked_by"),
+        (listed, "blocked_by_hidden"),
+    ] {
         let text = serde_json::to_string(&flat_property(schema, field)).unwrap();
         assert!(!text.contains("null"), "{field}: {text}");
         let required = schema["allOf"]
