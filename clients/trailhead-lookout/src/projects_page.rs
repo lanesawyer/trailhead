@@ -484,4 +484,32 @@ mod tests {
         assert_eq!(by("oper").first().map(|r| r.key.as_str()), Some("OPS"));
         assert!(by("trail ops").is_empty());
     }
+
+    #[test]
+    fn escape_in_the_search_box_empties_it_and_the_filter() {
+        use bevy::input::keyboard::{Key, KeyboardInput};
+        use bevy::input_focus::FocusedInput;
+
+        let mut app = app();
+        let field = {
+            let world = app.world_mut();
+            world.query_filtered::<Entity, With<ProjectsSearch>>().single(world).unwrap()
+        };
+        app.world_mut().entity_mut(field).insert(EditableText::new("trail"));
+        settle(&mut app);
+        assert_eq!(app.world().resource::<ProjectsFilter>().query, "trail");
+        let input = KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: field,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(field, input, window));
+        settle(&mut app);
+        assert_eq!(app.world().get::<EditableText>(field).unwrap().value().to_string(), "");
+        assert_eq!(app.world().resource::<ProjectsFilter>().query, "");
+    }
 }

@@ -994,9 +994,10 @@ async fn an_interrupted_request_for_changes_after_a_conflict_rework_leaves_the_r
     assert_eq!(reviewers, 2, "the round-2 reviewer ran");
 }
 
-/// The reviewer's verdict is recorded but its request never was. The tick finds the conflict gone and leaves the
-/// request alone, since a handoff would answer the verdict (TRAIL-1418), and reconcile takes the verdict up as the
-/// request: the round is counted once, with no second review and no use of the revoked reviewer's name.
+/// The reviewer's verdict is recorded but its request never was. The tick finds the conflict gone and
+/// `settle_gone_conflict` records the verdict as the request, since a handoff would
+/// answer the verdict (TRAIL-1418, TRAIL-1466); reconcile then only confirms the round is counted once, with no
+/// second review and no use of the revoked reviewer's name.
 #[tokio::test(start_paused = true)]
 async fn an_interrupted_request_for_changes_after_a_conflict_rework_counts_the_round_once_when_resumed() {
     let r = conflicted_in_review().await;
