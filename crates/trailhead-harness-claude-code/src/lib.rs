@@ -707,6 +707,7 @@ async fn git_head(dir: &Path) -> Result<String> {
 
 /// Every path that differs from `start`, committed or not, including new files, with its contents now.
 async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
+    unnest_commitless_repositories(dir).await;
     git(dir, &["add", "--all"]).await?;
     let names = git(dir, &["diff", "--cached", "--name-only", "--no-renames", "-z", start]).await?;
     let mut changes = Vec::new();
@@ -718,6 +719,37 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
     let mut seen = std::collections::HashSet::new();
     changes.retain(|c| seen.insert(c.path.clone()));
     Ok(changes)
+}
+
+/// A nested repository with no commit can't be staged as an embedded repository: `git add` fails on it. Remove the
+/// `.git` of each one (git lists a nested repository as a `dir/` entry among the untracked paths), so its files are
+/// staged as ordinary files, and log it. One with a commit is left alone: `read_change` publishes its files.
+async fn unnest_commitless_repositories(dir: &Path) {
+    let listed = match git(dir, &["ls-files", "-z", "--others", "--exclude-standard"]).await {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for nested repositories");
+            return;
+        }
+    };
+    for name in listed.split(|b| *b == 0).filter(|n| n.ends_with(b"/")) {
+        let nested = dir.join(String::from_utf8_lossy(name).trim_end_matches('/'));
+        if git(&nested, &["rev-parse", "--verify", "--quiet", "HEAD"]).await.is_ok() {
+            continue;
+        }
+        let dot_git = nested.join(".git");
+        let removed = match tokio::fs::symlink_metadata(&dot_git).await {
+            Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(&dot_git).await,
+            Ok(_) => tokio::fs::remove_file(&dot_git).await,
+            Err(e) => Err(e),
+        };
+        match removed {
+            Ok(()) => {
+                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit")
+            }
+            Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
+        }
+    }
 }
 
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
@@ -874,6 +906,18 @@ mod tests {
         paths.sort();
         let base = ".claude/skills/trailhead-ui";
         assert_eq!(paths, [".gitignore", "SKILL.md", "refs/b.md"].map(|p| format!("{base}/{p}")));
+    }
+
+    #[tokio::test]
+    async fn a_nested_repository_with_no_commit_is_read_as_its_files() {
+        let (dir, start) = started().await;
+        let inner = dir.path().join("a/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        run_git(&["init", "-q"], &inner);
+        let paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        assert_eq!(paths, ["a/inner/f"]);
+        assert!(!inner.join(".git").exists());
     }
 
     #[tokio::test]
