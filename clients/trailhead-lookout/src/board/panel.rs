@@ -126,6 +126,10 @@ pub(super) fn update_counts(mut counts: Query<(&widgets::ColumnCount, &mut Text)
     }
 }
 
+/// A card's tool button that opens this agent (an id) in the inspector.
+#[derive(Component, PartialEq)]
+pub(super) struct InspectHolder(String);
+
 /// Marks a card's tool button, which is disabled while the connection isn't live.
 #[derive(Component)]
 pub(super) struct CardTool;
@@ -147,6 +151,7 @@ pub(super) enum ToolKind {
     Edit,
     Comment,
     Answer,
+    Holder,
     Pull,
 }
 
@@ -283,7 +288,7 @@ fn drop_unwanted(row: &[Entity], keep: impl Fn(usize, Entity) -> bool, commands:
     }
 }
 
-type ToolState<'a> = (&'a ToolKind, Option<&'a Act>, Option<&'a ExternalLink>);
+type ToolState<'a> = (&'a ToolKind, Option<&'a Act>, Option<&'a ExternalLink>, Option<&'a InspectHolder>);
 
 /// Brings the rows of a card whose view model changed to what it now has: badges added or dropped at the end, tool
 /// buttons added, dropped, or given their new target. A badge or button that stays is the same entity.
@@ -340,6 +345,20 @@ fn sync_tools(
             }
             Some(_) => {}
             None => spawn_tool(commands, row, action, act, live),
+        }
+    }
+    if let Some(holder) = &card.holder {
+        let hint = format!("Inspect {}", holder.name);
+        let target = InspectHolder(holder.id.clone());
+        match present(ToolKind::Holder) {
+            Some(e) if tools.get(e).is_ok_and(|t| t.3 != Some(&target)) => {
+                commands.entity(e).insert((target, Hint(hint)));
+            }
+            Some(_) => {}
+            None => {
+                let tool = commands.queue_spawn_scene(tool_button(Icon::Inspect, hint, ButtonKind::Plain)).id();
+                commands.entity(tool).insert((target, ToolKind::Holder, ChildOf(row)));
+            }
         }
     }
     let Some(pr) = &card.pr else { return };
@@ -451,6 +470,7 @@ mod in_place_tests {
             actions,
             found: None,
             pr: None,
+            holder: None,
         }
     }
 
@@ -524,5 +544,30 @@ mod in_place_tests {
         settle(&mut app);
         assert_eq!(subtree(&mut app, more), before);
         assert!(texts(&mut app, more).contains(&"Show 7 more".to_string()));
+    }
+}
+
+/// Opens the agent holding a card's task in the inspector.
+pub(super) fn on_inspect_holder(
+    activate: On<Activate>,
+    tools: Query<&InspectHolder>,
+    mut selection: ResMut<Selection>,
+) {
+    if let Ok(InspectHolder(id)) = tools.get(activate.entity) {
+        selection.0 = Some(Subject::Agent(id.clone()));
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::*;
+
+    #[test]
+    fn pressing_the_holder_tool_selects_the_agent() {
+        let mut app = App::new();
+        app.init_resource::<Selection>().add_observer(on_inspect_holder);
+        let tool = app.world_mut().spawn(InspectHolder("a1".into())).id();
+        app.world_mut().trigger(Activate { entity: tool });
+        assert_eq!(app.world().resource::<Selection>().0, Some(Subject::Agent("a1".into())));
     }
 }
