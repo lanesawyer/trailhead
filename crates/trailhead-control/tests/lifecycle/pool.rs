@@ -664,3 +664,55 @@ async fn a_stale_stack_sandbox_that_wont_be_destroyed_is_labelled_broken_and_fre
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.destroyed, ["trailhead-w1"]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_parked_tasks_stale_stack_sandbox_that_wont_be_destroyed_is_broken_and_the_task_gets_a_fresh_one() {
+    // A cap of 2: the broken w1 must not take one of the places, or the second task below would wait.
+    let r = rig_with(
+        &with_stack(r#"node = "26""#).replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"),
+    );
+    let key = r.tracker.add_task("TRAIL", "Ambiguous", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    let id = r.compute.get("trailhead-w1").unwrap().id;
+    let mut busy = r.compute.get("trailhead-w1").unwrap().labels;
+    assert_eq!(busy.get(label::STATE).map(String::as_str), Some(label::BUSY), "parked, it holds its own sandbox");
+    assert_eq!(busy.get(label::TASK).map(String::as_str), Some(key.0.as_str()));
+    // Built for a stack that has since changed.
+    busy.insert(label::STACK.into(), "old".into());
+    r.compute.set_labels(&id, &busy).await.unwrap();
+    r.compute.fail("trailhead-w1", "destroy");
+    // The tick's release of an answered task's sandbox (before acquire) hits one blip, so the task still holds it, busy,
+    // when `acquire_worker` looks. Later calls work, as `release_worker` on the stale snapshot would.
+    r.compute.fail_once_after("trailhead-w1", "set_egress", 0);
+
+    r.tracker.answer(&key, "The core crate.");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    let w1 = r.compute.get("trailhead-w1").expect("destroy failed, so it's still there");
+    let labels = &w1.labels;
+    assert_eq!(labels.get(label::STATE).map(String::as_str), Some(label::BROKEN));
+    for gone in [label::ROLE, label::TASK] {
+        assert!(!labels.contains_key(gone), "{gone} would keep it counting for the task: {labels:?}");
+    }
+    assert_eq!(r.tracker.task(&key).run.host.as_deref(), Some("trailhead-w2"), "a fresh sandbox, not the broken one");
+    let w2 = r.compute.get("trailhead-w2").expect("created for the task");
+    assert_ne!(w2.id, id);
+    assert_ne!(w2.labels.get(label::STATE).map(String::as_str), Some(label::BROKEN));
+
+    // It no longer counts toward the cap: another task still gets a place.
+    let other = r.tracker.add_task("TRAIL", "Other", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1, "a place for it");
+    assert_eq!(ran[0].0.key, other);
+
+    r.compute.heal("trailhead-w1");
+    // The blip that kept the release from landing backed w1 off; wait it out.
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.destroyed, ["trailhead-w1"]);
+}
