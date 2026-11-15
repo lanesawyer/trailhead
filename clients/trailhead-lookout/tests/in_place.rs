@@ -5,7 +5,8 @@
 //! header). This scans the view sources for the shape of that redraw and fails on any that is not in [`ALLOWED`].
 //!
 //! Flagged: a `despawn_children` / `despawn_related` call, a `despawn()` of a loop variable named `child`, and a
-//! `despawn` inside a function named `redraw*`, and any function that despawns inside a `for` loop (say over a
+//! `despawn` inside a function named `redraw*`, and any function that despawns inside a loop (`for`, `while`, `loop`,
+//! nested or not, or a `for_each` closure; say over a
 //! marker query) and then spawns, whatever it is named. Opening and closing a surface (a panel or modal on a state change)
 //! is not a redraw and is allowed.
 
@@ -55,10 +56,19 @@ fn fn_name_start(line: &str) -> Option<&str> {
     }
 }
 
+/// Whether the line opens a loop body: `for`, `while` (and `while let`) or `loop`, past any label.
+fn starts_loop(trimmed: &str) -> bool {
+    let rest = match trimmed.strip_prefix('\'') {
+        Some(labelled) => labelled.split_once(": ").map_or(trimmed, |(_, after)| after),
+        None => trimmed,
+    };
+    ["for ", "while ", "loop "].iter().any(|k| rest.starts_with(k))
+}
+
 fn flagged(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut current = String::new();
-    let mut loop_indent = None;
+    let mut loops: Vec<usize> = Vec::new();
     let mut loop_despawn = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
@@ -67,18 +77,20 @@ fn flagged(source: &str) -> Vec<String> {
         }
         if let Some(rest) = fn_name_start(trimmed) {
             current = rest.split(['(', '<']).next().unwrap_or_default().to_string();
-            loop_indent = None;
+            loops.clear();
             loop_despawn = false;
         }
         let indent = line.len() - trimmed.len();
-        if trimmed.starts_with("for ") {
-            loop_indent = Some(indent);
-        } else if loop_indent.is_some_and(|at| indent <= at && !trimmed.starts_with('}')) {
-            loop_indent = None;
+        while loops.last().is_some_and(|&at| indent <= at && !trimmed.starts_with(['}', '{', ')'])) {
+            loops.pop();
+        }
+        let for_each = trimmed.contains(".for_each(");
+        if starts_loop(trimmed) || for_each {
+            loops.push(indent);
         }
         let is_despawn = line.contains("despawn");
         let respawn = loop_despawn && !is_despawn && (line.contains("spawn(") || line.contains("spawn_"));
-        if is_despawn && loop_indent.is_some_and(|at| indent > at) {
+        if is_despawn && (for_each || loops.iter().any(|&at| indent > at)) {
             loop_despawn = true;
         }
         let wholesale = line.contains("despawn_children")
@@ -144,4 +156,14 @@ fn the_scan_sees_a_wholesale_redraw() {
         );
         assert!(flagged(&next).is_empty(), "{qualifier}");
     }
+    let nested = "fn r(q: Query<Entity>) {\n    for a in &q {\n        for b in &a {\n            touch(b);\n        }\n        commands.entity(a).despawn();\n    }\n    commands.spawn(Node::default());\n}\n";
+    assert_eq!(flagged(nested), ["r"]);
+    let each = "fn r(q: Query<Entity>) {\n    q.iter().for_each(|e| commands.entity(e).despawn());\n    commands.spawn(Node::default());\n}\n";
+    assert_eq!(flagged(each), ["r"]);
+    let each_multi = "fn r(q: Query<Entity>) {\n    q.iter()\n        .for_each(|e| {\n            commands.entity(e).despawn();\n        });\n    commands.spawn(Node::default());\n}\n";
+    assert_eq!(flagged(each_multi), ["r"]);
+    let looped = "fn r(q: Query<Entity>) {\n    while let Some(e) = it.next() {\n        commands.entity(e).despawn();\n    }\n    commands.spawn(Node::default());\n}\n";
+    assert_eq!(flagged(looped), ["r"]);
+    let header = "fn r(q: Query<Entity>) {\n    for (a, b) in q\n        .iter()\n        .zip(w)\n    {\n        commands.entity(a).despawn();\n    }\n    commands.spawn(Node::default());\n}\n";
+    assert_eq!(flagged(header), ["r"]);
 }

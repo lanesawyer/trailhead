@@ -11,6 +11,7 @@ use tracing::Instrument;
 use trailhead_factory::messages;
 use trailhead_factory::{ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Status, Task, TaskKey, label};
 
+use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
 
@@ -237,6 +238,8 @@ impl Factory {
             .await?
             .into_iter()
             .filter(|t| !busy.contains(&t.key) && self.setback_over(&t.key))
+            // A reviewer's breach whose park was cut short isn't rework: reconcile finishes the park for a human first.
+            .filter(|t| !matches!(phase(t, self.tracker.agent(), false), Phase::ReviewBreachUnparked { .. }))
             .collect();
         if room == 0 && !startable.iter().any(|t| others.contains(&t.key)) {
             if starvation_is_parked_tasks(running, reviewing, others.len(), self.config.repo.max_sandboxes) {
@@ -252,9 +255,19 @@ impl Factory {
         let mut survey = self.survey().await;
         let mut placed = Vec::new();
         for task in startable {
-            // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
-            // target is down or capped gets a new sandbox elsewhere while the old stays held, so it takes room.
-            if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
+            // A task last run on a target that is down may still hold a sandbox there that `others` can't see.
+            // Starting it elsewhere is safe only if the repo has room for the new sandbox and for that one, which
+            // stays reserved; otherwise it waits for its target, whose sandboxes are unknown, not gone.
+            let unseen = task.run.target.as_ref().is_some_and(|t| survey.down.contains(t));
+            if unseen {
+                if room < 2 {
+                    tracing::info!(task = %task.key, "its target is down, so a sandbox it may hold can't be counted; not starting it elsewhere without room for both");
+                    continue;
+                }
+                room -= 2;
+            } else if !others.contains(&task.key) || !self.stays_put(&survey, &task) {
+                // A ready task that holds its own sandbox resumes in it, so it needs no room (TRAIL-1121). One whose
+                // target is capped gets a new sandbox elsewhere while the old stays held, so it takes room.
                 if room == 0 {
                     continue;
                 }
@@ -411,14 +424,22 @@ impl Factory {
             *self.starved.lock().unwrap() = None;
             return;
         }
+        // A task holding two sandboxes is looked up once, then counted once per sandbox.
+        let mut looked_up: HashMap<&TaskKey, bool> = HashMap::new();
         let mut holders: Vec<(TaskKey, bool)> = Vec::new();
         for key in others.0.iter().flatten() {
-            let parked = match self.tracker.show(key).await {
-                Ok(task) => task.status == Status::NeedsInput,
-                Err(e) => {
-                    tracing::warn!(task = %key, error = %e, "couldn't look up the task holding a sandbox");
-                    false
-                }
+            let parked = if let Some(parked) = looked_up.get(key) {
+                *parked
+            } else {
+                let parked = match self.tracker.show(key).await {
+                    Ok(task) => task.status == Status::NeedsInput,
+                    Err(e) => {
+                        tracing::warn!(task = %key, error = %e, "couldn't look up the task holding a sandbox");
+                        false
+                    }
+                };
+                looked_up.insert(key, parked);
+                parked
             };
             holders.push((key.clone(), parked));
         }
@@ -427,26 +448,27 @@ impl Factory {
         if !should_say_starved(&mut last, &holders, waiting) {
             return;
         }
-        let parked: Vec<&str> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.as_str()).collect();
+        let parked: Vec<String> = holders.iter().filter(|(_, p)| *p).map(|(k, _)| k.0.clone()).collect();
         let max_sandboxes = self.config.repo.max_sandboxes;
         let tasks = if waiting == 1 { "task" } else { "tasks" };
         if parked_fill_repo_cap(parked.len(), max_sandboxes) {
             tracing::warn!(
-                held_by = parked.join(", "),
+                held_by = collapse_repeats(parked.clone()).join(", "),
                 max_sandboxes,
                 "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
             );
         } else {
-            let held: Vec<String> = holders
-                .iter()
-                .map(|(k, parked)| {
-                    let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
-                    describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
-                })
-                .collect();
+            let held = collapse_repeats(
+                holders
+                    .iter()
+                    .map(|(k, parked)| {
+                        let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                        describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
+                    })
+                    .collect(),
+            );
             tracing::info!(max_sandboxes, "{waiting} ready {tasks} waiting; sandboxes held by {}", held.join(", "));
         }
-        *last = Some(holders);
     }
 
     /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
@@ -544,11 +566,12 @@ impl Factory {
         Ok(names.len())
     }
 
-    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished are
-    /// released. A parked task keeps its sandbox, so without this the place stays taken until the next reconcile
-    /// (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh checkout with the answer in its prompt.
-    /// A task holds one pooled sandbox: any other still labelled for it is left over from an earlier attempt and is
-    /// released too (TRAIL-1185).
+    /// [`Factory::occupied`] once the sandboxes held for tasks a human has reopened, cancelled or finished, or taken
+    /// off the queue by hand (re-parented while parked or running, TRAIL-1147), are released; one still running is
+    /// released on the first poll after its run ends. A parked task keeps its sandbox, so without this the place stays
+    /// taken until the next reconcile (TRAIL-108, TRAIL-257). A reopened task's next attempt starts from a fresh
+    /// checkout with the answer in its prompt. A task holds one pooled sandbox: any other still labelled for it is left
+    /// over from an earlier attempt and is released too (TRAIL-1185).
     async fn occupied_after_release(&self, running: &HashSet<TaskKey>) -> Result<Vec<Sandbox>> {
         let held = self.occupied().await?;
         let candidates: Vec<&Sandbox> = held
@@ -740,14 +763,18 @@ fn starvation_is_parked_tasks(running: usize, reviewing: usize, others: usize, m
     running <= reviewing && parked_fill_repo_cap(others, max_sandboxes)
 }
 
-/// Updates the last-said holders and returns whether the starvation is to be said now: not with nothing waiting
-/// (which forgets the last warning), and not again for the same holders.
+/// Returns whether the starvation is to be said now: not with nothing waiting (which forgets the last warning), and
+/// not again for the same holders. When it is, records `holders` as the last said.
 fn should_say_starved(last: &mut Option<Vec<(TaskKey, bool)>>, holders: &[(TaskKey, bool)], waiting: usize) -> bool {
     if waiting == 0 {
         *last = None;
         return false;
     }
-    last.as_deref() != Some(holders)
+    if last.as_deref() == Some(holders) {
+        return false;
+    }
+    *last = Some(holders.to_vec());
+    true
 }
 
 /// Puts the ready tasks in the order runs start: by priority, and within a priority a rework of a task whose PR is
@@ -760,7 +787,8 @@ fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
 }
 
 /// Whether `sandbox` is the one pooled sandbox `task` keeps among `candidates` labelled for it: the one it last ran
-/// on, as the tracker recorded it (the same choice `acquire_worker` makes), else the first by name.
+/// on, as the tracker recorded it (`run.host`, the same choice `acquire_worker` makes). When that names none of them
+/// (no host recorded, or it sits on a target that isn't listed), nothing says which holds the latest work: keep all.
 fn keeps(task: &Task, sandbox: &Sandbox, candidates: &[&Sandbox]) -> bool {
     let mine: Vec<&str> = candidates
         .iter()
@@ -770,9 +798,10 @@ fn keeps(task: &Task, sandbox: &Sandbox, candidates: &[&Sandbox]) -> bool {
     if mine.len() < 2 {
         return true;
     }
-    let recorded = task.run.host.as_deref().or(task.run.sandbox.as_deref());
-    let kept = recorded.filter(|r| mine.contains(r)).or_else(|| mine.iter().copied().min());
-    kept == Some(sandbox.name.as_str())
+    match task.run.host.as_deref().filter(|h| mine.contains(h)) {
+        Some(kept) => kept == sandbox.name,
+        None => true,
+    }
 }
 
 #[cfg(test)]
@@ -796,7 +825,6 @@ mod starvation_tests {
         let (a, ab) = (holders(&[("T-1", true)]), holders(&[("T-1", true), ("T-2", true)]));
         let mut last = None;
         assert!(should_say_starved(&mut last, &a, 1));
-        last = Some(a.clone());
         assert!(!should_say_starved(&mut last, &a, 3), "the same holders aren't said again");
         assert!(should_say_starved(&mut last, &ab, 1), "a new set of holders is");
         assert!(should_say_starved(&mut last, &holders(&[("T-1", false)]), 1), "so is a holder no longer parked");
@@ -829,14 +857,81 @@ fn describe_holder(key: &str, parked: bool, retry_in: Option<Duration>) -> Strin
     }
 }
 
+/// One task can hold several pooled sandboxes, so a sorted list of holders repeats it: name each once, with a count.
+fn collapse_repeats(sorted: Vec<String>) -> Vec<String> {
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for item in sorted {
+        match out.last_mut() {
+            Some((last, n)) if *last == item => *n += 1,
+            _ => out.push((item, 1)),
+        }
+    }
+    out.into_iter().map(|(item, n)| if n > 1 { format!("{item} ×{n}") } else { item }).collect()
+}
+
 #[cfg(test)]
 mod holder_tests {
     use super::*;
+
+    #[test]
+    fn a_task_holding_two_sandboxes_is_named_once() {
+        let two = describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42)));
+        let held = collapse_repeats(vec![two.clone(), two, "TRAIL-2 (parked)".into()]);
+        assert_eq!(held, ["TRAIL-1087 (retrying in 42s) ×2", "TRAIL-2 (parked)"]);
+    }
 
     #[test]
     fn a_holder_in_setback_is_not_called_parked() {
         assert_eq!(describe_holder("TRAIL-1087", false, Some(Duration::from_secs(42))), "TRAIL-1087 (retrying in 42s)");
         assert_eq!(describe_holder("TRAIL-1", false, None), "TRAIL-1 (in flight)");
         assert_eq!(describe_holder("TRAIL-2", true, None), "TRAIL-2 (parked)");
+    }
+}
+
+#[cfg(test)]
+mod keeps_tests {
+    use super::keeps;
+    use trailhead_factory::{Labels, Priority, RunRecord, Sandbox, SandboxId, Status, Task, TaskKey, label};
+
+    fn sandbox(name: &str) -> Sandbox {
+        let labels: Labels = [(label::TASK.to_string(), "TRAIL-7".to_string())].into_iter().collect();
+        Sandbox { id: SandboxId(name.into()), name: name.into(), labels }
+    }
+
+    fn task(host: Option<&str>) -> Task {
+        Task {
+            key: TaskKey("TRAIL-7".into()),
+            project: "TRAIL".into(),
+            title: String::new(),
+            description: String::new(),
+            status: Status::NeedsInput,
+            grade: None,
+            priority: Priority::default(),
+            holder: None,
+            changes_requested: false,
+            run: RunRecord {
+                sandbox: Some("trail-7-a1".into()),
+                host: host.map(str::to_string),
+                ..RunRecord::default()
+            },
+        }
+    }
+
+    fn kept(task: &Task, all: &[Sandbox]) -> Vec<String> {
+        let refs: Vec<&Sandbox> = all.iter().collect();
+        all.iter().filter(|s| keeps(task, s, &refs)).map(|s| s.name.clone()).collect()
+    }
+
+    #[test]
+    fn the_recorded_host_is_the_one_kept() {
+        let all = [sandbox("w-a"), sandbox("w-b")];
+        assert_eq!(kept(&task(Some("w-b")), &all), ["w-b"]);
+    }
+
+    #[test]
+    fn nothing_is_released_when_the_host_is_missing_or_unlisted() {
+        let all = [sandbox("w-a"), sandbox("w-b")];
+        assert_eq!(kept(&task(None), &all), ["w-a", "w-b"]);
+        assert_eq!(kept(&task(Some("elsewhere")), &all), ["w-a", "w-b"]);
     }
 }

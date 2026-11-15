@@ -416,7 +416,9 @@ async fn pipe_plain(
             if body.done() {
                 break;
             }
-            let got = client_r.read(&mut chunk).await?;
+            let got = tokio::time::timeout(BODY_IDLE_TIMEOUT, client_r.read(&mut chunk))
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request body idle too long"))??;
             if got == 0 {
                 break;
             }
@@ -928,6 +930,20 @@ mod tests {
         assert!(!out.to_ascii_lowercase().contains("proxy-authorization"), "{out}");
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_plain_request_body_that_stalls_is_dropped() {
+        let port = origin().await;
+        let (gw, proxy) = setup(&["127.0.0.1"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(format!("POST http://127.0.0.1:{port}/ HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc").as_bytes())
+            .await
+            .unwrap();
+        // The client goes quiet with the body unfinished; the proxy closes on it instead of waiting for the lease.
+        let mut out = Vec::new();
+        tokio::time::timeout(BODY_IDLE_TIMEOUT * 2, s.read_to_end(&mut out)).await.unwrap().ok();
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 0);
+    }
+
     #[test]
     fn body_framing_finds_the_end_of_the_request() {
         let mut b = Body::Length(3);
@@ -1026,6 +1042,26 @@ mod tests {
         let state = gw.state();
         assert_eq!(state.unregistered_refusals["127.0.0.1"]["example.com"], 1);
         assert_eq!(state.sandboxes[0].refused["127.0.0.1"], 2);
+    }
+
+    #[tokio::test]
+    async fn counts_unregistered_refusals_per_host() {
+        let (gw, proxy) = setup(&["example.com"]).await;
+        gw.handle(GatewayRequest::Register {
+            name: "a".into(),
+            address: "10.9.9.9".parse().unwrap(),
+            labels: Labels::new(),
+        })
+        .await;
+        for host in ["example.com:443", "other.example:443", "example.com:443"] {
+            let (_s, status) = connect_via(proxy, host).await;
+            assert!(status.contains("403"), "{status}");
+        }
+        let state = gw.state();
+        let hosts = &state.unregistered_refusals["127.0.0.1"];
+        assert_eq!(hosts.len(), 2, "{hosts:?}");
+        assert_eq!(hosts["example.com"], 2);
+        assert_eq!(hosts["other.example"], 1);
     }
 
     #[tokio::test]

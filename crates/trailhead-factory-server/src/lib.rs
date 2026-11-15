@@ -200,37 +200,47 @@ fn resolve_opts(opts: &Opts, paths: &Paths, dir: &Path) -> Result<(Opts, fnox::F
     Ok((resolved, fnox))
 }
 
-/// The directory of the repo whose config is at `config_path`.
-fn config_dir(config_path: &Path) -> PathBuf {
-    config_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).to_path_buf()
-}
-
 /// The factory file's path, the git remote beside it, and the `[factory]` settings read from it.
 fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>, FactoryConfig)> {
-    let config_path = match &opts.config {
-        Some(path) => path.clone(),
-        None => find::config(&std::env::current_dir().map_err(Error::backend)?)?,
-    };
-    let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
-    let repo_dir = config_dir(&config_path);
-    let remote = find::remote(&repo_dir);
-    let config = FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-    Ok((config_path, remote, config))
+    find::load_config(opts.config.as_deref())
 }
 
-/// Whether `now` differs from the `started` config (whose `[factory.merge]` is blanked, as it is re-read live) in a way that
-/// needs a restart and wasn't already `warned` about, so an edit is reported once, not on every merge decision.
-fn changed_without_restart(started: &FactoryConfig, now: FactoryConfig, warned: &mut Option<FactoryConfig>) -> bool {
+/// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it is
+/// re-read live) and need a restart, unless that same edit was already `warned` about, so it is reported once, not on every
+/// merge decision. Empty when there is nothing to report.
+fn changed_without_restart(
+    started: &FactoryConfig,
+    now: FactoryConfig,
+    warned: &mut Option<FactoryConfig>,
+) -> Vec<&'static str> {
     let now = FactoryConfig { merge: Default::default(), ..now };
-    if now == *started {
+    // Destructured so that a new section can't be left out of the comparison.
+    let FactoryConfig { repo, stack, checks, profiles, gates, grades, egress, compute, targets, daemon, merge: _ } =
+        started;
+    let changed: Vec<&'static str> = [
+        ("repo", *repo != now.repo),
+        ("stack", *stack != now.stack),
+        ("checks", *checks != now.checks),
+        ("profiles", *profiles != now.profiles),
+        ("gates", *gates != now.gates),
+        ("grades", *grades != now.grades),
+        ("egress", *egress != now.egress),
+        ("compute", *compute != now.compute),
+        ("targets", *targets != now.targets),
+        ("daemon", *daemon != now.daemon),
+    ]
+    .into_iter()
+    .filter_map(|(name, differs)| differs.then_some(name))
+    .collect();
+    if changed.is_empty() {
         *warned = None;
-        return false;
+        return changed;
     }
     if warned.as_ref() == Some(&now) {
-        return false;
+        return Vec::new();
     }
     *warned = Some(now);
-    true
+    changed
 }
 
 /// The baseline [`changed_without_restart`] compares against: `config` as read from the file, with `[factory.merge]` blanked
@@ -348,7 +358,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     // binds, so a failure here leaves no endpoint to close.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
-    let built = computes(shared, opts, &fnox, paths, binary.clone(), false)?;
+    let built = computes(shared, opts, &fnox, paths, binary.clone(), false, !harness_secrets.is_empty())?;
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(key)
         .bind()
@@ -409,9 +419,11 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
                 let config =
                     FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
                 let mode = config.merge.mode;
-                if changed_without_restart(&started, config, &mut warned.lock().unwrap()) {
+                let changed = changed_without_restart(&started, config, &mut warned.lock().unwrap());
+                if !changed.is_empty() {
                     tracing::warn!(
                         path = %config_path.display(),
+                        changed = %changed.join(", "),
                         "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
@@ -461,10 +473,16 @@ async fn run_repo(
         Ok(()) => false,
         Err(e) => {
             tracing::error!(error = %e, "this repo's loop stopped; the other repos carry on");
-            feed.set_stopped(&entry.slug, e.to_string());
+            loop_stopped(&entry.slug, entry.factory.status(), &feed, &e.to_string());
             true
         }
     }
+}
+
+/// Marks a repo whose loop returned an error stopped, on its status board and in the feed.
+fn loop_stopped(slug: &str, board: &trailhead_control::StatusBoard, feed: &surface::Feed, error: &str) {
+    board.control(trailhead_factory::ControlState::Stopped);
+    feed.set_stopped(slug, error.to_string());
 }
 
 /// A target's `Compute` and launch facts.
@@ -474,7 +492,7 @@ pub(crate) type Built = (Arc<dyn Compute>, Target);
 type Wired = (Target, Arc<dyn Compute>, Arc<dyn Daemon>);
 
 /// A factory file's targets, each with its `Compute` and launch facts, in placement order. `read_only` is as for
-/// [`compute`].
+/// [`compute`]. `has_model_credential` is whether the harness secrets the sandboxes get are non-empty.
 fn computes(
     config: &FactoryConfig,
     opts: &Opts,
@@ -482,13 +500,15 @@ fn computes(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<Vec<Built>> {
     config
         .target_specs()
         .into_iter()
         .map(|spec| {
-            let (compute, target) = compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only)
-                .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
+            let (compute, target) =
+                compute(&spec.compute, opts, fnox, paths, binary.clone(), read_only, has_model_credential)
+                    .map_err(|e| Error::context(format!("target {}", spec.name), e))?;
             Ok((compute, target.listed(&spec)))
         })
         .collect()
@@ -505,6 +525,7 @@ fn compute(
     paths: &Paths,
     binary: Arc<Vec<u8>>,
     read_only: bool,
+    has_model_credential: bool,
 ) -> Result<(Arc<dyn Compute>, Target)> {
     match config {
         ComputeConfig::Sprites => {
@@ -521,9 +542,9 @@ fn compute(
                     "no GitHub writer token (GITHUB_WRITER_TOKEN or `trailhead factory login github-writer`): Docker sandboxes can't publish"
                 );
             }
-            if opts.claude_oauth_token.is_none() {
+            if !read_only && !has_model_credential {
                 tracing::warn!(
-                    "no Claude subscription token: Docker sandboxes have no model access until the gateway holds a credential for it"
+                    "no harness credential (no Claude subscription token, or the harness cannot use it): Docker sandboxes have no model access until the gateway holds a credential for it"
                 );
             }
             trailhead_compute_docker::build(config, docker, read_only).map_err(Error::backend)
@@ -574,6 +595,20 @@ fn check_result(failed: usize) -> Result<()> {
     }
 }
 
+/// Where each secret comes from (env, fnox, keyring or file), never its value. `opts` holds what the environment set.
+fn print_secret_sources(opts: &Opts, fnox: &fnox::Fnox, paths: &Paths) {
+    let creds = paths.creds();
+    let writer = std::env::var("GITHUB_WRITER_TOKEN").ok();
+    for (name, env, cred) in [
+        ("SPRITES_TOKEN", opts.sprites_token.clone(), login::SPRITES),
+        ("GITHUB_TOKEN", opts.github_token.clone(), login::GITHUB),
+        ("CLAUDE_CODE_OAUTH_TOKEN", opts.claude_oauth_token.clone(), login::CLAUDE),
+        ("GITHUB_WRITER_TOKEN", writer, login::GITHUB_WRITER),
+    ] {
+        println!("secret {}", login::describe(name, env, fnox, &creds, cred));
+    }
+}
+
 /// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
 /// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
 /// the server.
@@ -583,6 +618,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     let (opts, fnox) = resolve_opts(&plan.opts, &paths, &plan.specs[0].dir)?;
     let tracker = ops::api_tracker(&opts, &paths)?;
     let mut failed = 0;
+    print_secret_sources(&plan.opts, &fnox, &paths);
     for spec in &plan.specs {
         let slug = spec.slug();
         let project = &spec.config.repo.project;
@@ -608,7 +644,7 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     }
     let first = &plan.specs[0].config;
     let specs = first.target_specs();
-    match computes(first, &opts, &fnox, &paths, Default::default(), true) {
+    match computes(first, &opts, &fnox, &paths, Default::default(), true, true) {
         Ok(built) => {
             for ((compute, target), spec) in built.iter().zip(specs.iter().map(|s| compute_name(&s.compute))) {
                 match compute.list(&Default::default()).await {
@@ -638,13 +674,17 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     check_result(failed)
 }
 
-/// Logs a repo loop that panicked and marks it stopped on its status board, since the loop never got to say so itself.
+/// Logs a repo loop that panicked and marks it stopped on its status board and in the feed, since the loop never got
+/// to say so itself.
 fn loop_panicked(
     e: &tokio::task::JoinError,
+    feed: &surface::Feed,
     boards: &std::collections::HashMap<tokio::task::Id, (String, Arc<trailhead_control::StatusBoard>)>,
 ) {
     let repo = boards.get(&e.id()).map(|(slug, board)| {
         board.control(trailhead_factory::ControlState::Stopped);
+        feed.set_stopped(slug, e.to_string());
+        board.error(format!("loop panicked: {e}"));
         slug.as_str()
     });
     tracing::error!(error = %e, ?repo, "a repo's loop panicked; the other repos carry on");
@@ -676,7 +716,7 @@ async fn run_loops(
             Ok(true) => failed += 1,
             Err(e) => {
                 failed += 1;
-                loop_panicked(&e, &boards);
+                loop_panicked(&e, &feed, &boards);
             }
         }
     }
@@ -906,6 +946,11 @@ pub enum Command {
     /// Save a secret in the OS keyring (read from stdin), so the server's control plane needs no environment variables.
     #[command(subcommand)]
     Login(login::Login),
+    /// Remove a secret saved by `login` (from the keyring and the file). The environment and fnox are untouched.
+    Logout {
+        #[arg(value_enum)]
+        name: login::Secret,
+    },
 }
 
 /// Sets up logging to the terminal and runs `cmd`.
@@ -919,6 +964,11 @@ pub async fn command(cmd: Command) -> Result<()> {
         Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
         Command::Allowed => allowed(),
         Command::Login(cmd) => login(cmd).await,
+        Command::Logout { name } => {
+            let paths = Paths::from_env().ok_or(Error::NoDirs)?;
+            println!("{}", login::logout(&paths.creds(), name)?);
+            Ok(())
+        }
     }
 }
 
@@ -972,11 +1022,39 @@ mod tests {
         let started = super::started_baseline(&base);
         let mut warned = None;
         // A mode change is applied live, so it isn't a reason to restart.
-        assert!(!super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned));
+        assert!(super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned).is_empty());
         let edited = parse("[checks]\nfmt = \"cargo fmt\"");
-        assert!(super::changed_without_restart(&started, edited.clone(), &mut warned));
-        assert!(!super::changed_without_restart(&started, edited, &mut warned));
-        assert!(!super::changed_without_restart(&started, base, &mut warned));
+        assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks"]);
+        assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
+        assert!(super::changed_without_restart(&started, base, &mut warned).is_empty());
+    }
+
+    #[test]
+    fn several_changed_sections_are_listed_in_order() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let started = super::started_baseline(&parse(""));
+        let mut warned = None;
+        // Listed in the order the sections are compared, not the order the file has them.
+        let edited = parse("[egress]\nalways = [\"example.com\"]\n[checks]\nfmt = \"cargo fmt\"");
+        assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks", "egress"]);
+        assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
+    }
+
+    #[test]
+    fn a_follow_up_edit_adding_a_section_warns_again_with_both() {
+        use trailhead_factory::FactoryConfig;
+        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
+        let started = super::started_baseline(&parse(""));
+        let mut warned = None;
+        let first = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert_eq!(super::changed_without_restart(&started, first.clone(), &mut warned), ["checks"]);
+        assert!(super::changed_without_restart(&started, first, &mut warned).is_empty());
+        let second = parse("[checks]\nfmt = \"cargo fmt\"\n[egress]\nalways = [\"example.com\"]");
+        assert_eq!(super::changed_without_restart(&started, second.clone(), &mut warned), ["checks", "egress"]);
+        assert!(super::changed_without_restart(&started, second, &mut warned).is_empty());
     }
 
     #[test]
@@ -988,7 +1066,7 @@ mod tests {
         // What `wire` does in subscription mode, after the baseline is taken.
         config.egress.always.push("api.anthropic.com".into());
         let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
-        assert!(!super::changed_without_restart(&started, reread, &mut None));
+        assert!(super::changed_without_restart(&started, reread, &mut None).is_empty());
         assert_ne!(started.egress, config.egress);
     }
 
@@ -1005,8 +1083,32 @@ mod tests {
         let id = loops.spawn(std::future::pending::<()>()).id();
         boards.insert(id, ("o/m".to_string(), other.clone()));
         let e = loops.join_next().await.unwrap().unwrap_err();
-        super::loop_panicked(&e, &boards);
+        let feed = super::surface::Feed::new(trailhead_factory::FactoryState::Running);
+        feed.set_boards(vec![("o/n".to_string(), up.clone()), ("o/m".to_string(), other.clone())]);
+        super::loop_panicked(&e, &feed, &boards);
+        let reply = feed.reply();
+        assert!(reply.repos[0].stopped.as_ref().is_some_and(|m| m.contains("panic")));
+        assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(up.snapshot().control, ControlState::Stopped);
+        let (_, message) = up.snapshot().last_error.unwrap();
+        assert!(message.starts_with("loop panicked: "), "{message}");
+        assert!(other.snapshot().last_error.is_none());
+        assert_eq!(other.snapshot().control, ControlState::Up);
+    }
+
+    #[test]
+    fn a_loop_that_returned_an_error_is_marked_stopped_on_its_board_and_in_the_feed() {
+        use trailhead_factory::ControlState;
+        let (down, other) = (trailhead_control::StatusBoard::new(), trailhead_control::StatusBoard::new());
+        down.control(ControlState::Up);
+        other.control(ControlState::Up);
+        let feed = super::surface::Feed::new(trailhead_factory::FactoryState::Running);
+        feed.set_boards(vec![("o/n".to_string(), down.clone()), ("o/m".to_string(), other.clone())]);
+        super::loop_stopped("o/n", &down, &feed, "the store is gone");
+        assert_eq!(down.snapshot().control, ControlState::Stopped);
+        let reply = feed.reply();
+        assert_eq!(reply.repos[0].stopped.as_deref(), Some("the store is gone"));
+        assert_eq!(reply.repos[1].stopped, None);
         assert_eq!(other.snapshot().control, ControlState::Up);
     }
 
