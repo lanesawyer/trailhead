@@ -89,6 +89,7 @@ impl Plugin for BoardUiPlugin {
             .add_systems(OnExit(View::Board), (save_scroll, despawn_panel).chain())
             .init_resource::<BoardScroll>()
             .add_observer(on_card_press)
+            .add_observer(on_inspect_holder)
             .add_observer(on_more_press)
             .add_systems(
                 Update,
