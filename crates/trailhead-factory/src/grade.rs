@@ -206,10 +206,26 @@ fn cargo_line_ok(line: &str) -> bool {
 }
 
 /// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
-/// `requires-dist`. Only the keys that narrow an already-locked dependency are allowed (`name`, `specifier`, `marker`,
-/// `extra`, `extras`); a table that says where to fetch from, or carries a `source` or `version`, is a new source.
+/// `requires-dist`, and in the dev groups and extras (`dev = [`, `[package.metadata.requires-dev]`). Only the keys that
+/// narrow an already-locked dependency are allowed (`name`, `specifier`, `marker`, `extra`, `extras`); a table that says
+/// where to fetch from, or carries a `source` or `version`, is a new source.
 fn uv_line_ok(line: &str) -> bool {
-    matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]") || uv_entry_ok(line)
+    const HEADERS: [&str; 4] = [
+        "[package.metadata]",
+        "[package.dev-dependencies]",
+        "[package.optional-dependencies]",
+        "[package.metadata.requires-dev]",
+    ];
+    if line == "]" || HEADERS.contains(&line) || uv_entry_ok(line) {
+        return true;
+    }
+    // `dependencies = [`, `requires-dist = [`, and a dev group or extra's own name (`dev = [`, `"my.extra" = [`),
+    // alone on its line or, as `requires-dev` writes it, with its entry inline. Only entries are accepted, so an
+    // opener for another list (`wheels = [`) still can't smuggle a source in.
+    let Some((name, rest)) = line.split_once(" = [") else { return false };
+    let name = name.trim_matches('"');
+    let name_ok = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    name_ok && (rest.is_empty() || rest.strip_suffix(']').is_some_and(|inner| uv_entry_ok(inner.trim())))
 }
 
 /// Whether `line` is one inline table whose keys are all known and whose first is `name`, however it is spaced.
@@ -565,7 +581,11 @@ mod tests {
             ..file("b/uv.lock", FileStatus::Renamed, 1)
         };
         assert_eq!(grader(&r).grade(Some(gr(1)), &[moved]).grade, gr(4));
+        let groups = "@@ -9,6 +9,8 @@\n [package.dev-dependencies]\n dev = [\n+    { name = \"pytest\" },\n ]\n [package.optional-dependencies]\n+extra = [\n+    { name = \"x\" },\n+]\n [package.metadata.requires-dev]\n+dev = [{ name = \"pytest\", specifier = \">=8\" }]";
+        assert_eq!(grade("uv.lock", groups), gr(1));
         for bad in [
+            "+dev = [{ name = \"x\", git = \"https://x\" }]",
+            "+wheels = [{ url = \"https://x\" }]",
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
             "+    { name = \"x\", index = \"https://x/simple\" },",
