@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use iroh::address_lookup::MemoryLookup;
+use iroh::endpoint::Connection;
 use iroh::endpoint::{ReadError, ReadExactError, VarInt, presets};
-use iroh::protocol::Router;
+use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use std::sync::Mutex;
 
@@ -103,7 +104,22 @@ async fn endpoint(key: SecretKey, lookup: Arc<MemoryLookup>, alpns: Vec<Vec<u8>>
         .unwrap()
 }
 
+/// Keeps a handle to every connection the control plane accepts, then hands it to `UiProtocol`.
+#[derive(Debug)]
+struct Recording {
+    inner: UiProtocol,
+    conns: Arc<Mutex<Vec<Connection>>>,
+}
+
+impl ProtocolHandler for Recording {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        self.conns.lock().unwrap().push(conn.clone());
+        self.inner.accept(conn).await
+    }
+}
+
 struct Rig {
+    conns: Arc<Mutex<Vec<Connection>>>,
     _dir: tempfile::TempDir,
     store: Store,
     human: Ctx,
@@ -145,14 +161,13 @@ impl Rig {
         let feed = feed.unwrap_or_else(|| Arc::new(TestFeed(events.clone())));
         let control_ep = endpoint(SecretKey::generate(), Arc::new(MemoryLookup::new()), vec![]).await;
         let control = control_ep.addr();
+        let conns = Arc::new(Mutex::new(Vec::new()));
+        let ui = UiProtocol::new(server, allowed.clone()).with_status(feed).with_logs(Arc::new(TestLogs(logs.clone())));
         let router = Router::builder(control_ep)
-            .accept(
-                UI_ALPN,
-                UiProtocol::new(server, allowed.clone()).with_status(feed).with_logs(Arc::new(TestLogs(logs.clone()))),
-            )
+            .accept(UI_ALPN, Recording { inner: ui, conns: conns.clone() })
             .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
             .spawn();
-        Rig { _dir: dir, store, human, token, control, allowed, peers, events, logs, _router: router }
+        Rig { conns, _dir: dir, store, human, token, control, allowed, peers, events, logs, _router: router }
     }
 
     /// An endpoint that knows how to find the control plane.
@@ -479,4 +494,30 @@ async fn dropping_a_tunnel_closes_its_port() {
         }
     };
     tokio::time::timeout(Duration::from_secs(5), closed).await.expect("the port is still listening");
+}
+
+#[tokio::test]
+async fn dropping_a_tunnel_ends_its_forwards_and_closes_the_connection() {
+    let r = Rig::new().await;
+    let key = SecretKey::generate();
+    r.allowed.add(key.public()).unwrap();
+    let tunnel = open_ui_tunnel(r.client(key).await, r.control.id).await.unwrap();
+    let mut stream = reqwest::Client::new()
+        .get(format!("http://{}/v1/events/stream", tunnel.addr()))
+        .bearer_auth(&r.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success(), "{}", stream.status());
+    let conn = r.conns.lock().unwrap().first().cloned().expect("the control plane accepted the UI connection");
+    assert!(conn.close_reason().is_none());
+
+    drop(tunnel);
+
+    // The open request ends (cleanly or with an error) instead of hanging.
+    let ended = async { while let Ok(Some(_)) = stream.chunk().await {} };
+    tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the forwarded stream is still open");
+    // And the control plane sees the connection close.
+    tokio::time::timeout(Duration::from_secs(10), conn.closed()).await.expect("the UI connection is still open");
+    assert!(conn.close_reason().is_some());
 }

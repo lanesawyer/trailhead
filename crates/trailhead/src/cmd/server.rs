@@ -54,9 +54,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(unit) = local_scope(&paths, local, &info) {
                     println!("scope {unit}");
                     if client::is_shared_scope(&unit) {
-                        println!(
-                            "warning: the server shares a scope with an app, terminal or login session; ending it would stop the server (`trailhead server restart` starts it in its own)"
-                        );
+                        println!("{}", shared_scope_warning(client::can_start_scoped()));
                     }
                 }
                 if let Some(runs) = info.runs_in_flight {
@@ -111,6 +109,20 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
     Ok(())
 }
 
+/// The warning for a server in a shared scope. A restart only helps when a scoped start would work from here;
+/// otherwise `start_local_server` falls back to running unscoped and lands in the same scope again.
+fn shared_scope_warning(can_scope: bool) -> String {
+    let base =
+        "warning: the server shares a scope with an app, terminal or login session; ending it would stop the server";
+    if can_scope {
+        format!("{base} (`trailhead server restart` starts it in its own)")
+    } else {
+        format!(
+            "{base}. `trailhead server restart` can't help: there is no reachable systemd user manager to give it its own scope (no user runtime dir, or `systemd-run --user` unavailable). On a login session, `loginctl enable-linger` keeps a user manager running"
+        )
+    }
+}
+
 /// The systemd unit the server runs in, when it is local, ours and this machine can say.
 fn local_scope(paths: &trailhead_server::Paths, local: bool, info: &client::Health) -> Option<String> {
     if local && client::is_ours(paths, info) { info.pid.and_then(client::server_unit) } else { None }
@@ -163,6 +175,14 @@ pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_scope_warning_suggests_restart_only_when_it_can_scope() {
+        assert!(shared_scope_warning(true).contains("`trailhead server restart` starts it"));
+        let w = shared_scope_warning(false);
+        assert!(!w.contains("starts it in its own"));
+        assert!(w.contains("loginctl enable-linger"));
+    }
 
     #[test]
     fn status_json_adds_scope_and_shared_scope_flag() {

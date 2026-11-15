@@ -46,7 +46,7 @@ pub trait Workspace: Send + Sync {
     /// Whether `commit` is an ancestor of (or is) the checkout's HEAD.
     async fn contains(&self, commit: &str) -> Result<bool>;
     /// The files that have `<<<<<<<` or `>>>>>>>` lines added since `start`, committed or not.
-    async fn conflict_markers(&self, start: &str) -> Result<Vec<String>>;
+    async fn conflict_markers(&self, start: &str, base: &str) -> Result<Vec<String>>;
     /// The files the checkout changes against the base branch's remote head (`origin/<base>`), committed or not.
     async fn changed_files(&self, base: &str) -> Result<Vec<String>>;
     /// Whether the checkout has uncommitted changes or commits that are not on `origin/<remote_branch>`.
@@ -468,7 +468,7 @@ impl Runner {
                 }
                 // The checks only catch markers in files they compile, so look for them in everything changed.
                 if merge == Merge::Merged {
-                    let files = self.workspace.conflict_markers(start).await?;
+                    let files = self.workspace.conflict_markers(start, &req.base_branch).await?;
                     if !files.is_empty() {
                         let (reason, note) = messages::conflict_markers_left(&files);
                         tracker.note(key, &note).await?;
