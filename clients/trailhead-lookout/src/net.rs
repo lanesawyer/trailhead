@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     /// What `/v1/me` answers on the stub: `None` is a 401, `Some` the JSON of an identity.
-    type Me = Arc<Mutex<Option<serde_json::Value>>>;
+    type Me = Option<serde_json::Value>;
 
     /// A stub of the server behind the tunnel: `/v1/health` answers, `/v1/me` as `me` says.
     async fn stub(me: Me) -> SocketAddr {
@@ -1053,7 +1053,7 @@ mod tests {
         let app = Router::new().route("/v1/health", get(|| async { Json(serde_json::json!({})) })).route(
             "/v1/me",
             get(move || {
-                let answer = me.lock().unwrap().clone();
+                let answer = me.clone();
                 async move {
                     match answer {
                         Some(identity) => (StatusCode::OK, Json(identity)),
@@ -1116,7 +1116,7 @@ mod tests {
     /// Runs the refusal sequence for a token the stub turns down in the way `refused` names.
     async fn refusal_sequence(me: Option<serde_json::Value>, refused: Reason) {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(me))).await;
+        let addr = stub(me).await;
         let (mut net, rx) = net_for(dir.path(), addr).await;
         let offline = |reason: Reason| (Link::Offline, Some(reason));
         let connecting = (Link::Syncing, Some(Reason::Dialing));
@@ -1164,7 +1164,7 @@ mod tests {
     #[tokio::test]
     async fn releasing_the_probe_resets_the_backoff() {
         let dir = tempfile::tempdir().unwrap();
-        let addr = stub(Arc::new(Mutex::new(None))).await;
+        let addr = stub(None).await;
         let (mut net, _rx) = net_for(dir.path(), addr).await;
         net.token = Some("saved".into());
         net.check().await;
@@ -1172,5 +1172,57 @@ mod tests {
         net.release_probe();
         assert!(net.probe_due());
         assert_eq!(net.probe_backoff.refused(), Duration::from_secs(10), "back to the base gap");
+    }
+
+    #[tokio::test]
+    async fn a_live_link_checks_its_token_every_so_many_probes_and_drops_a_revoked_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (mut net, rx) = net_for(dir.path(), addr).await;
+        net.state = Some((Link::Live, None));
+        net.token = Some("revoked".into());
+        net.resume.hold_for_test();
+
+        // Until the last probe of the round, health alone answers and nothing changes.
+        for _ in 1..TOKEN_CHECK_EVERY {
+            net.check().await;
+            assert!(states(&rx).is_empty());
+            assert!(net.token.is_some());
+            assert!(net.resume.is_held());
+        }
+        // The probe that is due asks /v1/me, which turns the token down.
+        net.check().await;
+        assert_eq!(states(&rx), [(Link::Offline, Some(Reason::TokenRejected))]);
+        assert!(net.token.is_none());
+        assert!(!net.resume.is_held());
+        assert_eq!(net.live_probes, 0);
+    }
+
+    #[tokio::test]
+    async fn a_live_link_keeps_an_accepted_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(Some(serde_json::json!({"user": {"name": "lane"}}))).await;
+        let (mut net, rx) = net_for(dir.path(), addr).await;
+        net.state = Some((Link::Live, None));
+        net.token = Some("good".into());
+        net.resume.hold_for_test();
+        for _ in 0..TOKEN_CHECK_EVERY {
+            net.check().await;
+        }
+        assert!(states(&rx).is_empty());
+        assert_eq!(net.token.as_deref(), Some("good"));
+        assert!(net.resume.is_held());
+    }
+
+    #[tokio::test]
+    async fn health_answering_releases_a_not_allowed_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (mut net, _rx) = net_for(dir.path(), addr).await;
+        net.probe_hold = Some((tokio::time::Instant::now() + Duration::from_secs(60), Reason::NotAllowed));
+        net.probe_backoff.refused();
+        net.check().await;
+        assert!(net.probe_hold.is_none());
+        assert!(net.probe_due());
     }
 }
