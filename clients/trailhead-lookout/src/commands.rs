@@ -22,9 +22,9 @@ use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
 
 /// Caps real failures: a command is reported failed after this many. A send the net thread refused with
-/// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries: a
-/// `RateLimited` answer is retried only while the command has been sent fewer than this many times in all, counting
-/// every send (including those two kinds), before `RateLimited` is handed back.
+/// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries, counted
+/// on their own: `RateLimited` answers are tallied apart from sends, so those two kinds of send don't use up the
+/// budget, and the command is handed back as `RateLimited` on its this-many-th such answer, whatever the link did.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The longest the outbox waits on a `Retry-After` before sending again.
@@ -125,6 +125,9 @@ struct Pending {
     /// Attempts that really failed. A resend after the link dropped, or a send the net thread refused for want of a
     /// connection, isn't one.
     failures: u32,
+    /// `RateLimited` answers so far, counted apart from `attempts` so resends over a flaky link don't use up the
+    /// retries a rate limit gets.
+    rate_limits: u32,
     not_before: Option<Instant>,
 }
 
@@ -133,7 +136,8 @@ struct Pending {
 pub struct Outbox {
     pending: Vec<Pending>,
     next: u64,
-    /// Wait before sending again after a failed attempt, times the failures so far.
+    /// Wait before sending again after a failed attempt, times the failures so far (for a `RateLimited` answer with
+    /// no `Retry-After`, times the rate-limit answers so far).
     pub backoff: Duration,
 }
 
@@ -194,6 +198,7 @@ fn accept(
             stage: Stage::Queued,
             attempts: 0,
             failures: 0,
+            rate_limits: 0,
             not_before: None,
         });
     }
@@ -206,11 +211,12 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
         match &reply.result {
             // A rate limit for an earlier attempt: a later one is in flight, and requeuing would send a third beside it.
             Ok(Outcome::RateLimited { .. }) if outbox.pending[at].attempts != reply.attempt => {}
-            // Rate limited: wait out `Retry-After`, then send again with the same key, until the attempts run
-            // out.
-            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until its rate-limit
+            // answers reach [`MAX_ATTEMPTS`].
+            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].rate_limits + 1 < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
-                let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
+                p.rate_limits += 1;
+                let wait = retry_after.map_or(backoff * p.rate_limits, |after| after.min(MAX_RETRY_AFTER));
                 p.stage = Stage::Queued;
                 p.not_before = Some(Instant::now() + wait);
             }
