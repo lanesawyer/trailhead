@@ -414,6 +414,16 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
     )
 }
 
+/// Why a task is parked when the worker found its work already on the base branch, or no longer applicable.
+pub fn already_done_question(evidence: &str) -> String {
+    let evidence = if evidence.trim().is_empty() { "(the worker gave no evidence)" } else { evidence.trim() };
+    format!(
+        "The worker found nothing to do: the task looks already done on the base branch, or obsolete. \
+         Its evidence: {evidence}\n\nIf that holds, close the task (mark it done or cancel it). Otherwise say what \
+         is missing, then reopen the task."
+    )
+}
+
 /// Why a task is parked when two attempts in a row gave up, which points at the environment, not the task.
 pub fn repeated_failure_question(before: &str, reason: &str) -> String {
     format!(
