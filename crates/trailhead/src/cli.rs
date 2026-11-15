@@ -313,7 +313,8 @@ pub(crate) struct EditArgs {
     /// Move it under this task (e.g. the factory's queue), or "none" to make it top-level.
     #[arg(long)]
     pub(crate) parent: Option<String>,
-    /// Set a metadata key, `a.b=value` (JSON, else a string); `a.b=null` removes it. Repeatable.
+    /// Set a metadata key, `a.b=value` (JSON, else a string; a string `factory.*` field like `factory.sandbox`
+    /// keeps the raw text even if it parses as JSON, except `null`); `a.b=null` removes it. Repeatable.
     #[arg(long, value_name = "KEY=VALUE")]
     pub(crate) meta: Vec<String>,
     /// Fail if the task changed since this version.
@@ -505,7 +506,17 @@ pub(crate) fn parse_lifetime(s: &str) -> Result<i64, String> {
 mod tests {
     use clap::Parser;
 
+    use clap::CommandFactory;
+
     use super::{Cli, Cmd, WebhookCmd, parse_lifetime};
+
+    #[test]
+    fn meta_help_mentions_the_string_field_exception() {
+        let mut cmd = Cli::command();
+        let edit = cmd.find_subcommand_mut("edit").expect("edit subcommand");
+        let help = edit.render_long_help().to_string();
+        assert!(help.contains("string `factory.*` field"), "{help}");
+    }
 
     #[test]
     fn webhook_url_does_not_clobber_the_server_url() {

@@ -142,3 +142,39 @@ async fn an_agent_releases_its_revoked_sub_agents_claim_but_not_a_strangers() {
     env.store.release(&boss, &task.key).await.unwrap();
     env.store.claim(&boss, &task.key, None).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_sub_agent_cannot_release_its_parents_or_a_siblings_claim() {
+    let env = Env::new().await;
+    env.store
+        .create_project(&env.human, NewProject { key: "WEB".into(), name: "Web".into(), ..Default::default() })
+        .await
+        .unwrap();
+    let parent = env.store.create_agent(&env.human, "boss").await.unwrap();
+    let (_, secret) = env
+        .store
+        .create_token_with(&env.human, Principal::Agent(parent.id), "b", TokenOptions::default())
+        .await
+        .unwrap();
+    let (boss, _) = env.store.authenticate_token(&secret).await.unwrap();
+    let mut kids = Vec::new();
+    for name in ["kid1", "kid2"] {
+        let kid = env.store.create_agent(&boss, name).await.unwrap();
+        let (_, s) =
+            env.store.create_token_with(&boss, Principal::Agent(kid.id), "k", TokenOptions::default()).await.unwrap();
+        kids.push(env.store.authenticate_token(&s).await.unwrap().0);
+    }
+    let new_task = |title: &str| NewTask { project: "WEB".into(), title: title.into(), ..Default::default() };
+    let boss_task = env.store.create_task(&boss, new_task("parent's")).await.unwrap();
+    let sibling_task = env.store.create_task(&boss, new_task("sibling's")).await.unwrap();
+    env.store.claim(&boss, &boss_task.key, None).await.unwrap();
+    env.store.claim(&kids[1], &sibling_task.key, None).await.unwrap();
+
+    // A child can't release its parent's claim, nor a sibling's.
+    assert!(matches!(env.store.release(&kids[0], &boss_task.key).await, Err(Error::NotClaimHolder)));
+    assert!(matches!(env.store.release(&kids[0], &sibling_task.key).await, Err(Error::NotClaimHolder)));
+
+    // The rightful holders still can.
+    env.store.release(&kids[1], &sibling_task.key).await.unwrap();
+    env.store.release(&boss, &boss_task.key).await.unwrap();
+}

@@ -51,6 +51,7 @@ pub enum Source {
     Env,
     Fnox,
     Keyring,
+    File,
 }
 
 impl Source {
@@ -59,24 +60,87 @@ impl Source {
             Source::Env => "env",
             Source::Fnox => "fnox",
             Source::Keyring => "keyring",
+            Source::File => "file",
         }
     }
 }
 
-/// A secret from the environment if it's set and not blank, else the one fnox defines, else the one saved by `login`.
-/// Logs which source it came from, never the value.
+/// A secret and where it came from: the environment if it's set and not blank, else the one fnox defines, else the
+/// one saved by `login`.
+pub fn lookup(
+    name: &str,
+    env: Option<String>,
+    fnox: &Fnox,
+    creds: &CredStore,
+    cred: Cred,
+) -> Result<Option<(String, Source)>> {
+    if let Some(v) = env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        return Ok(Some((v, Source::Env)));
+    }
+    if let Some(v) = fnox.get(name)? {
+        return Ok(Some((v, Source::Fnox)));
+    }
+    Ok(creds.read(cred).filter(|(v, _)| !v.is_empty()).map(|(v, saved)| {
+        let source = match saved {
+            Saved::Keyring => Source::Keyring,
+            Saved::File(_) => Source::File,
+        };
+        (v, source)
+    }))
+}
+
+/// [`lookup`], logging which source it came from, never the value.
 pub fn resolve(name: &str, env: Option<String>, fnox: &Fnox, creds: &CredStore, cred: Cred) -> Result<Option<String>> {
-    let found = match env.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
-        Some(v) => Some((v, Source::Env)),
-        None => match fnox.get(name)? {
-            Some(v) => Some((v, Source::Fnox)),
-            None => creds.read(cred).map(|(v, _)| v).filter(|v| !v.is_empty()).map(|v| (v, Source::Keyring)),
-        },
-    };
-    Ok(found.map(|(v, source)| {
+    Ok(lookup(name, env, fnox, creds, cred)?.map(|(v, source)| {
         tracing::info!("{name} from {}", source.label());
         v
     }))
+}
+
+/// One line saying where `name` comes from, for `factory check`; never the value.
+pub fn describe(name: &str, env: Option<String>, fnox: &Fnox, creds: &CredStore, cred: Cred) -> String {
+    match lookup(name, env, fnox, creds, cred) {
+        Ok(Some((_, source))) => format!("{name}: from {}", source.label()),
+        Ok(None) => format!("{name}: not set"),
+        Err(e) => format!("{name}: {e}"),
+    }
+}
+
+/// The names `logout` takes, one per saved secret.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum Secret {
+    Sprites,
+    Claude,
+    Github,
+    GithubWriter,
+}
+
+impl Secret {
+    fn cred(self) -> Cred<'static> {
+        match self {
+            Secret::Sprites => SPRITES,
+            Secret::Claude => CLAUDE,
+            Secret::Github => GITHUB,
+            Secret::GithubWriter => GITHUB_WRITER,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Secret::Sprites => "sprites",
+            Secret::Claude => "claude",
+            Secret::Github => "github",
+            Secret::GithubWriter => "github-writer",
+        }
+    }
+}
+
+/// Removes what `login` saved for `secret` from the keyring and the file; says if there was nothing to remove.
+pub fn logout(creds: &CredStore, secret: Secret) -> Result<String> {
+    let name = secret.name();
+    let removed =
+        creds.remove(secret.cred()).map_err(|e| Error::context(format!("removing the saved {name} secret"), e))?;
+    Ok(if removed { format!("removed the saved {name} secret") } else { format!("no saved {name} secret to remove") })
 }
 
 /// The first line of `input`, trimmed; prompts on stderr first when stdin is a terminal.
@@ -299,6 +363,22 @@ esac
         assert!(calls(&dir).is_empty(), "fnox was run though the environment had the secret");
         assert_eq!(got(Some("  ")).as_deref(), Some("from-fnox"));
         assert_eq!(got(None).as_deref(), Some("from-fnox"));
+    }
+
+    #[test]
+    fn logout_removes_the_saved_secret_and_describe_names_the_source_without_the_value() {
+        let _spawning = crate::fnox::SPAWNING.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let creds = store(&dir);
+        let fnox = load(&fake_fnox(&dir), &repo_with_config(&dir));
+        assert!(logout(&creds, Secret::Github).unwrap().starts_with("no saved"));
+        creds.save(GITHUB, "s3cret").unwrap();
+        let line = describe("GITHUB_TOKEN", None, &fnox, &creds, GITHUB);
+        assert_eq!(line, "GITHUB_TOKEN: from file");
+        let env = describe("GITHUB_TOKEN", Some("s3cret".into()), &fnox, &creds, GITHUB);
+        assert_eq!(env, "GITHUB_TOKEN: from env");
+        assert!(logout(&creds, Secret::Github).unwrap().starts_with("removed"));
+        assert_eq!(describe("GITHUB_TOKEN", None, &fnox, &creds, GITHUB), "GITHUB_TOKEN: not set");
     }
 
     #[test]

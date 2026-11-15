@@ -416,7 +416,9 @@ async fn pipe_plain(
             if body.done() {
                 break;
             }
-            let got = client_r.read(&mut chunk).await?;
+            let got = tokio::time::timeout(BODY_IDLE_TIMEOUT, client_r.read(&mut chunk))
+                .await
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request body idle too long"))??;
             if got == 0 {
                 break;
             }
@@ -662,12 +664,19 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
             if body.replace(framing).is_some() {
                 return Err("conflicting body framing");
             }
+            // Dropped: the canonical line written below is what the upstream frames the body by.
+            continue;
         }
         if name.starts_with("proxy-") || matches!(name.as_str(), "host" | "connection" | "keep-alive") {
             continue;
         }
         out.push_str(l);
         out.push_str("\r\n");
+    }
+    match &body {
+        Some(Body::Length(n)) => out.push_str(&format!("Content-Length: {n}\r\n")),
+        Some(Body::Chunked(_)) => out.push_str("Transfer-Encoding: chunked\r\n"),
+        None => {}
     }
     out.push_str("\r\n");
     Ok(Request::Plain { host, port, head: out.into_bytes(), body: body.unwrap_or(Body::Length(0)) })
@@ -813,6 +822,20 @@ mod tests {
         };
         assert_eq!(port, 80);
         assert!(String::from_utf8(head).unwrap().starts_with("GET /?q=1 HTTP/1.1\r\n"));
+        // Framing is rewritten from the parsed body, never forwarded as the client wrote it.
+        for (raw, framing) in [
+            ("Content-Length: +5", "Content-Length: 5"),
+            ("Content-Length : 5", "Content-Length: 5"),
+            ("Transfer-Encoding : chunked", "Transfer-Encoding: chunked"),
+            ("transfer-encoding: CHUNKED", "Transfer-Encoding: chunked"),
+        ] {
+            let req = format!("POST http://a/ HTTP/1.1\r\nX: y\r\n{raw}\r\n\r\n");
+            let Ok(Request::Plain { head, .. }) = parse_head(req.as_bytes()) else { panic!("{raw}") };
+            assert_eq!(
+                String::from_utf8(head).unwrap(),
+                format!("POST / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nX: y\r\n{framing}\r\n\r\n")
+            );
+        }
         assert!(parse_head(b"GET /relative HTTP/1.1\r\n\r\n").is_err());
         assert!(parse_head(b"nonsense\r\n\r\n").is_err());
     }
@@ -905,6 +928,20 @@ mod tests {
         assert!(out.starts_with("HTTP/1.1 200"), "{out}");
         assert!(out.contains("GET /x?y=1 HTTP/1.1"), "{out}");
         assert!(!out.to_ascii_lowercase().contains("proxy-authorization"), "{out}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_plain_request_body_that_stalls_is_dropped() {
+        let port = origin().await;
+        let (gw, proxy) = setup(&["127.0.0.1"]).await;
+        let mut s = TcpStream::connect(proxy).await.unwrap();
+        s.write_all(format!("POST http://127.0.0.1:{port}/ HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc").as_bytes())
+            .await
+            .unwrap();
+        // The client goes quiet with the body unfinished; the proxy closes on it instead of waiting for the lease.
+        let mut out = Vec::new();
+        tokio::time::timeout(BODY_IDLE_TIMEOUT * 2, s.read_to_end(&mut out)).await.unwrap().ok();
+        assert_eq!(gw.state().sandboxes[0].open_tunnels, 0);
     }
 
     #[test]
@@ -1005,6 +1042,26 @@ mod tests {
         let state = gw.state();
         assert_eq!(state.unregistered_refusals["127.0.0.1"]["example.com"], 1);
         assert_eq!(state.sandboxes[0].refused["127.0.0.1"], 2);
+    }
+
+    #[tokio::test]
+    async fn counts_unregistered_refusals_per_host() {
+        let (gw, proxy) = setup(&["example.com"]).await;
+        gw.handle(GatewayRequest::Register {
+            name: "a".into(),
+            address: "10.9.9.9".parse().unwrap(),
+            labels: Labels::new(),
+        })
+        .await;
+        for host in ["example.com:443", "other.example:443", "example.com:443"] {
+            let (_s, status) = connect_via(proxy, host).await;
+            assert!(status.contains("403"), "{status}");
+        }
+        let state = gw.state();
+        let hosts = &state.unregistered_refusals["127.0.0.1"];
+        assert_eq!(hosts.len(), 2, "{hosts:?}");
+        assert_eq!(hosts["example.com"], 2);
+        assert_eq!(hosts["other.example"], 1);
     }
 
     #[tokio::test]
