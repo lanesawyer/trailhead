@@ -533,6 +533,11 @@ fn current_scope_env() -> Option<Vec<(&'static str, std::ffi::OsString)>> {
     )
 }
 
+/// True when a server started from here would get its own scope, so `server restart` can fix a shared one.
+pub fn can_start_scoped() -> bool {
+    current_scope_env().is_some()
+}
+
 /// `scope_env`, then a probe: a runtime directory doesn't mean a manager, so when its sockets can be named and
 /// none of them `connects`, the answer is `None` (unscoped).
 fn scope_env_probed(
@@ -811,6 +816,23 @@ mod scope_env_tests {
         assert_eq!(vars.len(), 2);
         let expected = ["/run/user/1000/systemd/private", "/run/user/1000/bus"].map(std::path::PathBuf::from);
         assert_eq!(seen.into_inner(), expected);
+        // Cron with the caller's own bus address: the runtime directory comes from `scope_env`, the bus from the
+        // caller's variable.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let vars = scope_env_probed(
+            None,
+            os("unix:path=/x/bus"),
+            1000,
+            |_| true,
+            |p| {
+                seen.borrow_mut().push(p.to_path_buf());
+                p.ends_with("bus")
+            },
+        )
+        .unwrap();
+        assert_eq!(vars, vec![("XDG_RUNTIME_DIR", "/run/user/1000".into())]);
+        let expected = ["/run/user/1000/systemd/private", "/x/bus"].map(std::path::PathBuf::from);
+        assert_eq!(seen.into_inner(), expected);
         // Cron with no manager answering: unscoped.
         assert_eq!(probed(None, None, &|_| false), None);
     }
@@ -888,9 +910,7 @@ pub fn api_err(e: trailhead_client::http::Error) -> anyhow::Error {
     use trailhead_client::http::Error;
     match e {
         Error::Api { error, .. } => error.into(),
-        Error::Transport(e) => anyhow::Error::new(e).context("request to Trailhead failed"),
-        Error::Decode { status, source } => {
-            anyhow::Error::new(source).context(format!("Trailhead answered {status} but the response didn't decode"))
-        }
+        // Display names this layer and source() the cause, so the chain prints each once.
+        e @ (Error::Transport(_) | Error::Decode { .. }) => anyhow::Error::new(e),
     }
 }

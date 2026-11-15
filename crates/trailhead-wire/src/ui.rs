@@ -165,11 +165,12 @@ impl std::fmt::Debug for dyn LogFeed {
     }
 }
 
-/// Why a stream was reset: the first frame wasn't a request this control plane knows.
+/// Why a stream was reset: the first frame couldn't be read as a request, or the request was for a status or log feed
+/// this control plane doesn't serve. (An unknown op isn't a reset: it gets an `Unsupported` frame.)
 pub const BAD_REQUEST: u32 = 2;
 
 /// Why an API stream was reset: the request was fine, but the control plane couldn't reach the Trailhead server.
-/// Distinct from [`BAD_REQUEST`] so a UI can tell a server that's down from an op that's unknown.
+/// Distinct from [`BAD_REQUEST`] so a UI can tell a server that's down from a bad request or a missing feed.
 pub const SERVER_UNREACHABLE: u32 = 3;
 
 /// How often an open UI connection is checked against the allowlist, so a disallowed endpoint loses the streams it

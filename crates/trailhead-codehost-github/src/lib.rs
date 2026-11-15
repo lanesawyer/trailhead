@@ -601,8 +601,9 @@ impl CodeHost for GitHub {
                 break;
             }
             if page == MAX_PR_PAGES {
-                // Whatever lies past the cap is silently absent from the answer, so say so.
-                tracing::warn!(repo = %repo.slug(), base, listed = out.len(), "open PRs run past the page cap; the rest are not listed");
+                // Whatever lies past the cap is silently absent from the answer, so say so. A full last page
+                // can't say whether another follows (exactly 500 open PRs reads the same), hence "may".
+                tracing::warn!(repo = %repo.slug(), base, listed = out.len(), "open PRs may run past the page cap; any beyond it are not listed");
             }
         }
         Ok(out)
