@@ -259,7 +259,7 @@ impl NetHandle {
                 let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
                     Ok(rt) => rt,
                     Err(e) => {
-                        let _ = event_tx.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(e.to_string()))));
+                        report_unreachable(&event_tx, e.to_string());
                         return;
                     }
                 };
@@ -400,6 +400,13 @@ struct Net {
     timings: SyncTimings,
 }
 
+/// The net thread can't start (no runtime, no endpoint): go `Offline` and say nothing is dialed, so the
+/// Connection page doesn't keep showing the CLI or saved target as dialed.
+fn report_unreachable(events: &mpsc::Sender<NetEvent>, error: String) {
+    let _ = events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(error))));
+    let _ = events.send(NetEvent::Dialed(None));
+}
+
 async fn run(
     config: NetConfig,
     target: Option<String>,
@@ -409,8 +416,7 @@ async fn run(
     let endpoint = match bind(&config).await {
         Ok(e) => e,
         Err(e) => {
-            let _ = events.send(NetEvent::State(Link::Offline, Some(Reason::Unreachable(format!("no endpoint: {e}")))));
-            let _ = events.send(NetEvent::Dialed(None));
+            report_unreachable(&events, format!("no endpoint: {e}"));
             return;
         }
     };
@@ -1014,6 +1020,16 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thread_that_cannot_start_goes_offline_and_clears_the_dialed_target() {
+        let (tx, rx) = mpsc::channel();
+        report_unreachable(&tx, "boom".into());
+        assert!(
+            matches!(rx.try_recv(), Ok(NetEvent::State(Link::Offline, Some(Reason::Unreachable(e)))) if e == "boom")
+        );
+        assert!(matches!(rx.try_recv(), Ok(NetEvent::Dialed(None))));
+    }
 
     #[test]
     fn too_old_message_names_only_the_op() {
