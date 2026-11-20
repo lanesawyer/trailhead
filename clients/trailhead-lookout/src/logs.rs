@@ -33,6 +33,9 @@ const LEVELS: [LogLevel; 3] = [LogLevel::Info, LogLevel::Warn, LogLevel::Error];
 pub struct Entry {
     pub id: u64,
     pub line: LogLine,
+    /// Whether this marks lines Lookout missed rather than a line the factory logged. A filter never hides it, since
+    /// the missed lines could have been of any level or task.
+    pub gap: bool,
 }
 
 /// A [`LogUpdate`] on its way to the log.
@@ -74,12 +77,16 @@ impl LogState {
     }
 
     fn push(&mut self, line: LogLine) {
+        self.push_entry(line, false);
+    }
+
+    fn push_entry(&mut self, line: LogLine, gap: bool) {
         if let Some(task) = &line.task {
             self.tasks.insert(task.clone());
         }
         let id = self.next;
         self.next += 1;
-        self.entries.push_back(Entry { id, line });
+        self.entries.push_back(Entry { id, line, gap });
         while self.entries.len() > MAX_LINES {
             self.entries.pop_front();
         }
@@ -100,7 +107,7 @@ impl LogState {
                 }
             }
             LogUpdate::Line(line) => self.push(line),
-            LogUpdate::Skipped(count) => self.push(gap(count)),
+            LogUpdate::Skipped(count) => self.push_entry(gap(count), true),
             LogUpdate::Dropped => {}
             LogUpdate::TooOld(why) => self.note = Some(why),
         }
@@ -135,14 +142,15 @@ impl Default for LogFilter {
 }
 
 impl LogFilter {
-    pub fn allows(&self, line: &LogLine) -> bool {
-        line.level >= self.level && self.task.as_ref().is_none_or(|t| line.task.as_ref() == Some(t))
+    pub fn allows(&self, entry: &Entry) -> bool {
+        let line = &entry.line;
+        entry.gap || (line.level >= self.level && self.task.as_ref().is_none_or(|t| line.task.as_ref() == Some(t)))
     }
 }
 
 /// The lines the list shows: those the filter allows, oldest first.
 pub fn visible<'a>(state: &'a LogState, filter: &LogFilter) -> Vec<&'a Entry> {
-    state.entries().filter(|e| filter.allows(&e.line)).collect()
+    state.entries().filter(|e| filter.allows(e)).collect()
 }
 
 /// Whether the list sticks to its bottom.
@@ -166,10 +174,11 @@ const AT_BOTTOM: f32 = 2.0;
 
 /// Where follow mode leaves a list scrolled to `y` that could scroll `max` (it could scroll `last_max` when last
 /// looked at): `(following, y)`. Following, a list still at its old end moves to the new one, and one the person moved
-/// up from it stops following. Not following, scrolling back to the end follows again.
+/// up from it stops following (a list that shrank, its filter narrowed, has its position clamped to the new end,
+/// which is not the person scrolling). Not following, scrolling back to the end follows again.
 pub fn follow_step(following: bool, y: f32, last_max: f32, max: f32) -> (bool, f32) {
     if following {
-        if y < last_max - AT_BOTTOM { (false, y) } else { (true, max) }
+        if y < last_max - AT_BOTTOM && y < max - AT_BOTTOM { (false, y) } else { (true, max) }
     } else if y >= max - AT_BOTTOM {
         (true, max)
     } else {
@@ -551,12 +560,25 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_marker_shows_under_any_filter() {
+        let mut state = open();
+        state.push(line(1, LogLevel::Info, Some("TRAIL-1")));
+        state.apply(LogUpdate::Skipped(3));
+        let filter = LogFilter { level: LogLevel::Error, task: Some("TRAIL-2".into()) };
+        let shown: Vec<_> = visible(&state, &filter).iter().map(|e| e.line.message.as_str()).collect();
+        assert_eq!(shown, ["3 log lines skipped: Lookout fell behind"]);
+    }
+
+    #[test]
     fn follow_sticks_to_the_bottom_and_lets_go_when_scrolled_up() {
         // At the end of a list that grew: follows it down.
         assert_eq!(follow_step(true, 100.0, 100.0, 140.0), (true, 140.0));
         // Moved up from the end: stops, and stays where the person put it.
         assert_eq!(follow_step(true, 60.0, 100.0, 140.0), (false, 60.0));
         assert_eq!(follow_step(false, 60.0, 140.0, 180.0), (false, 60.0));
+        // A narrowed filter shrinks the list and clamps the position to the new end: still following.
+        assert_eq!(follow_step(true, 40.0, 140.0, 40.0), (true, 40.0));
+        assert_eq!(follow_step(true, 0.0, 140.0, 0.0), (true, 0.0));
         // Scrolled back to the end: follows again.
         assert_eq!(follow_step(false, 179.0, 180.0, 180.0), (true, 180.0));
     }

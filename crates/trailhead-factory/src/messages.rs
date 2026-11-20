@@ -414,6 +414,16 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
     )
 }
 
+/// Why a task is parked when the worker found its work already on the base branch, or no longer applicable.
+pub fn already_done_question(evidence: &str) -> String {
+    let evidence = if evidence.trim().is_empty() { "(the worker gave no evidence)" } else { evidence.trim() };
+    format!(
+        "The worker found nothing to do: the task looks already done on the base branch, or obsolete. \
+         Its evidence: {evidence}\n\nIf that holds, close the task (mark it done or cancel it). Otherwise say what \
+         is missing, then reopen the task."
+    )
+}
+
 /// Why a task is parked when two attempts in a row gave up, which points at the environment, not the task.
 pub fn repeated_failure_question(before: &str, reason: &str) -> String {
     format!(
@@ -536,6 +546,13 @@ pub fn merged_unapproved_question(pr_url: &str) -> String {
     )
 }
 
+/// Why a task is parked when the factory's merger merged its PR and core then refused the factory's `done`.
+pub fn merged_unfinished_question(pr_url: &str) -> String {
+    format!(
+        "The factory merged the PR {pr_url}, but it isn't allowed to finish this task: its own identity is on record as having sent the work to review. Mark it done."
+    )
+}
+
 /// Why a task is parked when the agent's work is done and checked but publishing it failed.
 pub fn publish_failed_question(error: &dyn std::fmt::Display) -> String {
     format!(
@@ -566,6 +583,16 @@ pub fn conflict_feedback(pr_url: &str, base: &str) -> String {
          branch is already being merged into your checkout, uncommitted and with conflict markers where it \
          clashes. Resolve every conflict, keeping what both sides intended; don't discard either side's changes \
          or rebase. Then run the checks and finish."
+    )
+}
+
+/// What a worker is told when the host kept dropping a branch update it was asked for, so no conflict was reported.
+pub fn dropped_update_feedback(pr_url: &str, base: &str) -> String {
+    format!(
+        "{pr_url} is behind `{base}`, and the host kept dropping the update that would bring it up to date without \
+         saying why, so there may be no conflict at all. The base branch is already being merged into your \
+         checkout, uncommitted. Resolve whatever conflicts come up, if any, keeping what both sides intended; \
+         don't discard either side's changes or rebase. Then run the checks and finish."
     )
 }
 

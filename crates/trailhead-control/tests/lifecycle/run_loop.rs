@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use trailhead_control::{Host, Outcome};
 use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, Status, TaskKey, Usd, label, run_name};
-use trailhead_testkit::{Script, unix_now};
+use trailhead_testkit::{Script, TrackerOp, unix_now};
 
 use crate::common::*;
+use crate::logs::Logs;
 
 #[tokio::test]
 async fn a_parked_sandbox_keeps_its_place_in_the_cap() {
@@ -795,6 +796,33 @@ async fn taking_a_parked_task_off_its_queue_frees_its_place() {
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput, "the detached task is left to its new owner");
 }
 
+#[tokio::test]
+async fn a_failed_in_flight_listing_doesnt_release_a_parked_tasks_sandbox() {
+    let (r, queue) = queued_rig();
+    let key = r.tracker.add_subtask(&queue, "Ambiguous", "");
+    r.tracker.set_grade(&key, 3);
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"]);
+
+    // The task is off its queue, which a good listing would show, but the listing fails: the guard keeps the sandbox.
+    r.tracker.detach(&key);
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 100);
+    let next = r.tracker.add_subtask(&queue, "Next", "");
+    r.tracker.set_grade(&next, 3);
+    r.factory.tick().await.unwrap();
+    assert_eq!(busy(&r.compute), ["trailhead-w1"], "a tracker hiccup frees no parked sandbox");
+    assert_eq!(r.compute.get("trailhead-w1").unwrap().labels.get(label::TASK), Some(&key.0));
+    assert_eq!(r.tracker.task(&next).status, Status::Open, "the one place is still taken");
+
+    // Once the listing works again the detached task's sandbox is released.
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 0);
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == next), "the next task started in the released place");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
     let r = releasing_after(1);
@@ -805,70 +833,6 @@ async fn a_parked_task_still_claimed_is_left_alone_without_waking_its_daemon() {
     assert!(r.daemon.unpublished_asked().is_empty(), "the daemon wasn't asked while the claim stood");
     assert_eq!(r.tracker.task(&waiting).status, Status::Open);
     assert_eq!(r.tracker.task(&parked).run.released, None);
-}
-
-/// Log lines the current thread's test has asked to read back.
-///
-/// A scoped subscriber (`set_default`) can lose to the callsite interest cache when other tests log at the same
-/// callsites in parallel with no subscriber, so a test would miss its lines. One global subscriber keeps every
-/// callsite enabled; it writes to the `Logs` the thread installed, which is the test's, since these tests run on a
-/// current-thread runtime.
-#[derive(Clone, Default)]
-pub(crate) struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-thread_local! {
-    static CAPTURING: std::cell::RefCell<Option<Logs>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Stops the thread's capture when dropped.
-pub(crate) struct Capture;
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        CAPTURING.with(|c| *c.borrow_mut() = None);
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ThreadLogs;
-
-impl std::io::Write for ThreadLogs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        CAPTURING.with(|c| {
-            if let Some(logs) = &*c.borrow() {
-                logs.0.lock().unwrap().extend_from_slice(buf);
-            }
-        });
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLogs {
-    type Writer = ThreadLogs;
-    fn make_writer(&'a self) -> ThreadLogs {
-        *self
-    }
-}
-
-impl Logs {
-    /// Captures this thread's log lines until the returned guard drops.
-    pub(crate) fn capture() -> (Logs, Capture) {
-        static INSTALL: std::sync::Once = std::sync::Once::new();
-        INSTALL.call_once(|| {
-            let sub = tracing_subscriber::fmt().with_writer(ThreadLogs).with_ansi(false).finish();
-            tracing::subscriber::set_global_default(sub).expect("no other global subscriber in this test binary");
-        });
-        let logs = Logs::default();
-        CAPTURING.with(|c| *c.borrow_mut() = Some(logs.clone()));
-        (logs, Capture)
-    }
-
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
 }
 
 /// A worker sandbox another repo's factory holds, taking a place under the host's cap.
@@ -960,4 +924,133 @@ async fn a_parked_task_with_a_pushed_branch_and_no_pr_is_compared_with_its_branc
         .into_iter()
         .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
     assert!(resumed, "it resumes on the branch it pushed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_resumed_task_whose_first_prepare_fails_still_resumes_from_its_branch() {
+    let r = releasing_after(1);
+    let (parked, waiting) = parked_with_one_waiting(&r).await;
+    r.tracker.lapse_lease(&parked);
+    r.daemon.set_remote_branches(&["main", "factory/trail-1"]);
+    assert!(r.factory.tick().await.unwrap().is_empty(), "not parked long enough yet");
+    tokio::time::advance(AFTER).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, _)| t.key == waiting));
+    assert!(r.tracker.task(&parked).run.released.is_some_and(|at| at > 0));
+
+    // The first attempt after the answer fails while preparing; the retry must still resume.
+    r.tracker.answer(&parked, "Go on.");
+    r.daemon.fail_prepares(1, "boom");
+    r.factory.run_task(&r.tracker.task(&parked)).await.unwrap_err();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&parked)).await.unwrap();
+    let resumed = r
+        .daemon
+        .prepared()
+        .into_iter()
+        .any(|(_, p)| p.branch.as_deref() == Some("factory/trail-1") && p.branch_if_present);
+    assert!(resumed, "the retry resumes on the branch it pushed");
+}
+
+/// A rework task with a pooled sandbox it ran on (`trailhead-w1`, recorded as its host) and a second, left over from an
+/// earlier attempt (`trailhead-w2`), both busy and labelled with its key. `w2` has a warm checkpoint when `warm`.
+async fn rework_holding_two_sandboxes(warm: bool) -> (Rig, TaskKey) {
+    let config = CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nqueue = \"TRAIL-1\"\nmax_sandboxes = 3");
+    let mut r = rig_with(&format!(
+        "{config}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n[merge]\nmode = \"on\"\n"
+    ));
+    let queue = r.tracker.add_task("TRAIL", "Factory queue", "");
+    r.factory = r.factory.with_codehost(Arc::new(r.codehost.clone()));
+    let key = r.tracker.add_subtask(&queue, "Do it", "");
+    r.tracker.set_grade(&key, 1);
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/0.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    r.codehost.set_conflicts(true);
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.task(&key).run.pending_changes().is_some_and(|c| !c.kind.is_review()));
+
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::ROLE.into(), Role::Worker.as_str().into());
+    labels.insert(label::TASK.into(), key.0.clone());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    labels.remove(label::WARM);
+    let spec = SandboxSpec { name: "trailhead-w2".into(), labels: labels.clone(), egress: Default::default() };
+    let stale = r.compute.create(&spec).await.unwrap();
+    if warm {
+        let cp = r.compute.checkpoint(&stale.id, "warm").await.unwrap();
+        labels.insert(label::WARM.into(), cp.0);
+        r.compute.set_labels(&stale.id, &labels).await.unwrap();
+    }
+    let host = r.tracker.task(&key).run.host;
+    assert_eq!(host.as_deref(), Some("trailhead-w1"), "the run recorded the sandbox it ran on");
+    (r, key)
+}
+
+async fn rework_in_recorded_sandbox(r: &Rig, key: &TaskKey) {
+    // The tick's first release of `w2` (in `occupied_after_release`, before any task is placed) fails on its first
+    // call, `set_egress`, so `w2` is still busy and held for the task when `acquire_worker` places it. That is the
+    // stale-release loop under test; without the fault `occupied_after_release` releases `w2` and the loop never runs.
+    r.compute.fail_once_after("trailhead-w2", "set_egress", 0);
+    r.codehost.set_conflicts(false);
+    let pr = r.tracker.task(key).run.pr.expect("a PR");
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.harness.push(Role::Worker, Script::new(changes_to("docs/0.md")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(ran.iter().any(|(t, o)| &t.key == key && !matches!(o, Outcome::Settled { .. })), "the rework ran: {ran:?}");
+    assert_eq!(r.tracker.task(key).run.host.as_deref(), Some("trailhead-w1"), "the rework ran in its recorded sandbox");
+}
+
+#[tokio::test]
+async fn a_rework_runs_in_its_recorded_sandbox_and_destroys_a_cold_stale_one() {
+    let (r, key) = rework_holding_two_sandboxes(false).await;
+    rework_in_recorded_sandbox(&r, &key).await;
+    let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["trailhead-w1"], "the cold stale sandbox was destroyed");
+}
+
+#[tokio::test]
+async fn a_rework_runs_in_its_recorded_sandbox_and_restores_a_warm_stale_one_to_idle() {
+    let (r, key) = rework_holding_two_sandboxes(true).await;
+    rework_in_recorded_sandbox(&r, &key).await;
+    let stale = r.compute.get("trailhead-w2").expect("the warm stale sandbox is kept");
+    assert_eq!(stale.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
+    assert_eq!(stale.labels.get(label::TASK), None, "no longer held for the task");
+    assert_eq!(r.compute.restores("trailhead-w2").len(), 1, "restored to its warm checkpoint");
+}
+
+#[tokio::test]
+async fn a_task_holding_two_sandboxes_is_looked_up_once_per_starvation_check() {
+    let r = rig_on(
+        &CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"),
+        Host::new(&Default::default()),
+    );
+    let parked = r.tracker.add_task("TRAIL", "Parks", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which crate?".into() }));
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&parked).status, Status::NeedsInput);
+
+    // A second sandbox held for the same task fills the repo's cap of two.
+    let labels = trailhead_factory::Labels::from([
+        (label::FACTORY.into(), "trailhead".into()),
+        (label::REPO.into(), "lanesawyer/trailhead".into()),
+        (label::TASK.into(), parked.0.clone()),
+        (label::ROLE.into(), "worker".into()),
+    ]);
+    r.compute.create(&SandboxSpec { name: "trailhead-w2".into(), labels, egress: Default::default() }).await.unwrap();
+    let waiting = r.tracker.add_task("TRAIL", "Waits", "");
+    let (logs, _capture) = Logs::capture();
+
+    let before = r.tracker.shows(&parked);
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&waiting).status, Status::Open, "no place while both sandboxes are held");
+    assert_eq!(r.tracker.shows(&parked), before + 1, "one lookup for the task, not one per sandbox");
+    assert!(logs.text().contains("held by parked tasks"), "both parked sandboxes still count: {}", logs.text());
 }

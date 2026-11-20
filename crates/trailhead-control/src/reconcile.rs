@@ -47,8 +47,9 @@ impl Factory {
     }
 
     /// Warns, once per stretch outside the queues, about factory tasks sitting outside every repo's queue:
-    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses and the sandbox
-    /// stays (TRAIL-531). Which repo owns one is unknowable, so nothing is torn down.
+    /// re-parented while their run was live, they're invisible to reconcile, so their claim lapses. Once its run
+    /// has ended, the run loop releases the pooled sandbox held for one on its next poll (TRAIL-1147), but reconcile
+    /// still can't see the task (TRAIL-531). Which repo owns one is unknowable, so nothing else is torn down.
     async fn warn_strays(&self) {
         // A repo without a queue works the whole project, so nothing in it can sit outside a queue, whichever repo
         // asks: the other repo's in-flight runs are that repo's own.
@@ -66,7 +67,7 @@ impl Factory {
                 for t in strays.iter().filter(|t| logged.insert(t.key.0.clone())) {
                     tracing::warn!(
                         task = %t.key,
-                        "a factory task sits outside every configured queue, so reconcile can't see it; move it back under its queue or close it"
+                        "a factory task sits outside every configured queue, so reconcile can't see it and the run loop releases its pooled sandbox; move it back under its queue or close it"
                     );
                 }
             }
@@ -83,13 +84,21 @@ impl Factory {
         let (live, down) = self.list_all(&self.base_labels()).await?;
         let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await;
         // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
-        let parked: HashSet<String> = in_flight
-            .iter()
-            .flatten()
-            .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
-            .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
-            .collect();
-        self.status.sync_sandboxes(&live, &down, &parked);
+        // A sandbox a breach left stuck (cut-off and destroy both failed) is shown apart: waiting to be destroyed,
+        // not suspended.
+        let held = |stuck: bool| -> HashSet<String> {
+            in_flight
+                .iter()
+                .flatten()
+                .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
+                .filter(|t| {
+                    let breach = t.run.worker_breach.as_ref();
+                    breach.is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) == stuck
+                })
+                .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
+                .collect()
+        };
+        self.status.sync_sandboxes(&live, &down, &held(false), &held(true));
         self.warn_strays().await;
         let in_flight = in_flight?;
         // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
@@ -115,13 +124,17 @@ impl Factory {
                 continue;
             }
             // A run parked for its breach, or one whose park is yet to land, keeps its suspended sandbox, unless the
-            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone.
+            // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone. Only the
+            // task the sandbox is labelled for keeps it: a parked task's record goes on naming a host its run gave
+            // back long ago, and a later task's cut-short run there would never be released (TRAIL-1474).
+            let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
                 (t.status == Status::NeedsInput
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
+                    && labelled.is_none_or(|task| *task == t.key.0)
             }) {
                 // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
                 if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
@@ -139,7 +152,11 @@ impl Factory {
                 continue;
             }
             match self.target_of(sandbox).compute.destroy(&sandbox.id).await {
-                Ok(()) => done.destroyed.push(sandbox.name.clone()),
+                Ok(()) => {
+                    self.forget_sandbox(&sandbox.id);
+                    self.status.sandbox_gone(&sandbox.name);
+                    done.destroyed.push(sandbox.name.clone());
+                }
                 Err(e) => tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't destroy an orphaned sandbox"),
             }
         }
@@ -265,29 +282,39 @@ impl Factory {
         {
             tracing::warn!(task = %task.key.0, error = %e, "couldn't release the sub-agent's claim before closing");
         }
-        let merged_by_human = merged.by == MergedBy::Human;
-        let pr_url = merged.pr.url.clone();
+        let question = match merged.by {
+            MergedBy::Human => messages::merged_unapproved_question(&merged.pr.url),
+            MergedBy::Merger => messages::merged_unfinished_question(&merged.pr.url),
+        };
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
         self.tracker.report(&task.key, RunPatch { merged: Patch::Set(merged), ..RunPatch::default() }).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
-        // A park cut short after the unapproved merge was found: finish it, don't try to finish the task (TRAIL-729).
-        if merged_by_human && task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
-            return self.park_unapproved_merge(task, &pr_url).await;
+        // A park cut short after the finish was refused: finish the park, don't try to finish the task (TRAIL-729).
+        if task.run.unapproved_merge == Some(true) && task.status != Status::NeedsInput {
+            return self.park_unfinished_merge(task, &question).await;
         }
         if task.status == Status::NeedsInput {
             self.tracker.claim(&task.key).await?;
         }
         match self.tracker.finish(&task.key, &handoff).await {
-            // A person merged work nobody approved, and core won't let the factory call it done: it isn't one of the
-            // project's reviewers (TRAIL-1439), or its own identity sent the work to review. The merge is recorded, so
-            // ask once for a person to mark it done rather than be refused again every pass (TRAIL-706).
-            Err(Error::Forbidden(why)) if merged_by_human => {
-                tracing::warn!(task = %task.key, %why, "the PR was merged unapproved; parking for a person to finish it");
-                self.tracker
+            // Core won't let the factory call it done. A person merged work nobody approved and the factory isn't one
+            // of the project's reviewers (TRAIL-1439), or, whoever merged, the factory's own identity sent the work
+            // to review. The merge is recorded, so ask once for a person to mark it done rather than be refused
+            // again every pass (TRAIL-706, TRAIL-1462).
+            Err(Error::Forbidden(why)) => {
+                tracing::warn!(task = %task.key, %why, "the PR is merged but the task can't be finished; parking for a person to finish it");
+                // The marker only lets a later pass finish a cut-short park. If writing it fails, park anyway: a task
+                // left claimed without it lapses to open, and the next pass would let core close it unparked (TRAIL-1378).
+                let marker = self
+                    .tracker
                     .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
-                    .await?;
-                return self.park_unapproved_merge(task, &pr_url).await;
+                    .await;
+                if let Err(e) = &marker {
+                    tracing::warn!(task = %task.key, error = %e, "couldn't record the unapproved merge; parking anyway");
+                }
+                let parked = self.park_unfinished_merge(task, &question).await;
+                return parked;
             }
             finished => finished?,
         }
@@ -295,17 +322,18 @@ impl Factory {
         Ok(())
     }
 
-    /// Parks a task whose PR a person merged unapproved, from wherever a cut-short park left it: an approved task is
-    /// unapproved, one in review or open is claimed as it stands (never reopened first: a failed claim then leaves it
-    /// as it was, not open and unheld; TRAIL-826), then asked. A parked one is already claimed.
-    async fn park_unapproved_merge(&self, task: &Task, pr_url: &str) -> Result<()> {
+    /// Parks a task whose PR is merged but which core won't let the factory finish, from wherever a cut-short park
+    /// left it: an approved task is unapproved, one in review or open is claimed as it stands (never reopened first:
+    /// a failed claim then leaves it as it was, not open and unheld; TRAIL-826), then asked. A parked one is already
+    /// claimed.
+    async fn park_unfinished_merge(&self, task: &Task, question: &str) -> Result<()> {
         if task.status == Status::Approved {
             self.tracker.unapprove(&task.key).await?;
         }
         if matches!(task.status, Status::InReview | Status::Approved | Status::Open) {
             self.tracker.claim(&task.key).await?;
         }
-        self.tracker.ask(&task.key, &messages::merged_unapproved_question(pr_url)).await
+        self.tracker.ask(&task.key, question).await
     }
 
     /// A PR closed without merging: the task is parked with a question for a human, rather than reopened, since a
@@ -328,10 +356,26 @@ impl Factory {
     /// conflicts, then goes through the checks and review again. It counts toward `max_conflict_reworks`, not review
     /// rounds, so a PR that keeps conflicting is parked for a human without using up its reviews (TRAIL-199, TRAIL-221).
     pub(crate) async fn rework_conflict(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::conflict_feedback).await
+    }
+
+    /// Like `rework_conflict`, for a branch update the host kept dropping: no conflict was reported, so the worker
+    /// is told to merge the base in and resolve whatever comes up (TRAIL-1271).
+    pub(crate) async fn rework_dropped_update(&self, task: &Task, pr: &PrRef, attempt: u32) -> Result<()> {
+        self.rework_behind(task, pr, attempt, messages::dropped_update_feedback).await
+    }
+
+    async fn rework_behind(
+        &self,
+        task: &Task,
+        pr: &PrRef,
+        attempt: u32,
+        feedback: fn(&str, &str) -> String,
+    ) -> Result<()> {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
         self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
         let base = &self.config.repo.base_branch;
-        let body = messages::conflict_feedback(&pr.url, base);
+        let body = feedback(&pr.url, base);
         tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
@@ -367,7 +411,7 @@ impl Factory {
             return Ok(false);
         }
         let after_update = match &task.run.reviewed_head {
-            Some(reviewed) if reviewed != head && codehost.carries_verdict(pr, reviewed).await? => {
+            Some(reviewed) if reviewed != head && self.carries_verdict(&task.key, pr, reviewed, Some(head)).await? => {
                 // Only CI seen passing on the reviewed head says the merge brought the failure in. A host that
                 // can't be asked gets the softer wording.
                 match codehost.ci_at(pr, reviewed).await {
@@ -581,11 +625,11 @@ impl Factory {
         if unreviewed(task) {
             return Ok(true);
         }
-        let (Some(pr), Some(codehost), Some(reviewed)) = (&task.run.pr, &self.codehost, &task.run.reviewed_head) else {
+        let (Some(pr), Some(reviewed)) = (&task.run.pr, &task.run.reviewed_head) else {
             return Ok(false);
         };
         // The head the host showed is the one reviewed: nothing to ask.
-        Ok(head != Some(reviewed) && !codehost.carries_verdict(pr, reviewed).await?)
+        Ok(head != Some(reviewed) && !self.carries_verdict(&task.key, pr, reviewed, head.map(String::as_str)).await?)
     }
 
     /// True when the PR is due a review.
@@ -640,8 +684,10 @@ impl Factory {
             // that no longer stands (the PR was pushed to, or a person settled the park) is answered here, and the
             // PR is looked at as it is.
             let recorded = task.run.changes_requested.as_ref().filter(|c| c.attempt == attempt);
-            let stale =
-                recorded.is_some_and(|c| c.settled || task.run.pending_changes().is_some()) && standing.is_none();
+            // A settled request is answered whatever `reviewed` says: a conflict or CI request doesn't move `reviewed`,
+            // so `last_changes()` can hide one on an attempt not yet reviewed, and a person's settling must still be
+            // answered (TRAIL-466).
+            let stale = recorded.is_some_and(|c| c.settled || task.run.last_changes().is_some()) && standing.is_none();
             let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
             self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
         }
@@ -671,7 +717,7 @@ impl Factory {
         if !owed {
             // CI may have finished, or Lane approved, since the gates were last looked at.
             self.evaluate_gates(&task.key).await?;
-        } else if self.rework_if_ci_failed(&task.key).await? {
+        } else if self.rework_if_ci_failed(task).await? {
             // A failed CI is reworked without waiting for the review, which would only look at a head that is about
             // to change.
             return Ok(false);

@@ -24,6 +24,13 @@ async fn a_profile_selects_the_scripted_harness_by_adapter_name() {
     assert_eq!(r.codehost.prs().len(), 1);
 }
 
+#[test]
+fn an_unknown_adapter_is_rejected_when_the_config_loads() {
+    let err = load_selecting(CONFIG).unwrap_err().to_string();
+    assert!(err.contains("unknown adapter `claude-code`"), "{err}");
+    assert!(err.contains(trailhead_testkit::SCRIPTED), "{err}");
+}
+
 #[tokio::test]
 async fn spec_to_reviewed_pr_then_human_merge() {
     let r = rig();
@@ -164,6 +171,7 @@ async fn a_breached_sandbox_that_cant_be_relabelled_is_still_cut_off_and_destroy
             );
         } else {
             assert!(r.compute.get("trailhead-w1").is_none(), "a sandbox that can't be cut off is destroyed");
+            assert_eq!(r.factory.sandbox_entries(), 0, "a destroyed sandbox's per-sandbox entries are forgotten");
         }
     }
 }
@@ -194,7 +202,7 @@ async fn a_failed_park_after_giving_up_does_not_leave_the_gave_up_marker() {
     assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_attempts = 1"));
     let key = r.tracker.add_task("TRAIL", "Fails", "");
@@ -205,6 +213,11 @@ async fn a_park_that_cannot_claim_after_giving_up_revokes_the_sub_agent() {
     assert!(ran.is_err(), "{ran:?}");
     assert!(r.tracker.is_revoked("factory/trail-1-a1"), "the sub-agent is revoked, not left to expire");
     assert_eq!(r.tracker.task(&key).run.gave_up.unwrap_or(0), 0);
+    // The task is set back too: it isn't picked up again until the backoff is over.
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "no luck".into() }));
+    assert!(r.factory.tick().await.unwrap().is_empty(), "still backing off");
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1, "retried once the backoff is over");
 }
 
 #[tokio::test]
@@ -661,6 +674,16 @@ async fn worker_infrastructure_failures_keep_counting_across_a_control_plane_res
     let questions: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(questions.len(), 1);
     assert!(questions[0].body.contains("it's not the task"), "{}", questions[0].body);
+
+    // Lane answers, and a new factory sees one more failure: the streak starts again at 1, so it's retried.
+    r.tracker.answer(&key, "the daemon is back");
+    restart(&mut r, &config);
+    r.daemon.fail_runs(1, "not found: run trail-1 on this daemon");
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(err.to_string().contains("not found: run"), "{err}");
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.infra_failures, Some(1), "the reopened task's streak starts over");
+    assert_eq!(task.status, Status::Open, "retried, not parked");
 }
 
 #[tokio::test(start_paused = true)]
@@ -697,6 +720,25 @@ async fn a_task_backing_off_at_the_head_of_the_queue_doesnt_hold_up_the_rest() {
     let started: Vec<_> = r.factory.tick().await.unwrap().into_iter().map(|(t, _)| t.key).collect();
     assert_eq!(started, [second]);
     assert_eq!(r.tracker.task(&first).status, Status::Open, "still waiting out its backoff");
+}
+
+/// A rework that can't start because the tracker failed before the run's sub-agent existed backs off without the
+/// factory claiming the task. A claim and release of a task in review reads to core as the factory sending the work
+/// to review, after which it could neither approve nor finish it (TRAIL-1462).
+#[tokio::test]
+async fn a_rework_that_fails_before_its_sub_agent_exists_doesnt_make_the_factory_the_worker() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Add a greeting", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+
+    r.tracker.fail_sub_agents(true);
+    assert!(r.factory.tick().await.is_err(), "the rework couldn't start");
+    let task = r.tracker.task(&key);
+    assert_eq!((task.status, task.holder), (Status::InReview, None));
+    assert_eq!(task.run.infra_failures, Some(1), "counted without the claim");
+    Tracker::approve(&r.tracker, &key).await.expect("the factory didn't do the work, so it may still approve it");
 }
 
 /// Reports and sub-agent creation both fail, so `infra_failed` runs every time with no persisted count.
@@ -933,6 +975,31 @@ async fn a_warm_sandbox_that_fails_prepare_once_is_released_and_keeps_its_cache(
     assert_eq!(kept.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
     assert!(kept.labels.contains_key(label::WARM));
     assert_eq!(r.tracker.task(&second).run.infra_failures, Some(1), "an infrastructure failure");
+}
+
+#[tokio::test]
+async fn a_good_prepare_between_two_failed_ones_resets_the_failure_count() {
+    let r = rig();
+    let first = r.tracker.add_task("TRAIL", "Warms the pool", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&first)).await.unwrap();
+
+    let second = r.tracker.add_task("TRAIL", "Fails, then works", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_some(), "kept after the first failure");
+
+    // A good prepare on the same sandbox clears its count.
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Reviewer, Script::new(approve()).steps(1, 50_000));
+    r.factory.run_task(&r.tracker.task(&second)).await.unwrap();
+
+    let third = r.tracker.add_task("TRAIL", "Fails again", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&third)).await.unwrap_err();
+    let kept = r.compute.get("trailhead-w1").expect("one failure after a good prepare isn't two in a row");
+    assert_eq!(kept.labels.get(label::STATE).map(String::as_str), Some(label::IDLE));
 }
 
 #[tokio::test]
@@ -1547,11 +1614,21 @@ async fn a_park_that_fails_still_keeps_the_backoff() {
 async fn a_daemon_that_errors_after_a_run_that_finished_at_once_still_records_the_spend() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Finished before the drop", "");
-    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000));
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 100_000).no_yield());
     r.daemon.fail_runs_midway(1, "connection lost");
     let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
     assert!(err.to_string().contains("connection lost"), "{err}");
     let task = r.tracker.task(&key);
     assert!(task.run.spend.is_some_and(|s| s > Usd::ZERO), "the spend is recorded: {:?}", task.run.spend);
     assert_eq!(task.run.infra_failures, Some(1));
+}
+
+#[tokio::test]
+async fn a_fresh_sandbox_destroyed_after_a_failed_prepare_leaves_nothing_in_the_per_sandbox_maps() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Fails on a new sandbox", "");
+    r.daemon.fail_prepares(1, "git fetch failed");
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(r.compute.get("trailhead-w1").is_none(), "a new sandbox has no warm label, so it is destroyed");
+    assert_eq!(r.factory.sandbox_entries(), 0);
 }

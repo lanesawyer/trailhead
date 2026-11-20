@@ -18,6 +18,7 @@
 # Design notes
 
 - [Project plan](PLAN.md)
+- [Trailhead as a shell of apps](app-platform.md)
 - [Index of the factory design](factory/README.md)
   - [Seams](factory/seams.md)
   - [Sandbox](factory/sandbox.md)

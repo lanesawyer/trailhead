@@ -1075,6 +1075,17 @@ mod tests {
     #[derive(Component)]
     struct Holder;
 
+    /// An app with feathers' dialog observer, which turns an Esc that reaches the modal's backdrop into a
+    /// close request, so a test fails if the Esc isn't stopped before it gets there.
+    fn modal_app() -> App {
+        let mut app = app();
+        app.add_plugins((crate::ModalPlugin, bevy::ui_widgets::ModalDialogPlugin))
+            .init_resource::<bevy::input_focus::InputFocusVisible>();
+        // A real window registers `Window`, which a key press needs to bubble up the hierarchy.
+        app.world_mut().spawn(Window::default());
+        app
+    }
+
     impl crate::Modal for Holder {
         fn title(&self) -> String {
             "Edit".into()
@@ -1083,8 +1094,7 @@ mod tests {
 
     #[test]
     fn esc_in_an_edit_inside_a_modal_cancels_the_edit_and_leaves_the_modal_open() {
-        let mut app = app();
-        app.add_plugins(crate::ModalPlugin);
+        let mut app = modal_app();
         let modal = crate::open_modal(&mut app.world_mut().commands(), Holder);
         settle(&mut app);
         let body = app.world().get::<crate::ModalSlots>(modal).unwrap().body;
@@ -1099,5 +1109,34 @@ mod tests {
         assert_eq!(app.world().get::<InlineText>(root).unwrap().value(), "Fix the board");
         assert!(app.world().get_entity(modal).is_ok(), "the modal is still open");
         assert!(edits(&app).is_empty());
+    }
+
+    #[test]
+    fn esc_in_an_inline_fields_popup_closes_it_and_leaves_the_modal_open() {
+        use bevy::feathers::controls::{FeathersMenu, FeathersMenuPopup, SelectPlugin};
+        use bevy::ui_widgets::{MenuAction, MenuEvent};
+        let mut app = modal_app();
+        app.add_plugins((SelectPlugin, bevy::ui_widgets::MenuPlugin));
+        let modal = crate::open_modal(&mut app.world_mut().commands(), Holder);
+        settle(&mut app);
+        let body = app.world().get::<crate::ModalSlots>(modal).unwrap().body;
+        let options = vec!["Todo".to_string(), "Doing".to_string()];
+        app.world_mut()
+            .commands()
+            .spawn_scene(inline_field("Status", options, Vec::new(), Some(0)))
+            .insert(ChildOf(body));
+        settle(&mut app);
+        let world = app.world_mut();
+        let menu = world.query_filtered::<Entity, With<FeathersMenu>>().single(world).unwrap();
+        let popup = world.query_filtered::<Entity, With<FeathersMenuPopup>>().single(world).unwrap();
+        // The popup holds the keyboard, as it does once opened (a menu that has lost it closes itself).
+        world.resource_mut::<InputFocus>().set(popup, FocusCause::Navigated);
+        world.trigger(MenuEvent { source: menu, action: MenuAction::Toggle });
+        settle(&mut app);
+        let shown = |app: &App| *app.world().get::<Visibility>(popup).unwrap() != Visibility::Hidden;
+        assert!(shown(&app), "the popup is open");
+        escape(&mut app, popup);
+        assert!(!shown(&app), "Esc closed the popup");
+        assert!(app.world().get_entity(modal).is_ok(), "the modal is still open");
     }
 }

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_control::{CoreTracker, Factory, Host};
-use trailhead_core::{CommentKind, Ctx, Grade, NewComment, NewProject, NewTask, ProjectPatch, Store, TaskPatch};
+use trailhead_core::{
+    CommentKind, Ctx, EventFilter, Grade, NewComment, NewProject, NewTask, ProjectPatch, Store, TaskPatch,
+};
 use trailhead_factory::{
     CiState, CodeHost, Commit, EventSink, FactoryConfig, Feedback, FileChange, Harness, HostConfig, PrRef, Result,
     Role, RunContext, RunEvent, RunOutcome, Status, TaskKey, Tracker, Usage, VerdictKind,
@@ -14,6 +16,7 @@ use trailhead_factory::{
 use trailhead_testkit::{Connect, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon};
 
 use crate::rng::Rng;
+use crate::tracker::{Armed, Flaky, Outage};
 
 /// Grades 1 and 2 merge on the agents' say; grade 3 waits for a person. The merger is on, so a task that passed its
 /// gates has no reason to stay open. There is room for every task at once: who gets a sandbox when they run short
@@ -109,6 +112,10 @@ pub enum Fault {
     MergeRefused,
     ComputeDown,
     ComputeUp,
+    /// The tracker fails the n-th write from now, whoever makes it: the control plane, a sub-agent or the daemon.
+    TrackerFailsWrite(u32),
+    /// The same, for the n-th call of any kind.
+    TrackerFailsCall(u32),
 }
 
 /// What the agents do in the step under way: `None` is the calm world of the settling phase, where a worker makes
@@ -184,15 +191,23 @@ pub struct World {
     pub codehost: FakeCodeHost,
     pub daemon: Arc<LocalDaemon>,
     pub tasks: Vec<TaskKey>,
+    /// The factory's own agent, to tell its comments from a reviewer's.
+    factory_agent: uuid::Uuid,
+    outage: Outage,
     mood: Arc<Mutex<Mood>>,
     /// What each step did, for the report of a failed run.
     pub log: Vec<String>,
+    /// Merges the factory made that its gates didn't allow.
+    pub unsafe_merges: Vec<String>,
 }
 
 impl World {
     /// A project the factory may review in, with one task per grade given.
     pub async fn new(grades: &[u8]) -> World {
-        let store = Arc::new(Store::open_local(":memory:").await.unwrap());
+        // The store's clock follows tokio's paused one, so waiting long enough lets a claim's lease run out.
+        let (began, at) = (tokio::time::Instant::now(), jiff::Timestamp::now());
+        let clock = Arc::new(move || at + jiff::SignedDuration::try_from(began.elapsed()).unwrap());
+        let store = Arc::new(Store::open_local(":memory:").await.unwrap().with_clock(clock));
         let (ws, user) = store.bootstrap_local("Lane").await.unwrap();
         let human = Ctx::user(ws.id, user.id);
         let project = NewProject { key: "TRAIL".into(), name: "Trailhead".into(), ..Default::default() };
@@ -206,10 +221,14 @@ impl World {
         let compute = FakeCompute::new();
         let codehost = FakeCodeHost::new();
         let mood = Arc::new(Mutex::new(Mood::default()));
-        let s = store.clone();
+        let outage = Outage::default();
+        let (s, o) = (store.clone(), outage.clone());
         let connect: Connect = Arc::new(move |cred| {
-            let s = s.clone();
-            Box::pin(async move { Ok(Arc::new(CoreTracker::authenticate(s, &cred).await?) as Arc<dyn Tracker>) })
+            let (s, o) = (s.clone(), o.clone());
+            Box::pin(async move {
+                let tracker = Arc::new(CoreTracker::authenticate(s, &cred).await?);
+                Ok(Arc::new(Flaky::new(tracker, o)) as Arc<dyn Tracker>)
+            })
         });
         let heads = codehost.clone();
         let agents = Arc::new(Agents { mood: mood.clone() });
@@ -217,7 +236,7 @@ impl World {
             LocalDaemon::connecting(agents, Arc::new(codehost.clone()), connect)
                 .with_heads(move |repo, branch| heads.head(repo, branch)),
         );
-        let factory = Self::boot(&compute, &tracker, &daemon, &codehost);
+        let factory = Self::boot(&compute, &tracker, &outage, &daemon, &codehost);
         let mut tasks = Vec::new();
         for (i, grade) in grades.iter().enumerate() {
             let new = NewTask {
@@ -228,19 +247,35 @@ impl World {
             };
             tasks.push(TaskKey(store.create_task(&human, new).await.unwrap().key.0));
         }
-        World { store, human, factory, tracker, compute, codehost, daemon, tasks, mood, log: Vec::new() }
+        let (factory_agent, log) = (agent.id, Vec::new());
+        World {
+            store,
+            human,
+            factory,
+            tracker,
+            compute,
+            codehost,
+            daemon,
+            tasks,
+            factory_agent,
+            outage,
+            mood,
+            log,
+            unsafe_merges: Vec::new(),
+        }
     }
 
     fn boot(
         compute: &FakeCompute,
         tracker: &CoreTracker,
+        outage: &Outage,
         daemon: &Arc<LocalDaemon>,
         codehost: &FakeCodeHost,
     ) -> Factory {
         Factory::new(
             FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
             Arc::new(compute.clone()),
-            Arc::new(tracker.clone()),
+            Arc::new(Flaky::new(Arc::new(tracker.clone()), outage.clone())),
             Arc::new(FakeProvider::new(1)),
             daemon.clone(),
             Host::new(&HostConfig::default()),
@@ -268,6 +303,53 @@ impl World {
     /// failure of the simulation: the next steps have to cope with whatever it left.
     async fn step(&mut self, seed: Option<u64>, reconcile: bool) -> String {
         self.mood.lock().unwrap().seed = seed;
+        let merged = self.merged();
+        let did = self.pass(reconcile).await;
+        // Whatever merged during the factory's own pass, its merger merged.
+        for pr in self.merged().into_iter().filter(|pr| !merged.contains(pr)) {
+            if let Err(why) = self.merge_was_due(&pr).await {
+                self.unsafe_merges.push(format!("{} was merged by the factory, but {why}", pr.url));
+            }
+        }
+        did
+    }
+
+    fn merged(&self) -> Vec<PrRef> {
+        self.codehost.prs().into_iter().filter(|p| p.merged).map(|p| p.pr).collect()
+    }
+
+    /// Whether the gates of the PR's grade held when the merger merged it: CI passed on its head, the newest verdict
+    /// from anyone but the factory approves, and at a grade that needs a person, a person approved the task.
+    async fn merge_was_due(&self, pr: &PrRef) -> std::result::Result<(), String> {
+        let host = self.codehost.prs().into_iter().find(|p| p.pr == *pr).unwrap();
+        if host.ci != CiState::Passed {
+            return Err(format!("CI on its head was {:?}", host.ci));
+        }
+        let mut owner = None;
+        for key in &self.tasks {
+            let task = self.show(key).await;
+            if task.run.pr.as_ref() == Some(pr) {
+                owner = Some(task);
+            }
+        }
+        let Some(task) = owner else { return Err("no task has it as its PR".into()) };
+        let comments = self.store.list_comments(&self.human, &task.key.0).await.unwrap();
+        let verdict = comments
+            .iter()
+            .rev()
+            .find(|c| c.kind == CommentKind::Review && c.author_id != self.factory_agent)
+            .and_then(|c| c.verdict);
+        if verdict != Some(trailhead_core::Verdict::Approve) {
+            return Err(format!("the newest review of {} that isn't the factory's own says {verdict:?}", task.key.0));
+        }
+        let grade = task.run.grade.as_ref().map(|g| g.grade).or(task.grade).map_or(0, |g| g.get());
+        if grade >= 3 && !self.moves(&task.key).await.contains("-> approved by a person") {
+            return Err(format!("{} is grade {grade} and no person approved it", task.key.0));
+        }
+        Ok(())
+    }
+
+    async fn pass(&mut self, reconcile: bool) -> String {
         if reconcile {
             match self.factory.reconcile().await {
                 Ok(done) => format!("{done:?}"),
@@ -286,7 +368,7 @@ impl World {
             Event::Tick(seed) => self.step(Some(*seed), false).await,
             Event::Reconcile(seed) => self.step(Some(*seed), true).await,
             Event::Restart => {
-                self.factory = Self::boot(&self.compute, &self.tracker, &self.daemon, &self.codehost);
+                self.factory = Self::boot(&self.compute, &self.tracker, &self.outage, &self.daemon, &self.codehost);
                 String::new()
             }
             Event::Wait(secs) => {
@@ -414,6 +496,8 @@ impl World {
             Fault::MergeRefused => self.codehost.refuse_merge(Some("a required check is expected")),
             Fault::ComputeDown => self.compute.set_unreachable(true),
             Fault::ComputeUp => self.compute.set_unreachable(false),
+            Fault::TrackerFailsWrite(left) => *self.outage.lock().unwrap() = Some(Armed { left, writes_only: true }),
+            Fault::TrackerFailsCall(left) => *self.outage.lock().unwrap() = Some(Armed { left, writes_only: false }),
         }
     }
 
@@ -449,6 +533,7 @@ impl World {
     pub async fn settle(&mut self) -> std::result::Result<(), String> {
         self.compute.set_unreachable(false);
         self.codehost.refuse_merge(None);
+        *self.outage.lock().unwrap() = None;
         let mut before = self.print().await;
         let mut still = 0;
         for round in 0..SETTLE_ROUNDS {
@@ -470,6 +555,29 @@ impl World {
             before = after;
         }
         Err(format!("still writing after {SETTLE_ROUNDS} fair passes; the last state:\n{before}"))
+    }
+
+    /// Who moved the task where and who claimed it, oldest first: what core's review rule goes by.
+    pub async fn moves(&self, key: &TaskKey) -> String {
+        let agents = self.store.list_agents(&self.human).await.unwrap();
+        let who = |id: uuid::Uuid| match agents.iter().find(|a| a.id == id) {
+            Some(agent) => agent.name.clone(),
+            None => "a person".to_string(),
+        };
+        let filter = EventFilter { task: Some(trailhead_core::TaskKey(key.0.clone())), ..EventFilter::default() };
+        let status = |v: &Option<serde_json::Value>| {
+            v.as_ref().and_then(|v| v.get("status")).and_then(|s| s.as_str()).unwrap_or("-").to_string()
+        };
+        let mut out = Vec::new();
+        for e in self.store.list_events(&self.human, filter).await.unwrap() {
+            let (before, after) = (status(&e.before), status(&e.after));
+            if e.kind.starts_with("claim.") {
+                out.push(format!("{} by {}", e.kind, who(e.actor_id)));
+            } else if before != after {
+                out.push(format!("{before} -> {after} by {}", who(e.actor_id)));
+            }
+        }
+        out.join("; ")
     }
 
     /// Whether a person has an unanswered question on the task.

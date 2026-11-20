@@ -7,15 +7,19 @@
 //! 1. **The factory settles.** Given fair passes, it reaches a state where another pass writes nothing.
 //! 2. **Someone owes the next move.** Every task is then closed, parked with a question a person can answer, or in
 //!    review with only a person's approval missing. Anything else is a task nobody will ever pick up.
+//! 3. **Nothing merged that shouldn't have.** Each PR the factory's merger merged had passed CI on its head, its
+//!    newest review approved, and a person had approved the task where the grade asks for one.
 //!
 //! The seeds are fixed, so a run is the same everywhere and a failure is never luck. `SIM_SEEDS=5000` plays more
-//! (worth doing after a change to the lifecycle), and `SIM_SEED=17` plays one. A failure is shrunk to the shortest
+//! (worth doing after a change to the lifecycle), `SIM_SEED=17` plays one, and `SIM_LOG=1` prints the factory's own
+//! log while it does (with `--nocapture`). A failure is shrunk to the shortest
 //! list of events that still fails in the same way, and printed with what each event did and as code to paste into
 //! `regressions.rs`. Fix the factory, not the history: an event the factory can't cope with is a bug, unless what it
 //! should do is undecided, and then the event's own guard in `world.rs` says so with the task that decides it.
 
 mod regressions;
 mod rng;
+mod tracker;
 mod world;
 
 use std::collections::BTreeMap;
@@ -62,6 +66,9 @@ fn event(rng: &mut Rng) -> Event {
         89..91 => Event::PersonReopens(task),
         91..92 => Event::PersonFinishes(task),
         92..93 => Event::PersonCancels(task),
+        // A pass makes a few dozen tracker calls, most of them early reads, so writes get their own, shorter count.
+        93..97 => Event::Fault(Fault::TrackerFailsWrite(1 + rng.below(10) as u32)),
+        97..98 => Event::Fault(Fault::TrackerFailsCall(1 + rng.below(40) as u32)),
         _ => Event::Fault(
             [
                 Fault::RunFails,
@@ -83,6 +90,10 @@ fn event(rng: &mut Rng) -> Event {
 
 /// Plays one history on its own paused clock and checks where it ends.
 pub fn play(grades: &[u8], events: &[Event]) -> Result<(), Failure> {
+    if std::env::var_os("SIM_LOG").is_some() {
+        // The factory's own log, for reading one history (`SIM_SEED`, or one test in `regressions.rs`).
+        let _ = tracing_subscriber::fmt().with_test_writer().without_time().try_init();
+    }
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build().unwrap();
     runtime.block_on(async {
         let mut world = World::new(grades).await;
@@ -111,6 +122,9 @@ pub fn play(grades: &[u8], events: &[Event]) -> Result<(), Failure> {
 /// Every task has to be somewhere a person or nobody has the next move, and no sandbox may be left working for a
 /// run that is over.
 async fn check(world: &World) -> Result<(), (String, String)> {
+    if let Some(merge) = world.unsafe_merges.first() {
+        return Err(("the merger merged what its gates didn't allow".to_string(), merge.clone()));
+    }
     for sandbox in world.compute.sandboxes() {
         let Some(task) = sandbox
             .labels
@@ -131,9 +145,10 @@ async fn check(world: &World) -> Result<(), (String, String)> {
     }
     for key in &world.tasks {
         let task = world.show(key).await;
+        let moves = world.moves(key).await;
         let stuck = |why: &str| {
             let what = format!(
-                "{} is {:?} and nobody owes it a move: {why}\n  holder {:?}, changes_requested {}, run {:?}",
+                "{} is {:?} and nobody owes it a move: {why}\n  holder {:?}, changes_requested {}, run {:?}\n  moves: {moves}",
                 key.0, task.status, task.holder, task.changes_requested, task.run
             );
             Err((why.to_string(), what))

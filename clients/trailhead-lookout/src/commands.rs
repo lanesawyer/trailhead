@@ -8,8 +8,9 @@
 //! Commands go out only while the connection is `Live`. One in flight when the link drops goes back in the queue and
 //! is sent again, with the same key, once `Live` returns, so a retry the server already applied gets that answer
 //! back instead of running twice. A `RateLimited` answer is retried the same way, with the same key, once its
-//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] it is reported failed (a rate
-//! limit is handed back as `RateLimited`) rather than tried forever.
+//! `Retry-After` has passed (capped at [`MAX_RETRY_AFTER`]). After [`MAX_ATTEMPTS`] failures, or once a
+//! rate-limited command has been sent that many times in all, it is reported failed (a rate limit is handed back as
+//! `RateLimited`) rather than tried forever.
 
 use std::time::{Duration, Instant};
 
@@ -20,15 +21,45 @@ use trailhead_client::http::{Call, Client};
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
 
-/// How many times a command is sent before it is reported failed.
+/// Caps real failures: a command is reported failed after this many. A send the net thread refused with
+/// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries, counted
+/// on their own: `RateLimited` answers are tallied apart from sends, so those two kinds of send don't use up the
+/// budget, and the command is handed back as `RateLimited` on its this-many-th such answer, whatever the link did.
 pub const MAX_ATTEMPTS: u32 = 5;
 
 /// The longest the outbox waits on a `Retry-After` before sending again.
 pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
-/// The net thread's answer when a request reached it before it was `Live`. Nothing was sent, so it isn't a failed
-/// attempt and doesn't count toward [`MAX_ATTEMPTS`].
-pub const NOT_CONNECTED: &str = "not connected";
+/// Why an attempt got no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The request reached the net thread before it was `Live`. Nothing was sent, so it isn't a failed attempt and
+    /// doesn't count toward [`MAX_ATTEMPTS`].
+    NotConnected,
+    /// The request was tried and got no usable answer (the link dropped, timed out, a server error).
+    Failed(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => f.write_str("not connected"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<String> for SendError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+impl From<&str> for SendError {
+    fn from(why: &str) -> Self {
+        Self::Failed(why.to_owned())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u64);
@@ -101,7 +132,7 @@ pub struct Reply {
     /// Which send this answers: a stale "no answer" doesn't undo a later send.
     pub attempt: u32,
     /// `Err` when the request got no usable answer (the link dropped, timed out): retry.
-    pub result: Result<Outcome, String>,
+    pub result: Result<Outcome, SendError>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +152,9 @@ struct Pending {
     /// Attempts that really failed. A resend after the link dropped, or a send the net thread refused for want of a
     /// connection, isn't one.
     failures: u32,
+    /// `RateLimited` answers so far, counted apart from `attempts` so resends over a flaky link don't use up the
+    /// retries a rate limit gets.
+    rate_limits: u32,
     not_before: Option<Instant>,
 }
 
@@ -129,7 +163,8 @@ struct Pending {
 pub struct Outbox {
     pending: Vec<Pending>,
     next: u64,
-    /// Wait before sending again after a failed attempt, times the failures so far.
+    /// Wait before sending again after a failed attempt, times the failures so far (for a `RateLimited` answer with
+    /// no `Retry-After`, times the rate-limit answers so far).
     pub backoff: Duration,
 }
 
@@ -190,6 +225,7 @@ fn accept(
             stage: Stage::Queued,
             attempts: 0,
             failures: 0,
+            rate_limits: 0,
             not_before: None,
         });
     }
@@ -200,10 +236,14 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
     for reply in replies.read() {
         let Some(at) = outbox.pending.iter().position(|p| p.id == reply.id) else { continue };
         match &reply.result {
-            // Rate limited: wait out `Retry-After`, then send again with the same key, until attempts run out.
-            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].attempts < MAX_ATTEMPTS => {
+            // A rate limit for an earlier attempt: a later one is in flight, and requeuing would send a third beside it.
+            Ok(Outcome::RateLimited { .. }) if outbox.pending[at].attempts != reply.attempt => {}
+            // Rate limited: wait out `Retry-After`, then send again with the same key, until its rate-limit
+            // answers reach [`MAX_ATTEMPTS`].
+            Ok(Outcome::RateLimited { retry_after, .. }) if outbox.pending[at].rate_limits + 1 < MAX_ATTEMPTS => {
                 let p = &mut outbox.pending[at];
-                let wait = retry_after.map_or(backoff * p.attempts, |after| after.min(MAX_RETRY_AFTER));
+                p.rate_limits += 1;
+                let wait = retry_after.map_or(backoff * p.rate_limits, |after| after.min(MAX_RETRY_AFTER));
                 p.stage = Stage::Queued;
                 p.not_before = Some(Instant::now() + wait);
             }
@@ -215,7 +255,7 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
             Err(_) if outbox.pending[at].attempts != reply.attempt => {}
             Err(why) => {
                 let p = &mut outbox.pending[at];
-                if why != NOT_CONNECTED {
+                if *why != SendError::NotConnected {
                     p.failures += 1;
                 }
                 if p.failures >= MAX_ATTEMPTS {

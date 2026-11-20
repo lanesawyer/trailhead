@@ -156,7 +156,7 @@ pub struct LocalConfig {
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
 /// and returns the store with the user's context.
-pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::error::Error>> {
+pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(dir) = cfg.db.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -180,10 +180,22 @@ pub async fn open_local(cfg: &LocalConfig) -> Result<(Store, Ctx), Box<dyn std::
             cfg.creds.save(creds::Cred::User, &secret)?;
         }
     }
+    match store.parent_cycles(&ctx).await {
+        Ok(cycles) => {
+            for cycle in cycles {
+                tracing::warn!(
+                    "parent cycle in the database: {}; unparent one of them (`trailhead update <key> --parent none`)",
+                    cycle.join(" -> ")
+                );
+            }
+        }
+        Err(e) => tracing::warn!("couldn't check for parent cycles: {e}"),
+    }
     Ok((store, ctx))
 }
 
-/// The factory's configuration is broken, so the server won't start. Keeps the factory's typed error as its source.
+/// The factory's configuration is broken, so the server won't start. Keeps the factory's typed error as its source;
+/// `Display` leaves it out, so a chain printer (`{:#}`) shows it once.
 #[cfg(feature = "factory")]
 #[derive(Debug)]
 struct FactoryConfigBroken {
@@ -196,8 +208,7 @@ impl std::fmt::Display for FactoryConfigBroken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the factory's configuration is broken, so the server won't start: {}\nFix it, or run `trailhead factory disable` to run without the factory (it edits {})",
-            self.source,
+            "the factory's configuration is broken, so the server won't start (fix it, or run `trailhead factory disable` to run without the factory; it edits {}); the cause is",
             self.user_config.display()
         )
     }
@@ -212,7 +223,7 @@ impl std::error::Error for FactoryConfigBroken {
 
 /// Runs the local server until Ctrl-C or SIGTERM, finishing in-flight requests first, or until SIGUSR1 asks it to
 /// restart onto a new binary.
-pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error>> {
+pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::Error + Send + Sync>> {
     let lock = match &cfg.lock_file {
         Some(path) => Some(trailhead_client::paths::lock(path, &format!("a server at {}", cfg.bind))?),
         None => None,
@@ -239,6 +250,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
         }
     });
     spawn_archiver(state.clone());
+    spawn_heap_trim();
     webhooks::spawn(state.clone());
     let reminders = state.clone();
     tokio::spawn(async move {
@@ -379,6 +391,34 @@ pub enum Exit {
     Restart,
 }
 
+/// Every minute, hands the heap's free memory back to the system. glibc keeps what a burst of work freed, so the
+/// server's size only ever rises to its busiest moment: after 240 large reads, 16 at a time, a server held 321 MB
+/// with 34 MB in use. A trim took that to 138 MB; the rest is free memory in pages that still hold something
+/// (TRAIL-287). Other allocators and platforms are left to themselves.
+fn spawn_heap_trim() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            // Off the runtime's threads: a trim walks every arena under its lock.
+            let _ = tokio::task::spawn_blocking(trim_heap).await;
+        }
+    });
+}
+
+/// Whether the allocator gave anything back.
+fn trim_heap() -> bool {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` takes glibc's own locks and releases only pages no allocation uses.
+        unsafe { libc::malloc_trim(0) == 1 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        false
+    }
+}
+
 /// Hourly, moves events older than the undo window to `events_archive`.
 fn spawn_archiver(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -440,5 +480,36 @@ impl Signals {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),
             _ = self.term.recv() => tracing::info!("received SIGTERM; shutting down"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "factory")]
+    #[test]
+    fn a_broken_factory_config_names_its_cause_once_in_the_chain() {
+        let cause = trailhead_factory_server::Error::NoAgent { agent: "factory" };
+        let cause_text = cause.to_string();
+        let err: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(super::FactoryConfigBroken { source: cause, user_config: "/cfg/config.toml".into() });
+        let mut chain = vec![err.to_string()];
+        let mut next = err.source();
+        while let Some(e) = next {
+            chain.push(e.to_string());
+            next = e.source();
+        }
+        assert_eq!(chain.len(), 2, "the typed cause is the source: {chain:?}");
+        assert_eq!(chain[1], cause_text);
+        assert!(!chain[0].contains(&cause_text), "Display leaves the cause to the chain: {chain:?}");
+        assert!(chain[0].contains("/cfg/config.toml"));
+    }
+
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn a_trim_gives_back_what_a_burst_of_small_allocations_freed() {
+        // Many small blocks, freed all at once, as a large response's rows are: glibc keeps them until it is asked.
+        let burst: Vec<Vec<u8>> = (0..200_000).map(|i| vec![i as u8; 256]).collect();
+        drop(burst);
+        assert!(super::trim_heap(), "about 50 MB was free to give back");
     }
 }

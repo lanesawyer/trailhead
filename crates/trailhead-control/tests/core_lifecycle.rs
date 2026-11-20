@@ -3,6 +3,10 @@
 
 use std::sync::Arc;
 
+#[path = "support/logs.rs"]
+mod logs;
+use logs::Logs;
+
 use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, Grade, NewProject, NewTask, Priority, ProjectPatch, Store, TaskPatch};
 
@@ -362,6 +366,7 @@ async fn with_a_queue_only_its_subtasks_run() {
     };
     let handed = r.store.create_task(&r.human, sub).await.unwrap().key;
     r.factory.config.repo.queue = vec![queue.0.clone()];
+    r.factory.config.repo.max_sandboxes = 2;
 
     let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
@@ -505,6 +510,78 @@ async fn requested_changes_past_the_cap_park_on_the_real_engine() {
     assert!(question.body.contains("after 1 review rounds") && question.body.contains("Still wrong."));
 }
 
+/// TRAIL-1203: `reworks` narrows by queue parent in SQL and drops blocked tasks, on the real engine.
+#[tokio::test]
+async fn reworks_under_a_queue_skip_other_tasks_and_blocked_ones_and_list_a_twice_listed_queue_once() {
+    let mut r = rig().await;
+    // Outside any queue, a task a reviewer asked changes of.
+    let outside = r.task("Outside the queue").await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    r.factory.tick().await.unwrap();
+    assert!(r.show(&outside).await.changes_requested);
+
+    let queue = r.task("Factory queue").await;
+    let sub = |title: &str| NewTask {
+        project: "TRAIL".into(),
+        title: title.into(),
+        parent: Some(queue.clone()),
+        grade: Some(gr(1)),
+        ..Default::default()
+    };
+    let plain = r.store.create_task(&r.human, sub("Plain rework")).await.unwrap().key;
+    let blocked = r.store.create_task(&r.human, sub("Blocked rework")).await.unwrap().key;
+    r.factory.config.repo.queue = vec![queue.0.clone()];
+    r.factory.config.repo.max_sandboxes = 2;
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
+    }
+    r.factory.tick().await.unwrap();
+    for key in [&plain, &blocked] {
+        let task = r.show(key).await;
+        assert_eq!((task.status, task.changes_requested), (Status::InReview, true), "{key:?}");
+    }
+
+    // `reworks` is private, so read through `ready`, which lists them with new work.
+    async fn reworks(r: &Rig, queue: &[TaskKey]) -> Vec<TaskKey> {
+        let ready = r.tracker.ready("TRAIL", queue, 50).await.unwrap();
+        ready.into_iter().filter(|t| t.changes_requested).map(|t| t.key).collect()
+    }
+    let all = reworks(&r, &[]).await;
+    assert!(all.contains(&outside) && all.contains(&plain) && all.contains(&blocked), "no queue lists every one");
+
+    let listed = reworks(&r, &[queue.clone(), queue.clone()]).await;
+    assert!(listed.contains(&plain) && listed.contains(&blocked));
+    assert!(!listed.contains(&outside), "a task outside the queue isn't reworked");
+    assert_eq!(listed.len(), 2, "a queue listed twice reads each task once: {listed:?}");
+
+    // An open blocker keeps the rework from starting until it is done.
+    let blocker = r.task("Blocker").await;
+    r.store.add_dependency(&r.human, &blocker.0, &blocked.0).await.unwrap();
+    let listed = reworks(&r, std::slice::from_ref(&queue)).await;
+    assert_eq!(listed, std::slice::from_ref(&plain), "the blocked rework is skipped");
+
+    let done = TaskPatch { status: Some(trailhead_core::Status::Done), ..Default::default() };
+    r.store.update_task(&r.human, &blocker.0, done, None).await.unwrap();
+    let listed = reworks(&r, std::slice::from_ref(&queue)).await;
+    assert_eq!(listed.len(), 2);
+    assert!(listed.contains(&blocked), "a done blocker lets the rework start");
+
+    // The factory itself starts each queue rework once, and leaves the outside one.
+    r.factory.config.repo.queue = vec![queue.0.clone(), queue.0.clone()];
+    for _ in 0..2 {
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(request_changes("Again.")));
+    }
+    let ran = r.factory.tick().await.unwrap();
+    let mut started: Vec<_> = ran.iter().map(|(t, _)| t.key.clone()).collect();
+    started.sort_by_key(|k| k.0.clone());
+    let mut want = vec![plain, blocked];
+    want.sort_by_key(|k| k.0.clone());
+    assert_eq!(started, want, "each queue rework starts once, the outside one not at all");
+}
+
 /// Runs a task to a reviewed PR, leaving it in review. Lane has added the factory to the project's reviewers, as the
 /// merger needs, so it can finish a task whose PR merged.
 async fn in_review(r: &Rig, title: &str) -> (TaskKey, trailhead_factory::PrRef) {
@@ -571,12 +648,30 @@ async fn a_parked_task_whose_pr_is_merged_is_finished_and_unblocks_what_is_chain
     assert!(done.merged.is_empty() && done.closed.is_empty(), "an open PR leaves the task parked");
     assert_eq!(r.show(&key).await.status, Status::NeedsInput);
 
+    let parked_at = r.store.latest_event_id(&r.human).await.unwrap();
     let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.codehost.merge(&pr, &head).await.unwrap();
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.merged, std::slice::from_ref(&key.0));
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::Done);
+    // The parked task is claimed where it stands and finished: it never passes through `open`, and
+    // nothing releases a claim before the one taken for the close.
+    let filter = trailhead_core::EventFilter {
+        task: Some(trailhead_core::TaskKey(key.0.clone())),
+        after_id: Some(parked_at),
+        ..Default::default()
+    };
+    let events = r.store.list_events(&r.human, filter).await.unwrap();
+    let steps: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e.kind.as_str() {
+            "task.updated" => e.after.as_ref().and_then(|a| a["status"].as_str()).map(|s| format!("status:{s}")),
+            "claim.released" => Some(e.kind.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(steps, ["status:needs_input", "status:in_progress", "claim.released", "status:done"], "{steps:?}");
     assert_eq!(task.run.merged.expect("merge recorded").by, trailhead_factory::MergedBy::Human);
     assert!(r.store.blockers(&r.human, &next.0).await.unwrap().is_empty(), "the chained task is unblocked");
 }
@@ -876,6 +971,36 @@ async fn an_approval_over_a_persons_request_goes_back_to_review_before_any_confl
     assert_eq!((asked.kind, asked.body.as_str()), (trailhead_factory::RequestKind::Review, "Add a test."));
 }
 
+/// Whoever merged, a finish core refuses parks the task once for a person to mark it done. A merge by the merger
+/// used to be retried, and refused, on every pass (TRAIL-1462).
+#[tokio::test]
+async fn a_merge_by_the_merger_whose_finish_is_refused_parks_the_task_once() {
+    let config = format!("{CONFIG}\n[merge]\nmode = \"on\"\n");
+    let r = rig_with(&config).await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    // The factory itself takes the task and sends it to review again, so in core's eyes it did the work.
+    let back = TaskPatch { status: Some(trailhead_core::Status::Open), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, back, None).await.unwrap();
+    r.tracker.claim(&key).await.unwrap();
+    r.tracker.request_review(&key, "pushed").await.unwrap();
+    approve_as_lane(&r, &key).await;
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged, "Lane's approval merges it");
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::NeedsInput, "{:?}", task.run.merge);
+    assert_eq!(task.run.merged.as_ref().expect("recorded").by, trailhead_factory::MergedBy::Merger);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().rev().find(|c| c.kind == CommentKind::Question).expect("a question");
+    assert!(question.body.contains("The factory merged the PR") && question.body.contains("Mark it done"));
+
+    let version = r.store.get_task(&r.human, &key.0).await.unwrap().version;
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.store.get_task(&r.human, &key.0).await.unwrap().version, version, "asked once, then left alone");
+    assert_eq!(r.store.list_comments(&r.human, &key.0).await.unwrap().len(), comments.len());
+}
+
 /// A person approves before the attempt's review has run. Reviews were only started for tasks in review, so the
 /// merger waited on one forever. It runs, and the approval stays, so an approving review merges (TRAIL-1469).
 #[tokio::test(start_paused = true)]
@@ -1120,6 +1245,32 @@ async fn conflict_reworks_up_to_the_cap_park_the_task() {
     let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
     let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
     assert!(question.body.contains("max_conflict_reworks") && question.body.contains('5'), "{}", question.body);
+}
+
+/// A conflict that goes away before its rework runs doesn't reset the count: alternating those with reworks that
+/// run still reaches the cap.
+#[tokio::test]
+async fn vanished_conflicts_between_conflict_reworks_still_park_at_the_cap() {
+    let r = rig().await;
+    let (key, pr) = in_review(&r, "Add a greeting").await;
+    for round in 0..2 {
+        conflict_and_rework(&r, &key, &pr, 1).await;
+        assert_eq!(r.show(&key).await.run.conflict_reworks, Some(2 * round + 1));
+        // A conflict that clears before the tick has nothing to rework.
+        r.codehost.set_mergeable(&pr, Some(false));
+        assert_eq!(r.factory.reconcile().await.unwrap().conflicted, std::slice::from_ref(&key.0));
+        r.codehost.set_mergeable(&pr, Some(true));
+        r.factory.tick().await.unwrap();
+        let task = r.show(&key).await;
+        assert_eq!(task.status, Status::InReview);
+        assert_eq!(task.run.conflict_reworks, Some(2 * round + 2), "a vanished conflict keeps the count");
+    }
+    r.codehost.set_mergeable(&pr, Some(false));
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::NeedsInput);
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    let question = comments.iter().find(|c| c.kind == CommentKind::Question).expect("a question for Lane");
+    assert!(question.body.contains("max_conflict_reworks"), "{}", question.body);
 }
 
 #[tokio::test]
@@ -1572,39 +1723,13 @@ fn factory_for(r: &Rig, name: &str, queue: &TaskKey, host: Arc<Host>) -> Factory
     )
 }
 
-#[derive(Clone, Default)]
-struct Logs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for Logs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Logs {
-    type Writer = Logs;
-    fn make_writer(&'a self) -> Logs {
-        self.clone()
-    }
-}
-
-impl Logs {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-
-    /// How many log lines carry `task=<key>` as a whole key, so `TRAIL-4` doesn't count `TRAIL-40`.
-    fn warnings_for(&self, key: &TaskKey) -> usize {
-        let field = format!("task={}", key.0);
-        let text = self.text();
-        text.match_indices(&field)
-            .filter(|(i, _)| !text[i + field.len()..].starts_with(|c: char| c.is_ascii_digit()))
-            .count()
-    }
+/// How many log lines carry `task=<key>` as a whole key, so `TRAIL-4` doesn't count `TRAIL-40`.
+fn warnings_for(logs: &Logs, key: &TaskKey) -> usize {
+    let field = format!("task={}", key.0);
+    let text = logs.text();
+    text.match_indices(&field)
+        .filter(|(i, _)| !text[i + field.len()..].starts_with(|c: char| c.is_ascii_digit()))
+        .count()
 }
 
 #[tokio::test]
@@ -1647,20 +1772,18 @@ async fn a_stray_is_warned_about_once_across_reconciles_and_not_for_a_sibling_re
     // Beta's run is live under beta's queue; alpha sees the shared queues, so it isn't a stray.
     let beta_task = subtask(&r, &q2, "Beta's task").await;
     with_run(&r, &beta_task).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.warnings_for(&beta_task), 0, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &beta_task), 0, "{}", logs.text());
 
     let stray = r.task("Moved out of every queue").await;
     with_run(&r, &stray).await;
     alpha.reconcile().await.unwrap();
     alpha.reconcile().await.unwrap();
     let text = logs.text();
-    assert_eq!(logs.warnings_for(&stray), 1, "{text}");
-    assert_eq!(logs.warnings_for(&beta_task), 0, "{text}");
+    assert_eq!(warnings_for(&logs, &stray), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &beta_task), 0, "{text}");
 }
 
 #[tokio::test]
@@ -1670,20 +1793,18 @@ async fn a_stray_moved_back_under_its_queue_and_out_again_is_warned_about_again(
     let alpha = factory_for(&r, "alpha", &queue, Host::new(&HostConfig::default()));
     let task = subtask(&r, &queue, "Moves around").await;
     with_run(&r, &task).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
     let reparent = |parent: Option<TaskKey>| TaskPatch { parent: Some(parent), ..Default::default() };
 
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 1, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 1, "{}", logs.text());
 
     r.store.update_task(&r.human, &task.0, reparent(Some(queue.clone())), None).await.unwrap();
     alpha.reconcile().await.unwrap();
     r.store.update_task(&r.human, &task.0, reparent(None), None).await.unwrap();
     alpha.reconcile().await.unwrap();
-    assert_eq!(logs.text().matches(&task.0).count(), 2, "{}", logs.text());
+    assert_eq!(warnings_for(&logs, &task), 2, "{}", logs.text());
 }
 
 #[tokio::test]
@@ -1711,17 +1832,15 @@ async fn strays_in_different_projects_on_one_host_are_each_warned_about_once() {
     let stray_b = r.store.create_task(&r.human, in_other("Beta's stray")).await.unwrap().key;
     with_run(&r, &stray_a).await;
     with_run(&r, &stray_b).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     for _ in 0..3 {
         alpha.reconcile().await.unwrap();
         beta.reconcile().await.unwrap();
     }
     let text = logs.text();
-    assert_eq!(logs.warnings_for(&stray_a), 1, "{text}");
-    assert_eq!(logs.warnings_for(&stray_b), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &stray_a), 1, "{text}");
+    assert_eq!(warnings_for(&logs, &stray_b), 1, "{text}");
 }
 
 #[tokio::test]
@@ -1744,8 +1863,8 @@ async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent, &rework, &same]);
 }
 
-#[tokio::test]
-async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
+/// A rig whose gate 1 auto-merges (in shadow mode), with a task taken to `Approved` and its PR.
+async fn approved_auto_mergeable() -> (Rig, TaskKey, trailhead_factory::PrRef) {
     let config = format!(
         "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"shadow\"\n"
     );
@@ -1762,10 +1881,32 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.show(&key).await.status, Status::Approved);
+    (r, key, pr)
+}
+
+#[tokio::test]
+async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
+    let (r, key, pr) = approved_auto_mergeable().await;
 
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
     r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
     r.codehost.push_to(&pr);
+    r.factory.reconcile().await.unwrap();
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::InReview);
+    assert_eq!(task.run.merging.as_deref(), None);
+}
+
+#[tokio::test]
+async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
+    let (r, key, pr) = approved_auto_mergeable().await;
+
+    // The intent names the current head, and the head stays put: only the gates change (a grade
+    // raised to one that needs a person).
+    let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
+    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
     r.factory.reconcile().await.unwrap();
     let task = r.show(&key).await;
     assert_eq!(task.status, Status::InReview);
@@ -1790,9 +1931,7 @@ async fn no_stray_is_warned_about_when_a_sibling_repo_works_the_project_without_
     // The queueless repo's run sits under no queue, but it is that repo's own, not a stray.
     let theirs = r.task("Alpha's task").await;
     with_run(&r, &theirs).await;
-    let logs = Logs::default();
-    let sub = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
-    let _guard = tracing::subscriber::set_default(sub);
+    let (logs, _capture) = Logs::capture();
 
     beta.reconcile().await.unwrap();
     assert!(!logs.text().contains(&theirs.0), "{}", logs.text());

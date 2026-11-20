@@ -190,8 +190,9 @@ run_fields! {
     asked: u32,
     /// How the task's PR was merged, once it has been.
     merged: Merged,
-    /// A person merged the PR without the approval core requires to finish the task, so the task is being parked for a
-    /// person to mark it done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
+    /// The PR is merged but core refused the factory's `done` (a person merged it without the approval core requires,
+    /// or the factory's own identity sent the work to review), so the task is being parked for a person to mark it
+    /// done. Written before the park's reopen, claim and ask, so a pass that finds a task with it
     /// outside `needs_input` finishes the park rather than closing the task (TRAIL-729). `merged` alone can't say
     /// this: it is also recorded by a close that failed before the park.
     unapproved_merge: bool,
@@ -325,8 +326,10 @@ pub struct ChangesRequested {
     /// host couldn't say.
     #[serde(default)]
     pub head: Option<String>,
-    /// A person has taken the request over: the task was parked on it and then answered or reopened, which settles
-    /// it whether or not they pushed. A settled request is kept for the record but is no longer pending.
+    /// The request no longer needs a worker: either a person took it over (the task was parked on it and then
+    /// answered or reopened, which settles it whether or not they pushed), or the factory saw the host stop
+    /// reporting the conflict before its rework ran (`settle_gone_conflict`, TRAIL-952). A settled request is kept
+    /// for the record but is no longer pending.
     #[serde(default)]
     pub settled: bool,
 }

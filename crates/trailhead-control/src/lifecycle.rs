@@ -37,19 +37,21 @@ impl Factory {
             let mut state = codehost.pr_state(pr).await?;
             // Right after the base moves the host may not have worked `mergeable` out yet. Ask again a few times
             // before a worker is spent on a conflict that a clean local merge would leave nothing to fix (TRAIL-953).
+            // The read above was the first, so the zero wait leading the list is skipped: every re-read follows a
+            // real backoff (TRAIL-1341).
             if conflict_rework {
-                for wait in MERGEABLE_WAITS {
+                for wait in MERGEABLE_WAITS.iter().skip(1) {
                     if !matches!(state, PrState::Open { mergeable: None, .. }) {
                         break;
                     }
-                    tokio::time::sleep(wait).await;
+                    tokio::time::sleep(*wait).await;
                     state = codehost.pr_state(pr).await?;
                 }
             }
             match state {
-                PrState::Open { mergeable: Some(true), .. } if conflict_rework => {
+                PrState::Open { mergeable: Some(true), head } if conflict_rework => {
                     tracing::info!(task = %task.key, pr = %pr.url, "the host no longer reports a conflict; back to review");
-                    if !self.settle_gone_conflict(task, pr).await? {
+                    if !self.settle_gone_conflict(task, pr, head).await? {
                         return Ok(Outcome::Settled { reason: messages::settled_conflict_superseded(&pr.url) });
                     }
                     return Ok(Outcome::Settled { reason: messages::settled_conflict_gone(&pr.url) });
@@ -87,15 +89,12 @@ impl Factory {
                 }
                 return Err(e);
             }
-            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity. Revoking
-            // the sub-agent that was never created fails, and that warning is expected.
+            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity, which
+            // takes the claim only if the task has to be parked. Revoking the sub-agent that was never created
+            // fails, and that warning is expected.
             Err(e) => {
-                // Parking and releasing need the claim, so take it as the factory's own identity first.
-                if let Err(claim) = self.tracker.claim(&task.key).await {
-                    tracing::warn!(task = %task.key, error = %claim, "couldn't claim the task to back it off");
-                }
                 return Err(self
-                    .infra_failed(task, &self.tracker, &name, e, task.run.infra_failures, Patch::Keep)
+                    .infra_failed_by(task, &self.tracker, false, &name, e, task.run.infra_failures, Patch::Keep)
                     .await);
             }
         };
@@ -140,8 +139,10 @@ impl Factory {
             };
             let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
-            // to open: it resumes from it when the remote has it (TRAIL-751).
-            let resume = !rework && task.run.released.is_some();
+            // to open: it resumes from it when the remote has it (TRAIL-751). `started` clears `released`, so an
+            // attempt that fails before preparing would lose the marker: any earlier run counts too (TRAIL-1291). A
+            // run that never pushed finds no branch on the remote and starts fresh.
+            let resume = !rework && (task.run.released.is_some() || task.run.started.is_some());
             let (sandbox, setup_failure) = self
                 .acquire_worker(target, task, (rework || resume).then(|| Self::branch(task)), resume, merge_base)
                 .await?;
@@ -223,8 +224,9 @@ impl Factory {
         self.conclude(task, &sub, sandbox, &name, attempt, run, None).await
     }
 
-    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: reconcile
-    /// leaves a parked task's sandbox alone, so that loses the suspended state, which beats leaving it reachable.
+    /// Cuts a breached sandbox off, saying what became of it. One that can't be cut off is destroyed: a parked
+    /// task's sandbox is otherwise left alone, so that loses the suspended state, which beats leaving it reachable.
+    /// If the destroy fails too the sandbox is `Stuck`: reconcile destroys it, and the status board shows it broken.
     pub(crate) async fn cut_off_breached(&self, task: &Task, sandbox: &Sandbox) -> BreachedSandbox {
         let Err(e) = self.cut_off(sandbox).await else { return BreachedSandbox::Suspended };
         tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't cut off the breached sandbox; destroying it");
@@ -233,6 +235,7 @@ impl Factory {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't destroy the breached sandbox; reconcile retries");
             return BreachedSandbox::Stuck;
         }
+        self.forget_sandbox(&sandbox.id);
         BreachedSandbox::Destroyed
     }
 
@@ -520,6 +523,24 @@ impl Factory {
         prior: Option<u32>,
         failure: Patch<String>,
     ) -> Error {
+        self.infra_failed_by(task, sub, true, name, error, prior, failure).await
+    }
+
+    /// [`Factory::infra_failed`], for a run whose claim `by` holds (`held`) or one that failed before anything
+    /// claimed the task. An unheld task is claimed only to be parked, never to be released again: a claim and
+    /// release of a task waiting in review for its rework reads to core as the factory sending the work to review,
+    /// after which it may neither approve nor finish it (TRAIL-1462).
+    #[allow(clippy::too_many_arguments)]
+    async fn infra_failed_by(
+        &self,
+        task: &Task,
+        sub: &Arc<dyn Tracker>,
+        held: bool,
+        name: &str,
+        error: Error,
+        prior: Option<u32>,
+        failure: Patch<String>,
+    ) -> Error {
         let max = self.config.repo.max_infra_failures.max(1);
         // A `setup` that fails on a fresh run fails on the base branch itself, so a second failure is proof enough:
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
@@ -543,7 +564,7 @@ impl Factory {
         if setback.park.is_none() {
             self.back_off(&task.key, &setback);
         }
-        // Before the release: the run's sub-agent holds the claim, so only it can report.
+        // Before the release: when the run's sub-agent holds the claim, only it can report.
         let update = RunPatch {
             attempt: Patch::Set(task.run.attempt.unwrap_or(0)),
             retries: Patch::Set(task.run.retries.unwrap_or(0) + 1),
@@ -563,6 +584,9 @@ impl Factory {
                 Park::Waited => messages::resource_wait_question(waits, &error.to_string()),
                 Park::Limit => messages::infra_question(failures, max, &error.to_string()),
             };
+            if !held && let Err(e) = sub.claim(&task.key).await {
+                tracing::warn!(task = %task.key, error = %e, "couldn't claim the task to park it");
+            }
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
@@ -579,7 +603,7 @@ impl Factory {
                     }
                 }
             }
-        } else if let Err(e) = sub.release(&task.key).await {
+        } else if held && let Err(e) = sub.release(&task.key).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't release the task; reconcile retries");
         }
         if let Err(e) = self.tracker.revoke_sub_agent(name).await {
@@ -752,11 +776,11 @@ impl Factory {
     ///
     /// The task is read again first, and so is its newest review: a review may have asked for changes since `task`
     /// was read, and its request, not the conflict's, is the one standing then. A handoff would count as answering
-    /// it and the request would be lost (TRAIL-1418), so nothing is written. The next tick's `reworks()` starts
-    /// it once it is recorded, and reconcile takes it up if it never was. The verdict is the check because the
-    /// reviewer's request is recorded on the task only after the verdict, the sandbox's teardown and the gates.
-    /// False when the settle was skipped.
-    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef) -> Result<bool> {
+    /// it and the request would be lost (TRAIL-1418), so no handoff is written: the verdict is taken up as the
+    /// request instead, as reconcile does, so the next tick's `reworks()` starts it and the task isn't settled again
+    /// (TRAIL-1466). The verdict is the check because the reviewer's request is recorded on the task only after the
+    /// verdict, the sandbox's teardown and the gates. False when the settle was skipped.
+    async fn settle_gone_conflict(&self, task: &Task, pr: &PrRef, head: Option<String>) -> Result<bool> {
         let task = &self.tracker.show(&task.key).await?;
         let Some(conflict) = task.run.pending_changes().filter(|c| c.kind == RequestKind::Conflict) else {
             return Ok(false);
@@ -766,13 +790,27 @@ impl Factory {
         // the one who did the work, which core then lets it neither approve nor finish (TRAIL-1468).
         let in_review = task.status == Status::InReview;
         // The conflict request's own verdict is the factory's, with the request's body.
-        let superseded = in_review
-            && self
+        let superseded = match in_review {
+            true => self
                 .tracker
                 .last_review(&task.key)
                 .await?
-                .is_some_and(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim());
-        if superseded {
+                .filter(|v| v.kind == VerdictKind::RequestChanges && v.body.trim() != conflict.body.trim()),
+            false => None,
+        };
+        if let Some(verdict) = superseded {
+            // Taken up as the request, as reconcile does, so the task stops being listed as a conflict rework and
+            // isn't settled again on every tick until reconcile runs (TRAIL-1466).
+            let requested = ChangesRequested {
+                reviewer: verdict.reviewer,
+                body: verdict.body,
+                attempt: task.run.attempt.unwrap_or(1),
+                kind: RequestKind::Review,
+                head,
+                settled: false,
+            };
+            let round = task.run.review_rounds.unwrap_or(0) + 1;
+            self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
             return Ok(false);
         }
         // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
@@ -827,7 +865,8 @@ impl Factory {
     }
 }
 
-/// The waits before each reading of a just-pushed PR's `mergeable`: GitHub usually has it within a few seconds.
+/// The waits before each reading of a PR's `mergeable`, for a just-pushed PR and for one whose base has just moved
+/// (before a conflict rework): GitHub usually has it within a few seconds.
 const MERGEABLE_WAITS: [Duration; 4] =
     [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(5)];
 

@@ -10,14 +10,20 @@ Three layers, cheapest first. Each task carries a risk **grade**, and the repo's
 
 ## Grades
 
-Named after the climbing classes of the Yosemite Decimal System: the higher the grade, the more exposure. **Treeline** is the line between the grades that may merge without a human and the ones that need one; by default it sits above grade 2.
+Named after the climbing classes of the Yosemite Decimal System: the higher the grade, the more exposure. **Treeline** is the line between the grades that may merge without a human and the ones that need one; it sits above grade 2 today and moves above grade 3 once grade 3's quorum is built.
 
-| Grade | Like | Example changes | Default gates |
-| --- | --- | --- | --- |
-| 1 | A walk on a trail | Docs, new or changed tests, formatting | Checks + CI; auto-merge |
-| 2 | Off-trail | Ordinary code within existing modules | Checks + CI + agent review; auto-merge |
-| 3 | Scrambling, above Treeline | Dependency manifests, schema or migrations, public API changes, large diffs | Checks + CI + agent review + human |
-| 4 | Exposed | Lockfile changes (any new or upgraded package), auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`.trailhead.toml`) and profiles | Checks + CI + human; agent review advisory |
+Decided (2026-11-19, TRAIL-1572): the grades are a ladder. What places a change is how far the damage reaches if it is wrong, and each grade keeps the gates of the one below and adds one thing. A person is needed only at grade 4.
+
+| Grade | Like | Reach if wrong | Example changes | Default gates |
+| --- | --- | --- | --- | --- |
+| 1 | A walk on a trail | Nothing that runs | Docs, new or changed tests, formatting | Checks + CI; auto-merge |
+| 2 | Off-trail | One module | Ordinary code within existing modules | + one agent review; auto-merge |
+| 3 | Scrambling | What other code or stored data depends on | Shared code, dependency manifests, schema or migrations, public API changes, changes across modules, large diffs | + a [quorum of reviewers](#the-quorum), in place of the single review; auto-merge. A person only when the quorum deadlocks or overrules its security reviewer |
+| 4 | Exposed, above Treeline | The controls themselves | Lockfile changes (any new or upgraded package), auth, secrets handling, sandbox egress, CI workflows, the factory's own policy (`.trailhead.toml`), profiles and the agents' instructions | + a person, always. The quorum runs first and its findings are what the person reads |
+
+Status: grades 1 and 2 are built as the table says. The quorum is not built (TRAIL-204), so until it is, grade 3 is checks, CI, one agent review and a person, and grade 4 is checks, CI and a person with the agent review advisory, as this repo's `.trailhead.toml` has them.
+
+A grade means the same gates everywhere in a repo. A part of a repo that needs more care gets a higher floor through a path rule, not gates of its own.
 
 How grades are set:
 
@@ -69,11 +75,22 @@ A name in `require` that isn't one of those five must name a check in `[factory.
 
 Decided (2026-10-29): Trailhead's own repo auto-merges grade 1 only to start. The maintainer grades the queue once grades exist and widens auto-merge from there. With the rules above, code in `crates/*/src` raises a grade-1 task to 2, so docs and test-only PRs merge on their own (deleting or renaming a test is still at least grade 2). Files that steer the agents (`AGENTS.md`, `.claude/`, `.mcp.json`, `skills/`, `.trailhead.toml`) are grade 4 with CI and the factory's policy. Decided (2026-10-29): test-only PRs are grade 1; grade 2 auto-merge waits on TRAIL-260, TRAIL-298 and TRAIL-295 and a run of grade 2 shadow decisions you agree with. Decided (2026-10-29): grade 2 auto-merges too, now that those three have landed and the grade 2 decisions so far were right (TRAIL-314). TRAIL-390, reworking a PR whose CI fails after a branch update, follows rather than blocks it.
 
-Decided: quorum reviewers must be independent. Quorums are built after the merger, once a repo wants a grade with no human gate (TRAIL-204).
+### The quorum
 
-- **Different models or providers** (`distinct_models`).
+Decided: quorum reviewers must be independent. Not built (TRAIL-204).
+
 - **Fresh sandboxes and contexts**, no access to the author's transcript.
-- **Blind first pass.** Each reviewer records a verdict before seeing the others; disagreement escalates.
+- **Blind first pass.** Each reviewer records a verdict before seeing the others.
+- **Different models or providers** when the repo asks for them (`distinct_models`); not required.
+
+Decided (2026-11-19, TRAIL-1572), for the quorum grade 3 merges on:
+
+- **Reviewers differ by job.** An engineer, a tester, a security reviewer and, when the diff touches UI, a UX reviewer, each with its own instructions. The UX reviewer judges screenshots of the changed views, which needs headless rendering in the sandbox (TRAIL-802).
+- **A majority approves.** One reviewer cannot hold a change up alone; its objection stays on the PR.
+- **One round of rework on the feedback.** After the blind pass the worker gets every reviewer's findings at once and reworks, and the reviewers look again. The majority is counted on that second look.
+- **A person is pulled in** when there is no majority after two rounds, and when the majority overrules the security reviewer's objection. Neither merges without them.
+
+Leaning: at grade 3 the quorum replaces the single agent review, since its engineer is that reviewer. Open: how these rounds count against `max_review_rounds`, and the profile each job runs on.
 
 ## Changes requested
 
@@ -127,7 +144,7 @@ flowchart TD
    - **`shadow`:** it posts what it *would* do and doesn't merge, including, when the PR is behind `main`, that it would update the branch first ("Would merge `main` into the branch, wait for CI on the new head, then squash-merge."). You merge as today and compare. The default; Trailhead's own repo ran it until 2026-10-29 and is now `on` (TRAIL-313).
    - **`on`:** for a grade with `auto_merge`, it first brings the PR up to date (below), then squash-merges it, pinned to the head its gates passed on. A merge conflict sends the task back to running, to rework the PR on top of `main`; a moved head or a merge the host refuses for another reason is tried again on the next pass, not reworked. For other grades, your approval is the human gate and the merger merges after it.
 
-   **Updating the branch (TRAIL-212).** `main` requires its checks to pass on a branch that's up to date with it (strict status checks), so a green run against an old base isn't enough: PR #21 merged on one while `main` had since changed a signature, and `main` stopped compiling. Before merging, the merger asks the host whether the PR is behind its base (`CodeHost::behind`). If it is, it merges the base branch into the PR branch (`CodeHost::update_branch`: a merge commit, never a rebase and force-push) and goes back to waiting for CI on the new head. It merges only when CI is green on a head that isn't behind. Another PR landing meanwhile just repeats this.
+   **Updating the branch (TRAIL-212).** `main` requires its checks to pass on a branch that's up to date with it (strict status checks), so a green run against an old base isn't enough: PR #21 merged on one while `main` had since changed a signature, and `main` stopped compiling. Before merging, the merger asks the host whether the PR is behind its base (`CodeHost::behind`). If it is, it merges the base branch into the PR branch (`CodeHost::update_branch`: a merge commit, never a rebase and force-push) and goes back to waiting for CI on the new head. It merges only when CI is green on a head that isn't behind. Another PR landing meanwhile just repeats this. The host only queues the update (a 202), so until the head moves the merger doesn't ask again; but if the update never lands, it asks again after ten minutes (`UPDATE_PATIENCE`, TRAIL-490). After three asks on one head (`UPDATE_ASKS`) it treats the branch as conflicting, since a host that keeps dropping the update has likely found a conflict it only reports that way, and sends the task to a conflict rework (TRAIL-621), which counts against `max_conflict_reworks`.
    - **A person's PR goes next (TRAIL-804).** GitHub's merge queue needs an organization's repo, so a person signals "mine goes next" by turning on GitHub auto-merge for their PR (`gh pr merge <n> --auto --squash`). Each pass in `on` mode, the merger lists the open PRs on the base branch that no task names (`CodeHost::open_prs`, whose `auto_merge` is GitHub's field of that name) and takes the oldest with auto-merge on. While there is one it neither merges nor updates any factory PR; reviews, reworks and approvals carry on. It says so once in the log (`holding merges: #306 has auto-merge on`) and in `factory status`. If that PR is behind its base it updates it (`update_branch`, a merge commit) so GitHub can merge it when CI is green; the next pass sees it gone and the factory merges again. A PR whose CI failed or that conflicts still holds while auto-merge is on, and is reported as blocked, so a person turns auto-merge off or fixes it; its code is not touched. The merger never merges a person's PR and never turns auto-merge on or off. If the host can't be asked, the hold stays as it was.
    - **Conflicts.** If the base branch doesn't merge cleanly, the task goes back to running for a rework on top of `main`, as for any merge conflict ([lifecycle.md](lifecycle.md)). Only a real merge conflict does: the host also refuses an update when there's nothing to merge in (an update it queued earlier has landed, so the merger looks at the head again) or when the head moved since the merger read it (the update names the head it read, so a push that raced it isn't merged over). Those are not conflicts, since a conflict costs a conflict rework (TRAIL-199, TRAIL-221); the first is `UpToDate` and the second an error the merger retries on its next tick.
    - **An approval doesn't skip the review.** A person can approve at any time, and their approval is theirs to withdraw, with two exceptions that would otherwise leave the task approved forever (TRAIL-1469). Approved while the newest review of that head, a reviewer's or a person's own, asks for changes, the task goes back to review so the rework can run: the gate still wants a review to approve, and the rework's push would have voided the approval anyway. This is looked at before a conflict is, since a conflict request would replace the reviewer's. Approved on a head no review has read (the attempt's review hasn't run yet, or the person pushed and then approved), the review still runs, and the approval stays, so a review that approves merges without asking again.
@@ -140,7 +157,7 @@ Decided: agents may tighten the policy under the repo's normal gates, but any ch
 
 ## Rules that keep the gate honest
 
-- The grade is set on the task by a human, and only raised after that: by the diff (paths, dependency files, size) or a reviewer. The author never grades its own work.
+- The grade is set on the task by a human, and only raised after that: by the diff (paths, dependency files, size) or a reviewer. The author never grades its own work. Decided (2026-11-19, not built): a project may carry a default grade, set by a human, that tasks agents create in it start at, so work an agent plans for an asked-for app can be picked up ([app-platform.md](../app-platform.md)).
 - A change touching the policy or profile files is top grade.
 - Any reviewer can raise a grade through its verdict; nobody can lower one.
 - Author and reviewer disagree past the repo's review-round cap → park for a human (TRAIL-180).

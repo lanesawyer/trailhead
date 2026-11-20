@@ -4,6 +4,8 @@
 mod common;
 mod grading;
 mod lifecycle;
+#[path = "../support/logs.rs"]
+mod logs;
 mod merger;
 mod pool;
 mod reconcile;

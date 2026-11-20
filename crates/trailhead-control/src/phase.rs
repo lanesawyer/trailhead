@@ -38,7 +38,8 @@ pub(crate) enum Phase<'a> {
 /// What a parked task still has on it for reconcile to finish.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Parked<'a> {
-    /// A person merged the PR unapproved and was asked to mark the task done: its PR isn't looked at again.
+    /// The PR is merged, core refused the factory's `done`, and a person was asked to mark the task done: its PR
+    /// isn't looked at again.
     pub awaiting_done: bool,
     /// A changes request no one has settled, which the park may have been for.
     pub unsettled: Option<&'a ChangesRequested>,
