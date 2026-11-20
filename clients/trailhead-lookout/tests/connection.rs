@@ -774,13 +774,24 @@ async fn a_running_control_plane_that_stops_is_never_shown_unreachable() {
     // The feed changing ends the stream cleanly; that's a resync, so Lookout redials without a flash of Unreachable.
     *rig.control.lock().unwrap() = Some(FactoryState::Stopped);
     rig.changed.send_modify(|_| {});
+    never_unreachable_until(&mut app, "the stopped control plane", |l| matches!(l, FactoryLink::Control(_))).await;
+
+    // A later change is a resync too, not the second clean end in a row: this connection stayed open first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    *rig.control.lock().unwrap() = Some(FactoryState::Running);
+    rig.changed.send_modify(|_| {});
+    never_unreachable_until(&mut app, "the control plane running again", |l| *l == FactoryLink::Running).await;
+}
+
+/// Updates the app until its factory link is `wanted`, failing if it ever shows Unreachable on the way.
+async fn never_unreachable_until(app: &mut App, what: &str, wanted: impl Fn(&FactoryLink) -> bool) {
     for _ in 0..100 {
         app.update();
-        assert_ne!(link(&app), FactoryLink::Unreachable);
-        if matches!(link(&app), FactoryLink::Control(_)) {
+        assert_ne!(link(app), FactoryLink::Unreachable);
+        if wanted(&link(app)) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("never showed the stopped control plane: {:?}", link(&app));
+    panic!("never showed {what}: {:?}", link(app));
 }
