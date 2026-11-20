@@ -1,6 +1,6 @@
 //! The trail map (`docs/factory/ui.md#views`): campsites are the pooled sandboxes (idle ones too), waypoints are the
 //! tasks being worked, and agents walk between them. Everything comes from the two mirrors, Trailhead's
-//! ([`crate::mirror`]) and the factory's ([`crate::factory`]).
+//! ([`trailhead_shell::mirror`]) and the factory's ([`crate::factory`]).
 //!
 //! What moves, and what only marks:
 //! - An agent is whoever holds a claim. It stands at its task's waypoint until the task's run has a sandbox, then
@@ -21,12 +21,12 @@ use bevy::prelude::*;
 use jiff::Timestamp;
 use trailhead_factory::{RunPhase, SandboxState};
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Status, Task, User, key_number};
+use trailhead_shell::mirror::{Mirrored, Rev, rows};
 use uuid::Uuid;
 
 use crate::board::View;
 use crate::claims::live_claims;
 use crate::factory::{Campsite, FactoryStatus, Run};
-use crate::mirror::{Mirrored, Rev, rows};
 use crate::widgets::{
     self, BackgroundTone, Keyed, TextTone, sandbox_token, size, space, status_label, status_tone, text_toned, token,
 };
@@ -538,9 +538,9 @@ fn glide(time: Res<Time>, mut tokens: Query<(&Token, &mut Node)>) {
 mod tests {
     use serde_json::{Value, json};
     use trailhead_factory::{RunStatus, SandboxStatus, TaskKey, Usd};
+    use trailhead_shell::fixture::{self, at, claim_json, sid};
 
     use super::*;
-    use crate::fixture::{self, at, claim_json, sid};
 
     fn camp(name: &str, state: SandboxState, task: Option<&str>) -> Campsite {
         let status = SandboxStatus {
@@ -744,9 +744,9 @@ mod tests {
     #[test]
     fn an_agent_made_after_the_snapshot_walks_to_its_camp_once_its_event_arrives() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
-        use crate::mirror::MirrorPlugin;
-        use crate::sync::{Snapshot, SyncItem};
         use trailhead_factory::{ControlState, FactorySnapshot};
+        use trailhead_shell::mirror::MirrorPlugin;
+        use trailhead_shell::sync::{Snapshot, SyncItem};
         use trailhead_wire::ui::RepoSnapshot;
 
         let mut app = App::new();
@@ -783,7 +783,7 @@ mod tests {
         }
         assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
         // The claim arrives as an event; its holder is in no agent list.
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 2, "entity": "claim", "entity_id": sid("t42"), "kind": "claim.created",
             "after": claim_json(json!({"task_id": "t42", "holder_id": "a-new"})),
         })));
@@ -792,9 +792,9 @@ mod tests {
         }
         // Until the agent.created event arrives it has no name, so no walker.
         assert!(app.world().resource::<TrailMap>().0.walkers.is_empty());
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 3, "entity": "agent", "entity_id": sid("a-new"), "kind": "agent.created",
-            "after": crate::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
+            "after": trailhead_shell::fixture::agent_json(json!({"id": "a-new", "name": "factory/trail-42"})),
         })));
         for _ in 0..3 {
             app.update();
@@ -923,9 +923,9 @@ mod tests {
     #[test]
     fn the_map_follows_the_mirrors() {
         use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate};
-        use crate::mirror::MirrorPlugin;
-        use crate::sync::{Snapshot, SyncItem};
         use trailhead_factory::{ControlState, FactorySnapshot};
+        use trailhead_shell::mirror::MirrorPlugin;
+        use trailhead_shell::sync::{Snapshot, SyncItem};
         use trailhead_wire::ui::RepoSnapshot;
 
         let mut app = App::new();

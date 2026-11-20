@@ -198,10 +198,11 @@ pub(super) fn clear_sent(
 #[cfg(test)]
 mod tests {
 
+    use trailhead_shell::fixture::{sid, task_json};
+
     use super::super::testing::settle;
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::{sid, task_json};
 
     fn compose_button(app: &mut App, part: ComposePart) -> Entity {
         let world = app.world_mut();
@@ -238,7 +239,7 @@ mod tests {
         let source = sent(&mut app)[0].source;
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
         let task_event = |id: i64, version: i64| {
-            crate::fixture::sync_event(json!({
+            trailhead_shell::fixture::sync_event(json!({
                 "id": id, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
                 "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "version": version})),
             }))

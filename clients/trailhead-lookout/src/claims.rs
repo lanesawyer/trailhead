@@ -15,9 +15,9 @@ pub fn live_claims(claims: &[Claim], now: Timestamp) -> HashMap<Uuid, &Claim> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use trailhead_shell::fixture;
 
     use super::*;
-    use crate::fixture;
 
     #[test]
     fn an_expired_claim_holds_nothing() {

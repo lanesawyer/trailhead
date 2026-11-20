@@ -249,13 +249,13 @@ impl Resume {
     }
 
     /// Marks a position as held, for tests that check it is forgotten.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn hold_for_test(&self) {
         self.set(Some(ResumePoint { last: 1, down_since: None }));
     }
 
     /// Whether a position is held.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_held(&self) -> bool {
         self.point().is_some()
     }

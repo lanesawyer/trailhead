@@ -10,12 +10,12 @@ use bevy::clipboard::Clipboard;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation, SelectedTab, ValueChange};
 use trailhead_model::Task;
+use trailhead_shell::mirror::{Mirrored, rows};
 
 use crate::author::Authoring;
 use crate::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use crate::factory::FactoryStatus;
 use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
-use crate::mirror::{Mirrored, rows};
 use crate::net::NetCommand;
 use crate::widgets::{
     Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group, field,
@@ -399,9 +399,9 @@ impl Plugin for SettingsUiPlugin {
 mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
+    use trailhead_shell::fixture::task_json;
 
     use super::*;
-    use crate::fixture::task_json;
     use crate::widgets::{ModalPlugin, ModalRoot};
 
     fn app() -> App {

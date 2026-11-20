@@ -16,6 +16,7 @@ use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::{Project, ProjectStatus, Task};
 use trailhead_shell::ActiveApp;
+use trailhead_shell::mirror::Mirrored;
 use uuid::Uuid;
 
 use crate::LOOKOUT;
@@ -23,7 +24,6 @@ use crate::author::Act;
 use crate::board::{Filter, View};
 use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus};
-use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::project_form::NewProject;
 use crate::search::Deep;
@@ -402,13 +402,13 @@ pub fn connection_chip(
 mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
+    use trailhead_shell::fixture::{project_json, sid, task_json};
+    use trailhead_shell::mirror::MirrorPlugin;
+    use trailhead_shell::sync::{Snapshot, SyncItem};
 
     use super::*;
     use crate::board::BoardPlugin;
-    use crate::fixture::{project_json, sid, task_json};
-    use crate::mirror::MirrorPlugin;
     use crate::project::ProjectPlugin;
-    use crate::sync::{Snapshot, SyncItem};
 
     fn app() -> App {
         let mut app = App::new();
@@ -636,7 +636,7 @@ mod tests {
     fn a_new_project_adds_its_entry_in_order_and_keeps_the_rest() {
         let mut app = app();
         let before = tree(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 2, "entity": "project", "entity_id": sid("p3"), "kind": "project.created",
             "after": project_json(json!({"id": "p3", "key": "BDE", "name": "Data explorer"})),
         })));
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(entry_words(&mut app, "TRAIL"), ["Trailhead", "TRAIL", "2"], "done isn't open");
         assert_eq!(entry_words(&mut app, "OPS"), ["Operations", "OPS", "0"]);
         let before = tree(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 2, "entity": "task", "entity_id": sid("t2"), "kind": "task.updated",
             "after": task_json(json!({"id": "t2", "key": "TRAIL-2", "status": "done", "version": 2})),
         })));
@@ -694,7 +694,7 @@ mod tests {
     fn an_archived_project_leaves_the_sidebar_and_comes_back_unarchived() {
         let mut app = app();
         let archive = |app: &mut App, id: i64, status: &str| {
-            app.world_mut().write_message(crate::fixture::sync_event(json!({
+            app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
                 "id": id, "entity": "project", "entity_id": sid("p2"), "kind": "project.updated",
                 "after": project_json(json!({"id": "p2", "key": "OPS", "name": "Operations", "status": status,
                                              "version": id})),
@@ -713,7 +713,7 @@ mod tests {
         let mut app = app();
         assert_eq!(entry_words(&mut app, "TRAIL")[..2], ["Trailhead", "TRAIL"]);
         let before = tree(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 2, "entity": "project", "entity_id": sid("p1"), "kind": "project.updated",
             "after": project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead engine", "version": 2})),
         })));

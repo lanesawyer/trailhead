@@ -1,9 +1,9 @@
 //! Fixtures the board's tests share.
 
 use serde_json::{Value, json};
+use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, task_json};
 
 use super::*;
-use crate::fixture::{agent_json, at, claim_json, comment_json, project_json, task_json};
 
 /// The board's fixture as the API's JSON.
 #[allow(clippy::type_complexity)]

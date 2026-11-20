@@ -340,17 +340,18 @@ pub(super) fn sync_panel(
 #[cfg(test)]
 mod tests {
 
+    use trailhead_shell::fixture::{comment_json, sid, task_json};
+    use trailhead_shell::sync::Snapshot;
+
     use super::super::testing::settle;
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::{comment_json, sid, task_json};
-    use crate::sync::Snapshot;
     use crate::widgets::ScrollDown;
 
     #[test]
     fn the_window_dropdown_sets_how_far_back_revert_goes() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         let select = app.world_mut().spawn(WindowChoice).id();
         app.world_mut().trigger(Picked { entity: select, index: 2 });
         app.update();
@@ -364,7 +365,7 @@ mod tests {
     #[test]
     fn the_status_dropdown_sends_the_move_and_ignores_the_current_status() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         app.add_message::<Submit>();
         let f = fixture();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
@@ -393,7 +394,7 @@ mod tests {
     #[test]
     fn a_finished_control_resets_when_its_task_changes_and_goes_when_the_task_does() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
         let f = fixture();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
@@ -415,9 +416,9 @@ mod tests {
         assert_eq!(app.world().get::<Control>(a), Some(&Control::Done), "nothing changed yet");
         assert!(app.world().get_entity(b).is_err(), "a subject not in the mirror loses its controls");
         assert!(!app.world().resource::<Controls>().0.contains_key(&(gone, Action::Undo)));
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
-            "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7", "version": 9})),
+            "after": trailhead_shell::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7", "version": 9})),
         })));
         app.update();
         assert_eq!(app.world().get::<Control>(a), Some(&Control::Idle), "the task changed");
@@ -426,7 +427,7 @@ mod tests {
     #[test]
     fn tidying_waits_for_a_change() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
         let f = fixture();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
@@ -453,11 +454,11 @@ mod tests {
     #[test]
     fn notification_events_are_not_a_tasks_last_change() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         for (id, kind) in [(3, "task.updated"), (4, "task.due_soon"), (5, "task.overdue")] {
-            app.world_mut().write_message(crate::fixture::sync_event(json!({
+            app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
                 "id": id, "entity": "task", "entity_id": sid("t7"), "kind": kind,
-                "after": crate::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7"})),
+                "after": trailhead_shell::fixture::task_json(json!({"id": "t7", "key": "TRAIL-7"})),
             })));
         }
         app.update();
@@ -473,7 +474,7 @@ mod tests {
     #[test]
     fn the_panel_follows_the_mirror_and_an_answer_reaches_its_control() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         let f = fixture();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 5,
@@ -482,7 +483,7 @@ mod tests {
             agents: as_json(&f.agents),
             ..Default::default()
         }));
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 6, "entity": "comment", "entity_id": sid("c1"), "kind": "comment.created",
             "after": comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "body": "q", "resolved_at": null})),
         })));
@@ -522,7 +523,7 @@ mod tests {
 
     fn closing_app() -> App {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         app
     }
 
@@ -587,7 +588,7 @@ mod tests {
     #[test]
     fn picking_a_grade_sends_the_patch_with_the_version_and_a_refusal_shows_beside_it() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
         app.add_message::<Submit>();
         let f = fixture();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
@@ -668,7 +669,7 @@ mod tests {
     fn a_changed_title_and_a_pressed_control_leave_the_panel_as_it_was() {
         let mut app = app();
         let before = body(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 300, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
             "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
                       "version": 5})),
@@ -707,7 +708,7 @@ mod tests {
             at: 6,
             projects: vec![],
             tasks: vec![],
-            agents: vec![crate::fixture::agent_json(json!({"id": "a1", "name": "factory/trail-7-a1"}))],
+            agents: vec![trailhead_shell::fixture::agent_json(json!({"id": "a1", "name": "factory/trail-7-a1"}))],
             ..Default::default()
         }));
         app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Agent(sid("a1")));
@@ -737,13 +738,13 @@ mod tests {
             status.repos.insert("o/b".into(), repo("OPS-1", vec![g(2), g(4)]));
         }
         for (i, (id, key)) in [("pa", "TRAIL"), ("pb", "OPS")].into_iter().enumerate() {
-            app.world_mut().write_message(crate::fixture::sync_event(json!({
+            app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
                 "id": 400 + i as i64, "entity": "project", "entity_id": sid(id), "kind": "project.created",
-                "after": crate::fixture::project_json(json!({"id": id, "key": key, "name": key})),
+                "after": trailhead_shell::fixture::project_json(json!({"id": id, "key": key, "name": key})),
             })));
         }
         for (i, (id, key, project)) in [("t20", "TRAIL-20", "pa"), ("t21", "OPS-21", "pb")].into_iter().enumerate() {
-            app.world_mut().write_message(crate::fixture::sync_event(json!({
+            app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
                 "id": 410 + i as i64, "entity": "task", "entity_id": sid(id), "kind": "task.created",
                 "after": task_json(json!({"id": id, "key": key, "project_id": project, "grade": 2})),
             })));
@@ -785,7 +786,7 @@ mod tests {
         // The task's project is only known once the mirror has it.
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 6,
-            projects: vec![crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"}))],
+            projects: vec![trailhead_shell::fixture::project_json(json!({"id": "p1", "key": "TRAIL"}))],
             tasks: vec![task_json(
                 json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
             )],

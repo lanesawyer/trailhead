@@ -2,11 +2,11 @@
 
 use bevy::state::app::StatesPlugin;
 use serde_json::Value;
+use trailhead_shell::fixture::{agent, claim, comment, task};
+use trailhead_shell::fixture::{at, comment_json, sid, task_json};
+use trailhead_shell::sync::Snapshot;
 
 use super::*;
-use crate::fixture::{agent, claim, comment, task};
-use crate::fixture::{at, comment_json, sid, task_json};
-use crate::sync::Snapshot;
 
 pub(super) struct Fixture {
     pub(super) projects: Vec<Project>,
@@ -62,7 +62,7 @@ pub(super) fn fixture() -> Fixture {
 }
 
 pub(super) fn question(id: &str, body: &str) -> SyncItem {
-    crate::fixture::sync_event(json!({
+    trailhead_shell::fixture::sync_event(json!({
         "id": id.trim_start_matches('c').parse::<i64>().unwrap() + 100, "entity": "comment", "entity_id": sid(id),
         "kind": "comment.created",
         "after": comment_json(json!({"id": id, "task_id": "t7", "kind": "question", "body": body,
@@ -84,7 +84,7 @@ pub(super) fn app() -> App {
         .init_state::<Connection>()
         .init_resource::<ConnectionStatus>()
         .add_plugins((
-            crate::mirror::MirrorPlugin,
+            trailhead_shell::mirror::MirrorPlugin,
             InspectorUiPlugin,
             crate::widgets::ModalPlugin,
             crate::widgets::InlinePlugin,

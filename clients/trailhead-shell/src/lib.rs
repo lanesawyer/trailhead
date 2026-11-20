@@ -22,8 +22,12 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use trailhead_ui::{Icon, Theme};
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture;
+pub mod mirror;
 mod rail;
 mod store;
+pub mod sync;
 mod window;
 
 pub use rail::{OpenApp, Rail};

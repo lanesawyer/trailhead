@@ -37,6 +37,8 @@ use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
     Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
 };
+use trailhead_shell::mirror::{Mirror, Mirrored, Rev, rows};
+use trailhead_shell::sync::SyncItem;
 use uuid::Uuid;
 
 use crate::author::{
@@ -47,10 +49,8 @@ use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::{Api, Connection, ConnectionStatus};
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
-use crate::mirror::{Mirror, Mirrored, Rev, rows};
 use crate::project::OpenProject;
 use crate::settings::OpenLogs;
-use crate::sync::SyncItem;
 use crate::widgets::{
     ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
     ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, bubble_head, button,
@@ -139,7 +139,7 @@ fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) 
         if is_notification(&e.kind) {
             continue;
         }
-        if let Some(task) = crate::sync::task_of(e) {
+        if let Some(task) = trailhead_shell::sync::task_of(e) {
             latest.0.insert(task.to_string(), e.id);
         }
     }

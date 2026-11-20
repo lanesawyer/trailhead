@@ -52,6 +52,7 @@ png = "0.18"
 
 [dev-dependencies]
 trailhead-ui = { workspace = true, features = ["test-support"] }
+trailhead-shell = { workspace = true, features = ["test-support"] }
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 axum.workspace = true

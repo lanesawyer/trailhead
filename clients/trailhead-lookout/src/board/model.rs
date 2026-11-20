@@ -488,10 +488,10 @@ pub(super) fn parent_label(key: &str, title: &str) -> String {
 mod tests {
     use serde_json::json;
     use trailhead_model::Priority;
+    use trailhead_shell::fixture::{at, project_json, sid, task_json};
 
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::{at, project_json, sid, task_json};
 
     #[test]
     fn groups_by_status_with_subtasks_under_their_parent() {
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn an_in_review_task_with_changes_requested_says_so_and_stays_in_review() {
-        use crate::fixture::{comment, task};
+        use trailhead_shell::fixture::{comment, task};
         let first = "01900000-0000-7000-8000-000000000001";
         let second = "01900000-0000-7000-8000-000000000002";
         let tasks = [
@@ -577,7 +577,7 @@ mod tests {
             // Not in review, so nothing to wait on.
             comment(json!({"id": first, "task_id": "t3", "kind": "review", "verdict": "request_changes"})),
         ];
-        let projects = [crate::fixture::project(json!({"id": "p1", "key": "TRAIL"}))];
+        let projects = [trailhead_shell::fixture::project(json!({"id": "p1", "key": "TRAIL"}))];
         let view = build(
             Input { projects: &projects, tasks: &tasks, comments: &comments, now: at_now(), ..Default::default() },
             &Filter::default(),

@@ -13,12 +13,12 @@ use bevy::ui_widgets::Activate;
 use trailhead_client::http::{self as client, Call, ProjectUpdate};
 
 use trailhead_model::{Project, ProjectStatus};
+use trailhead_shell::mirror::Mirrored;
 
 use crate::author::describe;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::form::{self, FormState};
-use crate::mirror::Mirrored;
 use crate::project::{OpenProject, ProjectPage};
 use crate::widgets::{
     ButtonKind, Icon, InitialText, Modal, ModalFocus, ModalSlots, Picked, button, button_group, field, open_modal,
@@ -458,7 +458,7 @@ mod tests {
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
 
-    use crate::fixture::project;
+    use trailhead_shell::fixture::project;
 
     fn draft(key: &str) -> ProjectDraft {
         ProjectDraft { key: key.into(), name: " Trailhead ".into(), brief: "the task engine".into(), ..default() }

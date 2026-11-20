@@ -12,10 +12,10 @@ use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, ControlOrientation, ValueChange};
 use trailhead_model::{Project, ProjectStatus, Status, Task};
+use trailhead_shell::mirror::Mirrored;
 use uuid::Uuid;
 
 use crate::board::View;
-use crate::mirror::Mirrored;
 use crate::project::OpenProject;
 use crate::project_form::NewProject;
 use crate::widgets::{
@@ -349,9 +349,9 @@ fn sync_rows(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use trailhead_shell::fixture::{project, task};
 
     use super::*;
-    use crate::fixture::{project, task};
 
     fn world() -> (Vec<Project>, Vec<Task>) {
         let projects = vec![
@@ -394,10 +394,10 @@ mod tests {
 
     fn app() -> App {
         use bevy::state::app::StatesPlugin;
+        use trailhead_shell::mirror::MirrorPlugin;
+        use trailhead_shell::sync::{Snapshot, SyncItem};
 
-        use crate::fixture::{project_json, task_json};
-        use crate::mirror::MirrorPlugin;
-        use crate::sync::{Snapshot, SyncItem};
+        use trailhead_shell::fixture::{project_json, task_json};
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))

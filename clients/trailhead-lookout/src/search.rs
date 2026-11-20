@@ -243,9 +243,11 @@ mod tests {
     #[test]
     fn a_hit_keeps_the_tasks_id_and_where_it_matched() {
         let body = json!({"match": {"field": "comment", "snippet": "a …b", "comment_id": null}});
-        let hit: SearchHit =
-            serde_json::from_value(crate::fixture::whole(crate::fixture::task_json(json!({"id": "t1"})), body))
-                .unwrap();
+        let hit: SearchHit = serde_json::from_value(trailhead_shell::fixture::whole(
+            trailhead_shell::fixture::task_json(json!({"id": "t1"})),
+            body,
+        ))
+        .unwrap();
         let id = hit.task.id.to_string();
         assert_eq!(DeepHit::from(hit), DeepHit { id, field: "comment".into(), snippet: "a …b".into() });
     }

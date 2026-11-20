@@ -17,6 +17,7 @@ use bevy::text::{EditableText, LineBreak};
 use bevy::ui_widgets::{Activate, ValueChange};
 use trailhead_client::http::{Call, NewTask};
 use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
+use trailhead_shell::mirror::Mirrored;
 
 use crate::board::View;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
@@ -24,7 +25,6 @@ use crate::connection::Connection;
 use crate::factory::{FactoryStatus, project_of};
 use crate::form::{self, FormState};
 use crate::inspector::{OpenComposer, Selection, Subject};
-use crate::mirror::Mirrored;
 use crate::project::ProjectPage;
 use crate::widgets::{
     ButtonKind, Icon, InitialText, Keyed, Modal, ModalFocus, ModalSlots, Picked, SelectEdit, Token, Truncated, button,
@@ -863,11 +863,11 @@ mod tests {
     use std::time::Duration;
 
     use bevy::state::app::StatesPlugin;
+    use trailhead_shell::fixture::{sid, task_json};
+    use trailhead_shell::mirror::MirrorPlugin;
 
     use super::*;
     use crate::commands::{CommandId, CommandsPlugin, Outbox};
-    use crate::fixture::{sid, task_json};
-    use crate::mirror::MirrorPlugin;
     use reqwest::Method;
     use serde_json::{Value, json};
 
@@ -941,10 +941,12 @@ mod tests {
     #[test]
     fn parent_suggestions_are_the_projects_open_tasks_that_match() {
         let tasks = [
-            crate::fixture::task(json!({"id": "a", "key": "TRAIL-1", "title": "Build the board"})),
-            crate::fixture::task(json!({"id": "b", "key": "TRAIL-2", "title": "Board filters", "status": "done"})),
-            crate::fixture::task(json!({"id": "c", "key": "OPS-1", "title": "Board the ship"})),
-            crate::fixture::task(json!({"id": "d", "key": "TRAIL-3", "title": "Lookout board header"})),
+            trailhead_shell::fixture::task(json!({"id": "a", "key": "TRAIL-1", "title": "Build the board"})),
+            trailhead_shell::fixture::task(
+                json!({"id": "b", "key": "TRAIL-2", "title": "Board filters", "status": "done"}),
+            ),
+            trailhead_shell::fixture::task(json!({"id": "c", "key": "OPS-1", "title": "Board the ship"})),
+            trailhead_shell::fixture::task(json!({"id": "d", "key": "TRAIL-3", "title": "Lookout board header"})),
         ];
         let keys = |q: &str, limit| -> Vec<String> {
             parent_suggestions(&tasks, "TRAIL", q, limit).into_iter().map(|(k, _)| k).collect()
@@ -1115,12 +1117,12 @@ mod tests {
             .add_sub_state::<View>()
             .add_plugins((MirrorPlugin, CommandsPlugin, AuthorPlugin));
         app.world_mut().resource_mut::<Outbox>().backoff = Duration::ZERO;
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 1, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated", "after": task(),
         })));
         for (id, key) in [(2, "TRAIL"), (3, "ZED")] {
-            let project = crate::fixture::project_json(json!({"id": key, "key": key, "name": key}));
-            app.world_mut().write_message(crate::fixture::sync_event(json!({
+            let project = trailhead_shell::fixture::project_json(json!({"id": key, "key": key, "name": key}));
+            app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
                 "id": id, "entity": "project", "entity_id": sid(key), "kind": "project.created", "after": project,
             })));
         }

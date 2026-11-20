@@ -544,14 +544,14 @@ mod tests {
     use super::super::testing::*;
     use super::*;
 
-    use crate::fixture::{at, sid, task};
+    use trailhead_shell::fixture::{at, sid, task};
 
     #[test]
     fn a_fetched_task_adds_its_dependencies_claim_run_and_details() {
         let f = fixture();
         let detail: TaskDetail = serde_json::from_value(json!({
             "task": serde_json::to_value(&f.tasks[0]).unwrap(),
-            "claim": crate::fixture::claim_json(json!({"task_id": "t7", "holder_id": "a1", "expires_at": "2099-01-01T00:00:00Z"})),
+            "claim": trailhead_shell::fixture::claim_json(json!({"task_id": "t7", "holder_id": "a1", "expires_at": "2099-01-01T00:00:00Z"})),
             "blocked_by": ["TRAIL-3"], "blocks": ["TRAIL-9", "TRAIL-10"], "comments": [],
             "duplicate_of": null, "duplicates": [],
         }))
@@ -593,11 +593,11 @@ mod tests {
             "task": serde_json::to_value(&f.tasks[0]).unwrap(),
             "claim": null, "blocked_by": [], "blocks": [], "duplicate_of": null, "duplicates": [],
             "comments": [
-                crate::fixture::comment_json(json!({"id": "c3", "task_id": "t7", "kind": "review", "author_id": "a1",
+                trailhead_shell::fixture::comment_json(json!({"id": "c3", "task_id": "t7", "kind": "review", "author_id": "a1",
                     "body": "looks right", "verdict": "request_changes", "model": "m-1", "created_at": at(3)})),
-                crate::fixture::comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "author_id": "a1",
+                trailhead_shell::fixture::comment_json(json!({"id": "c1", "task_id": "t7", "kind": "question", "author_id": "a1",
                     "addressed_to": "u1", "body": "which db?", "created_at": at(1)})),
-                crate::fixture::comment_json(json!({"id": "c2", "task_id": "t7", "kind": "note", "author_id": "u1",
+                trailhead_shell::fixture::comment_json(json!({"id": "c2", "task_id": "t7", "kind": "note", "author_id": "u1",
                     "body": "sqlite", "created_at": at(2)})),
             ],
         }))

@@ -11,9 +11,9 @@ use serde_json::Value;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use trailhead_core::{Ctx, NewComment, NewProject, NewTask, Principal, Store, TaskPatch};
-use trailhead_lookout::mirror::{Mirror, MirrorPlugin, Mirrored, Rev};
-use trailhead_lookout::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 use trailhead_model::{Claim, Comment, Project, Task};
+use trailhead_shell::mirror::{Mirror, MirrorPlugin, Mirrored, Rev};
+use trailhead_shell::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 struct Rig {
     _dir: tempfile::TempDir,

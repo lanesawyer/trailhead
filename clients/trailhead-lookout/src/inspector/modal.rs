@@ -313,18 +313,19 @@ pub(super) fn on_open_task(activate: On<Activate>, rows: Query<&OpensTask>, mut 
 #[cfg(test)]
 mod tests {
 
+    use trailhead_shell::fixture::{agent_json, claim_json, sid, task_json};
+    use trailhead_shell::sync::Snapshot;
+
     use super::super::testing::settle;
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::{agent_json, claim_json, sid, task_json};
-    use crate::sync::Snapshot;
 
     #[test]
     fn an_update_leaves_an_open_modals_title_alone() {
         let mut app = app();
         let modal = app.world_mut().commands().spawn_scene(panel_header("Answer TRAIL-7")).id();
         settle(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 301, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
             "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "renamed", "status": "in_progress", "priority": 1,
                       "version": 5})),
@@ -419,9 +420,9 @@ mod tests {
     #[test]
     fn the_project_closes_the_modal_and_opens_its_page() {
         let mut app = app();
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 200, "entity": "project", "entity_id": sid("p1"), "kind": "project.created",
-            "after": crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"})),
+            "after": trailhead_shell::fixture::project_json(json!({"id": "p1", "key": "TRAIL"})),
         })));
         settle(&mut app);
         #[derive(Resource, Default)]
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn a_read_only_sidebar_shows_the_grade_as_a_badge_not_text() {
         let mut app = app();
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 302, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated",
             "after": task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_review", "priority": 1,
                       "grade": 2, "version": 5})),

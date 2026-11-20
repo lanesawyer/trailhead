@@ -16,6 +16,7 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_factory::logs::LogLine;
+use trailhead_shell::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 use trailhead_wire::ui::{
     CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
 };
@@ -25,7 +26,6 @@ use crate::commands::{self, CommandId, Reply, Request};
 use crate::detail::{self, DetailReply};
 use crate::factory::FactoryUpdate;
 use crate::search::{self, SearchReply};
-use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
 /// three values as the net thread reports them.

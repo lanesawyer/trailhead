@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn a_pr_link_is_the_code_hosts_own_url_and_the_merged_one_once_merged() {
         let pr = |n: u64| serde_json::json!({"repo": {"owner": "o", "name": "r"}, "number": n, "url": format!("https://host/o/r/-/merge_requests/{n}")});
-        let with = |factory| crate::fixture::task(serde_json::json!({"metadata": {"factory": factory}}));
+        let with = |factory| trailhead_shell::fixture::task(serde_json::json!({"metadata": {"factory": factory}}));
         assert_eq!(pr_link(&with(serde_json::json!({"attempt": 1}))), None);
         let open = pr_link(&with(serde_json::json!({"pr": pr(4)}))).unwrap();
         assert_eq!(open, PrLink { label: "o/r#4".into(), url: "https://host/o/r/-/merge_requests/4".into() });

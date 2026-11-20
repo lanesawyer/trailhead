@@ -8334,11 +8334,20 @@ dependencies = [
 name = "trailhead-shell"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "bevy",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tracing",
+ "trailhead-client",
+ "trailhead-core",
+ "trailhead-model",
+ "trailhead-server",
  "trailhead-ui",
+ "uuid",
 ]
 
 [[package]]

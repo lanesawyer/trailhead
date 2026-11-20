@@ -299,12 +299,12 @@ mod tests {
 
     use bevy::state::app::StatesPlugin;
     use serde_json::{Value, json};
+    use trailhead_shell::fixture::{project_json, sid, task_json};
+    use trailhead_shell::mirror::MirrorPlugin;
+    use trailhead_shell::sync::{Snapshot, SyncItem};
 
     use super::*;
     use crate::board::BoardPlugin;
-    use crate::fixture::{project_json, sid, task_json};
-    use crate::mirror::MirrorPlugin;
-    use crate::sync::{Snapshot, SyncItem};
 
     fn task(id: &str, project: &str, status: &str, parent: Option<&str>) -> Value {
         let mut t = json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": project, "status": status,
@@ -363,7 +363,7 @@ mod tests {
     fn changing_one_task_leaves_every_other_card_as_it_was() {
         let mut app = app(vec![task("t1", "p1", "open", None), task("t2", "p1", "in_progress", None)]);
         let before = cards(&mut app);
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 9, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated",
             "after": task_json(json!({"id": "t1", "key": "T1", "title": "renamed", "project_id": "p1", "status": "open",
                       "priority": 2, "version": 2})),

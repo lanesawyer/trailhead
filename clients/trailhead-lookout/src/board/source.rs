@@ -150,11 +150,11 @@ pub(super) fn queue_keys(authoring: &Authoring, factory: Option<&FactoryStatus>)
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use trailhead_shell::fixture::{claim_json, sid, task_json};
+    use trailhead_shell::sync::{Snapshot, SyncItem};
 
     use super::super::testing::*;
     use super::*;
-    use crate::fixture::{claim_json, sid, task_json};
-    use crate::sync::{Snapshot, SyncItem};
 
     #[test]
     fn queue_keys_prefer_the_reported_queues_and_fall_back_to_the_authoring_parent() {
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn picking_another_project_drops_a_parent_it_doesnt_have() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(BoardPlugin);
         let (projects, tasks, _, _, agents) = input_json();
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
             at: 5,
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn picking_another_project_drops_a_holder_with_nothing_there() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(BoardPlugin);
         let (projects, mut tasks, claims, _, agents) = input_json();
         // The view runs on the clock, so the claims last past it.
         for mut claim in claims {
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn the_view_follows_the_mirror() {
         let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(BoardPlugin);
+        app.add_plugins(MinimalPlugins).add_plugins(trailhead_shell::mirror::MirrorPlugin).add_plugins(BoardPlugin);
         let (projects, tasks, claims, comments, agents) = input_json();
         let snapshot = Snapshot { at: 5, projects, tasks, agents, ..Default::default() };
         let _ = (claims, comments);
@@ -308,7 +308,7 @@ mod tests {
 
         // An event moves the task to another column.
         app.world_mut().resource_mut::<Filter>().closed = true;
-        app.world_mut().write_message(crate::fixture::sync_event(json!({
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
             "id": 6, "entity": "task", "entity_id": sid("t200"), "kind": "task.updated",
             "after": task_json(json!({"id": "t200", "key": "OPS-1", "project_id": "p2", "status": "done", "priority": 2, "version": 2})),
         })));

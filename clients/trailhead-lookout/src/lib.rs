@@ -13,14 +13,11 @@ pub mod connect;
 pub mod connection;
 pub mod detail;
 pub mod factory;
-#[doc(hidden)]
-pub mod fixture;
 pub mod form;
 pub mod icon;
 pub mod inspector;
 pub mod logs;
 pub mod map;
-pub mod mirror;
 pub mod net;
 pub mod project;
 pub mod project_form;
@@ -28,7 +25,6 @@ pub mod projects_page;
 pub mod search;
 pub mod settings;
 pub mod sidebar;
-pub mod sync;
 pub mod usage;
 pub mod widgets;
 

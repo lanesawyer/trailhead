@@ -5,12 +5,12 @@
 use bevy::prelude::*;
 use trailhead_client::http::Client;
 use trailhead_model::{Task, TaskDetail, TaskKey};
+use trailhead_shell::mirror::Mirrored;
+use trailhead_shell::sync::{SyncItem, task_of};
 
 use crate::connection::{Connection, SendNet};
 use crate::inspector::{Selection, Subject};
-use crate::mirror::Mirrored;
 use crate::net::NetCommand;
-use crate::sync::{SyncItem, task_of};
 
 /// The server's answer to a fetch, as the net thread passes it on.
 #[derive(Message, Debug, Clone, PartialEq)]
@@ -166,9 +166,9 @@ fn ask(
 mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
+    use trailhead_shell::fixture::{sid, task_json};
 
     use super::*;
-    use crate::fixture::{sid, task_json};
 
     fn app() -> App {
         let mut app = App::new();
@@ -208,7 +208,7 @@ mod tests {
 
     fn event(app: &mut App, entity: &str, after: serde_json::Value) {
         let id = after["id"].clone();
-        app.world_mut().write_message(crate::fixture::sync_event(
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(
             json!({"id": 9, "entity": entity, "entity_id": id, "after": after}),
         ));
         app.update();
