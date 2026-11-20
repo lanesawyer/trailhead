@@ -260,9 +260,46 @@ struct Entry {
 /// host, and a factory for each repo.
 struct Setup {
     repos: Vec<Entry>,
-    tunnel: Router,
     store: Arc<Store>,
     ctx: Ctx,
+}
+
+/// The server's way in over iroh: the endpoint, with the API tunnel sandboxes reach Trailhead through and the UI
+/// protocol the Trailhead app dials. It is opened before anything the factory needs (secrets, the daemon binary,
+/// the compute), so the app shows tasks and projects, and what the factory is waiting for, while the factory can't
+/// start.
+struct Door {
+    endpoint: Endpoint,
+    /// The key the daemons' tokens are made from.
+    master: [u8; 32],
+    peers: trailhead_wire::Peers,
+    tunnel: Router,
+}
+
+async fn open_door(server: SocketAddr, paths: &Paths, feed: &surface::Feed) -> Result<Door> {
+    let (key, master) = load_or_create_keys(&paths.creds())?;
+    let endpoint = Endpoint::builder(presets::N0)
+        .secret_key(key)
+        .bind()
+        .await
+        .map_err(|e| Error::context("binding the iroh endpoint", e))?;
+    let peers = trailhead_wire::Peers::default();
+    let build =
+        std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
+    let ui = UiProtocol::new(server, ui_allowlist(paths)).with_status(Arc::new(feed.clone()));
+    let ui = match LOGS.get() {
+        Some(buffer) => ui.with_logs(Arc::new(LogsFeed(buffer.clone()))),
+        None => ui,
+    };
+    let tunnel = Router::builder(endpoint.clone())
+        .accept(API_ALPN, ApiTunnel::new(server, peers.clone()))
+        .accept(UI_ALPN, ui.build(build))
+        .spawn();
+    tracing::info!(
+        "a UI connects to endpoint id {}; allow it with `trailhead factory allow <its endpoint id>`",
+        endpoint.id()
+    );
+    Ok(Door { endpoint, master, peers, tunnel })
 }
 
 /// The user config's `[factory]` table; a missing file is the default.
@@ -308,7 +345,14 @@ fn plan(run: &RunOpts, host_config: HostConfig) -> Result<Plan> {
 
 /// Reaches out from a [`Plan`]: secrets, the daemon binary, the store, the iroh endpoint and the
 /// computes. Fnox runs in `fnox_dir`, the first repo's directory. `store` is the server's own: the only process that opens the database.
-async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, feed: surface::Feed) -> Result<Setup> {
+async fn wire(
+    plan: Plan,
+    paths: &Paths,
+    fnox_dir: &Path,
+    store: Arc<Store>,
+    feed: surface::Feed,
+    door: &Door,
+) -> Result<Setup> {
     let Plan { opts, host_config, mut specs, adapter } = plan;
     let (opts, fnox) = resolve_opts(&opts, paths, fnox_dir)?;
     let opts = &opts;
@@ -352,19 +396,12 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     let slugs: Vec<String> = specs.iter().map(|s| s.slug()).collect();
     let ctx = factory_ctx(&store, opts.create_agent).await?;
     let tracker = Arc::new(CoreTracker::new(store.clone(), ctx.clone(), AGENT));
-    let (key, master) = load_or_create_keys(&paths.creds())?;
 
-    // `repos::validate` made the compute and daemon settings the same for every repo. Built before the endpoint
-    // binds, so a failure here leaves no endpoint to close.
+    // `repos::validate` made the compute and daemon settings the same for every repo.
     let shared = &specs[0].config;
     let binary = Arc::new(binary);
     let built = computes(shared, opts, &fnox, paths, binary.clone(), false, !harness_secrets.is_empty())?;
-    let endpoint = Endpoint::builder(presets::N0)
-        .secret_key(key)
-        .bind()
-        .await
-        .map_err(|e| Error::context("binding the iroh endpoint", e))?;
-    let peers = trailhead_wire::Peers::default();
+    let (endpoint, master, peers) = (&door.endpoint, door.master, &door.peers);
     let mut targets: Vec<Wired> = Vec::new();
     for (compute, target) in built {
         let launch = Launch {
@@ -375,23 +412,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
         let daemon = RemoteDaemon::new(endpoint.clone(), master, compute.clone(), launch).with_peers(peers.clone());
         targets.push((target, compute, Arc::new(daemon)));
     }
-    let build =
-        std::env::current_exe().and_then(std::fs::read).map(|b| build_id(&b)).unwrap_or_else(|_| "unknown".into());
-    let ui = UiProtocol::new(opts.server, ui_allowlist(paths)).with_status(Arc::new(feed.clone()));
-    let ui = match LOGS.get() {
-        Some(buffer) => ui.with_logs(Arc::new(LogsFeed(buffer.clone()))),
-        None => ui,
-    };
-    let ui = ui.build(build);
-    let tunnel = Router::builder(endpoint.clone())
-        .accept(API_ALPN, ApiTunnel::new(opts.server, peers))
-        .accept(UI_ALPN, ui)
-        .spawn();
     tracing::info!(endpoint = %endpoint.id(), repos = %slugs.join(", "), "factory ready");
-    tracing::info!(
-        "a UI connects to endpoint id {}; allow it with `trailhead factory allow <its endpoint id>`",
-        endpoint.id()
-    );
 
     let host = Host::with_usage_file(&host_config, paths.data_dir.join("factory").join("usage.json"));
     let mut repos = Vec::new();
@@ -445,7 +466,7 @@ async fn wire(plan: Plan, paths: &Paths, fnox_dir: &Path, store: Arc<Store>, fee
     }
     feed.set_boards(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
     feed.set_state(FactoryState::Running);
-    Ok(Setup { repos, tunnel, store, ctx })
+    Ok(Setup { repos, store, ctx })
 }
 
 /// Resolves once the watch channel it came from is set.
@@ -698,7 +719,7 @@ async fn run_loops(
     cancel: tokio::sync::watch::Receiver<bool>,
     feed: surface::Feed,
 ) -> Result<()> {
-    let Setup { repos, tunnel, store, ctx } = setup;
+    let Setup { repos, store, ctx } = setup;
     let mut loops = tokio::task::JoinSet::new();
     let mut boards = std::collections::HashMap::new();
     for entry in repos {
@@ -720,7 +741,6 @@ async fn run_loops(
             }
         }
     }
-    tunnel.shutdown().await.map_err(Error::backend)?;
     match failed {
         0 => Ok(()),
         n => Err(Error::LoopsFailed(n)),
@@ -807,30 +827,18 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     let feed = surface::Feed::new(FactoryState::Starting { reason: None });
     let shared = feed.clone();
     let control = async move {
-        let mut wait = RETRY_FIRST;
-        let setup = loop {
-            match wire(plan.clone(), &paths, &fnox_dir, store.clone(), shared.clone()).await {
-                Ok(setup) => break setup,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        retry_secs = wait.as_secs(),
-                        "control: starting; the server keeps serving and tries the factory again"
-                    );
-                    shared.set_state(FactoryState::Starting { reason: Some(e.to_string()) });
-                }
-            }
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = fired(drain.clone()) => {
-                    shared.set_state(FactoryState::Stopped);
-                    return;
-                }
-            }
-            wait = (wait * 2).min(RETRY_MAX);
-        };
-        if let Err(e) = run_loops(setup, poll, drain, cancel, shared.clone()).await {
+        let Some(door) = until_ready(&shared, &drain, || open_door(server, &paths, &shared)).await else { return };
+        let wired = until_ready(&shared, &drain, || {
+            wire(plan.clone(), &paths, &fnox_dir, store.clone(), shared.clone(), &door)
+        })
+        .await;
+        if let Some(setup) = wired
+            && let Err(e) = run_loops(setup, poll, drain, cancel, shared.clone()).await
+        {
             tracing::error!(error = %e, "the control plane stopped; the server keeps serving");
+        }
+        if let Err(e) = door.tunnel.shutdown().await {
+            tracing::warn!(error = %e, "closing the iroh endpoint");
         }
         shared.set_state(FactoryState::Stopped);
     };
@@ -840,6 +848,40 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     });
     let running = Running { drain: drain_tx, cancel: cancel_tx, done, feed: feed.clone() };
     Ok(InServer { feed, running: Some(running) })
+}
+
+/// Tries `step` until it works, waiting longer after each failure and saying why on the status feed. `None` once the
+/// server is draining, with the feed marked stopped.
+async fn until_ready<T, F>(
+    feed: &surface::Feed,
+    drain: &tokio::sync::watch::Receiver<bool>,
+    mut step: impl FnMut() -> F,
+) -> Option<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    let mut wait = RETRY_FIRST;
+    loop {
+        match step().await {
+            Ok(ready) => return Some(ready),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    retry_secs = wait.as_secs(),
+                    "control: starting; the server keeps serving and tries the factory again"
+                );
+                feed.set_state(FactoryState::Starting { reason: Some(e.to_string()) });
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = fired(drain.clone()) => {
+                feed.set_state(FactoryState::Stopped);
+                return None;
+            }
+        }
+        wait = (wait * 2).min(RETRY_MAX);
+    }
 }
 
 /// What [`start`] gives the server: the status feed its `/v1/factory` routes serve, whatever the control plane is
@@ -1012,6 +1054,44 @@ impl trailhead_wire::ui::LogFeed for LogsFeed {
 #[cfg(test)]
 mod tests {
     use super::check_result;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_step_that_fails_is_tried_again_and_the_feed_says_why_meanwhile() {
+        use trailhead_factory::FactoryState;
+        let feed = super::surface::Feed::new(FactoryState::Starting { reason: None });
+        let (_drain_tx, drain) = tokio::sync::watch::channel(false);
+        let tries = std::sync::atomic::AtomicU32::new(0);
+        let watching = feed.clone();
+        let ready = super::until_ready(&feed, &drain, || {
+            let n = tries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let seen = watching.state();
+            async move {
+                match n {
+                    0 => Err(super::Error::context("docker", "Socket not found")),
+                    _ => Ok(seen),
+                }
+            }
+        })
+        .await;
+        let Some(FactoryState::Starting { reason: Some(reason) }) = ready else { panic!("{ready:?}") };
+        assert!(reason.contains("Socket not found"), "{reason}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_step_still_failing_when_the_server_drains_gives_up_and_the_feed_says_stopped() {
+        use trailhead_factory::FactoryState;
+        let feed = super::surface::Feed::new(FactoryState::Starting { reason: None });
+        let (drain_tx, drain) = tokio::sync::watch::channel(false);
+        let waiting =
+            super::until_ready(&feed, &drain, || async { Err::<(), _>(super::Error::context("docker", "down")) });
+        let stop = async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            drain_tx.send_replace(true);
+        };
+        let (ready, ()) = tokio::join!(waiting, stop);
+        assert_eq!(ready, None);
+        assert_eq!(feed.state(), FactoryState::Stopped);
+    }
 
     #[test]
     fn a_changed_setting_other_than_merge_mode_warns_once() {
