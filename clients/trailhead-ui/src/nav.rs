@@ -8,6 +8,10 @@
 //! The sidebar's right edge drags it wider or narrower, within [`extent::SIDEBAR_MIN_WIDTH`] and
 //! [`extent::SIDEBAR_MAX_WIDTH`]: [`SidebarWidth`] holds where it is. The pages an app shows beside the sidebar fill
 //! [`beside_sidebar`] and carry [`BesideSidebar`], so they follow its width and the two never overlap.
+//!
+//! A window that holds several apps has a [`rail`] down its left edge, a narrow strip with a [`rail_item`] for each
+//! app. While there is one, the sidebar and the pages beside it start where the rail ends; an app with no sidebar
+//! fills [`beside_rail`] and carries [`BesideRail`].
 
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
@@ -55,6 +59,14 @@ pub(crate) struct SidebarFrame;
 /// On a page beside the sidebar ([`beside_sidebar`]), whose left follows [`SidebarWidth`].
 #[derive(Component, Clone, Default)]
 pub struct BesideSidebar;
+
+/// On the [`rail`] itself.
+#[derive(Component, Clone, Default)]
+pub(crate) struct RailFrame;
+
+/// On a page that fills the window beside the [`rail`] ([`beside_rail`]), for an app with no sidebar.
+#[derive(Component, Clone, Default)]
+pub struct BesideRail;
 
 /// The strip along the sidebar's right edge that drags it.
 #[derive(Component, Clone, Default)]
@@ -171,24 +183,69 @@ pub(crate) fn show_edge_lines(
     }
 }
 
-/// Sizes the sidebar and moves the pages beside it to [`SidebarWidth`], when it changes or one is spawned.
+/// Puts the sidebar after the [`rail`], if there is one, at [`SidebarWidth`] wide, and the pages after both. It
+/// compares every time it runs, since a rail or a sidebar coming or going moves the others; a node already in place
+/// is left untouched.
 #[allow(clippy::type_complexity)]
 pub(crate) fn fit_to_sidebar(
     width: Res<SidebarWidth>,
-    mut frames: Query<(Ref<SidebarFrame>, &mut Node), Without<BesideSidebar>>,
-    mut pages: Query<(Ref<BesideSidebar>, &mut Node), Without<SidebarFrame>>,
+    rails: Query<(), With<RailFrame>>,
+    mut frames: Query<&mut Node, (With<SidebarFrame>, Without<BesideSidebar>, Without<BesideRail>)>,
+    mut pages: Query<&mut Node, (With<BesideSidebar>, Without<SidebarFrame>, Without<BesideRail>)>,
+    mut bare: Query<&mut Node, (With<BesideRail>, Without<SidebarFrame>, Without<BesideSidebar>)>,
 ) {
-    let changed = width.is_changed();
-    let at = px(width.get());
-    for (frame, mut node) in &mut frames {
-        if (changed || frame.is_added()) && node.width != at {
-            node.width = at;
+    let rail = if rails.is_empty() { 0.0 } else { extent::RAIL_WIDTH };
+    let (after_rail, wide, after_sidebar) = (px(rail), px(width.get()), px(rail + width.get()));
+    for mut node in &mut frames {
+        if node.left != after_rail {
+            node.left = after_rail;
+        }
+        if node.width != wide {
+            node.width = wide;
         }
     }
-    for (page, mut node) in &mut pages {
-        if (changed || page.is_added()) && node.left != at {
-            node.left = at;
+    for mut node in &mut pages {
+        if node.left != after_sidebar {
+            node.left = after_sidebar;
         }
+    }
+    for mut node in &mut bare {
+        if node.left != after_rail {
+            node.left = after_rail;
+        }
+    }
+}
+
+/// The strip down the left edge of a window that holds several apps: a column of [`rail_item`]s, one for each app,
+/// spawned as its children. The sidebar and the pages start where it ends.
+pub fn rail() -> impl Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(0),
+            top: px(0),
+            bottom: px(0),
+            width: { px(extent::RAIL_WIDTH) },
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: { px(space::ROWS) },
+            padding: { UiRect::vertical(px(space::PANEL_INSET)) },
+            border: { UiRect::right(px(stroke::HAIRLINE)) },
+        }
+        Surface::Panel
+        BorderTone({ token::BORDER })
+        RailFrame
+    }
+}
+
+/// An app on the [`rail`]: its `icon`, with its `name` under the pointer. Plain until it is the app shown
+/// ([`NavItem::current`]).
+pub fn rail_item(icon: Icon, name: impl Into<String>) -> impl Scene {
+    let name = name.into();
+    bsn! {
+        @tool_button(icon, name, ButtonKind::Plain)
+        Node { flex_shrink: { 0.0_f32 } }
+        NavItem
     }
 }
 
@@ -351,6 +408,12 @@ pub fn beside_sidebar() -> Node {
     }
 }
 
+/// The whole window right of the [`rail`], for the page of an app with no sidebar. Put [`BesideRail`] on the page
+/// too, so it starts where the rail ends.
+pub fn beside_rail() -> Node {
+    Node { left: px(extent::RAIL_WIDTH), ..beside_sidebar() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +468,48 @@ mod tests {
         let late = app.world_mut().spawn((BesideSidebar, beside_sidebar())).id();
         app.update();
         assert_eq!(app.world().get::<Node>(late).unwrap().left, px(300));
+    }
+
+    #[test]
+    fn a_rail_moves_the_sidebar_and_the_pages_over_and_gives_the_room_back_when_it_goes() {
+        let mut app = App::new();
+        app.init_resource::<SidebarWidth>().add_systems(Update, fit_to_sidebar);
+        let frame = app.world_mut().spawn((SidebarFrame, Node::default())).id();
+        let page = app.world_mut().spawn((BesideSidebar, beside_sidebar())).id();
+        let bare = app.world_mut().spawn((BesideRail, beside_rail())).id();
+        let left = |app: &App, e| app.world().get::<Node>(e).unwrap().left;
+        app.update();
+        assert_eq!(left(&app, frame), px(0));
+        assert_eq!(left(&app, page), px(extent::SIDEBAR_WIDTH));
+        assert_eq!(left(&app, bare), px(0), "with no rail, a page beside it has the whole window");
+
+        let rail = app.world_mut().spawn(RailFrame).id();
+        app.update();
+        assert_eq!(left(&app, frame), px(extent::RAIL_WIDTH));
+        assert_eq!(left(&app, page), px(extent::RAIL_WIDTH + extent::SIDEBAR_WIDTH));
+        assert_eq!(left(&app, bare), px(extent::RAIL_WIDTH));
+
+        app.world_mut().despawn(rail);
+        app.update();
+        assert_eq!(left(&app, frame), px(0));
+        assert_eq!(left(&app, page), px(extent::SIDEBAR_WIDTH));
+    }
+
+    #[test]
+    fn a_rail_item_is_a_nav_item_so_the_app_shown_is_marked_like_a_page() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .add_systems(Update, paint_nav_items);
+        let item = app.world_mut().commands().spawn_scene(rail_item(Icon::Board, "Lookout")).id();
+        app.world_mut().flush();
+        app.update();
+        assert_eq!(app.world().get::<ButtonVariant>(item), Some(&ButtonVariant::Plain));
+        app.world_mut().get_mut::<NavItem>(item).unwrap().current = true;
+        app.update();
+        assert_eq!(app.world().get::<ButtonVariant>(item), Some(&ButtonVariant::Normal));
     }
 
     #[test]

@@ -70,6 +70,8 @@ pub mod radius {
 
 /// How big a panel is and where it sits.
 pub mod extent {
+    /// The rail of apps down the left edge of a window that holds several: a tool button and room either side.
+    pub const RAIL_WIDTH: f32 = 48.0;
     /// An app's sidebar, down the left of the window, until its edge is dragged.
     pub const SIDEBAR_WIDTH: f32 = 220.0;
     /// The narrowest a sidebar is dragged to: its places' names and its footer still read.

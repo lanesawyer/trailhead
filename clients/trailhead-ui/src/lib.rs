@@ -36,6 +36,8 @@
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
 //!   [`NavItem`]. Pages fill [`beside_sidebar`].
+//! - The apps of a window that holds several, down its left edge: [`rail`], holding a [`rail_item`] each; an app
+//!   with no sidebar fills [`beside_rail`].
 //! - Colors: a meaning from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. A surface (a
 //!   panel, a card, a hint): a [`Surface`]. An app builds on [`Theme::new`]: [`Theme::alias`] a token of its own to a
 //!   meaning, [`Theme::paint`] only colors that encode data, and adds [`ThemePlugin`] with it beside [`UiPlugin`].
@@ -149,8 +151,8 @@ pub use modal::{
     ModalSlots, open_modal,
 };
 pub use nav::{
-    BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_sidebar, nav_heading, nav_heading_action,
-    nav_item, nav_item_noted, sidebar, sidebar_card, sidebar_footer,
+    BesideRail, BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar, nav_heading,
+    nav_heading_action, nav_item, nav_item_noted, rail, rail_item, sidebar, sidebar_card, sidebar_footer,
 };
 pub use notice::{Notice, Tone, notice};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
