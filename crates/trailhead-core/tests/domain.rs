@@ -1725,3 +1725,28 @@ async fn blocks_and_duplicates_sort_by_key_number() {
     assert_eq!(got(&d.blocks), keys);
     assert_eq!(got(&d.duplicates), keys);
 }
+
+#[tokio::test]
+async fn parent_cycles_lists_each_existing_cycle() {
+    let env = Env::new().await;
+    assert!(env.store.parent_cycles(&env.human).await.unwrap().is_empty());
+    let a = env.task("a").await;
+    let b = env.task("b").await;
+    let c = env.task("c").await;
+    let d = env.task("d").await;
+    let e = env.task("e").await;
+    let f = env.task("f").await;
+    // a -> b -> c -> a is a cycle; d hangs under it; e <-> f is another; the API can't build them.
+    let conn = env.raw_conn().await;
+    for (task, parent) in [(&a, &b), (&b, &c), (&c, &a), (&d, &a), (&e, &f), (&f, &e)] {
+        conn.execute(
+            "UPDATE tasks SET parent_id = ?1 WHERE id = ?2",
+            libsql::params![parent.id.to_string(), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let keys = |t: &[&trailhead_core::Task]| t.iter().map(|t| t.key.to_string()).collect::<Vec<_>>();
+    let cycles = env.store.parent_cycles(&env.human).await.unwrap();
+    assert_eq!(cycles, vec![keys(&[&a, &b, &c]), keys(&[&e, &f])]);
+}

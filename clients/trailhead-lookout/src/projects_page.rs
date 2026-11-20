@@ -185,22 +185,10 @@ fn on_row_press(activate: On<Activate>, rows: Query<&RowOf>, mut commands: Comma
     }
 }
 
-/// The Projects page's panel; its padding leaves room for the row frame's scrollbar.
-fn page_node() -> Node {
-    Node {
-        min_width: px(0),
-        min_height: px(0),
-        flex_direction: FlexDirection::Column,
-        padding: UiRect::all(px(space::PANEL_INSET)),
-        row_gap: px(space::GROUPS),
-        ..widgets::beside_sidebar()
-    }
-}
-
 fn spawn_page(mut commands: Commands, filter: Res<ProjectsFilter>, mut rows: ResMut<Rows>) {
     // The rows of a page drawn before went with it.
     rows.0 = Keyed::default();
-    let panel = commands.spawn((Name::new("projects"), ProjectsPanel, BesideSidebar, page_node())).id();
+    let panel = commands.spawn((Name::new("projects"), ProjectsPanel, BesideSidebar, widgets::page_node())).id();
     let head = commands
         .spawn((Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() }, ChildOf(panel)))
         .id();
@@ -365,11 +353,6 @@ mod tests {
     use super::*;
     use crate::fixture::{project, task};
 
-    #[test]
-    fn the_page_panel_has_room_for_a_scrollbar() {
-        assert!(widgets::has_scrollbar_room(&page_node()));
-    }
-
     fn world() -> (Vec<Project>, Vec<Task>) {
         let projects = vec![
             project(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead"})),
@@ -483,5 +466,33 @@ mod tests {
         assert_eq!(by("trail").len(), 1);
         assert_eq!(by("oper").first().map(|r| r.key.as_str()), Some("OPS"));
         assert!(by("trail ops").is_empty());
+    }
+
+    #[test]
+    fn escape_in_the_search_box_empties_it_and_the_filter() {
+        use bevy::input::keyboard::{Key, KeyboardInput};
+        use bevy::input_focus::FocusedInput;
+
+        let mut app = app();
+        let field = {
+            let world = app.world_mut();
+            world.query_filtered::<Entity, With<ProjectsSearch>>().single(world).unwrap()
+        };
+        app.world_mut().entity_mut(field).insert(EditableText::new("trail"));
+        settle(&mut app);
+        assert_eq!(app.world().resource::<ProjectsFilter>().query, "trail");
+        let input = KeyboardInput {
+            key_code: KeyCode::Escape,
+            logical_key: Key::Escape,
+            state: bevy::input::ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window: field,
+        };
+        let window = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(FocusedInput::new(field, input, window));
+        settle(&mut app);
+        assert_eq!(app.world().get::<EditableText>(field).unwrap().value().to_string(), "");
+        assert_eq!(app.world().resource::<ProjectsFilter>().query, "");
     }
 }

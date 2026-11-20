@@ -236,7 +236,7 @@ impl Harness for ClaudeCode {
 pub fn schema(role: Role) -> Value {
     let outcomes = match role {
         Role::Reviewer => json!(["approve", "request_changes"]),
-        _ => json!(["done", "needs_input", "failed"]),
+        _ => json!(["done", "already_done", "needs_input", "failed"]),
     };
     json!({
         "type": "object",
@@ -244,7 +244,7 @@ pub fn schema(role: Role) -> Value {
             "outcome": { "enum": outcomes },
             "summary": {
                 "type": "string",
-                "description": "For done: the PR description. For a review: the review comment. Otherwise: why.",
+                "description": "For done: the PR description. For a review: the review comment. For already_done: the evidence (commit, file and line). Otherwise: why.",
             },
             "title": {
                 "type": "string",
@@ -278,11 +278,6 @@ pub fn schema(role: Role) -> Value {
     })
 }
 
-/// The most the human-context section of a prompt may take, in bytes.
-const HUMAN_CONTEXT_CAP: usize = 6000;
-/// The most the answers may take of the human-context section, so notes keep the rest.
-const ANSWERS_CAP: usize = 4000;
-
 /// How many open follow-ups a reviewer is shown.
 const FOLLOW_UPS_CAP: usize = 40;
 
@@ -307,6 +302,11 @@ fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
     }
     out
 }
+
+/// The most the human-context section of a prompt may take, in bytes.
+const HUMAN_CONTEXT_CAP: usize = 6000;
+/// The most the answers may take of the human-context section, so notes keep the rest.
+const ANSWERS_CAP: usize = 4000;
 
 /// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
@@ -473,11 +473,14 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. Don't create nested git repositories in \
              the checkout (no `git init` or `git clone` inside it): the parent's `git add --all` warns about an \
-             embedded repository, or fails if it has no commit. If only a human can answer something \
+             embedded repository, or fails if it has no commit. If you need another repository for reference, clone it into a temporary directory outside \
+             the checkout (e.g. under `/tmp`). If only a human can answer something \
              you need, stop and give needs_input with the question. A blocker in your environment (the network, a \
              missing tool, credentials) is needs_input, not failed: another attempt would meet the same blocker, \
              so say what is missing. If the task can't be done for another reason, give failed and say \
-             why. When you finish, give `title`: a conventional commit title for the change, like \
+             why. If the task's work is already on the base branch, or no longer applies, change nothing and give \
+             already_done, with the evidence (the commit, file and line) in `summary`; a person is asked to close \
+             the task. When you finish, give `title`: a conventional commit title for the change, like \
              `fix(factory): send the prompt on stdin so big PRs can be reviewed`, with the type (feat, fix, \
              perf, refactor, docs, test, chore, ci or build) that fits what you did and the crate or area as \
              scope; the factory appends the task key. The factory tracks this task in Trailhead for you, so skip \
@@ -674,6 +677,9 @@ async fn outcome(ctx: &RunContext, start: &str, result: &Value) -> Result<RunOut
             let question = answer["question"].as_str().filter(|q| !q.is_empty()).unwrap_or(&summary).to_string();
             RunOutcome::NeedsInput { question }
         }
+        "already_done" => {
+            RunOutcome::NeedsInput { question: trailhead_factory::messages::already_done_question(&summary) }
+        }
         "done" => {
             let changes = changes_since(&ctx.workdir, start).await?;
             if changes.is_empty() {
@@ -706,13 +712,49 @@ async fn git_head(dir: &Path) -> Result<String> {
 
 /// Every path that differs from `start`, committed or not, including new files, with its contents now.
 async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
+    unnest_commitless_repositories(dir).await;
     git(dir, &["add", "--all"]).await?;
     let names = git(dir, &["diff", "--cached", "--name-only", "--no-renames", "-z", start]).await?;
     let mut changes = Vec::new();
     for path in names.split(|b| *b == 0).filter(|p| !p.is_empty()) {
         read_change(dir, String::from_utf8_lossy(path).into_owned(), &mut changes).await?;
     }
+    // A tracked directory that became an embedded repository is listed as its old files and as the gitlink, which
+    // expands to the same files again: publish each path once.
+    let mut seen = std::collections::HashSet::new();
+    changes.retain(|c| seen.insert(c.path.clone()));
     Ok(changes)
+}
+
+/// A nested repository with no commit can't be staged as an embedded repository: `git add` fails on it. Remove the
+/// `.git` of each one (git lists a nested repository as a `dir/` entry among the untracked paths), so its files are
+/// staged as ordinary files, and log it. One with a commit is left alone: `read_change` publishes its files.
+async fn unnest_commitless_repositories(dir: &Path) {
+    let listed = match git(dir, &["ls-files", "-z", "--others", "--exclude-standard"]).await {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not look for nested repositories");
+            return;
+        }
+    };
+    for name in listed.split(|b| *b == 0).filter(|n| n.ends_with(b"/")) {
+        let nested = dir.join(String::from_utf8_lossy(name).trim_end_matches('/'));
+        if git(&nested, &["rev-parse", "--verify", "--quiet", "HEAD"]).await.is_ok() {
+            continue;
+        }
+        let dot_git = nested.join(".git");
+        let removed = match tokio::fs::symlink_metadata(&dot_git).await {
+            Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(&dot_git).await,
+            Ok(_) => tokio::fs::remove_file(&dot_git).await,
+            Err(e) => Err(e),
+        };
+        match removed {
+            Ok(()) => {
+                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit")
+            }
+            Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
+        }
+    }
 }
 
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
@@ -872,6 +914,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_nested_repository_with_no_commit_is_read_as_its_files() {
+        let (dir, start) = started().await;
+        let inner = dir.path().join("a/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        run_git(&["init", "-q"], &inner);
+        let paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        assert_eq!(paths, ["a/inner/f"]);
+        assert!(!inner.join(".git").exists());
+    }
+
+    #[tokio::test]
     async fn a_file_deleted_from_an_embedded_repository_is_not_published() {
         let (dir, start) = started().await;
         let inner = dir.path().join("inner");
@@ -884,6 +938,27 @@ mod tests {
         std::fs::remove_file(inner.join("gone")).unwrap();
         let paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
         assert_eq!(paths, ["inner/keep"]);
+    }
+
+    #[tokio::test]
+    async fn a_tracked_directory_that_becomes_an_embedded_repository_lists_each_path_once() {
+        let dir = tempfile::tempdir().unwrap();
+        run_git(&["init", "-q"], dir.path());
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("x"), "a").unwrap();
+        std::fs::write(inner.join("y"), "b").unwrap();
+        run_git(&["add", "--all"], dir.path());
+        run_git(&["commit", "-q", "-m", "start"], dir.path());
+        let start = git_head(dir.path()).await.unwrap();
+        run_git(&["init", "-q"], &inner);
+        std::fs::write(inner.join("x"), "changed").unwrap();
+        run_git(&["add", "--all"], &inner);
+        run_git(&["commit", "-q", "-m", "inner"], &inner);
+        run_git(&["rm", "-r", "-q", "--cached", "inner"], dir.path());
+        let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        paths.sort();
+        assert_eq!(paths, ["inner/x", "inner/y"].map(String::from));
     }
 
     fn only(changes: Vec<FileChange>) -> FileChange {

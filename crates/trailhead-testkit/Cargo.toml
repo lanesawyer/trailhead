@@ -14,7 +14,7 @@ description = "In-memory fakes for the Trailhead factory's plugin seams"
 workspace = true
 
 [dependencies]
-trailhead-factory.workspace = true
+trailhead-factory = { workspace = true, features = ["rust", "python", "node", "go"] }
 trailhead-daemon.workspace = true
 async-trait.workspace = true
 tokio.workspace = true

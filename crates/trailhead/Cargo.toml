@@ -20,7 +20,12 @@ bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [features]
-default = ["factory"]
+default = ["factory", "rust", "python", "node", "go"]
+# Programming languages the factory knows (`crates/trailhead-factory/src/language.rs`): leave one out of a build for a stack without it.
+rust = ["trailhead-factory-server?/rust"]
+python = ["trailhead-factory-server?/python"]
+node = ["trailhead-factory-server?/node"]
+go = ["trailhead-factory-server?/go"]
 # The factory's control plane in `trailhead serve` (docs/factory/server-control-plane.md).
 factory = ["trailhead-server/factory", "dep:trailhead-factory-server"]
 docker = ["factory", "trailhead-server/docker"]

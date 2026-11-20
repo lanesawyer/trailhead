@@ -260,7 +260,13 @@ mod tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
             .add_plugins(ModalPlugin);
+        // A real window registers `Window`, which a key press needs to bubble up the hierarchy.
+        app.world_mut().spawn(Window::default());
         app
+    }
+
+    fn window(app: &mut App) -> Entity {
+        app.world_mut().query_filtered::<Entity, With<Window>>().single(app.world()).unwrap()
     }
 
     fn open(app: &mut App) -> Entity {
@@ -336,17 +342,7 @@ mod tests {
     }
 
     fn escape(app: &mut App, from: Entity) {
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: bevy::input::keyboard::Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: from,
-        };
-        // Spawning a real window registers `Window`, which the press needs to bubble up the hierarchy.
-        let window = app.world_mut().spawn(Window::default()).id();
-        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        crate::test_support::press_escape(app.world_mut(), from);
         app.update();
     }
 
@@ -361,7 +357,7 @@ mod tests {
         let older = open(&mut app);
         let newer = open(&mut app);
         // With nothing focused, the press goes to the window.
-        let window = app.world_mut().spawn_empty().id();
+        let window = window(&mut app);
         escape(&mut app, window);
         assert!(app.world().get_entity(newer).is_err());
         assert!(app.world().get_entity(older).is_ok());
@@ -381,8 +377,6 @@ mod tests {
     /// An app with feathers' own dialog observers, which turn Escape and a click on the backdrop into `RequestClose`.
     fn feathers_app() -> App {
         let mut app = app();
-        // A real window registers `Window`, without which events can't bubble up the hierarchy.
-        app.world_mut().spawn(Window::default());
         app.init_resource::<bevy::input_focus::InputFocusVisible>().add_plugins(bevy::ui_widgets::ModalDialogPlugin);
         app
     }

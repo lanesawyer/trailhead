@@ -79,7 +79,7 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     let filter = TaskFilter {
         project: q.project,
         statuses: parse_list(q.status.as_deref())?,
-        parent: q.parent,
+        parent: q.parent.map(trailhead_core::TaskKey),
         title: q.title,
         due_before: parse_opt_time(q.due_before.as_deref())?,
         scheduled_through: parse_opt_date(q.scheduled_through.as_deref())?,

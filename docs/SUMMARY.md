@@ -18,6 +18,7 @@
 # Design notes
 
 - [Project plan](PLAN.md)
+- [Trailhead as a shell of apps](app-platform.md)
 - [Index of the factory design](factory/README.md)
   - [Seams](factory/seams.md)
   - [Sandbox](factory/sandbox.md)
@@ -31,6 +32,7 @@
   - [The control plane inside the server](factory/server-control-plane.md)
   - [Engine changes](factory/engine-changes.md)
   - [Order within a priority](factory/ordering.md)
+  - [The factory for users](factory/for-users.md)
 
 # History and undecided
 

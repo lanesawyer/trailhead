@@ -5,6 +5,8 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use trailhead_model::Grade;
 
+use crate::language;
+
 /// How a PR changed one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,46 +152,23 @@ pub fn is_check_definition(path: &str) -> bool {
     CHECK_DEFINITION_SET.is_match(path)
 }
 
-/// Whether `name` is a lockfile whose patch is read for dependency-list-only edits.
-fn is_read_lockfile(name: &str) -> bool {
-    matches!(name, "Cargo.lock" | "uv.lock" | "package-lock.json")
-}
-
-/// The files whose patch the grader reads: a `Cargo.lock`, `uv.lock` or `package-lock.json`, and Rust sources. The code host keeps a patch only for these.
+/// The files whose patch the grader reads: the lockfiles and sources the built-in languages know
+/// ([`crate::language`]). The code host keeps a patch only for these.
 pub fn reads_patch(path: &str) -> bool {
-    path.ends_with(".rs") || is_read_lockfile(path.rsplit('/').next().unwrap_or(path))
+    language::reads_patch(path)
 }
 
-/// Whether a Rust file's patch only changes comments: every added or removed line is blank or starts with `//` (so
-/// `///` and `//!` docs too). A line of code with a comment after it counts as code, and so does a `/* */` comment. A
-/// line inside a multi-line string literal that happens to start with `//` reads as a comment; that is the one way this
-/// can pass a change in behaviour, and it is rare enough to accept. An empty patch is not comment-only.
-pub fn is_comment_only(patch: &str) -> bool {
-    let mut changed = 0;
-    for line in patch.lines() {
-        let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
-        changed += 1;
-        let rest = rest.trim();
-        if !(rest.is_empty() || rest.starts_with("//")) {
-            return false;
-        }
-    }
-    changed > 0
+/// Whether a source file's patch only changes comments, as the language that owns `path` reads them. An empty patch is
+/// not comment-only.
+pub fn is_comment_only(path: &str, patch: &str) -> bool {
+    language::is_comment_only(path, patch)
 }
 
 /// Whether a lockfile's patch only edits dependency lists: no package added or removed, no version, source or
 /// checksum changed. That is a workspace member gaining or losing a dependency that is already locked, which brings in
-/// nothing new to fetch. Anything else (a lockfile it doesn't read, or a line it can't read) is not safe.
-///
-/// Read: `Cargo.lock`, `uv.lock` and `package-lock.json`. `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `go.sum` and
-/// `Gemfile.lock` put a dependency's version where a patch can't tell it from a new one, so they stay raised.
+/// nothing new to fetch. Anything else (a lockfile no built-in language reads, or a line it can't read) is not safe.
 pub fn is_dependency_list_only(path: &str, patch: &str) -> bool {
-    let line_ok: fn(&str) -> bool = match path.rsplit('/').next() {
-        Some("Cargo.lock") => cargo_line_ok,
-        Some("uv.lock") => uv_line_ok,
-        Some("package-lock.json") => npm_line_ok,
-        _ => return false,
-    };
+    let Some(line_ok) = language::lockfile(path.rsplit('/').next().unwrap_or(path)) else { return false };
     let mut changed = 0;
     for line in patch.lines() {
         let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
@@ -199,35 +178,6 @@ pub fn is_dependency_list_only(path: &str, patch: &str) -> bool {
         }
     }
     changed > 0
-}
-
-fn cargo_line_ok(line: &str) -> bool {
-    (line.starts_with('"') && line.ends_with("\",")) || line == "dependencies = [" || line == "]"
-}
-
-/// `uv.lock` lists a dependency as an inline table, `{ name = "x" },`, in `dependencies` and in the member's
-/// `requires-dist`. A table that says where to fetch from is a new source.
-fn uv_line_ok(line: &str) -> bool {
-    const SOURCES: [&str; 7] = ["url", "git", "path", "registry", "directory", "editable", "virtual"];
-    let entry = line.starts_with("{ name = \"")
-        && line.trim_end_matches(',').ends_with('}')
-        && !SOURCES.iter().any(|k| line.contains(&format!(", {k} = ")));
-    entry || matches!(line, "dependencies = [" | "[package.metadata]" | "requires-dist = [" | "]")
-}
-
-/// `package-lock.json` lists a dependency as `"name": "range"` inside a `dependencies` object. A `version` or
-/// `resolved` has the same shape, and a range that is a URL, path, git spec or alias fetches something new.
-fn npm_line_ok(line: &str) -> bool {
-    const OBJECTS: [&str; 4] =
-        ["\"dependencies\": {", "\"devDependencies\": {", "\"peerDependencies\": {", "\"optionalDependencies\": {"];
-    if OBJECTS.contains(&line) || line == "}" || line == "}," {
-        return true;
-    }
-    let Some((name, range)) = line.trim_end_matches(',').split_once("\": \"") else { return false };
-    let Some(range) = range.strip_suffix('"') else { return false };
-    let name = name.strip_prefix('"').unwrap_or_default();
-    let not_a_dependency = matches!(name, "version" | "resolved" | "integrity" | "name" | "license");
-    !not_a_dependency && !name.contains('"') && !range.contains(['"', ':', '/', '\\'])
 }
 
 /// Floor of a deleted or renamed test, or an edited check's definition: never grade 1.
@@ -262,7 +212,10 @@ impl Grader<'_> {
             .map(|(grade, globs)| {
                 let all = compile_glob_set(globs.iter().map(String::as_str));
                 let rest = compile_glob_set(
-                    globs.iter().map(String::as_str).filter(|g| !is_read_lockfile(g.rsplit('/').next().unwrap_or(g))),
+                    globs
+                        .iter()
+                        .map(String::as_str)
+                        .filter(|g| language::lockfile(g.rsplit('/').next().unwrap_or(g)).is_none()),
                 );
                 (*grade, all, rest)
             })
@@ -278,8 +231,8 @@ impl Grader<'_> {
                 .max();
             // Only an edit in place: a renamed or added file can change what the code is, whatever its lines say.
             let comment_edit = f.status == FileStatus::Modified
-                && f.path.ends_with(".rs")
-                && f.patch.as_deref().is_some_and(is_comment_only);
+                && language::is_source(&f.path)
+                && f.patch.as_deref().is_some_and(|p| is_comment_only(&f.path, p));
             if let Some(grade) = rule.filter(|_| !comment_edit) {
                 found.push((grade, format!("{} changed", f.path)));
             }
@@ -437,11 +390,13 @@ mod tests {
         assert_eq!(grader(&r).grade(Some(gr(1)), &edit).grade, gr(1));
     }
 
+    #[cfg(feature = "rust")]
     fn lock(patch: &str) -> ChangedFile {
         ChangedFile { patch: Some(patch.into()), ..modified("Cargo.lock") }
     }
 
     #[test]
+    #[cfg(feature = "rust")]
     fn a_lock_that_only_edits_dependency_lists_is_not_raised() {
         let r = rules();
         let dev = "@@ -100,6 +100,7 @@ dependencies = [\n  \"serde\",\n+ \"tracing-subscriber\",\n  \"tokio\",\n ]";
@@ -465,11 +420,13 @@ mod tests {
         assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
     }
 
+    #[cfg(feature = "rust")]
     fn rust(path: &str, status: FileStatus, patch: &str) -> ChangedFile {
         ChangedFile { patch: Some(patch.into()), ..file(path, status, 1) }
     }
 
     #[test]
+    #[cfg(feature = "rust")]
     fn a_rust_file_whose_diff_only_changes_comments_is_not_raised() {
         let r = rules();
         let modified = |patch| rust("crates/a/src/lib.rs", FileStatus::Modified, patch);
@@ -501,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "python", feature = "node"))]
     fn other_lockfiles_are_read_by_what_changed_too() {
         let r = rules();
         let r =
@@ -511,6 +469,14 @@ mod tests {
         };
         let uv = "@@ -9,6 +9,7 @@\n dependencies = [\n+    { name = \"requests\" },\n ]\n+requires-dist = [\n+    { name = \"requests\", specifier = \">=2\" },\n+]";
         assert_eq!(grade("uv.lock", uv), gr(1));
+        // Known keys, spaced any way, with commas and quotes inside values.
+        for ok in [
+            "+    { name = \"x\",specifier=\">=1,<2\" },",
+            "+    { name = \"x\", marker = \"python_full_version >= '3.9' and sys_platform == 'linux'\" },",
+            "+    { name = \"x\", extra = [\"a\", \"b\"], marker = \"url = 1\" },",
+        ] {
+            assert_eq!(grade("uv.lock", ok), gr(1), "{ok}");
+        }
         // A lockfile moved to another directory is not an edit in place, whatever its patch says.
         let moved = ChangedFile {
             patch: Some(uv.into()),
@@ -518,9 +484,20 @@ mod tests {
             ..file("b/uv.lock", FileStatus::Renamed, 1)
         };
         assert_eq!(grader(&r).grade(Some(gr(1)), &[moved]).grade, gr(4));
+        let groups = "@@ -9,6 +9,8 @@\n [package.dev-dependencies]\n dev = [\n+    { name = \"pytest\" },\n ]\n [package.optional-dependencies]\n+extra = [\n+    { name = \"x\" },\n+]\n [package.metadata.requires-dev]\n+dev = [{ name = \"pytest\", specifier = \">=8\" }]";
+        assert_eq!(grade("uv.lock", groups), gr(1));
         for bad in [
+            "+dev = [{ name = \"x\", git = \"https://x\" }]",
+            "+wheels = [{ url = \"https://x\" }]",
             "+    { name = \"x\", git = \"https://x\" },",
             "+    { name = \"x\", url = \"https://x\" },",
+            "+    { name = \"x\", index = \"https://x/simple\" },",
+            "+    { name = \"x\",url=\"https://x\" },",
+            "+    { name = \"x\", source = { url = \"https://x\" } },",
+            "+    { name = \"x\", version = \"9\" },",
+            "+    { name = \"x\", specifier = \"a, url = b\" , path = \"u\" },",
+            "+    { specifier = \">=1\", name = \"x\" },",
+            "+    { name = \"x\" } junk",
             "+version = \"1.0.0\"",
             "+[[package]]",
         ] {
