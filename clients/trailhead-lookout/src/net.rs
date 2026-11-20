@@ -343,13 +343,14 @@ enum Resync {
     No,
     /// The first clean end after serving a snapshot: redial at once, report nothing.
     Now,
-    /// Clean ends in a row: redial after a gap, still reporting nothing.
+    /// A clean end right after the last resync: redial after a gap, still reporting nothing.
     Slowly,
 }
 
-/// Whether a connection's end is a resync, given whether it ended cleanly after being heard and whether the one before did.
-fn resync_after(clean_and_heard: bool, previous_was_resync: bool) -> Resync {
-    match (clean_and_heard, previous_was_resync) {
+/// Whether a connection's end is a resync, given whether it ended cleanly after being heard, whether the one
+/// before did, and whether this one was brief (it ended within a retry gap of being dialed).
+fn resync_after(clean_and_heard: bool, previous_was_resync: bool, brief: bool) -> Resync {
+    match (clean_and_heard, previous_was_resync && brief) {
         (false, _) => Resync::No,
         (true, false) => Resync::Now,
         (true, true) => Resync::Slowly,
@@ -879,7 +880,9 @@ impl Net {
             let mut resynced = false;
             loop {
                 progress.heard = false;
+                let dialed = tokio::time::Instant::now();
                 let followed = follow_status(&endpoint, id, &events, &mut progress).await;
+                let brief = dialed.elapsed() < backoff.dropped();
                 if progress.heard {
                     backoff.reset();
                 }
@@ -907,9 +910,11 @@ impl Net {
                 }
                 // A clean end is the server asking for a resync (its feed changed, or we lagged), not a drop:
                 // redial at once and don't report Unreachable; the next snapshot says what changed.
-                // A second clean end in a row is a server that ends every stream (one from before TRAIL-761
-                // while stopped), so it waits like a drop, without reporting Unreachable.
-                let resync = resync_after(ended_cleanly && progress.heard, resynced);
+                // A clean end right after a resync, on a connection that barely lasted, is a server that ends
+                // every stream (one from before TRAIL-761 while stopped), so it waits like a drop, without
+                // reporting Unreachable. One that stayed open and then ended is a new resync, however the
+                // connection before it ended.
+                let resync = resync_after(ended_cleanly && progress.heard, resynced, brief);
                 resynced = resync != Resync::No;
                 if resync == Resync::Now {
                     continue;
@@ -1249,11 +1254,12 @@ mod tests {
     }
 
     #[test]
-    fn clean_ends_in_a_row_are_slowed_down() {
-        assert_eq!(resync_after(true, false), Resync::Now);
-        assert_eq!(resync_after(true, true), Resync::Slowly);
-        assert_eq!(resync_after(false, true), Resync::No, "a drop resets the run");
-        assert_eq!(resync_after(false, false), Resync::No);
+    fn brief_clean_ends_in_a_row_are_slowed_down() {
+        assert_eq!(resync_after(true, false, true), Resync::Now);
+        assert_eq!(resync_after(true, true, true), Resync::Slowly);
+        assert_eq!(resync_after(true, true, false), Resync::Now, "a connection that stayed open resyncs at once");
+        assert_eq!(resync_after(false, true, true), Resync::No, "a drop resets the run");
+        assert_eq!(resync_after(false, false, false), Resync::No);
     }
 
     #[tokio::test]
