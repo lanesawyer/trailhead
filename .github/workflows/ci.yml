@@ -87,8 +87,8 @@ jobs:
           # restored a stale cache that was an exact hit, so every run rebuilt every dependency and nothing was saved.
           key: ${{ hashFiles('Cargo.toml') }}
       # No system packages: it builds without alsa, udev or wayland headers (see its README).
-      - run: cargo clippy --profile ci -p trailhead-ui -p trailhead-shell -p trailhead-lookout --all-targets --locked -- -D warnings
-      - run: cargo test --profile ci -p trailhead-ui -p trailhead-shell -p trailhead-lookout --locked
+      - run: cargo clippy --profile ci -p trailhead-ui -p trailhead-shell -p trailhead-app-example -p trailhead-lookout --all-targets --locked -- -D warnings
+      - run: cargo test --profile ci -p trailhead-ui -p trailhead-shell -p trailhead-app-example -p trailhead-lookout --locked
 
   # The daemon is released as a static musl binary (release.yml). Build it here so a dependency that breaks the musl
   # build (aws-lc-sys, ring) fails the PR, not the release after the tag is pushed.

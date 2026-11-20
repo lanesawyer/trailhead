@@ -8028,6 +8028,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-app-example"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "tempfile",
+ "trailhead-shell",
+ "trailhead-ui",
+]
+
+[[package]]
 name = "trailhead-client"
 version = "0.1.0"
 dependencies = [
@@ -8253,6 +8263,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "trailhead-app-example",
  "trailhead-client",
  "trailhead-core",
  "trailhead-factory",

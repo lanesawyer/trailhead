@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
+use trailhead_app_example::Example;
 use trailhead_lookout::Lookout;
 use trailhead_lookout::icon::primary_window;
 use trailhead_lookout::net::NetConfig;
@@ -13,7 +14,7 @@ use trailhead_shell::ShellPlugin;
 /// `LOOKOUT_QUEUE` for the queue task a task queued for the factory goes under in its project, ahead of the
 /// factory's own queues. Without an id it dials the one used last time.
 ///
-/// It is the Trailhead shell with its apps: Lookout, and whatever else is added here.
+/// It is the Trailhead shell with its apps: Lookout and the example app, on the rail down the left edge.
 fn main() {
     let Some(config) = NetConfig::from_env() else {
         eprintln!("lookout: no home directory to keep its endpoint key in");
@@ -26,7 +27,7 @@ fn main() {
         .dialing(std::env::args().nth(1))
         .signing_in_with(var("LOOKOUT_TOKEN"))
         .queueing_under(var("LOOKOUT_QUEUE"));
-    let shell = ShellPlugin::new().with(lookout).store_in(kept).windowed();
+    let shell = ShellPlugin::new().with(lookout).with(Example).store_in(kept).windowed();
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
         // Update on input, and often enough for the net thread's news to show, instead of redrawing every frame.

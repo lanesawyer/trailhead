@@ -33,6 +33,8 @@ bevy = { version = "0.20", default-features = false, features = [
 ] }
 trailhead-ui.workspace = true
 trailhead-shell.workspace = true
+# The shell's second app, here until the shell has an assembly crate of its own to list its apps (TRAIL-1577).
+trailhead-app-example.workspace = true
 trailhead-client = { workspace = true, features = ["http"] }
 trailhead-model.workspace = true
 trailhead-wire.workspace = true

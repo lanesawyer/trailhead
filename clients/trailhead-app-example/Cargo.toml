@@ -1,0 +1,20 @@
+[package]
+name = "trailhead-app-example"
+description = "The example app for the Trailhead shell: what a new app is copied from"
+publish = false
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_state", "bevy_ui_widgets", "bevy_scene"] }
+trailhead-shell.workspace = true
+trailhead-ui.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -59,6 +59,7 @@ trailhead-tracker-rest = { path = "crates/trailhead-tracker-rest" }
 trailhead-factory-server = { path = "crates/trailhead-factory-server" }
 trailhead-ui = { path = "clients/trailhead-ui" }
 trailhead-shell = { path = "clients/trailhead-shell" }
+trailhead-app-example = { path = "clients/trailhead-app-example" }
 rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 bytes = "1"
