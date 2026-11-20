@@ -8320,6 +8320,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-shell"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "trailhead-ui",
+]
+
+[[package]]
 name = "trailhead-testkit"
 version = "0.1.0"
 dependencies = [

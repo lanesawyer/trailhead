@@ -1,0 +1,22 @@
+[package]
+name = "trailhead-shell"
+description = "The Trailhead shell: one window that holds several apps, and the contract an app is written against"
+publish = false
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Only what the contract and the rail name; the binary that assembles a shell picks the windowing features.
+bevy = { version = "0.20", default-features = false, features = ["std", "bevy_state", "bevy_ui_widgets", "bevy_scene"] }
+trailhead-ui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
