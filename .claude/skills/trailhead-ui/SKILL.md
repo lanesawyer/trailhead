@@ -6,140 +6,46 @@ argument-hint: 'What the widget or view does'
 
 # Trailhead UI kit
 
-The kit is the `trailhead-ui` crate, `clients/trailhead-ui/src/`: every control and surface an app's views are built
-from, one widget to a file, re-exported from its `lib.rs`. It knows nothing of Trailhead. These rules keep apps built
-on it consistent. Most of them come from bugs that built cleanly and failed silently. Lookout's own part (its tokens,
-card, column and views) is in the `lookout-ui` skill; the design is in `docs/factory/ui.md#look-and-components`.
+The kit's rules and its catalogue live in the kit itself, so that an app pinned to any revision reads the ones that
+match it:
 
-## 1. Use the kit, or grow it
+- **`clients/trailhead-ui/GUIDE.md`**: what the kit is and who changes it, every widget and how it is updated in
+  place, colors, sizes, spacing, icons and layers, the rules that came from real bugs, recipes, and the lint. It is
+  the source of truth.
+- **`clients/trailhead-shell/GUIDE.md`**: an app's contract with the shell (`ShellApp`, `ActiveApp`, where to draw,
+  the `LocalStore`, the connection, testing an app, the example app).
 
-Before you write a `Node` with a background, a button, a dropdown or a text style in a view, look in the kit.
+**Read the kit's guide before touching the kit or any view built on it**, and the shell's before touching an app's
+contract with the shell. Lookout's own part (its tokens, card, column and views) is in the `lookout-ui` skill; the
+design is in `docs/factory/ui.md#look-and-components`.
 
-- **The kit has it:** call it. Don't copy its insides into the view and tweak them.
-- **It nearly fits:** add an option to the widget (a variant, a prop) and use that. Two similar buttons, cards or
-  fields that drift apart are a bug.
-- **It doesn't exist:** add a widget file to the kit, built on feathers, with a doc comment saying what it's for. Then
-  use it in the view. A widget never imports a view module. A widget that is about one app's domain (Lookout's task
-  card and board column) lives in that app, not the kit.
-- **Pick the widget's shape by what the caller does with it** (`lib.rs` lists them): a scene (`fn x(..) -> impl
-  Scene`) for most; `spawn_x(commands, ..) -> XParts`, unparented, when the caller fills or keeps hold of parts
-  inside it; a `Node` or bundle when the caller extends it. Name a choice instead of passing a bare `bool` (`Fold`,
-  `ButtonKind::Danger`). Keep the systems `UiPlugin` runs `pub(crate)`.
-- **Layouts that repeat are widgets too.** A panel header, a section with a heading, a label-and-value row, a form's
-  button bar: if more than one surface has or will have it, it's a widget in the kit, even while only one uses it.
-  Composing kit pieces inline the same way in two views drifts just like two hand-made buttons (TRAIL-861). Before
-  building one, check the other views for the same shape.
+What follows is only about working on the kit in this repo.
 
-Much of the kit is ported from Lane's `bevy-data-explorer` (`~/Dev/bevy-data-explorer/src/widgets/`, also on GitHub at
-lanesawyer/bevy-data-explorer). Porting a widget from there is better than writing a new one.
+## Keep the guides true
 
-## 2. Build on feathers inside the kit, and prefer upstream
+A change to the kit changes its guide in the same commit: a new or changed widget, signature, token, size, spacing
+name, icon or layer goes in the catalogue and the tables, and a new rule goes in with its reason and its task. The
+same holds for the shell's contract and `clients/trailhead-shell/GUIDE.md`. An agent in an apps repo has only the
+guides and the code at its pin, so a guide that lags the code teaches the wrong thing.
 
-**Feathers stays in the kit.** Only `clients/trailhead-ui` imports `bevy::feathers`; an app (Lookout, the explorer)
-names only what the kit exports. When a view needs something feathers has and the kit doesn't expose (a token, a
-control, a component to query in a test), grow the kit: wrap it in a kit type or function and export that. Never
-re-export a feathers type as it is, and never reach past the kit from an app, even in a test. The kit's API is the
-seam that keeps a feathers upgrade to one crate.
+Much of the kit is ported from Lane's `bevy-data-explorer`; on this machine it is at
+`~/Dev/bevy-data-explorer/src/widgets/` (and `src/app/theme.rs`). Porting a widget from there is better than writing a
+new one.
 
-`bevy_feathers` 0.20 has buttons (`ButtonVariant`: normal, primary, plain; the kit's `ButtonKind`), tool buttons, menu
-buttons and popups, `FeathersSelect` for dropdowns, text inputs, checkboxes, toggles, sliders, scrollbars, list views,
-and panes. The kit wraps these; it doesn't draw its own where feathers has one. Where feathers lacks something or has
-a bug, work around it in one kit widget with a comment saying what upstream is missing, and prefer upstreaming the fix
-over growing a private copy.
-
-- **A fixed set of choices** (a filter, a priority, a status) is a dropdown (`FeathersSelect`), never a button that
-  cycles through values.
-- **A button that opens a menu** shows a chevron. One that acts when pressed doesn't.
-- **Every button changes background on hover**, `Plain` ones included (a tool button on a card is `Plain`). The hover
-  colors are theme tokens painted in `theme.rs`. Something pressable that isn't a button (a tab, a card, a hand-built
-  row) carries the kit's `HoverTone`, with a hover token visible against the surface it sits on.
-- **One primary button per surface** ("New task", "Save"). Everything else is normal or an icon-only tool button with a
-  tooltip.
-
-## 3. Colors, sizes, spacing, icons
-
-- **Colors are theme tokens**, a kit `Token` on a node as `BackgroundTone`, `TextTone` or `BorderTone`, never
-  `Color::srgb(..)` literals. The tone components are immutable: insert a new one to change the token. A missing
-  token renders fuchsia (TRAIL-777): if you see magenta, a token isn't in the theme.
-- **Name a meaning.** The kit's `token` module is semantic: surfaces (`SURFACE_WINDOW`, `_PANEL`, `_RAISED`,
-  `_FLOATING`), text (`TEXT`, `TEXT_DIM`, `TEXT_DISABLED`), one `BORDER`, fills with hover and pressed (`FILL_SOLID`,
-  `FILL_ITEM`, `FILL_ACCENT`, `FILL_FIELD`) and statuses (`STATUS_OK`, `_WARN`, `_DANGER`, `_INFO`, each with a
-  `_SUBTLE`). Each sits on one of feathers' semantic slots where feathers has one, so feathers' controls wear it too.
-  Views and widgets name these. Don't add a token for a widget unless it has to be restyled on its own; then
-  `Theme::alias` it to a meaning. Feathers' own `tokens::` appear only inside the kit widget wrapping that control.
-- **A surface is a `Surface`** (`Window`, `Panel`, `Raised`, `Floating`), not a `BackgroundTone` of a surface token:
-  it also tells feathers what the controls inside sit on, so a field or solid fill on a card takes the color that
-  shows there. Check a color against a surface in a test with `Theme::color_on`.
-- **Theme API.** `Theme::set` repaints a meaning everywhere (`set_accent` for a shade of `palette::ACCENT`, which then
-  follows the desktop's accent); `Theme::alias` points a token at a meaning; `Theme::paint` is only for an app's
-  categorical colors, which encode data (Lookout's statuses, priorities, grades). `palette` and color literals appear
-  only where the theme is built. `Theme::repeated_colors` lists a painted color some meaning already has: an app's
-  test asserts it's empty.
-- **Paint dark; the kit derives light and the accent.** `Theme::light` turns near-neutrals over and darkens colors
-  that mean something; `Theme::with_accent` moves the accent's shades onto the desktop's. A color written as a
-  literal follows neither, so it stays dark in a light theme.
-- **Text sizes** are the kit's `Size`, which only the kit makes: the text functions take one, so a size typed as a
-  number doesn't compile. Pick one from `size`; `Size::px` is for measuring (a line's height). **Gaps, padding,
-  margins and offsets** come from the `space` scale, **corners** from `radius` and **border widths** from `stroke`,
-  named for what they're for. Those go into a `Node`'s `Val`s, which take any number, so the lint is what finds a
-  literal there. If no name fits, add one to the kit with a doc comment.
-- **Icons** are `Icon` variants (Lucide glyphs from the embedded font). The text font has no icon glyphs, so anything
-  else shows as a box or a question mark. Adding an icon is one variant; take its codepoint from the same
-  `lucide-static` release the font came from.
-- **Long text is clamped or truncated** on cards and in lists. Full handoffs, questions and descriptions belong to a
-  detail panel.
-
-## 4. Layering and input
-
-- **A full-window surface is spawned after the overlays**, so an overlay without a `GlobalZIndex` loses every click to
-  it, even though it draws on top (TRAIL-776). Use the kit's layer constants: the app's main surface at the bottom,
-  panels above it, then forms and menus on top.
-- **A node is never smaller than its content unless you say so.** `width/height: percent(100)` loses to the content's
-  size in Taffy, so a full-window panel full of cards grew past the window and nothing inside it could overflow, so
-  nothing scrolled (TRAIL-836). A panel or column that should hold its children to a size and let them scroll needs
-  `min_width: px(0)` / `min_height: px(0)` (and its scrolling child `overflow: scroll_*()`). `Overflow::clip()` alone
-  doesn't do it.
-- **Scrolling goes through the kit's `ScrollBoth` / `ScrollDown`,** whose one observer walks up from what the pointer
-  is over to the nearest of each. Don't add a second wheel observer per area: a bubbling `PointerScroll` keeps naming
-  the entity it was fired on, so an ancestor's handler never sees its own entity.
-- **A surface is spawned once and updated in place** (TRAIL-880). Despawning a parent's children and spawning them
-  again on a change is a bug, however small the surface: the dropdown you just used is despawned under you, the
-  header flashes, scroll positions go. The only despawns are opening and closing the surface itself (a panel, a
-  modal). On a change, set what changed: a select's chosen row and, only when its options changed, its rows
-  (`SelectEdit`; never while its popup is open), a button's caption, a chip's tone and words (`ChipEdit`), a
-  disabled state. Lists that gain, lose and reorder items go through `trailhead_ui::Keyed`. Each app guards this with a
-  test (Lookout's is in the `lookout-ui` skill).
-- Presses arrive as `Activate` events (from `bevy::ui_widgets`, which feathers builds on), not `Interaction`.
-- `system_clipboard` must stay in the Bevy features, or no text field can paste.
-
-## 5. Plugins and tests
-
-- **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
-  in tests; `XUiPlugin` spawns and draws, and only a windowed app adds it (in the Trailhead shell, an app's
-  `ShellApp::build_ui`).
-- **The binary wires the app-level dependencies** (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`, which
-  brings feathers' plugins, the kit's `UiPlugin`, winit settings); in the Trailhead shell, `trailhead_shell::Shell`
-  does it for every app. A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test
-  app adds what `MinimalPlugins` lacks (TRAIL-774).
-- **Test the logic headless.** Pure functions that turn state into a view model carry most of the tests.
-
-## 6. Check it
+## Check it
 
 No headless test builds what the binary builds, and a factory sandbox can't open a window.
 
-- `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for the
-  app that uses the change.
-- **The lint** (`trailhead_ui::lint`) runs these rules over a crate's sources from one test (the kit's in `lint.rs`,
-  Lookout's in `tests/design_system.rs`): `no-feathers` (apps only), `color-literal`, `palette`, `raw-color`,
-  `feathers-color`, `font-size`, `spacing`, `radius`, `stroke`, `position`. An app adds rules about its own domain
-  as more `Rule`s. A file that has to break a rule goes on the test's `Allowed` list with the reason (and the task
-  that will take it off, if one will); an entry that finds nothing fails, so take it off when the file is fixed.
-  Never widen a rule's exceptions inside the rule to get a line through. The rules read lines, not meaning: a number
-  hidden in a constant named for nothing gets past them, so name constants for what they're for.
-- With a display, run the app (the Trailhead shell's window: `timeout 15 cargo run -p trailhead-desktop`) and look for
-  panics and `bevy_feathers::theme: Theme color ... not found` in the log.
-- When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
-  `inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives. A temporary
-  `info!(target: "probe", ..)` you remove before committing. Never drive a person's mouse to test it.
+- `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for each
+  crate that uses the change (`trailhead-shell`, `trailhead-app-example`, `trailhead-lookout`, `trailhead-desktop`).
+  These are not default members, so plain `cargo test` skips them; CI's `ui` job runs them.
+- The kit's lint runs over the kit from `src/lint.rs`'s tests (`lint::KIT`), over Lookout from
+  `clients/trailhead-lookout/tests/design_system.rs`, over the shell from `clients/trailhead-shell/tests/design_system.rs`
+  and over the example app from `clients/trailhead-app-example/tests/design_system.rs`. A rule change is checked
+  against all four.
+- With a display, run the Trailhead shell's window: `timeout 15 cargo run -p trailhead-desktop`, and look for panics
+  and `bevy_feathers::theme: Theme color ... not found` in the log.
+- When layout or input misbehaves, measure rather than guess (the kit's guide, section 4, "Look before you fix"). Never
+  drive a person's mouse to test it.
 - In a factory sandbox, say in your summary which parts nobody has seen yet. Every `clients/**` PR gets a human look
   before it merges.
