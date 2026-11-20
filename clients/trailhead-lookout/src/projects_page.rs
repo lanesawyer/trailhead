@@ -185,22 +185,10 @@ fn on_row_press(activate: On<Activate>, rows: Query<&RowOf>, mut commands: Comma
     }
 }
 
-/// The Projects page's panel; its padding leaves room for the row frame's scrollbar.
-fn page_node() -> Node {
-    Node {
-        min_width: px(0),
-        min_height: px(0),
-        flex_direction: FlexDirection::Column,
-        padding: UiRect::all(px(space::PANEL_INSET)),
-        row_gap: px(space::GROUPS),
-        ..widgets::beside_sidebar()
-    }
-}
-
 fn spawn_page(mut commands: Commands, filter: Res<ProjectsFilter>, mut rows: ResMut<Rows>) {
     // The rows of a page drawn before went with it.
     rows.0 = Keyed::default();
-    let panel = commands.spawn((Name::new("projects"), ProjectsPanel, BesideSidebar, page_node())).id();
+    let panel = commands.spawn((Name::new("projects"), ProjectsPanel, BesideSidebar, widgets::page_node())).id();
     let head = commands
         .spawn((Node { align_items: AlignItems::Center, column_gap: px(space::CONTROLS), ..default() }, ChildOf(panel)))
         .id();
@@ -364,11 +352,6 @@ mod tests {
 
     use super::*;
     use crate::fixture::{project, task};
-
-    #[test]
-    fn the_page_panel_has_room_for_a_scrollbar() {
-        assert!(widgets::has_scrollbar_room(&page_node()));
-    }
 
     fn world() -> (Vec<Project>, Vec<Task>) {
         let projects = vec![
