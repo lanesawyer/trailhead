@@ -52,7 +52,7 @@ fn step(app: &mut App) -> (Vec<(CommandId, u32, Request)>, Vec<CommandDone>) {
     (sent, done)
 }
 
-fn reply(app: &mut App, id: CommandId, attempt: u32, result: Result<Outcome, String>) {
+fn reply(app: &mut App, id: CommandId, attempt: u32, result: Result<Outcome, SendError>) {
     app.world_mut().write_message(Reply { id, attempt, result });
 }
 
@@ -165,6 +165,25 @@ fn a_rate_limited_command_is_sent_again_with_its_key_until_attempts_run_out() {
 }
 
 #[test]
+fn a_stale_rate_limit_does_not_requeue_a_later_attempt() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let (sent, _) = step(&mut app);
+    let id = sent[0].0;
+    set(&mut app, Connection::Syncing);
+    set(&mut app, Connection::Live);
+    let (resent, _) = step(&mut app);
+    assert_eq!(resent[0].1, 2);
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::ZERO), message: "slow".into() };
+    reply(&mut app, id, 1, Ok(limited));
+    let (again, done) = step(&mut app);
+    assert!(again.is_empty() && done.is_empty(), "attempt 2 is still out; nothing else is sent");
+    assert_eq!(app.world().resource::<Outbox>().len(), 1);
+}
+
+#[test]
 fn a_rate_limited_command_waits_for_retry_after() {
     let mut app = app();
     let control = app.world_mut().spawn_empty().id();
@@ -221,7 +240,7 @@ fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts()
     // The net thread isn't live yet either.
     for _ in 0..MAX_ATTEMPTS + 2 {
         let (id, n, _) = sent[0].clone();
-        reply(&mut app, id, n, Err(NOT_CONNECTED.into()));
+        reply(&mut app, id, n, Err(SendError::NotConnected));
         let (again, done) = step(&mut app);
         assert!(done.is_empty(), "not a failure");
         sent = again;
@@ -232,6 +251,27 @@ fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts()
     for _ in 0..20 {
         let (id, n, _) = sent[0].clone();
         reply(&mut app, id, n, Err("timed out".into()));
+        let (again, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        sent = again;
+    }
+    assert!(matches!(finished.expect("reported").outcome, Outcome::Failed(_)));
+}
+
+#[test]
+fn a_failure_whose_text_reads_not_connected_still_counts() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let mut sent = step(&mut app).0;
+    let mut finished = None;
+    for _ in 0..20 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Err(SendError::Failed("not connected".into())));
         let (again, done) = step(&mut app);
         if let Some(d) = done.into_iter().next() {
             finished = Some(d);
@@ -338,4 +378,34 @@ async fn a_bad_token_is_a_failure_not_a_retry() {
     let rig = Rig::new().await;
     let out = rig.run("not-a-token", &retitle("x", None)).await.unwrap();
     assert!(matches!(out, Outcome::Failed(_)), "{out:?}");
+}
+
+#[test]
+fn resends_after_reconnects_do_not_use_up_rate_limit_retries() {
+    let mut app = app();
+    let control = app.world_mut().spawn_empty().id();
+    set(&mut app, Connection::Live);
+    submit(&mut app, control);
+    let mut sent = step(&mut app).0;
+    for _ in 0..MAX_ATTEMPTS + 2 {
+        set(&mut app, Connection::Syncing);
+        set(&mut app, Connection::Live);
+        sent = step(&mut app).0;
+    }
+    let limited = Outcome::RateLimited { retry_after: Some(Duration::ZERO), message: "slow".into() };
+    let mut limits = 0;
+    let mut finished = None;
+    for _ in 0..20 {
+        let (id, n, _) = sent[0].clone();
+        reply(&mut app, id, n, Ok(limited.clone()));
+        limits += 1;
+        let (again, done) = step(&mut app);
+        if let Some(d) = done.into_iter().next() {
+            finished = Some(d);
+            break;
+        }
+        sent = again;
+    }
+    assert_eq!(limits, MAX_ATTEMPTS);
+    assert_eq!(finished.expect("handed back").outcome, limited);
 }

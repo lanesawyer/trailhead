@@ -14,7 +14,9 @@ The task engine stays the foundation and stays usable on its own: a fast, headle
 
 The factory is the fourth way, and the one the project now centers on: Trailhead drives the agents itself. A task with an approved spec becomes a sandboxed run, a pull request, a review and a merge, with the claims, questions, handoffs and spend recorded on the task.
 
-The factory has an official app: a native Bevy client for watching runs, steering them and writing specs (`docs/factory/ui.md`). It is a client of the API like any other, kept in this repo outside the default build, so the engine stays headless. The todo use case is still a separate client (working names `trailhead-todo` or `trailhead-ticklist`), and the maintainer's reader app stays a client of its own.
+The factory has an official app: a native Bevy client for watching runs, steering them and writing specs (`docs/factory/ui.md`). It is a client of the API like any other, kept in this repo outside the default build, so the engine stays headless.
+
+**Where this is going (decided 2026-11-19, TRAIL-1572; not built).** That app grows into a shell, called Trailhead, that holds several apps and can be asked for new ones: a request becomes a project and tasks, the factory builds the app, and the shell reloads with it. Lookout becomes the factory's app inside the shell and always ships with it. A person's own apps live in a separate apps repo of their own. The first is the todo use case, Ticklist, which the maintainer will move his todo list onto; it is a client of the task API as before. For now this is built for the maintainer alone. The design is `docs/app-platform.md`. The maintainer's reader app stays a client of its own.
 
 The long-term ambition is to replace other task tools, not to sync with them.
 
@@ -24,8 +26,8 @@ The long-term ambition is to replace other task tools, not to sync with them.
 2. **Agents act for people.** Every agent belongs to a user. There are no independent agents, and every change traces back to a human.
 3. **Nothing an agent does is permanent.** Every write is logged and reversible, including bulk reverts.
 4. **Agents pay for every token.** Responses are compact by default, with full detail on request.
-5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. It runs on a Linux box, wherever is convenient (a desktop PC, a home box, a VPS), and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
-6. **Trailhead is the source of truth.** Other tools can be notified or imported from, never synced with.
+5. **One server, reachable anywhere.** An instance is one server and one SQLite file, the single authority for its data. (Apps in the shell will each get a SQLite file of their own beside it, opened only by that server; `docs/app-platform.md`.) It runs on a Linux box, wherever is convenient (a desktop PC, a home box, a VPS), and agents on other machines reach it over a tunnel. Trailhead assumes it is online and connected; there are no replicas and nothing syncs between instances.
+6. **Trailhead is the source of truth for tasks.** Other task tools can be notified or imported from, never synced with. An app's own data may mirror an outside service (contacts from a CardDAV server, say) through a connector (decided 2026-11-19, `docs/app-platform.md`).
 7. **The factory coordinates; sandboxes act.** The control plane (inside the Trailhead server, one process, since TRAIL-164; `docs/factory/server-control-plane.md`) orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
 8. **Humans review by risk, not by habit.** Per-repo policy decides when a human is required; loosening it always needs one.
 9. **Pluggable where vendors differ.** Compute, agent harness, model provider, tracker and code host are traits with in-memory fakes, so the whole lifecycle runs in CI with no network or spend.
@@ -205,14 +207,27 @@ Factory (`docs/factory/mvp.md`), tracked under TRAIL-75:
 5. **Factory after the MVP.** First the rough edges the MVP's live runs hit (Sprites restarting under heavy builds, attempt caps, resuming parked tasks, `factory status` and `logs`, refusing a second control plane). Then suspend during review (resume affinity), grades (risk tiers), the merger and auto-merge (shadow mode first), quorums, a planner agent, profile escalation, the provider usage API and daily cap, previews, more repos (TRAIL-167), OTLP export.
 6. **Factory UI.** The Bevy app in `docs/factory/ui.md`, started once the factory runs unattended without regular fixes. It needs the factory status surface from phase 5 first.
 
+The shell of apps (`docs/app-platform.md`, TRAIL-1572):
+
+7. **Trailhead as a shell of apps.** Decided 2026-11-19; starts once the changes then in review are merged, and goes ahead of installing the factory without the repo (TRAIL-114). The maintainer drives the order, and the groundwork is done in interactive sessions, not by the factory. First, grade 3 merging on a quorum (`docs/factory/review.md`) and a spike on the contract between the shell and an app. Then:
+   - The kit as a library: the lint apps are held to, documentation for agents.
+   - The shell: a shell crate with the app switcher, Lookout as an app inside it, `trailhead app` to launch it.
+   - The apps repo: template, path rules, the builder and the relaunch.
+   - Ticklist, the todo app, on the task API, with backups.
+   - Asking for an app from inside the shell.
+   - The app data store, one SQLite file per app.
+   - Connectors to outside services.
+
 Deferred:
 
-7. **Teams.** Until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
-8. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira; for the factory, Jira specs first.
+8. **Teams.** Until a second person needs it. Other humans join the same server with their own accounts; the data model already carries workspaces, users and per-human permissions. Multiple workspaces and multi-process hosting (Turso, shared rate limits) come only if needed.
+9. **Importers.** One-way, one-time imports from Todoist, Vikunja, GitHub Issues, Jira; for the factory, Jira specs first.
 
 ## Decisions log
 
 Decisions made while building, including where the build refines or departs from the text above. Factory decisions live in `docs/factory/overview.md`; the ones that change the engine are also recorded here.
+
+- **Trailhead becomes a shell of apps (2026-11-19, TRAIL-1572).** The Bevy client becomes a shell that holds apps and can be asked for new ones, with the factory building them; Lookout is the factory's app inside it. This replaces "the todo use case becomes a separate client" below with Ticklist, an app in the maintainer's own apps repo, and narrows principle 6 to tasks. An app is a crate compiled into the shell and built only from `trailhead-ui`; a change is a rebuild and a relaunch. Apps live in one separate repo per person, on GitHub, a project per app, under the factory's grades. App data goes in a generic store in the server, one SQLite file per app with its own event log, and connectors to outside services run as supervised processes acting through the API. For the engine this means, when those phases are reached: a default grade on a project, so tasks an agent creates for an app can be worked; the app data store; and backups. Grades change with it: each grade keeps the gates below it, grade 3 merges on a quorum of reviewers with different jobs, and a person is needed only at grade 4 (`docs/factory/review.md`). Design and open questions in `docs/app-platform.md`.
 
 - **Composed writes are one transaction (2026-11-12, TRAIL-1444).** Three writes that REST, MCP and the CLI each built from separate store calls are now single core calls, one transaction and one undo batch, under the rules the separate calls had: creating a task with its dependencies (`NewTask::blocked_by`/`blocks`), a status change with its handoff (`TaskPatch::handoff`; `PATCH /v1/tasks/{task}` takes `handoff`, and the CLI's `done -m`, MCP's `update_task` and the factory's trackers send it there), and an agent with its first token (`Store::create_agent_with_token`, behind `POST /v1/agents`). A refused dependency used to leave the task behind, and a handoff written before a refused status change cleared a reviewer's changes-requested flag; now a refusal writes nothing. The handoff is written after the update in the same transaction, and is written even when the patch changes nothing else. Undoing the batch reverts all of it.
 
@@ -272,8 +287,8 @@ Decisions made while building, including where the build refines or departs from
 
 ## Non-goals
 
-- An official todo app inside this repo; it's a separate client. (The factory's UI is official; see the decisions log.)
-- Two-way sync with any other tool.
+- A todo app inside this repo. Ticklist lives in a person's own apps repo; this repo holds the shell, the kit, Lookout and an example app. (See the decisions log.)
+- Two-way sync of tasks with any other tool.
 - Replicas, offline sync or merging between instances.
 - Browser clients calling the API directly.
 - Agents that act without an owning user.

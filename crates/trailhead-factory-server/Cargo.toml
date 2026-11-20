@@ -14,6 +14,11 @@ description = "The Trailhead factory's control plane as a library: setup, creden
 workspace = true
 
 [features]
+# Programming languages (`trailhead-factory`'s `language` module).
+rust = ["trailhead-factory/rust"]
+python = ["trailhead-factory/python"]
+node = ["trailhead-factory/node"]
+go = ["trailhead-factory/go"]
 # The Docker Compute (`[factory.compute] kind = "docker"`).
 docker = ["dep:trailhead-compute-docker"]
 

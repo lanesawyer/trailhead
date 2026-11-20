@@ -30,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
         with:
-          tool: git-cliff
+          tool: git-cliff@2.10.0
 
       - id: version
         env:
@@ -161,7 +161,7 @@ jobs:
           fetch-depth: 0
       - uses: taiki-e/install-action@v2
         with:
-          tool: git-cliff
+          tool: git-cliff@2.10.0
       - uses: actions/download-artifact@v8
         with:
           path: dist
