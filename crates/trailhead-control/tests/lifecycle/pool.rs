@@ -716,3 +716,40 @@ async fn a_parked_tasks_stale_stack_sandbox_that_wont_be_destroyed_is_broken_and
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.destroyed, ["trailhead-w1"]);
 }
+
+#[tokio::test]
+async fn a_destroyed_sandboxs_warm_cost_is_forgotten() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    assert_eq!(r.factory.sandbox_entries(), 1, "the warm sandbox has a cost");
+    // Left busy with a warm checkpoint that's gone, so releasing it destroys it.
+    let id = trailhead_factory::SandboxId("trailhead-w1".into());
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::WARM.into(), "gone".into());
+    r.compute.set_labels(&id, &labels).await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.factory.sandbox_entries(), 0, "the cost went with the sandbox");
+}
+
+#[tokio::test]
+async fn a_stuck_breached_sandboxs_warm_cost_is_forgotten_when_reconcile_destroys_it() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    assert_eq!(r.factory.sandbox_entries(), 1, "the warm sandbox has a cost");
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The cut-off and the destroy after it both fail, leaving the breach stuck.
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail_once_after("trailhead-w1", "destroy", 0);
+    let _ = r.factory.run_task(&r.tracker.task(&key)).await;
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+    assert_eq!(r.factory.sandbox_entries(), 1, "a failed destroy keeps the cost");
+
+    r.compute.heal("trailhead-w1");
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.destroyed.contains(&"trailhead-w1".to_string()), "{done:?}");
+    assert!(r.compute.get("trailhead-w1").is_none());
+    assert_eq!(r.factory.sandbox_entries(), 0, "the cost went with the sandbox");
+}
