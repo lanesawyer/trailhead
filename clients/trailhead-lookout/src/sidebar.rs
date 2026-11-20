@@ -373,12 +373,8 @@ pub fn connection_chip(
                 "Factory down",
                 "Server connected; the factory can't be reached, so the map shows its last known state".into(),
             ),
-            FactoryLink::TooOld(why) => {
-                (token::STATUS_WARN, "Factory too old", format!("Server connected; the factory is too old: {why}"))
-            }
-            FactoryLink::Refused(why) => {
-                (token::STATUS_WARN, "Factory refused", format!("Server connected; the factory refused Lookout: {why}"))
-            }
+            FactoryLink::TooOld(why) => (token::STATUS_WARN, "Factory too old", format!("Server connected; {why}")),
+            FactoryLink::Refused(why) => (token::STATUS_WARN, "Factory refused", format!("Server connected; {why}")),
         },
     }
 }
@@ -387,9 +383,6 @@ pub fn connection_chip(
 mod tests {
     use bevy::state::app::StatesPlugin;
     use serde_json::json;
-
-    use bevy::input::keyboard::KeyboardInput;
-    use bevy::input_focus::FocusedInput;
 
     use super::*;
     use crate::board::BoardPlugin;
@@ -701,16 +694,7 @@ mod tests {
         app.world_mut().entity_mut(field).insert(EditableText::new("trail-8"));
         settle(&mut app);
         assert_eq!(app.world().resource::<Filter>().query, "trail-8");
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: bevy::input::keyboard::Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: field,
-        };
-        let window = app.world_mut().spawn_empty().id();
-        app.world_mut().trigger(FocusedInput::new(field, input, window));
+        trailhead_ui::test_support::press_escape(app.world_mut(), field);
         settle(&mut app);
         assert_eq!(app.world().get::<EditableText>(field).unwrap().value().to_string(), "");
         assert_eq!(app.world().resource::<Filter>().query, "");
@@ -728,6 +712,11 @@ mod tests {
         assert_eq!(words(Connection::Live, FactoryLink::Unknown), "Factory connecting");
         assert_eq!(words(Connection::Live, FactoryLink::TooOld("x".into())), "Factory too old");
         assert_eq!(words(Connection::Live, FactoryLink::Refused("x".into())), "Factory refused");
+        let hint = |f| connection_chip(Connection::Live, &status, &f).2;
+        let why = "the factory refused the status request; trying again in 5 s";
+        assert_eq!(hint(FactoryLink::Refused(why.into())), format!("Server connected; {why}"));
+        let old = "the factory is older than this Lookout; trying again in 5 s";
+        assert_eq!(hint(FactoryLink::TooOld(old.into())), format!("Server connected; {old}"));
         assert_eq!(words(Connection::Syncing, FactoryLink::Unreachable), "Syncing");
         assert_eq!(words(Connection::Offline, FactoryLink::Running), "Offline");
         let tone = |f| connection_chip(Connection::Live, &status, &f).0;

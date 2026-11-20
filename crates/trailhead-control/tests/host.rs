@@ -2,6 +2,9 @@
 
 use std::sync::Arc;
 
+#[path = "support/logs.rs"]
+mod logs;
+
 use trailhead_control::{Factory, Host};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
@@ -358,4 +361,28 @@ async fn a_malformed_usage_file_is_replaced_by_the_next_reading() {
     let b = repo("alpha", "", &FakeCompute::new(), &pausing_host_in(&path));
     queue(&b);
     assert!(b.factory.tick().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_snapshot_carries_the_repos_queue() {
+    let compute = FakeCompute::new();
+    let host = pausing_host();
+    let listed = repo("alpha", "queue = [\"TRAIL-102\", \"TRAIL-685\"]", &compute, &host);
+    assert_eq!(listed.factory.status().snapshot().queue, [TaskKey("TRAIL-102".into()), TaskKey("TRAIL-685".into())]);
+    let unlisted = repo("beta", "", &compute, &host);
+    assert!(unlisted.factory.status().snapshot().queue.is_empty());
+}
+
+#[tokio::test]
+async fn the_stray_check_being_off_for_a_project_is_logged_once() {
+    let (logs, _capture) = logs::Logs::capture();
+    let compute = FakeCompute::new();
+    let host = Host::new(&HostConfig::default());
+    let _queued = repo("a", "queue = \"TRAIL-1\"", &compute, &host);
+    assert!(!logs.text().contains("stray check is off"));
+    let _whole = repo("b", "", &compute, &host);
+    let _queued_too = repo("c", "queue = \"TRAIL-2\"", &compute, &host);
+    let _whole_too = repo("d", "", &compute, &host);
+    assert_eq!(logs.text().matches("stray check is off").count(), 1, "{}", logs.text());
+    assert!(logs.text().contains("TRAIL"));
 }
