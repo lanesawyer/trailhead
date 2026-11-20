@@ -423,27 +423,7 @@ async fn run(
     let _ = events.send(NetEvent::Endpoint(endpoint.id().to_string()));
     let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().expect("http client");
     let (reports, mut report_rx) = tokio_mpsc::unbounded_channel();
-    let mut net = Net {
-        probe_backoff: Backoff::new(config.status_retry),
-        config,
-        endpoint,
-        http,
-        events,
-        target: None,
-        status: None,
-        logs: None,
-        logs_wanted: false,
-        pasted: None,
-        token: None,
-        live_probes: 0,
-        state: None,
-        probe_hold: None,
-        sync: None,
-        sync_run: 0,
-        resume: Resume::default(),
-        reports,
-        timings: SyncTimings::default(),
-    };
+    let mut net = Net::new(config, endpoint, http, events, reports);
     match target {
         Some(t) => net.connect(&t).await,
         None => net.set(Link::Offline, Some(Reason::NoTarget)),
@@ -620,6 +600,37 @@ fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
 }
 
 impl Net {
+    /// A `Net` with no target, nothing running and nothing remembered.
+    fn new(
+        config: NetConfig,
+        endpoint: Endpoint,
+        http: reqwest::Client,
+        events: mpsc::Sender<NetEvent>,
+        reports: tokio_mpsc::UnboundedSender<(u64, Report)>,
+    ) -> Self {
+        Self {
+            probe_backoff: Backoff::new(config.status_retry),
+            config,
+            endpoint,
+            http,
+            events,
+            target: None,
+            status: None,
+            logs: None,
+            logs_wanted: false,
+            pasted: None,
+            token: None,
+            live_probes: 0,
+            state: None,
+            probe_hold: None,
+            sync: None,
+            sync_run: 0,
+            resume: Resume::default(),
+            reports,
+            timings: SyncTimings::default(),
+        }
+    }
+
     /// Reports a change of link or reason, and only changes.
     fn set(&mut self, link: Link, reason: Option<Reason>) {
         if link == Link::Offline {
@@ -713,6 +724,7 @@ impl Net {
         let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
         self.stop_status();
+        let _ = self.events.send(NetEvent::Factory(FactoryUpdate::Reset));
         self.stop_sync();
         self.token = None;
         self.pasted = None;
@@ -938,10 +950,12 @@ impl Net {
             let _ = events.send(NetEvent::Reply(Reply { id, attempt, result }));
         };
         let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            return reply(Err(commands::NOT_CONNECTED.into()));
+            return reply(Err(commands::SendError::NotConnected));
         };
         let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
-        tokio::spawn(async move { reply(commands::execute(&api, &request).await) });
+        tokio::spawn(
+            async move { reply(commands::execute(&api, &request).await.map_err(commands::SendError::Failed)) },
+        );
     }
 
     /// Searches on its own task, like [`Self::request`], and says so if it can't.
@@ -1101,27 +1115,8 @@ mod tests {
         let endpoint = bind(&config).await.unwrap();
         let (events, rx) = mpsc::channel();
         let (reports, _) = tokio_mpsc::unbounded_channel();
-        let net = Net {
-            probe_backoff: Backoff::new(config.status_retry),
-            target: Some(Target { id: endpoint.id(), api, _tunnel: None }),
-            config,
-            endpoint,
-            http: reqwest::Client::new(),
-            events,
-            status: None,
-            logs: None,
-            logs_wanted: false,
-            pasted: None,
-            token: None,
-            live_probes: 0,
-            state: None,
-            probe_hold: None,
-            sync: None,
-            sync_run: 0,
-            resume: Resume::default(),
-            reports,
-            timings: SyncTimings::default(),
-        };
+        let mut net = Net::new(config, endpoint, reqwest::Client::new(), events, reports);
+        net.target = Some(Target { id: net.endpoint.id(), api, _tunnel: None });
         (net, rx)
     }
 

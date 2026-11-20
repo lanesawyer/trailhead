@@ -1377,6 +1377,88 @@ mod tests {
     }
 
     #[test]
+    fn the_grade_dropdown_follows_the_drafts_project() {
+        use crate::factory::RepoState;
+        let g = |n| Grade::new(n).unwrap();
+        let mut app = ui_app();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: Some(human),
+            usage: Vec::new(),
+        };
+        {
+            let mut status = app.world_mut().resource_mut::<FactoryStatus>();
+            status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+            status.repos.insert("o/b".into(), repo("ZED-1", vec![g(2), g(4)]));
+        }
+        open_new_form(&mut app);
+        settle(&mut app);
+        let options = |app: &mut App| {
+            let world = app.world_mut();
+            let mut selects = world.query::<(&FormChoice, &crate::widgets::SelectOptions)>();
+            selects.iter(world).find(|(c, _)| **c == FormChoice::Grade).map(|(_, o)| o.0.clone()).unwrap()
+        };
+        let gates = [("TRAIL", vec![g(3), g(4)]), ("ZED", vec![g(2), g(4)])];
+        assert_ne!(grade_options(&gates[0].1), grade_options(&gates[1].1));
+        for (project, human) in gates.iter().cycle().take(3) {
+            app.world_mut().resource_mut::<Form>().open.as_mut().unwrap().draft.project = project.to_string();
+            settle(&mut app);
+            assert_eq!(options(&mut app), grade_options(human), "{project}");
+        }
+    }
+
+    #[test]
+    fn the_queue_switch_and_dropdown_follow_the_draft_through_other() {
+        let mut app = ui_app();
+        report_queues(&mut app, &["TRAIL-102", "TRAIL-685"]);
+        open_new_form(&mut app);
+        settle(&mut app);
+        let switch = app.world_mut().query_filtered::<Entity, With<QueueToggle>>().single(app.world()).unwrap();
+        let select = {
+            let world = app.world_mut();
+            let mut q = world.query::<(Entity, &FormChoice)>();
+            q.iter(world).find(|(_, c)| **c == FormChoice::Queue).unwrap().0
+        };
+        let checked = |app: &App| app.world().get::<bevy::ui::Checked>(switch).is_some();
+        let shown = |app: &mut App, part: FormPart| {
+            let world = app.world_mut();
+            let mut parts = world.query::<(&FormPart, &Node)>();
+            parts.iter(world).find(|(p, _)| **p == part).map(|(_, n)| n.display != Display::None).unwrap()
+        };
+        let selected = |app: &mut App| {
+            bevy::ecs::system::RunSystemOnce::run_system_once(app.world_mut(), move |edit: SelectEdit| {
+                edit.selected_rows(select)
+            })
+            .unwrap()
+        };
+
+        app.world_mut().trigger(ValueChange { source: switch, value: true, is_final: true });
+        settle(&mut app);
+        let queue = draft(&app).queue;
+        let at = ["TRAIL-102", "TRAIL-685"].iter().position(|q| *q == queue).unwrap();
+        assert!(checked(&app) && shown(&mut app, FormPart::QueuePick));
+        assert_eq!(selected(&mut app), [at]);
+
+        // "other…" is the last row: the draft leaves the queue, the switch goes off and the parent search shows.
+        app.world_mut().trigger(Picked { entity: select, index: 2 });
+        settle(&mut app);
+        assert!(!draft(&app).queued);
+        assert!(!checked(&app), "the switch follows the draft");
+        assert!(shown(&mut app, FormPart::Parent) && shown(&mut app, FormPart::Search));
+        assert_eq!(selected(&mut app), [2], "other… is what the dropdown shows");
+
+        // Switching queueing back on selects the queue again, not "other…".
+        app.world_mut().trigger(ValueChange { source: switch, value: true, is_final: true });
+        settle(&mut app);
+        assert!(draft(&app).queued && checked(&app));
+        assert!(!shown(&mut app, FormPart::Parent));
+        assert_eq!(selected(&mut app), [at]);
+    }
+
+    #[test]
     fn a_form_with_a_save_in_flight_ignores_a_click_outside() {
         let mut app = ui_app();
         open_new_form(&mut app);
