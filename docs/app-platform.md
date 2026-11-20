@@ -1,0 +1,195 @@
+# Trailhead as a shell of apps
+
+> **Design note.** The direction was decided on 2026-11-19 (TRAIL-1572) and is in `docs/PLAN.md` as phase 7; nothing here is built. Statements are marked **Leaning** (Lane agreed in conversation; expect it to move as it is built), **Proposal** (not yet agreed) or **Open**.
+
+## The idea
+
+Trailhead becomes one desktop app, a shell, that holds several apps and can be asked to grow new ones. You switch between a todo list, the factory's own app, and whatever else you have asked for. Asking for an app, or for a change to one, hands the work to the factory, which builds it; the shell then offers the update and reloads.
+
+The factory is what makes this practical: it already turns a spec into a checked, reviewed, merged change. What is new is a shell that hosts apps, a place for those apps to live, and somewhere for their data.
+
+## Names
+
+| Thing | Name | Status |
+| --- | --- | --- |
+| The shell | Trailhead | Leaning |
+| The factory's app inside it | Lookout (what the whole Bevy client is called today) | Leaning |
+| The UI kit | `trailhead-ui`, unchanged | Leaning |
+| How you start it | `trailhead app`, the only command a person types. It is a launcher in the CLI that runs the newest built shell and falls back to the previous one | Leaning |
+| The built shell | A file the builder writes and the launcher manages (`trailhead-shell` in Trailhead's data directory), never run by hand. It is separate from the CLI because it is rebuilt on every app change, and the CLI, the server and the launcher that does the fallback must not be | Leaning |
+| The todo app | Ticklist, a climber's list of routes to send (from [naming.md](factory/naming.md)) | Leaning |
+
+## What an app is
+
+- A Rust crate that exposes a Bevy plugin and a manifest (name, icon, the data collections it uses). **Leaning.**
+- Compiled into the shell binary. A change means a rebuild and a relaunch: the shell shows "your update is ready", and the button restarts it with its state restored. **Leaning.** Loading `bsn!` scenes from files, once Bevy has it, may later let views reload without a rebuild.
+- Built only from `trailhead-ui`. A lint in the apps repo refuses any other UI code, so an app that needs something the kit lacks cannot work around it. **Leaning.**
+- A client of the API only, like Lookout today: it never touches the server's database.
+- Limited in what it may reach: no file, network or process access of its own, enforced by lint. **Leaning** (see [Trust, grades and undo](#trust-grades-and-undo)).
+
+Lookout always ships with the shell: it is how asked-for work is watched, answered and reviewed.
+
+## The contract between shell and app
+
+The most load-bearing piece, and not yet designed: every app is written against it, so a change to it later is a change to every app. It is settled by a spike before the shell is built, with Lookout and the example app behind one trait.
+
+- **What the shell hands an app. Open.** A place to draw, a handle to its data, settings, notifications, commands.
+- **Sync and mirrors as a shared layer. Leaning, to be checked in the spike.** Lookout's own sync and mirror code would become what every app reads its data through, so an app declares what it watches and never writes a sync loop. The spike has to show that apps need it in that shape.
+- **A switched-away app is torn down. Leaning.** It is rebuilt when switched back to. Keeping apps alive is a later fix if the rebuild is slow enough to annoy.
+- **Local storage for what must survive. Leaning.** The shell gives each app a small store on the client's disk for things like unsent drafts and the view it was on, which is also what a relaunch restores from.
+- **Reading other apps' data. Leaning.** An app's manifest names the collections of other apps it reads, and tasks if it reads those. Sharing is the usual case; an app can also mark a collection as its own alone. Adding a line is a grade 3 change. Search and quick capture across apps belong to the shell.
+
+## The kit
+
+The kit has to become a small, capable library, not a pile of one-off widgets. The rule Lookout already follows carries over: one component, built once, and a view that needs more makes the widget grow.
+
+- When an app needs something the kit lacks, that is a task in the kit's queue (TRAIL-888) in the `trailhead` repo, reviewed by a person, and the app's task waits on it. **Leaning.**
+- The apps repo pins the `trailhead` repo at a revision. Taking a newer kit is its own task.
+- **How agents learn the kit. Leaning.** Through the kit's own documentation, written for agents and kept in the crate so it always matches the pinned revision, with an MCP server over it for looking widgets up. No gallery app of every widget.
+
+**Drift between users. Open, leaning "pin, and fork if you must".** Each user's shell is built from their own pin, so two users never have to agree on a kit version. The upstream kit stays curated. Someone who cannot wait for a widget points their apps repo at their own fork (one `[patch]` line) and may send the change back. Instructions for agents on bringing a fork up to date with upstream are wanted, later. Until other people use this, Lane's asks go straight to the upstream kit, and the question is settled when the factory is opened to others (TRAIL-114).
+
+## Repos and git
+
+**Leaning: two repos.**
+
+- **`trailhead`** (this one): the engine, the factory, the shell crate, the kit, Lookout, and a small example app that CI builds and that new apps are scaffolded from.
+- **An apps repo**, one per user, private: every app that user has, in one cargo workspace.
+
+```
+apps/<name>/         one crate per app
+connectors/<name>/   one crate per connector (later)
+shell/               the binary: registers the apps, about ten lines
+Cargo.toml           depends on the trailhead repo, pinned to a rev
+.trailhead.toml      the factory's settings and path rules
+```
+
+One repo, not one per app, because the shell is a single binary that needs one list of apps and one `Cargo.lock`, a kit bump is one change, and the sandboxes keep one warm build cache.
+
+- **A project per app.** Asking for an app creates a Trailhead project for it, with a brief and its first tasks, scoped to `apps/<name>/`. The factory needs to know which repo and path a project builds in (near TRAIL-157).
+- **GitHub, with the code host that exists.** Changes are pull requests that merge themselves when they stay inside one app's directory and pass checks and agent review. Nobody has to open them. A code host over a plain local repo is a later option.
+- **Review is trying it.** The person's gate on an app change is using the new build and keeping or rejecting it, not reading a diff. Rejecting is a revert and a rebuild.
+- **The builder.** After a merge, a builder on the server's machine pulls the apps repo and builds the shell, the event stream tells the running shell, and the launcher keeps the previous binary to fall back to.
+
+The personal todo app lives in the apps repo, not in `trailhead`: it is the app Lane will keep asking to change, which is the point of the whole design, and upstream should not take that churn. **Leaning.**
+
+## Data
+
+**Leaning.** Everything stays on one server on the user's own machine, reached over iroh as Lookout reaches it now. No cloud server.
+
+- **Tasks stay as they are.** The todo app is a client of the task API that already exists.
+- **Other app data goes in a generic store in the server.** An app declares typed collections in its manifest; the server validates each write, records it in an event log so undo and revert cover it, and streams changes to clients. Apps ship no server code, so generated code never runs in the process that owns the tasks.
+- **One SQLite file per app. Leaning.** The server opens each app's file beside its own; an open SQLite file costs little, and the tasks database is untouched by anything an app does. Removing, backing up or exporting an app is one file, and apps never wait on each other's writes. Each file carries its own event log, written in the same transaction as the data, because SQLite cannot commit atomically across files in WAL mode; "revert everything this agent did since noon" then runs over each file in turn. Only the server opens these files; apps and connectors go through the API.
+- **Agents reach the same data** through MCP, so an agent can read and write an app's records as it does tasks.
+- **Connectors** sync with outside services (CardDAV, CalDAV). Each is a separate process the server supervises, acting through the API under its own agent identity, so its writes are attributed and revertable and a crash stays outside the server.
+- **Principle 6 narrows.** Trailhead stays the source of truth for tasks. App data may mirror an outside source through a connector.
+
+- **Backups. Leaning; needed before Lane moves his todo list over.** The tasks database and every app's file, copied on a schedule to somewhere off the machine. Not designed yet.
+- **No list while the server is off. Accepted for now.** [ui.md](factory/ui.md)'s rule stands: nothing works without a live connection, so Ticklist is unavailable when the home machine is off or unreachable. A read-only cache is the fix if that becomes a nuisance.
+
+**Tasks or records. Proposal.** Many apps are a list of items, and the engine already allows a task nobody works (review.md: an ungraded task, "like an item on a shopping list"). The rule: something that gets done is a task, in a project of its own, and Ticklist shows it; something that is kept (a contact, a bookmark) is a record in the store. Records do not become tasks, because tasks carry status, claims and the ready queue, which a kept thing has no use for. The kit has one list widget that both are shown with.
+
+**Open:** how a collection's shape changes once it holds data (who writes the migration, when it runs, how undo crosses it).
+
+## Phases
+
+Numbered within this proposal; where they sit among PLAN.md's phases is decided when the plan is updated.
+
+Lane drives the order and decides when a phase is done. The groundwork (through the apps repo, at least) is done in interactive Claude Code sessions, not handed to the factory; once the shell can take a request, work moves into the app itself.
+
+Before any of it: the Lookout and factory changes now in review are merged, grade 3's gates are decided (see [Trust, grades and undo](#trust-grades-and-undo)), and the spike on [the contract between shell and app](#the-contract-between-shell-and-app) is done.
+
+1. **The kit as a library.** The lint that apps are held to, and the widgets the todo app will need.
+2. **The shell.** A shell crate (window, connection, settings, app switcher, the app trait); Lookout becomes an app inside it; `trailhead app` launches it. A refactor with no new features.
+3. **The apps repo.** Template, registration, path rules and self-merging, the builder and the relaunch. Proven with the example app.
+4. **Ticklist,** in the apps repo, on the existing task API. First target: Lane moves his Todoist workflow onto it. Backups come with it.
+5. **Asking for an app.** A request in the shell becomes a project, a brief and tasks; a planner run writes the spec and asks its questions through `needs_input`, which Lookout already shows.
+6. **The app data store.**
+7. **Connectors.**
+
+Later: Android (the only phone target for now; desktop is where this is mostly used), loading views from `bsn` files, the shell on a different machine from the server (the builder then ships binaries over iroh), a local code host. A possible second app for Lane: planning a work day and reviewing code.
+
+## What the todo app needs from the engine
+
+None of this blocks the first version: the basic app comes first and features follow as they are wanted. What a todo list needs of tasks is added to the task engine itself, for every client and agent, and the app uses it; the app does not keep task features of its own.
+
+The engine has due days and times, scheduled days and times, reminders, priorities, subtasks and projects. Not there yet for a Todoist workflow:
+
+- Recurring tasks (in PLAN.md's Later list).
+- Labels (TRAIL-155).
+- A one-time import from Todoist (PLAN.md phase 9).
+- Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet.
+- Quick capture without opening the shell. The CLI covers it today.
+
+## Trust, grades and undo
+
+A change to an app can merge without a person reading it and then runs on the user's machine as that user. **Leaning:** accept that, keep the factory's grades ([review.md](factory/review.md)) as the control, and make undo dependable.
+
+**The ladder. Decided for every repo, in [review.md](factory/review.md#grades).** The defaults did not climb evenly: grade 4 dropped the agent review that grade 3 required. Now each grade keeps everything below it and adds one thing, and that what puts a change at a grade is one question: how far does the damage reach if it is wrong?
+
+| Grade | Reach if wrong | Areas | Gates |
+| --- | --- | --- | --- |
+| 1 | Nothing that runs | Docs, new or changed tests | Checks + CI |
+| 2 | One module or one app | Ordinary code inside it | + one agent review |
+| 3 | Things other code or stored data depend on | Shared code, public API, the shape of stored data and migrations, dependency manifests, changes across modules, large diffs | + the quorum by job, in place of the single review, with a round of rework. A person only when it deadlocks or security is overruled |
+| 4 | The controls themselves | New or upgraded packages (the lockfile), credentials and network access, CI, the factory's policy, the agents' instructions | + a person, always. The quorum still runs, and its findings are what the person reads first |
+
+Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
+
+**In the apps repo** the same ladder, by path:
+
+| Grade | Paths |
+| --- | --- |
+| 1 | `apps/*/tests/**`, docs |
+| 2 | `apps/*/src/**` |
+| 3 | `shell/**`, the app template, an app's manifest (its collections), `**/Cargo.toml`, a diff touching more than one app |
+| 4 | `Cargo.lock` (a new package, the `trailhead` pin), `.trailhead.toml`, CI, `connectors/**`, agent instructions |
+
+**Apps that need more care. Leaning.** A grade means the same approvals everywhere in a repo; apps do not get gates of their own, or nobody could say what "grade 2" means. An app differs by where it starts: a path rule gives it a floor (`3 = ["apps/<name>/**"]` for an app holding work or money data), which path rules can already do.
+
+**Grading asked-for tasks. Leaning on the default; an engine change.** Only a person can give a task its first grade, and the factory skips ungraded tasks, so tasks a planner creates for an asked-for app would never be worked. A project carries a default grade, set by a person when the app is created, and tasks agents create in it start there. A person still set the first grade, once, for the app.
+
+**A grader agent. Open, leaning not yet.** An agent that grades each task before work starts would add little: the task's grade is only a floor, the diff's paths raise the PR by what it really touched, and a reviewer can already raise it for a risk no path shows. If it is wanted later it is a duty of the planner, never of the worker (the author does not grade its own work), and it may only raise above the project's default; lowering stays a person's.
+
+**Grade 3 without a person.** Lane wants grade 3 to merge on a quorum so that people come in only at grade 4. review.md already has a quorum (TRAIL-204, not built) whose reviewers may differ by model; that stays, and reviewers that differ by job are added to it. This changes the factory's review design for every repo, so it is written into review.md when settled; the state of it so far:
+
+- **Reviewers differ by job. Leaning.** An engineer, a tester, a security reviewer and, where the diff touches UI, a UX reviewer, each with its own instructions. `distinct_models` stays an option and is not required.
+- **A majority approves. Leaning.** One reviewer cannot hold a change up alone; its objection is recorded on the PR.
+- **A round of rework on the feedback. Leaning.** The reviewers give their first verdicts without seeing each other's, the worker gets all the findings at once and reworks, and the reviewers look again. The majority is counted on that second look.
+- **It never sticks. Leaning.** No majority after two rounds sends the change to a person, as review.md's quorum already does on disagreement.
+- **Security outvoted. Leaning.** A security objection the majority overrules sends the change to a person instead of merging.
+- **The UX reviewer needs to see the UI.** It judges the screenshots of [Seeing a change](#seeing-a-change).
+
+## Seeing a change
+
+Lane wants UI changes shown, live if possible. Three steps, each useful alone, chosen by how much a change needs. **Leaning.**
+
+1. **Screenshots.** The sandbox renders the changed views headless and attaches the images to the task; Lookout shows them on the task, before and after, and the UX reviewer reads the same images. Depends on headless rendering in a sandbox with no GPU (TRAIL-802, a spike, not yet proven).
+2. **Try it, on your machine.** A button on the task in Lookout has the builder build that PR's shell into a separate slot and open it as a second window beside the running one. It is the real app, live, built on demand. Offered only once checks and the agent gates have passed, since it runs unmerged code. **Open:** what data it runs on. A copy of the app's SQLite file is cheap, which is one more reason for a file per app; tasks have no such copy, so a previewed Ticklist would act on real tasks, with undo behind it, unless the server grows a preview scope.
+3. **Live from the sandbox. Later, maybe.** The sandbox runs the shell and streams frames to Lookout over iroh, with input sent back: watching an agent's work as it happens, with no unmerged code on your machine, and usable from a phone. It needs a frame stream built and software rendering fast enough to watch.
+- **Instead of the single review, or as well. Open.** Proposal: instead. The engineer is today's reviewer under another name, and reviewing twice buys nothing.
+- **Cost** is not a constraint now (a subscription, so spend is nominal); budgets are raised if they bind.
+
+**Lints still to add** for app crates: no `std::fs`, `std::net` or `std::process`; no `unsafe`; no UI outside the kit. Apps hold no credentials; connectors get theirs from the server.
+
+**Undo.** Three paths, each of which has to work without thought:
+
+- **A bad build:** the launcher falls back to the previous shell on its own when the new one fails to start, and offers the previous one from a menu when it starts but is wrong.
+- **A bad change:** rejecting it in the shell reverts the merge and rebuilds.
+- **Bad data:** app data is in the event log, so undo and revert-since cover whatever an app, an agent or a connector wrote.
+
+Text a connector brings in from outside is one way a bad instruction could reach an agent; connectors being grade 4 and apps having no network access is the answer for now. Sandboxing apps properly would mean running them as WASM, which is not planned while there is one user.
+
+## Other things to settle
+
+- **How long a request takes. Accepted for now.** A small change still goes through a sandbox, the agent, checks, CI, review, a merge and a build of the shell, which Rust makes slow; requests are queued work to come back to, not edits that appear as you watch. A faster path for small changes inside one app (a warm local sandbox, no second CI pass) is designed only if the wait proves bad.
+- **A crash in one app takes the shell down.** The launcher's fallback covers a crash at startup only. A way to start with one app switched off would cover the rest.
+- **Version skew.** The server is built from the `trailhead` repo and the shell from the apps repo's pin. They need a protocol version check and a rule for moving the pin when the server is upgraded.
+- **Build load.** Every merged app change builds the shell on the machine that also runs the server and perhaps the factory's local sandboxes. The builder needs a job limit and a build profile chosen for build time.
+- **The factory has to run unattended.** This design leans on self-merging changes with nobody watching, which is what phase 5 of PLAN.md is still hardening.
+- **This goes ahead of TRAIL-114. Leaning.** TRAIL-114 makes the factory installable by someone who has only their own repo (`cargo install trailhead`, `trailhead factory init`, `login`, `start`). For now this is all for Lane, with other people a someday aim, and this proposal changes what they would install. TRAIL-114's `factory init` is still needed in phase 3, to set up the apps repo.
+- **License.** The shell and Lookout are AGPL-3.0 and the kit is MIT OR Apache-2.0. A private apps repo linking them is fine; distributing a built shell carries the AGPL.
+
+## In PLAN.md and review.md
+
+Made on 2026-11-19: PLAN.md's vision, principles 5 and 6, phase 7, the decisions log and the non-goals; the grade ladder and the quorum in [review.md](factory/review.md); the review row of the decisions table in [overview.md](factory/overview.md). `AGENTS.md` still names phase 5 as current, which holds until this work starts.
