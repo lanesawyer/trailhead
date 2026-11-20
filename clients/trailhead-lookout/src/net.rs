@@ -1229,6 +1229,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_bind_clears_the_dialed_factory() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = NetConfig {
+            config_dir: dir.path().join("lookout"),
+            trailhead_config_dir: dir.path().join("config"),
+            trailhead_data_dir: dir.path().join("data"),
+            keyring: false,
+            network: Network::Direct(Arc::new(MemoryLookup::new())),
+            status_retry: Duration::from_secs(10),
+        };
+        std::fs::create_dir_all(&config.config_dir).unwrap();
+        std::fs::write(config.key_file(), "not a key").unwrap();
+        let handle = NetHandle::spawn(config, Some("abc".into()));
+        let mut events = Vec::new();
+        for _ in 0..100 {
+            events.extend(handle.drain());
+            if events.iter().any(|e| matches!(e, NetEvent::Dialed(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(events.iter().any(|e| matches!(e, NetEvent::Dialed(None))), "no Dialed(None) among the events");
+    }
+
+    #[test]
     fn brief_clean_ends_in_a_row_are_slowed_down() {
         assert_eq!(resync_after(true, false, true), Resync::Now);
         assert_eq!(resync_after(true, true, true), Resync::Slowly);
