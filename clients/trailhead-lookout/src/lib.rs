@@ -13,6 +13,7 @@ pub mod connect;
 pub mod connection;
 pub mod detail;
 pub mod factory;
+pub mod factory_link;
 pub mod form;
 pub mod icon;
 pub mod inspector;
@@ -74,7 +75,15 @@ impl ShellApp for Lookout {
     /// The connection is Lookout's for now. It is the shell's to own once a second app needs the server
     /// (TRAIL-1577), and then this adds only Lookout's own logic.
     fn build(&self, app: &mut App) {
-        app.add_plugins(connection::ConnectionPlugin::new(self.config.clone(), self.target.clone()));
+        let (factory_link, jobs) = factory_link::factory_link();
+        app.add_plugins(connection::ConnectionPlugin::new(self.config.clone(), self.target.clone()).with_jobs(jobs))
+            .add_plugins((
+                factory_link,
+                factory::FactoryPlugin,
+                search::SearchPlugin,
+                detail::DetailPlugin,
+                logs::LogsPlugin,
+            ));
     }
 
     fn build_ui(&self, app: &mut App) {

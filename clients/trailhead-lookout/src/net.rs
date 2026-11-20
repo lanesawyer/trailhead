@@ -1,12 +1,19 @@
 //! The net thread (`docs/factory/ui.md#architecture`): a tokio runtime on its own thread that owns Lookout's iroh
 //! endpoint, dials the control plane's `trailhead/ui/0`, serves the forwarded API on a local port, signs in, and
 //! reports to Bevy over channels. Bevy sends [`NetCommand`]s and reads [`NetEvent`]s; neither side blocks the other.
+//!
+//! It knows nothing of what an app does with the link. An app reads the API with a [`Fetch`], whose answer is the
+//! app's own message, and runs its own streams as [`LinkJob`]s, which report over the app's own channels.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use bevy::prelude::{Message, World};
 
 use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::{ConnectionError, presets};
@@ -15,17 +22,11 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
-use trailhead_factory::logs::LogLine;
 use trailhead_shell::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
-use trailhead_wire::ui::{
-    CLOSE_NOT_ALLOWED, LogFrame, LogStream, StatusFrame, StatusStream, UI_ALPN, UiTunnel, dial_ui, open_ui_tunnel,
-};
+use trailhead_wire::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, UiTunnel, open_ui_tunnel};
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
 use crate::commands::{self, CommandId, Reply, Request};
-use crate::detail::{self, DetailReply};
-use crate::factory::FactoryUpdate;
-use crate::search::{self, SearchReply};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
 /// three values as the net thread reports them.
@@ -110,16 +111,12 @@ pub enum NetCommand {
     Disconnect,
     /// Make this request (`crate::commands`); `attempt` comes back with the answer.
     Request { id: CommandId, attempt: u32, request: Box<Request> },
-    /// Search tasks and comments for `query` (`GET /v1/search`); `seq` comes back with the answer.
-    Search { seq: u64, query: String },
-    /// Follow the control plane's log, or stop. Sent as the Logs page opens and closes.
-    Logs(bool),
-    /// Fetch the task `key` in full (`GET /v1/tasks/{key}`); `seq` comes back with the answer.
-    Detail { seq: u64, key: String },
+    /// Make this read of the API; its answer comes back as the app's own message.
+    Fetch(Fetch),
 }
 
 /// What the net thread tells the app.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum NetEvent {
     /// Lookout's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
@@ -133,28 +130,88 @@ pub enum NetEvent {
     Sync(SyncItem),
     /// What came of a [`NetCommand::Request`].
     Reply(Reply),
-    /// The control plane's status snapshot and stream, or that it can't be reached.
-    Factory(FactoryUpdate),
-    /// What came of a [`NetCommand::Search`].
-    Search(SearchReply),
-    /// The control plane's log, while it is followed.
-    Logs(LogUpdate),
-    /// What came of a [`NetCommand::Detail`].
-    Detail(DetailReply),
+    /// What came of a [`NetCommand::Fetch`].
+    Fetched(Fetched),
 }
 
-/// What the log stream brings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LogUpdate {
-    /// The lines the control plane has kept, replacing what was shown; first on every connection.
-    Backlog(Vec<LogLine>),
-    Line(LogLine),
-    /// This many lines were missed because Lookout fell behind.
-    Skipped(u64),
-    /// The stream dropped; it is being retried.
-    Dropped,
-    /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
-    TooOld(String),
+type Boxed<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// A read of the API that an app makes on the net thread, on its own task like a command's request. A read has no
+/// idempotency key or retry of its own, and its answer is the app's own [`Message`], which the app tags (with a
+/// sequence number, say) to tell a current answer from a stale one.
+#[derive(Clone)]
+pub struct Fetch(Arc<dyn Fn(Option<trailhead_client::http::Client>) -> Boxed<Fetched> + Send + Sync>);
+
+impl Fetch {
+    /// `read` is given the API client while the link is `Live`, and `None` otherwise, and makes the message to send
+    /// back either way.
+    pub fn new<M, F>(read: impl Fn(Option<trailhead_client::http::Client>) -> F + Send + Sync + 'static) -> Fetch
+    where
+        M: Message,
+        F: Future<Output = M> + Send + 'static,
+    {
+        Fetch(Arc::new(move |api| {
+            let answer = read(api);
+            Box::pin(async move {
+                let message = answer.await;
+                Fetched(Box::new(move |world: &mut World| {
+                    world.write_message(message);
+                }))
+            })
+        }))
+    }
+}
+
+impl Fetch {
+    /// The read, given the API client while `Live`.
+    pub(crate) fn run(&self, api: Option<trailhead_client::http::Client>) -> Boxed<Fetched> {
+        (self.0)(api)
+    }
+}
+
+impl std::fmt::Debug for Fetch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Fetch(..)")
+    }
+}
+
+/// The answer to a [`Fetch`]: it writes the app's message into the world.
+pub struct Fetched(Box<dyn FnOnce(&mut World) + Send>);
+
+impl Fetched {
+    pub fn deliver(self, world: &mut World) {
+        (self.0)(world);
+    }
+}
+
+impl std::fmt::Debug for Fetched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Fetched(..)")
+    }
+}
+
+/// The control plane the net thread holds, as a [`LinkJob`] sees it.
+#[derive(Clone)]
+pub struct HeldLink {
+    pub endpoint: Endpoint,
+    pub id: EndpointId,
+    /// [`NetConfig::status_retry`]: how soon a dropped stream is tried again, and the first gap after a refusal.
+    pub retry: Duration,
+}
+
+/// Work an app runs on the net thread for as long as a control plane is held, such as a stream of its own over
+/// `trailhead/ui/0`. It reports over its own channel, not through [`NetEvent`].
+///
+/// [`LinkJob::start`] is called on the net thread's runtime each time a control plane is dialed (a Connect to a new
+/// one), and the future it returns is spawned there. That task is aborted when the control plane is replaced or let
+/// go, and when the net thread ends.
+pub trait LinkJob: Send + 'static {
+    /// The work for the control plane just dialed.
+    fn start(&mut self, link: HeldLink) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+
+    /// The net thread holds no control plane any more (a Disconnect, or a Connect that failed), and the task
+    /// [`LinkJob::start`] spawned has been aborted. Not called when the net thread ends.
+    fn released(&mut self) {}
 }
 
 /// Everything the HTTP client needs to talk to the Trailhead API through the control plane.
@@ -248,8 +305,8 @@ pub struct NetHandle {
 
 impl NetHandle {
     /// Starts the net thread. `target` is dialed straight away; without one the link is `Offline` until a
-    /// [`NetCommand::Connect`].
-    pub fn spawn(config: NetConfig, target: Option<String>) -> NetHandle {
+    /// [`NetCommand::Connect`]. `jobs` run while a control plane is held.
+    pub fn spawn(config: NetConfig, target: Option<String>, jobs: Vec<Box<dyn LinkJob>>) -> NetHandle {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -262,7 +319,7 @@ impl NetHandle {
                         return;
                     }
                 };
-                runtime.block_on(run(config, target, cmd_rx, event_tx));
+                runtime.block_on(run(config, target, jobs, cmd_rx, event_tx));
             })
             .expect("spawn the net thread");
         NetHandle { commands: cmd_tx, events: Mutex::new(event_rx), thread: Some(thread) }
@@ -319,66 +376,28 @@ pub const STATUS_BACKOFF_STEPS: u32 = 5;
 /// doesn't need noticing within one, and the health request is all the other probes send.
 const TOKEN_CHECK_EVERY: u32 = 15;
 
-/// Why the factory won't serve the status stream.
-enum Refusal {
-    /// It doesn't know the request: older than this Lookout.
-    TooOld(String),
-    /// It knows the request and says no.
-    Refused(String),
-}
-
-/// What the status task has seen of the current connection.
-#[derive(Default)]
-struct Progress {
-    /// Whether the app was last told the factory is stopped; cleared by anything heard.
-    stopped: bool,
-    /// Whether the connection has served a frame, which means the factory isn't refusing us.
-    heard: bool,
-}
-
-/// How the status task treats the end of a connection.
-#[derive(Debug, PartialEq, Eq)]
-enum Resync {
-    /// Not a resync: a drop, reported and retried after a gap.
-    No,
-    /// The first clean end after serving a snapshot: redial at once, report nothing.
-    Now,
-    /// A clean end right after the last resync: redial after a gap, still reporting nothing.
-    Slowly,
-}
-
-/// Whether a connection's end is a resync, given whether it ended cleanly after being heard, whether the one
-/// before did, and whether this one was brief (it ended within a retry gap of being dialed).
-fn resync_after(clean_and_heard: bool, previous_was_resync: bool, brief: bool) -> Resync {
-    match (clean_and_heard, previous_was_resync && brief) {
-        (false, _) => Resync::No,
-        (true, false) => Resync::Now,
-        (true, true) => Resync::Slowly,
-    }
-}
-
 /// The gap before the next try: the retry after a drop, and doubling from it after each refusal in a row.
-struct Backoff {
+pub struct Backoff {
     base: Duration,
     refusals: u32,
 }
 
 impl Backoff {
-    fn new(base: Duration) -> Backoff {
+    pub fn new(base: Duration) -> Backoff {
         Backoff { base, refusals: 0 }
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.refusals = 0;
     }
 
     /// A transient drop: back soon, without lengthening later gaps.
-    fn dropped(&self) -> Duration {
+    pub fn dropped(&self) -> Duration {
         self.base
     }
 
     /// A refusal: this gap, and a longer one after the next.
-    fn refused(&mut self) -> Duration {
+    pub fn refused(&mut self) -> Duration {
         let wait = self.base * 2u32.pow(self.refusals);
         self.refusals = (self.refusals + 1).min(STATUS_BACKOFF_STEPS);
         wait
@@ -391,12 +410,9 @@ struct Net {
     http: reqwest::Client,
     events: mpsc::Sender<NetEvent>,
     target: Option<Target>,
-    /// Follows the control plane's status stream, redialing until it is back.
-    status: Option<tokio::task::JoinHandle<()>>,
-    /// Follows the log while the Logs page is open.
-    logs: Option<tokio::task::JoinHandle<()>>,
-    /// Whether the Logs page is open, so a new control plane gets its log too.
-    logs_wanted: bool,
+    /// The app's work while a control plane is held, and its tasks for the one held now.
+    jobs: Vec<Box<dyn LinkJob>>,
+    running: Vec<tokio::task::JoinHandle<()>>,
     /// A token pasted in, not yet confirmed (and so not yet saved).
     pasted: Option<String>,
     /// The token that signed in, kept while `Live` so a dropped link signs back in without asking again.
@@ -427,6 +443,7 @@ fn report_unreachable(events: &mpsc::Sender<NetEvent>, error: String) {
 async fn run(
     config: NetConfig,
     target: Option<String>,
+    jobs: Vec<Box<dyn LinkJob>>,
     mut commands: tokio_mpsc::UnboundedReceiver<NetCommand>,
     events: mpsc::Sender<NetEvent>,
 ) {
@@ -440,7 +457,7 @@ async fn run(
     let _ = events.send(NetEvent::Endpoint(endpoint.id().to_string()));
     let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().expect("http client");
     let (reports, mut report_rx) = tokio_mpsc::unbounded_channel();
-    let mut net = Net::new(config, endpoint, http, events, reports);
+    let mut net = Net::new(config, endpoint, http, events, reports, jobs);
     match target {
         Some(t) => net.connect(&t).await,
         None => net.set(Link::Offline, Some(Reason::NoTarget)),
@@ -459,9 +476,7 @@ async fn run(
                     net.check().await;
                 }
                 Some(NetCommand::Request { id, attempt, request }) => net.request(id, attempt, *request),
-                Some(NetCommand::Search { seq, query }) => net.search(seq, query),
-                Some(NetCommand::Logs(on)) => net.set_logs(on),
-                Some(NetCommand::Detail { seq, key }) => net.detail(seq, key),
+                Some(NetCommand::Fetch(fetch)) => net.fetch(fetch),
                 None => break,
             },
             Some((run, report)) = report_rx.recv() => net.on_report(run, report),
@@ -475,8 +490,7 @@ async fn run(
         }
     }
     net.stop_sync();
-    net.stop_logs();
-    net.stop_status();
+    net.stop_jobs();
     net.endpoint.close().await;
 }
 
@@ -506,115 +520,6 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// One connection's worth of the status stream: the snapshot, then events until it ends. Returns why the factory
-/// refused, if it did.
-async fn follow_status(
-    endpoint: &Endpoint,
-    id: EndpointId,
-    events: &mpsc::Sender<NetEvent>,
-    progress: &mut Progress,
-) -> Result<Option<Refusal>, trailhead_factory::Error> {
-    let conn = dial_ui(endpoint, id).await?;
-    match stream_status(conn.clone(), events, progress).await {
-        Err(e) => match refusal_of(&conn, &e, progress.heard) {
-            Some(refusal) => Ok(Some(refusal)),
-            None => Err(e),
-        },
-        done => done,
-    }
-}
-
-async fn stream_status(
-    conn: iroh::endpoint::Connection,
-    events: &mpsc::Sender<NetEvent>,
-    progress: &mut Progress,
-) -> Result<Option<Refusal>, trailhead_factory::Error> {
-    let mut stream = StatusStream::open(conn).await?;
-    while let Some(frame) = stream.next().await? {
-        let update = match frame {
-            StatusFrame::Snapshot { control, repos } => {
-                if events.send(NetEvent::Factory(FactoryUpdate::Control(control))).is_err() {
-                    return Ok(None);
-                }
-                FactoryUpdate::Snapshot(repos)
-            }
-            StatusFrame::Event { repo, event } => FactoryUpdate::Event { repo, event },
-            StatusFrame::Unsupported(unsupported) => return Ok(Some(Refusal::TooOld(too_old_message(&unsupported)))),
-        };
-        progress.stopped = false;
-        progress.heard = true;
-        if events.send(NetEvent::Factory(update)).is_err() {
-            return Ok(None);
-        }
-    }
-    Ok(None)
-}
-
-/// One connection's worth of the log stream. Returns the message to show when the factory doesn't serve logs.
-async fn follow_logs(
-    endpoint: &Endpoint,
-    id: EndpointId,
-    events: &mpsc::Sender<NetEvent>,
-) -> Result<Option<String>, trailhead_factory::Error> {
-    let mut stream = LogStream::open(dial_ui(endpoint, id).await?).await?;
-    let mut heard = false;
-    loop {
-        let frame = match stream.next().await {
-            Ok(Some(frame)) => frame,
-            Ok(None) => return Ok(None),
-            // Reset before anything was served: a control plane that has no log feed.
-            Err(e) if !heard && e.to_string().contains("stream reset by peer") => return Ok(Some(NO_LOGS.into())),
-            Err(e) => return Err(e),
-        };
-        heard = true;
-        let update = match frame {
-            LogFrame::Backlog { lines } => LogUpdate::Backlog(lines),
-            LogFrame::Line(line) => LogUpdate::Line(line),
-            LogFrame::Skipped { count } => LogUpdate::Skipped(count),
-            LogFrame::Unsupported(_) => return Ok(Some(NO_LOGS.into())),
-        };
-        if events.send(NetEvent::Logs(update)).is_err() {
-            return Ok(None);
-        }
-    }
-}
-
-/// What the Logs page says of a factory that doesn't send logs.
-pub const NO_LOGS: &str = "this factory is too old to send logs";
-
-/// Whether a failed stream was the factory saying no, rather than the link dropping: the connection closed because
-/// this endpoint isn't allowed, or the stream reset before anything was served.
-fn refusal_of(conn: &iroh::endpoint::Connection, error: &trailhead_factory::Error, heard: bool) -> Option<Refusal> {
-    match conn.close_reason() {
-        Some(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into() => {
-            Some(Refusal::Refused(Reason::NotAllowed.to_string()))
-        }
-        Some(_) => None,
-        None if !heard && error.to_string().contains("stream reset by peer") => {
-            Some(Refusal::Refused("the factory refused the status request".into()))
-        }
-        None => None,
-    }
-}
-
-/// What the map says of a factory that didn't know our request: what it was asked, what it serves, and its build.
-fn too_old_message(u: &trailhead_wire::ui::Unsupported) -> String {
-    // Only the op: a request that carries parameters would make the label long.
-    let asked = u
-        .got
-        .get("op")
-        .and_then(|op| op.as_str())
-        .map_or_else(|| "an unreadable request".to_string(), |op| format!("\"{op}\""));
-    format!(
-        "the factory is older than this Lookout: reinstall trailhead and restart its server (it was asked {}, and \
-         serves {}; version {}, build {})",
-        asked,
-        u.known.join(", "),
-        u.version,
-        u.build
-    )
-}
-
 impl Net {
     /// A `Net` with no target, nothing running and nothing remembered.
     fn new(
@@ -623,6 +528,7 @@ impl Net {
         http: reqwest::Client,
         events: mpsc::Sender<NetEvent>,
         reports: tokio_mpsc::UnboundedSender<(u64, Report)>,
+        jobs: Vec<Box<dyn LinkJob>>,
     ) -> Self {
         Self {
             probe_backoff: Backoff::new(config.status_retry),
@@ -631,9 +537,8 @@ impl Net {
             http,
             events,
             target: None,
-            status: None,
-            logs: None,
-            logs_wanted: false,
+            jobs,
+            running: Vec::new(),
             pasted: None,
             token: None,
             live_probes: 0,
@@ -675,8 +580,7 @@ impl Net {
                     return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string())));
                 }
             }
-            self.start_status(id);
-            self.restart_logs();
+            self.start_jobs(id);
             self.token = None;
             self.state = None;
             self.stop_sync();
@@ -739,8 +643,10 @@ impl Net {
     fn drop_target(&mut self) {
         let _ = self.events.send(NetEvent::Dialed(None));
         self.target = None;
-        self.stop_status();
-        let _ = self.events.send(NetEvent::Factory(FactoryUpdate::Reset));
+        self.stop_jobs();
+        for job in &mut self.jobs {
+            job.released();
+        }
         self.stop_sync();
         self.token = None;
         self.pasted = None;
@@ -870,103 +776,15 @@ impl Net {
         self.target.as_ref().map(|t| format!("http://{}", t.api))
     }
 
-    /// Follows the control plane's status stream on its own connection, and says when it can't be reached.
-    fn start_status(&mut self, id: EndpointId) {
-        self.stop_status();
-        let (endpoint, events) = (self.endpoint.clone(), self.events.clone());
-        let mut backoff = Backoff::new(self.config.status_retry);
-        self.status = Some(tokio::spawn(async move {
-            let mut progress = Progress::default();
-            let mut resynced = false;
-            loop {
-                progress.heard = false;
-                let dialed = tokio::time::Instant::now();
-                let followed = follow_status(&endpoint, id, &events, &mut progress).await;
-                let brief = dialed.elapsed() < backoff.dropped();
-                if progress.heard {
-                    backoff.reset();
-                }
-                let ended_cleanly = followed.is_ok();
-                let refusal = match followed {
-                    Ok(refusal) => refusal,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "the factory status stream ended");
-                        None
-                    }
-                };
-                if let Some(refusal) = refusal {
-                    let wait = backoff.refused();
-                    let retry = format!("trying again in {} s", wait.as_secs().max(1));
-                    progress.stopped = false;
-                    let update = match refusal {
-                        Refusal::TooOld(why) => FactoryUpdate::TooOld(format!("{why}; {retry}")),
-                        Refusal::Refused(why) => FactoryUpdate::Refused(format!("{why}; {retry}")),
-                    };
-                    if events.send(NetEvent::Factory(update)).is_err() {
-                        return;
-                    }
-                    tokio::time::sleep(wait).await;
-                    continue;
-                }
-                // A clean end is the server asking for a resync (its feed changed, or we lagged), not a drop:
-                // redial at once and don't report Unreachable; the next snapshot says what changed.
-                // A clean end right after a resync, on a connection that barely lasted, is a server that ends
-                // every stream (one from before TRAIL-761 while stopped), so it waits like a drop, without
-                // reporting Unreachable. One that stayed open and then ended is a new resync, however the
-                // connection before it ended.
-                let resync = resync_after(ended_cleanly && progress.heard, resynced, brief);
-                resynced = resync != Resync::No;
-                if resync == Resync::Now {
-                    continue;
-                }
-                if resync == Resync::No && !progress.stopped {
-                    progress.stopped = true;
-                    if events.send(NetEvent::Factory(FactoryUpdate::Unreachable)).is_err() {
-                        return;
-                    }
-                }
-                tokio::time::sleep(backoff.dropped()).await;
-            }
-        }));
+    /// Starts the app's jobs for the control plane just dialed, replacing those for the one before.
+    fn start_jobs(&mut self, id: EndpointId) {
+        self.stop_jobs();
+        let link = HeldLink { endpoint: self.endpoint.clone(), id, retry: self.config.status_retry };
+        self.running = self.jobs.iter_mut().map(|job| tokio::spawn(job.start(link.clone()))).collect();
     }
 
-    /// Follows (or stops following) the control plane's log, for the Logs page.
-    fn set_logs(&mut self, on: bool) {
-        self.logs_wanted = on;
-        self.restart_logs();
-    }
-
-    fn restart_logs(&mut self) {
-        self.stop_logs();
-        let (Some(Target { id, .. }), true) = (self.target.as_ref(), self.logs_wanted) else { return };
-        let (endpoint, events, id) = (self.endpoint.clone(), self.events.clone(), *id);
-        let retry = self.config.status_retry;
-        self.logs = Some(tokio::spawn(async move {
-            loop {
-                match follow_logs(&endpoint, id, &events).await {
-                    Ok(Some(why)) => {
-                        let _ = events.send(NetEvent::Logs(LogUpdate::TooOld(why)));
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::debug!(error = %e, "the factory log stream ended"),
-                }
-                if events.send(NetEvent::Logs(LogUpdate::Dropped)).is_err() {
-                    return;
-                }
-                tokio::time::sleep(retry).await;
-            }
-        }));
-    }
-
-    fn stop_logs(&mut self) {
-        if let Some(task) = self.logs.take() {
-            task.abort();
-        }
-    }
-
-    fn stop_status(&mut self) {
-        if let Some(task) = self.status.take() {
+    fn stop_jobs(&mut self) {
+        for task in self.running.drain(..) {
             task.abort();
         }
     }
@@ -987,30 +805,17 @@ impl Net {
         );
     }
 
-    /// Searches on its own task, like [`Self::request`], and says so if it can't.
-    fn search(&self, seq: u64, query: String) {
+    /// Makes an app's read on its own task, like [`Self::request`], handing it the API client only while `Live`.
+    fn fetch(&self, fetch: Fetch) {
         let events = self.events.clone();
-        let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            let _ = events.send(NetEvent::Search(SearchReply { seq, result: Err("not connected".into()) }));
-            return;
+        let api = match (self.api_base(), &self.token, &self.state) {
+            (Some(base), Some(token), Some((Link::Live, _))) => {
+                Some(trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone()))
+            }
+            _ => None,
         };
-        let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
         tokio::spawn(async move {
-            let result = search::fetch(&api, &query).await;
-            let _ = events.send(NetEvent::Search(SearchReply { seq, result }));
-        });
-    }
-
-    fn detail(&self, seq: u64, key: String) {
-        let events = self.events.clone();
-        let (Some(base), Some(token), Some((Link::Live, _))) = (self.api_base(), &self.token, &self.state) else {
-            let _ = events.send(NetEvent::Detail(DetailReply { seq, result: Err("not connected".into()) }));
-            return;
-        };
-        let api = trailhead_client::http::Client::with_http(self.http.clone(), base, token.clone());
-        tokio::spawn(async move {
-            let result = detail::fetch(&api, &key).await;
-            let _ = events.send(NetEvent::Detail(DetailReply { seq, result }));
+            let _ = events.send(NetEvent::Fetched(fetch.run(api).await));
         });
     }
 
@@ -1079,19 +884,6 @@ mod tests {
     }
 
     #[test]
-    fn too_old_message_names_only_the_op() {
-        let u = trailhead_wire::ui::Unsupported {
-            got: serde_json::json!({"op": "logs", "task": "x".repeat(500)}),
-            known: vec!["status".into()],
-            version: "1".into(),
-            build: "b".into(),
-        };
-        let message = too_old_message(&u);
-        assert!(message.contains("asked \"logs\","), "{message}");
-        assert!(message.len() < 300, "{message}");
-    }
-
-    #[test]
     fn refusals_back_off_to_a_cap_and_reset() {
         let mut backoff = Backoff::new(Duration::from_secs(2));
         let gaps: Vec<u64> = (0..8).map(|_| backoff.refused().as_secs()).collect();
@@ -1133,6 +925,14 @@ mod tests {
     }
 
     async fn net_for(dir: &Path, api: SocketAddr) -> (Net, mpsc::Receiver<NetEvent>) {
+        net_with_jobs(dir, api, Vec::new()).await
+    }
+
+    async fn net_with_jobs(
+        dir: &Path,
+        api: SocketAddr,
+        jobs: Vec<Box<dyn LinkJob>>,
+    ) -> (Net, mpsc::Receiver<NetEvent>) {
         let config = NetConfig {
             config_dir: dir.join("lookout"),
             trailhead_config_dir: dir.join("config"),
@@ -1144,7 +944,7 @@ mod tests {
         let endpoint = bind(&config).await.unwrap();
         let (events, rx) = mpsc::channel();
         let (reports, _) = tokio_mpsc::unbounded_channel();
-        let mut net = Net::new(config, endpoint, reqwest::Client::new(), events, reports);
+        let mut net = Net::new(config, endpoint, reqwest::Client::new(), events, reports, jobs);
         net.target = Some(Target { id: net.endpoint.id(), api, _tunnel: None });
         (net, rx)
     }
@@ -1241,7 +1041,7 @@ mod tests {
         };
         std::fs::create_dir_all(&config.config_dir).unwrap();
         std::fs::write(config.key_file(), "not a key").unwrap();
-        let handle = NetHandle::spawn(config, Some("abc".into()));
+        let handle = NetHandle::spawn(config, Some("abc".into()), Vec::new());
         let mut events = Vec::new();
         for _ in 0..100 {
             events.extend(handle.drain());
@@ -1251,15 +1051,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(events.iter().any(|e| matches!(e, NetEvent::Dialed(None))), "no Dialed(None) among the events");
-    }
-
-    #[test]
-    fn brief_clean_ends_in_a_row_are_slowed_down() {
-        assert_eq!(resync_after(true, false, true), Resync::Now);
-        assert_eq!(resync_after(true, true, true), Resync::Slowly);
-        assert_eq!(resync_after(true, true, false), Resync::Now, "a connection that stayed open resyncs at once");
-        assert_eq!(resync_after(false, true, true), Resync::No, "a drop resets the run");
-        assert_eq!(resync_after(false, false, false), Resync::No);
     }
 
     #[tokio::test]
@@ -1326,5 +1117,74 @@ mod tests {
         net.check().await;
         assert!(net.probe_hold.is_none());
         assert!(net.probe_due());
+    }
+
+    /// A job that says when it starts, when its task is dropped, and when it is told the control plane went.
+    struct FakeJob(tokio_mpsc::UnboundedSender<&'static str>);
+
+    /// Says "dropped" when the task holding it is aborted.
+    struct OnDrop(tokio_mpsc::UnboundedSender<&'static str>);
+
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send("dropped");
+        }
+    }
+
+    impl LinkJob for FakeJob {
+        fn start(&mut self, link: HeldLink) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let said = self.0.clone();
+            assert_eq!(link.retry, Duration::from_secs(10));
+            Box::pin(async move {
+                let _ = said.send("started");
+                let _guard = OnDrop(said);
+                std::future::pending::<()>().await;
+            })
+        }
+
+        fn released(&mut self) {
+            let _ = self.0.send("released");
+        }
+    }
+
+    async fn next(said: &mut tokio_mpsc::UnboundedReceiver<&'static str>) -> &'static str {
+        timeout(Duration::from_secs(5), said.recv()).await.expect("the job said nothing").unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_job_runs_from_the_dial_until_the_control_plane_is_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (tx, mut said) = tokio_mpsc::unbounded_channel();
+        let (mut net, _rx) = net_with_jobs(dir.path(), addr, vec![Box::new(FakeJob(tx))]).await;
+        let id = net.endpoint.id();
+        net.start_jobs(id);
+        assert_eq!(next(&mut said).await, "started");
+
+        // Dialing another control plane replaces the work: the old task goes, and a new one starts.
+        net.start_jobs(id);
+        let mut replaced = [next(&mut said).await, next(&mut said).await];
+        replaced.sort_unstable();
+        assert_eq!(replaced, ["dropped", "started"]);
+
+        net.drop_target();
+        let mut let_go = [next(&mut said).await, next(&mut said).await];
+        let_go.sort_unstable();
+        assert_eq!(let_go, ["dropped", "released"]);
+        assert!(net.running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_job_ends_with_the_net_thread_without_being_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let addr = stub(None).await;
+        let (tx, mut said) = tokio_mpsc::unbounded_channel();
+        let (mut net, _rx) = net_with_jobs(dir.path(), addr, vec![Box::new(FakeJob(tx))]).await;
+        net.start_jobs(net.endpoint.id());
+        assert_eq!(next(&mut said).await, "started");
+        net.stop_jobs();
+        assert_eq!(next(&mut said).await, "dropped");
+        drop(net);
+        assert_eq!(said.recv().await, None, "released only when a control plane is let go");
     }
 }

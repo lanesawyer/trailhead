@@ -12,8 +12,6 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::logs::{LogLevel, LogLine};
 
-use crate::connection::SendNet;
-use crate::net::{LogUpdate, NetCommand};
 use crate::widgets::{
     ButtonKind, Icon, Keyed, Picked, SelectEdit, Token, button, field, row, scroll_body, scroll_frame, scrollbar,
     select, set_display, set_text, size, space, text_mono, text_toned, token,
@@ -38,9 +36,27 @@ pub struct Entry {
     pub gap: bool,
 }
 
+/// What the log stream brings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogUpdate {
+    /// The lines the control plane has kept, replacing what was shown; first on every connection.
+    Backlog(Vec<LogLine>),
+    Line(LogLine),
+    /// This many lines were missed because Lookout fell behind.
+    Skipped(u64),
+    /// The stream dropped; it is being retried.
+    Dropped,
+    /// The control plane doesn't serve logs, so it is older than this Lookout. Carries the message to show.
+    TooOld(String),
+}
+
 /// A [`LogUpdate`] on its way to the log.
 #[derive(Message, Debug, Clone)]
 pub struct LogItem(pub LogUpdate);
+
+/// Follow the control plane's log, or stop. Sent as the Logs page opens and closes.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowLogs(pub bool);
 
 /// The lines heard while the page is open.
 #[derive(Resource, Debug, Default)]
@@ -51,7 +67,7 @@ pub struct LogState {
     tasks: BTreeSet<String>,
     /// Why there is nothing to read, when the factory can't send logs.
     note: Option<String>,
-    /// Whether the net thread was last told to follow the log.
+    /// Whether the log was last asked to be followed.
     streaming: bool,
 }
 
@@ -232,7 +248,7 @@ impl Plugin for LogsPlugin {
             .init_resource::<LogFilter>()
             .init_resource::<Follow>()
             .add_message::<LogItem>()
-            .add_message::<SendNet>()
+            .add_message::<FollowLogs>()
             .add_systems(PreUpdate, apply_items);
     }
 }
@@ -315,19 +331,19 @@ pub fn logs_page(commands: &mut Commands, page: Entity) {
     commands.queue_spawn_scene(scrollbar(list, ControlOrientation::Vertical)).insert(ChildOf(frame));
 }
 
-/// Tells the net thread to follow the log while the page is showing, and to stop when it isn't.
+/// Asks for the log to be followed while the page is showing, and to stop when it isn't.
 fn sync_stream(
     pages: Query<&Node, With<LogsPage>>,
     mut state: ResMut<LogState>,
     mut follow: ResMut<Follow>,
-    mut send: MessageWriter<SendNet>,
+    mut send: MessageWriter<FollowLogs>,
 ) {
     let wanted = pages.iter().any(|n| n.display != Display::None);
     if wanted == state.streaming {
         return;
     }
     state.streaming = wanted;
-    send.write(SendNet(NetCommand::Logs(wanted)));
+    send.write(FollowLogs(wanted));
     if !wanted {
         // Nothing is kept for a page nobody is reading; the next opening starts from the factory's backlog.
         state.clear();
@@ -624,14 +640,7 @@ mod tests {
             let page = app.world_mut().spawn((LogsPage, Node { display: Display::None, ..default() })).id();
             app.update();
             let sent = |app: &mut App| -> Vec<bool> {
-                app.world_mut()
-                    .resource_mut::<Messages<SendNet>>()
-                    .drain()
-                    .filter_map(|SendNet(c)| match c {
-                        NetCommand::Logs(on) => Some(on),
-                        _ => None,
-                    })
-                    .collect()
+                app.world_mut().resource_mut::<Messages<FollowLogs>>().drain().map(|FollowLogs(on)| on).collect()
             };
             assert!(sent(&mut app).is_empty());
             app.world_mut().get_mut::<Node>(page).unwrap().display = Display::Flex;

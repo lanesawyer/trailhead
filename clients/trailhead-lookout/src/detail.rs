@@ -10,9 +10,9 @@ use trailhead_shell::sync::{SyncItem, task_of};
 
 use crate::connection::{Connection, SendNet};
 use crate::inspector::{Selection, Subject};
-use crate::net::NetCommand;
+use crate::net::{Fetch, NetCommand};
 
-/// The server's answer to a fetch, as the net thread passes it on.
+/// The server's answer to a fetch, as the net thread hands it back.
 #[derive(Message, Debug, Clone, PartialEq)]
 pub struct DetailReply {
     /// Which ask this answers.
@@ -159,7 +159,21 @@ fn ask(
     let seq = fetching.next;
     fetching.asked = Some((seq, id));
     fetching.stale = false;
-    net.write(SendNet(NetCommand::Detail { seq, key }));
+    net.write(SendNet(NetCommand::Fetch(read(seq, key))));
+}
+
+/// The read of the task `key`, answered with `seq`.
+fn read(seq: u64, key: String) -> Fetch {
+    Fetch::new(move |api| {
+        let key = key.clone();
+        async move {
+            let result = match api {
+                Some(api) => fetch(&api, &key).await,
+                None => Err("not connected".into()),
+            };
+            DetailReply { seq, result }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -178,14 +192,14 @@ mod tests {
         app
     }
 
+    /// The fetches sent since the last call, as the task's id. A read is opaque, so what it asks is taken from
+    /// [`Fetching`]: at most one is sent a frame, and `ask` runs last.
     fn asked(app: &mut App) -> Vec<(u64, String)> {
         let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
-        sent.into_iter()
-            .filter_map(|SendNet(c)| match c {
-                NetCommand::Detail { seq, key } => Some((seq, key)),
-                _ => None,
-            })
-            .collect()
+        let fetches = sent.iter().filter(|SendNet(c)| matches!(c, NetCommand::Fetch(_))).count();
+        assert!(fetches <= 1, "{fetches} fetches in one frame");
+        let asked = app.world().resource::<Fetching>().asked.clone();
+        (fetches == 1).then(|| asked.expect("a fetch sent is the one asked")).into_iter().collect()
     }
 
     fn select(app: &mut App, name: &str) {

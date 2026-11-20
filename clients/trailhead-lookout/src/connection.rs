@@ -3,16 +3,14 @@
 //! Every command system runs only in [`Connection::Live`], and the UI greys out its controls otherwise, showing
 //! [`ConnectionStatus::reason`].
 
+use std::sync::Mutex;
+
 use bevy::prelude::*;
 use trailhead_shell::mirror::{MirrorPlugin, apply_sync};
 use trailhead_shell::sync::SyncItem;
 
 use crate::commands::{CommandsPlugin, Reply};
-use crate::detail::{DetailPlugin, DetailReply};
-use crate::factory::{FactoryItem, FactoryPlugin, FactoryUpdate, apply_factory};
-use crate::logs::{LogItem, LogsPlugin};
-use crate::net::{ApiAccess, Link, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
-use crate::search::{SearchPlugin, SearchReply};
+use crate::net::{ApiAccess, Link, LinkJob, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
 
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Connection {
@@ -69,34 +67,40 @@ pub struct ConnectionPlugin {
     config: NetConfig,
     /// A control plane endpoint id to dial at start; defaults to the one dialed last time.
     target: Option<String>,
+    /// The app's work while a control plane is held, handed to the net thread when the plugin is built.
+    jobs: Mutex<Vec<Box<dyn LinkJob>>>,
 }
 
 impl ConnectionPlugin {
     pub fn new(config: NetConfig, target: Option<String>) -> Self {
         let target = target.or_else(|| config.saved_target());
-        ConnectionPlugin { config, target }
+        ConnectionPlugin { config, target, jobs: Mutex::default() }
+    }
+
+    /// Runs `jobs` on the net thread while a control plane is held.
+    #[must_use]
+    pub fn with_jobs(self, jobs: impl IntoIterator<Item = Box<dyn LinkJob>>) -> Self {
+        self.jobs.lock().expect("jobs lock").extend(jobs);
+        self
     }
 }
 
 impl Plugin for ConnectionPlugin {
     fn build(&self, app: &mut App) {
+        let jobs = std::mem::take(&mut *self.jobs.lock().expect("jobs lock"));
         app.init_state::<Connection>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
             .insert_resource(Dialed(self.target.clone()))
-            .add_plugins((MirrorPlugin, FactoryPlugin, CommandsPlugin, SearchPlugin, DetailPlugin, LogsPlugin))
+            .add_plugins((MirrorPlugin, CommandsPlugin))
             .add_message::<SendNet>()
-            .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone())))
-            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync).before(apply_factory)).chain());
+            .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone(), jobs)))
+            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync)).chain());
     }
 }
 
-fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>, mut factory: MessageWriter<FactoryItem>) {
+fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>) {
     for SendNet(command) in commands.read() {
-        if matches!(command, NetCommand::Disconnect) {
-            // The status stream goes with the control plane; the mirror keeps its last state, marked unreachable.
-            factory.write(FactoryItem(FactoryUpdate::Unreachable));
-        }
         net.0.send(command.clone());
     }
 }
@@ -111,11 +115,7 @@ fn apply_events(
     mut dialed: ResMut<Dialed>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
-    mut factory: MessageWriter<FactoryItem>,
     mut replies: MessageWriter<Reply>,
-    mut searches: MessageWriter<SearchReply>,
-    mut logs: MessageWriter<LogItem>,
-    mut details: MessageWriter<DetailReply>,
 ) {
     for event in net.0.drain() {
         match event {
@@ -129,20 +129,9 @@ fn apply_events(
             NetEvent::Reply(reply) => {
                 replies.write(reply);
             }
-            NetEvent::Search(reply) => {
-                searches.write(reply);
-            }
-            NetEvent::Logs(update) => {
-                logs.write(LogItem(update));
-            }
-            NetEvent::Detail(reply) => {
-                details.write(reply);
-            }
+            NetEvent::Fetched(fetched) => commands.queue(move |world: &mut World| fetched.deliver(world)),
             NetEvent::Sync(item) => {
                 sync.write(item);
-            }
-            NetEvent::Factory(update) => {
-                factory.write(FactoryItem(update));
             }
         }
     }
@@ -166,11 +155,7 @@ mod tests {
             .init_resource::<Dialed>()
             .add_message::<SendNet>()
             .add_message::<SyncItem>()
-            .add_message::<FactoryItem>()
             .add_message::<Reply>()
-            .add_message::<SearchReply>()
-            .add_message::<LogItem>()
-            .add_message::<DetailReply>()
             .insert_resource(Net(handle))
             .add_systems(PreUpdate, (forward_commands, apply_events).chain());
         (app, events)
@@ -238,5 +223,19 @@ mod tests {
         events.send(NetEvent::Dialed(None)).unwrap();
         app.update();
         assert_eq!(dialed(&app), None);
+    }
+
+    #[derive(Message, Debug, PartialEq, Eq)]
+    struct Answer(Option<u8>);
+
+    #[tokio::test]
+    async fn a_fetched_answer_arrives_as_the_apps_own_message() {
+        let (mut app, events) = app();
+        app.add_message::<Answer>();
+        let fetch = crate::net::Fetch::new(|api| async move { Answer(api.map(|_| 1)) });
+        events.send(NetEvent::Fetched(fetch.run(None).await)).unwrap();
+        app.update();
+        let got: Vec<_> = app.world_mut().resource_mut::<Messages<Answer>>().drain().collect();
+        assert_eq!(got, [Answer(None)], "not live, so no client");
     }
 }

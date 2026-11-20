@@ -14,7 +14,7 @@ use trailhead_model::SearchHit;
 
 use crate::board::Filter;
 use crate::connection::{Connection, SendNet};
-use crate::net::NetCommand;
+use crate::net::{Fetch, NetCommand};
 
 /// How long the query has to sit unchanged before it is put to the server.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
@@ -38,7 +38,7 @@ pub struct DeepHit {
     pub snippet: String,
 }
 
-/// The server's answer to a search, as the net thread passes it on.
+/// The server's answer to a search, as the net thread hands it back.
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct SearchReply {
     /// Which ask this answers.
@@ -161,7 +161,21 @@ fn ask(
     asking.next += 1;
     let seq = asking.next;
     asking.asked = Some((seq, wanted.to_string()));
-    net.write(SendNet(NetCommand::Search { seq, query: wanted.to_string() }));
+    net.write(SendNet(NetCommand::Fetch(search(seq, wanted.to_string()))));
+}
+
+/// The read that searches for `query`, answered with `seq`.
+fn search(seq: u64, query: String) -> Fetch {
+    Fetch::new(move |api| {
+        let query = query.clone();
+        async move {
+            let result = match api {
+                Some(api) => fetch(&api, &query).await,
+                None => Err("not connected".into()),
+            };
+            SearchReply { seq, result }
+        }
+    })
 }
 
 /// Keeps an answer only if it is to the ask in flight and the query is still the one asked.
@@ -222,14 +236,14 @@ mod tests {
         asked
     }
 
+    /// The searches sent since the last call. A read is opaque, so what it asks is taken from [`Asking`]: at most
+    /// one is sent a frame, and `ask` runs last.
     fn drain(app: &mut App) -> Vec<(u64, String)> {
         let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
-        sent.into_iter()
-            .filter_map(|SendNet(c)| match c {
-                NetCommand::Search { seq, query } => Some((seq, query)),
-                _ => None,
-            })
-            .collect()
+        let fetches = sent.iter().filter(|SendNet(c)| matches!(c, NetCommand::Fetch(_))).count();
+        assert!(fetches <= 1, "{fetches} searches in one frame");
+        let asked = app.world().resource::<Asking>().asked.clone();
+        (fetches == 1).then(|| asked.expect("a search sent is the one asked")).into_iter().collect()
     }
 
     fn type_query(app: &mut App, query: &str) {
