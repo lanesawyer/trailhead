@@ -37,6 +37,9 @@ pub struct Rule {
     pub fix: &'static str,
     /// Whether it looks inside tests, which build their own fixtures (a test may name a color to check a theme).
     pub in_tests: bool,
+    /// Whether it also looks at `Cargo.toml` files, whose lines it gets with `path` ending in `.toml` and `#` comments
+    /// stripped.
+    pub manifest: bool,
     /// Whether `line` steps off the system.
     pub finds: fn(&Line) -> bool,
 }
@@ -65,6 +68,7 @@ pub const NO_FEATHERS: Rule = Rule {
     name: "no-feathers",
     fix: "use (or grow) the trailhead-ui kit instead of feathers",
     in_tests: true,
+    manifest: true,
     finds: |line| ["feathers::", "bevy_feathers"].iter().any(|needle| line.code.contains(needle)),
 };
 
@@ -73,6 +77,7 @@ pub const COLOR_LITERAL: Rule = Rule {
     name: "color-literal",
     fix: "name a token (the kit's `token::*`, or an app's own painted where its theme is built)",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         const LITERALS: [&str; 10] = [
             "Color::srgb",
@@ -95,6 +100,7 @@ pub const PALETTE: Rule = Rule {
     name: "palette",
     fix: "name a token; the palette is for where a theme is built",
     in_tests: false,
+    manifest: false,
     finds: |line| has_word(line.code, "palette::"),
 };
 
@@ -103,6 +109,7 @@ pub const RAW_COLOR: Rule = Rule {
     name: "raw-color",
     fix: "use BackgroundTone, BorderTone, TextTone or a Surface",
     in_tests: false,
+    manifest: false,
     finds: |line| ["BackgroundColor", "BorderColor", "TextColor"].iter().any(|word| has_word(line.code, word)),
 };
 
@@ -112,6 +119,7 @@ pub const FEATHERS_COLOR: Rule = Rule {
     name: "feathers-color",
     fix: "name a kit token (`token::*`) in a tone component",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         has_word(line.code, "tokens::")
             || ["ThemeBackgroundColor(", "ThemeBorderColor(", "ThemeTextColor("].iter().any(|c| has_word(line.code, c))
@@ -123,6 +131,7 @@ pub const FONT_SIZE: Rule = Rule {
     name: "font-size",
     fix: "use a `size::*` (add one with a doc comment if none fits)",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         ["FontSize::Px(", "font_size(", "font_size: "].iter().any(|call| number_after(line.code, call))
             || typed_const(line.code, &["FONT", "TEXT_SIZE"])
@@ -134,6 +143,7 @@ pub const SPACING: Rule = Rule {
     name: "spacing",
     fix: "use a `space::*` (add one with a doc comment if none fits)",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         typed_const(line.code, &["GAP", "INSET", "INDENT", "MARGIN", "PADDING"])
             || (["gap", "padding", "margin"].iter().any(|word| line.code.contains(word)) && typed_px(line.code))
@@ -145,6 +155,7 @@ pub const RADIUS: Rule = Rule {
     name: "radius",
     fix: "use a `radius::*`",
     in_tests: false,
+    manifest: false,
     finds: |line| line.code.contains("radius") && typed_px(line.code),
 };
 
@@ -153,6 +164,7 @@ pub const STROKE: Rule = Rule {
     name: "stroke",
     fix: "use a `stroke::*`",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         let code = line.code.replace("border_radius", "");
         has_word(&code, "border") && typed_px(&code)
@@ -164,6 +176,7 @@ pub const POSITION: Rule = Rule {
     name: "position",
     fix: "use a `space::*`, or a named constant saying what the offset is for",
     in_tests: false,
+    manifest: false,
     finds: |line| {
         ["top:", "left:", "right:", "bottom:"].iter().any(|side| has_word(line.code, side)) && typed_px(line.code)
     },
@@ -190,7 +203,7 @@ pub fn check(crate_root: impl AsRef<Path>, dirs: &[&str], rules: &[Rule], allowe
             }
             let line = Line { path: &relative, code, in_tests };
             for rule in rules {
-                if (in_tests && !rule.in_tests) || (toml && rule.name != NO_FEATHERS.name) || !(rule.finds)(&line) {
+                if (in_tests && !rule.in_tests) || (toml && !rule.manifest) || !(rule.finds)(&line) {
                     continue;
                 }
                 match allowed.iter().position(|a| a.path == relative && (a.rule == rule.name || a.rule == "*")) {
@@ -392,6 +405,26 @@ mod tests {
         let found = check(&root, &["src"], &[SPACING, COLOR_LITERAL, NO_FEATHERS], &[]);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!(found[0].starts_with("src/view.rs:6: [no-feathers]"), "{found:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_rule_sees_a_manifest_only_if_it_says_so() {
+        let root = std::env::temp_dir().join(format!("trailhead-ui-lint-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "name = \"x\"\nbevy_feathers = \"1\" # why\n").unwrap();
+        let named = Rule {
+            name: "named",
+            fix: "",
+            in_tests: false,
+            manifest: true,
+            finds: |line| line.path == "Cargo.toml" && line.code.starts_with("name"),
+        };
+        let silent = Rule { name: "silent", manifest: false, ..named };
+        let found = check(&root, &["Cargo.toml"], &[named, silent, NO_FEATHERS], &[]);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found[0].starts_with("Cargo.toml:1: [named]"), "{found:?}");
+        assert!(found[1].starts_with("Cargo.toml:2: [no-feathers]"), "{found:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -8,6 +8,7 @@ const STATUS_LABEL: Rule = Rule {
     name: "status-label",
     fix: "show a status with widgets::status_label",
     in_tests: false,
+    manifest: false,
     finds: formats_a_status,
 };
 
