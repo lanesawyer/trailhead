@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use trailhead_ui::Icon;
+use trailhead_ui::{Icon, Theme};
 
 mod rail;
 mod store;
@@ -73,6 +73,10 @@ pub trait ShellApp: Send + Sync + 'static {
 
     /// Adds what spawns and draws. Only a windowed shell calls it, after [`ShellApp::build`].
     fn build_ui(&self, _app: &mut App) {}
+
+    /// Paints the app's own tokens onto the theme every app shares: the colors that encode its data
+    /// (`Theme::paint`) and its aliases of the kit's meanings (`Theme::alias`).
+    fn paint(&self, _theme: &mut Theme) {}
 }
 
 /// The shell's own entry in the [`LocalStore`].
@@ -105,6 +109,15 @@ impl ShellPlugin {
     pub fn windowed(mut self) -> Self {
         self.windowed = true;
         self
+    }
+
+    /// The kit's theme with every app's tokens painted on, for the kit's `ThemePlugin`.
+    pub fn theme(&self) -> Theme {
+        let mut theme = Theme::new();
+        for shell_app in &self.apps {
+            shell_app.paint(&mut theme);
+        }
+        theme
     }
 
     /// Keeps the [`LocalStore`] in this directory, one file an app. Without it nothing outlives the process.

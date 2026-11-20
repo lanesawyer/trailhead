@@ -147,9 +147,15 @@ pub fn comment_icon(kind: CommentKind) -> Icon {
     }
 }
 
-/// The kit's theme with Lookout's tokens added, which `main.rs` hands to the kit's `ThemePlugin`.
+/// The kit's theme with Lookout's tokens added.
 pub fn theme() -> Theme {
     let mut theme = Theme::new();
+    paint(&mut theme);
+    theme
+}
+
+/// Adds Lookout's tokens to a theme, which the shell does for each of its apps.
+pub fn paint(theme: &mut Theme) {
     // The most urgent priority is the kit's danger red.
     theme.alias(&token::PRIORITY_1, &token::STATUS_DANGER);
     theme.alias(&token::PENDING, &token::TEXT_DIM);
@@ -194,7 +200,6 @@ pub fn theme() -> Theme {
 
     theme.paint(&token::AGENT, Color::srgb(0.95, 0.75, 0.3));
     theme.paint(&token::AGENT_TEXT, Color::BLACK);
-    theme
 }
 
 #[cfg(test)]

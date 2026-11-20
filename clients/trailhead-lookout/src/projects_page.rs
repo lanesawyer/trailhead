@@ -403,7 +403,8 @@ mod tests {
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
-            .init_state::<View>()
+            .insert_state(trailhead_shell::ActiveApp(crate::LOOKOUT))
+            .add_sub_state::<View>()
             .add_plugins((MirrorPlugin, ProjectsPageUiPlugin));
         let projects = vec![
             project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead"})),

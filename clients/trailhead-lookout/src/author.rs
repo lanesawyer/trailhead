@@ -1109,11 +1109,11 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin)).init_state::<Connection>().init_state::<View>().add_plugins((
-            MirrorPlugin,
-            CommandsPlugin,
-            AuthorPlugin,
-        ));
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Connection>()
+            .insert_state(trailhead_shell::ActiveApp(crate::LOOKOUT))
+            .add_sub_state::<View>()
+            .add_plugins((MirrorPlugin, CommandsPlugin, AuthorPlugin));
         app.world_mut().resource_mut::<Outbox>().backoff = Duration::ZERO;
         app.world_mut().write_message(crate::fixture::sync_event(json!({
             "id": 1, "entity": "task", "entity_id": sid("t1"), "kind": "task.updated", "after": task(),

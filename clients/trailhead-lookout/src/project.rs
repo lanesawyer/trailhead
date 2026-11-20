@@ -318,7 +318,7 @@ mod tests {
     fn app(tasks: Vec<Value>) -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, StatesPlugin)).add_plugins((MirrorPlugin, BoardPlugin, ProjectPlugin));
-        app.init_state::<View>();
+        app.insert_state(trailhead_shell::ActiveApp(crate::LOOKOUT)).add_sub_state::<View>();
         let projects = vec![
             project_json(json!({"id": "p1", "key": "TRAIL", "name": "Trailhead"})),
             project_json(json!({"id": "p2", "key": "OPS"})),

@@ -26,6 +26,7 @@ pub use column::{
 };
 pub use page::page_node;
 pub use theme::{
-    comment_icon, grade_tone, priority_tone, sandbox_token, status_label, status_token, status_tone, theme, token,
+    comment_icon, grade_tone, paint, priority_tone, sandbox_token, status_label, status_token, status_tone, theme,
+    token,
 };
 pub use trailhead_ui::*;

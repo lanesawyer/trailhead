@@ -263,6 +263,11 @@ fn tidy_controls(
     });
 }
 
+/// Closes the inspector when another app is shown, so it doesn't stay open over that app.
+fn deselect(mut selection: ResMut<Selection>) {
+    selection.set_if_neq(Selection(None));
+}
+
 /// Keeps the [`Selection`] and the panel's contents from the mirror.
 pub struct InspectorPlugin;
 
@@ -309,6 +314,7 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_inline_edited)
             .add_observer(on_inline_chosen)
             .add_systems(Startup, spawn_panel)
+            .add_systems(OnExit(trailhead_shell::ActiveApp(crate::LOOKOUT)), deselect)
             .add_systems(Update, (answer_edits, tidy_controls.after(settle).before(sync_panel)))
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(

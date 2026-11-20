@@ -14,8 +14,10 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Dependency, Project, Status, Task, User};
+use trailhead_shell::ActiveApp;
 use uuid::Uuid;
 
+use crate::LOOKOUT;
 use crate::author::{Act, Authoring};
 use crate::connection::Connection;
 use crate::factory::{FactoryStatus, PrLink, pr_link};
@@ -29,8 +31,11 @@ use crate::widgets::{
     priority_tone, select, space, status_label, token, tool_button,
 };
 
-/// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]).
-#[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+/// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]). It exists only
+/// while Lookout is the app the shell shows, so switching to another app leaves the view and tears its panel down;
+/// coming back starts on the board.
+#[derive(SubStates, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[source(ActiveApp = ActiveApp(LOOKOUT))]
 pub enum View {
     #[default]
     Board,
@@ -84,7 +89,7 @@ pub struct BoardUiPlugin;
 impl Plugin for BoardUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(BoardPlugin)
-            .init_state::<View>()
+            .add_sub_state::<View>()
             .add_systems(OnEnter(View::Board), spawn_panel)
             .add_systems(OnExit(View::Board), (save_scroll, despawn_panel).chain())
             .init_resource::<BoardScroll>()

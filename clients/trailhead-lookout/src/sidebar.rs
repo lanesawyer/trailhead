@@ -3,7 +3,8 @@
 //! ([`crate::usage`]), and a footer with the connection chip and settings. The places scroll between the search box
 //! and the usage card, which stays put with the footer.
 //!
-//! It is spawned once and updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
+//! It is spawned when Lookout becomes the app the shell shows, torn down when another app does, and in between
+//! updated in place: the projects follow the mirror through [`Keyed`], the page shown is marked
 //! on its [`NavItem`], and the chip is edited with [`ChipEdit`]. Searching shows the results on the board.
 
 use std::collections::HashMap;
@@ -14,8 +15,10 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::{Project, ProjectStatus, Task};
+use trailhead_shell::ActiveApp;
 use uuid::Uuid;
 
+use crate::LOOKOUT;
 use crate::author::Act;
 use crate::board::{Filter, View};
 use crate::connection::{Connection, ConnectionStatus};
@@ -102,7 +105,8 @@ impl Plugin for SidebarUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Entries>()
             .init_resource::<UsageMeterEntities>()
-            .add_systems(Startup, spawn_sidebar)
+            .add_systems(OnEnter(ActiveApp(LOOKOUT)), spawn_sidebar)
+            .add_systems(OnExit(ActiveApp(LOOKOUT)), despawn_sidebar)
             .add_observer(on_nav)
             .add_systems(
                 Update,
@@ -115,7 +119,8 @@ impl Plugin for SidebarUiPlugin {
                     gate_new_task,
                     sync_usage,
                 )
-                    .chain(),
+                    .chain()
+                    .run_if(in_state(ActiveApp(LOOKOUT))),
             );
     }
 }
@@ -165,6 +170,20 @@ fn spawn_sidebar(mut commands: Commands) {
     commands
         .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonKind::Plain))
         .insert((SettingsButton, ChildOf(footer)));
+}
+
+/// Takes the sidebar down with what was kept of its rows, so the next one starts from nothing.
+fn despawn_sidebar(
+    mut commands: Commands,
+    sidebars: Query<Entity, With<Sidebar>>,
+    mut entries: ResMut<Entries>,
+    mut meters: ResMut<UsageMeterEntities>,
+) {
+    for sidebar in &sidebars {
+        commands.entity(sidebar).despawn();
+    }
+    *entries = Entries::default();
+    *meters = UsageMeterEntities::default();
 }
 
 fn on_nav(activate: On<Activate>, to: Query<&NavTo>, mut next: ResMut<NextState<View>>, mut commands: Commands) {
@@ -397,7 +416,8 @@ mod tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
             .init_state::<Connection>()
-            .init_state::<View>()
+            .insert_state(trailhead_shell::ActiveApp(crate::LOOKOUT))
+            .add_sub_state::<View>()
             .init_resource::<ConnectionStatus>()
             .init_resource::<FactoryStatus>()
             .add_plugins((MirrorPlugin, BoardPlugin, ProjectPlugin, SidebarUiPlugin));
@@ -419,6 +439,34 @@ mod tests {
         for _ in 0..4 {
             app.update();
         }
+    }
+
+    #[test]
+    fn showing_another_app_takes_the_sidebar_and_the_view_down_and_coming_back_builds_them_again() {
+        let mut app = app();
+        let projects = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<&NavTo>().iter(world).filter(|to| matches!(to, NavTo::Project(_))).count()
+        };
+        let sidebars = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<&Sidebar>().iter(world).count()
+        };
+        let show = |app: &mut App, id| {
+            app.world_mut().resource_mut::<NextState<ActiveApp>>().set(ActiveApp(id));
+            settle(app);
+        };
+        assert_eq!((sidebars(&mut app), projects(&mut app)), (1, 2));
+        app.world_mut().resource_mut::<NextState<View>>().set(View::Map);
+        settle(&mut app);
+
+        show(&mut app, trailhead_shell::AppId("another"));
+        assert_eq!((sidebars(&mut app), projects(&mut app)), (0, 0));
+        assert!(!app.world().contains_resource::<State<View>>(), "the view goes with the app");
+
+        show(&mut app, LOOKOUT);
+        assert_eq!((sidebars(&mut app), projects(&mut app)), (1, 2), "its projects are listed again from the mirror");
+        assert_eq!(*app.world().resource::<State<View>>().get(), View::Board);
     }
 
     /// Every entity under the sidebar, in order.

@@ -1,6 +1,9 @@
-//! Lookout, the Trailhead factory's Bevy client (`docs/factory/ui.md`).
+//! Lookout, the Trailhead factory's Bevy client (`docs/factory/ui.md`), and the factory's app in the Trailhead shell
+//! (`docs/app-platform.md`).
 
 use bevy::prelude::*;
+use trailhead_shell::{AppId, Manifest, ShellApp};
+use trailhead_ui::{Icon, Theme};
 
 pub mod author;
 pub mod board;
@@ -29,32 +32,84 @@ pub mod sync;
 pub mod usage;
 pub mod widgets;
 
-/// The app's systems and resources, without a window or renderer, so tests can run it headless.
-pub struct LookoutPlugin;
+/// Lookout's id in the shell.
+pub const LOOKOUT: AppId = AppId("lookout");
 
-impl Plugin for LookoutPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup);
+/// Lookout as the shell holds it.
+pub struct Lookout {
+    config: net::NetConfig,
+    /// The control plane to dial, ahead of the one dialed last time.
+    target: Option<String>,
+    /// A user token to sign in with at startup.
+    token: Option<String>,
+    /// The queue task a task queued for the factory goes under, ahead of the factory's own queues.
+    queue: Option<String>,
+}
+
+impl Lookout {
+    pub fn new(config: net::NetConfig) -> Self {
+        Lookout { config, target: None, token: None, queue: None }
+    }
+
+    #[must_use]
+    pub fn dialing(mut self, target: Option<String>) -> Self {
+        self.target = target;
+        self
+    }
+
+    #[must_use]
+    pub fn signing_in_with(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
+
+    #[must_use]
+    pub fn queueing_under(mut self, queue: Option<String>) -> Self {
+        self.queue = queue;
+        self
     }
 }
 
-fn setup(mut commands: Commands) {
-    commands.spawn(Camera2d);
-}
+impl ShellApp for Lookout {
+    fn manifest(&self) -> Manifest {
+        Manifest { id: LOOKOUT, name: "Lookout", icon: Icon::Board }
+    }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    /// The connection is Lookout's for now. It is the shell's to own once a second app needs the server
+    /// (TRAIL-1577), and then this adds only Lookout's own logic.
+    fn build(&self, app: &mut App) {
+        app.add_plugins(connection::ConnectionPlugin::new(self.config.clone(), self.target.clone()));
+    }
 
-    #[test]
-    fn builds_headless_and_runs_one_update() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins).add_plugins(LookoutPlugin);
-        app.update();
+    fn build_ui(&self, app: &mut App) {
+        app.add_plugins((
+            board::BoardUiPlugin,
+            map::MapUiPlugin,
+            project::ProjectUiPlugin,
+            project_form::ProjectFormUiPlugin,
+            projects_page::ProjectsPageUiPlugin,
+            author::AuthorUiPlugin,
+            inspector::InspectorUiPlugin,
+            connect::ConnectUiPlugin,
+            settings::SettingsUiPlugin,
+            sidebar::SidebarUiPlugin,
+            icon::IconUiPlugin,
+        ));
+        let (queue, token) = (self.queue.clone(), self.token.clone());
+        app.add_systems(Startup, move |mut authoring: ResMut<author::Authoring>| {
+            if let Some(queue) = &queue {
+                authoring.queue = queue.clone();
+                authoring.pinned = true;
+            }
+        })
+        .add_systems(Startup, move |mut send: MessageWriter<connection::SendNet>| {
+            if let Some(token) = &token {
+                send.write(connection::SendNet(net::NetCommand::Login(token.clone())));
+            }
+        });
+    }
 
-        let world = app.world_mut();
-        assert_eq!(world.query::<&Camera2d>().iter(world).count(), 1);
-        // An empty full-window node would sit over the board whenever it spawned after it, and take every click.
-        assert_eq!(world.query::<&Node>().iter(world).count(), 0);
+    fn paint(&self, theme: &mut Theme) {
+        widgets::paint(theme);
     }
 }
