@@ -31,13 +31,36 @@ Lookout always ships with the shell: it is how asked-for work is watched, answer
 
 ## The contract between shell and app
 
-The most load-bearing piece, and not yet designed: every app is written against it, so a change to it later is a change to every app. It is settled by a spike before the shell is built, with Lookout and the example app behind one trait.
+Every app is written against it, so a change to it later is a change to every app. A spike settled its shape (TRAIL-1575): the `trailhead-shell` crate (`clients/trailhead-shell`), with Lookout and the example app (`clients/trailhead-app-example`) both behind it. **Built** below means the spike has it and its tests hold it.
 
-- **What the shell hands an app. Open.** A place to draw, a handle to its data, settings, notifications, commands.
-- **Sync and mirrors as a shared layer. Leaning, to be checked in the spike.** Lookout's own sync and mirror code would become what every app reads its data through, so an app declares what it watches and never writes a sync loop. The spike has to show that apps need it in that shape.
-- **A switched-away app is torn down. Leaning.** It is rebuilt when switched back to. Keeping apps alive is a later fix if the rebuild is slow enough to annoy.
-- **Local storage for what must survive. Leaning.** The shell gives each app a small store on the client's disk for things like unsent drafts and the view it was on, which is also what a relaunch restores from.
-- **Reading other apps' data. Leaning.** An app's manifest names the collections of other apps it reads, and tasks if it reads those. Sharing is the usual case; an app can also mark a collection as its own alone. Adding a line is a grade 3 change. Search and quick capture across apps belong to the shell.
+**An app is a `ShellApp`. Built.** One type per app crate, with four parts:
+
+| Part | What it is |
+| --- | --- |
+| `manifest` | Its id, the name a person sees, and its icon on the rail |
+| `build` | Its state, resources and logic. Runs headless, so an app is tested without a window |
+| `build_ui` | What spawns and draws. Only a windowed shell calls it |
+| `paint` | Its own tokens on the theme all apps share: the colors that encode its data |
+
+**The shell says which app is shown, and an app hangs everything on that. Built.** The shown app is the `ActiveApp` state. An app spawns what it draws on entering its own value and despawns it on leaving, runs its systems only in it, and makes its own views a sub-state of it. Lookout's `View` is such a sub-state, so switching away leaves the view, which tears its panel down with no code of Lookout's own.
+
+**Teardown is of what is drawn, not of what is known. Built.** A switched-away app has no entities on screen, but its logic keeps running: Lookout's mirror stays in step with the server while another app is shown, so coming back needs no reload. Keeping an app's drawing alive is the later fix if rebuilding it is slow enough to annoy.
+
+**A place to draw is the window beside the rail. Built.** The shell hands over no parent entity. An app fills the kit's `beside_rail`, or has a kit `sidebar` and fills `beside_sidebar`; the kit moves both over when a rail exists. A shell with one app has no rail and the app has the whole window, so Lookout alone looks as it did.
+
+**Local storage. Built.** `LocalStore` is a small JSON file per app on the client's disk, for what must outlive a switch or a restart: the view it was on, an unsent draft. An app reads it when it is built and writes to it when the thing changes; the shell saves the file after that frame. The shell keeps the app last shown there. It is not the app's data, which lives on the server.
+
+**Sync and mirrors as a shared layer. Leaning yes, not yet moved.** Lookout's connection (`connection.rs`, `net.rs`), commands (`commands.rs`), sync and mirror (`sync.rs`, `mirror.rs`) name nothing of Lookout's views: the mirror is entities keyed by kind and Trailhead id, replaced when a newer version arrives. They move to the shell as they are, as the task engine's mirror, which Lookout and Ticklist both read (TRAIL-1577). The app data store later gets a second mirror of the same shape, keyed by collection.
+
+**Reading other apps' data. Leaning.** An app's manifest names the collections of other apps it reads, and tasks if it reads those. Sharing is the usual case; an app can also mark a collection as its own alone. Adding a line is a grade 3 change. Search and quick capture across apps belong to the shell.
+
+What the spike found that the shell still has to take on (TRAIL-1577):
+
+- **The window is still set up in Lookout's binary**, which is the shell's assembly for now: the window and its icon, the theme choice and its file, the kit's plugins. The shell owns these; an assembly crate then only lists apps, as the apps repo's `shell/` will.
+- **The connection is added by Lookout's `build`**, and the panel that says why it is not live is spawned whatever app is shown. Both are the shell's.
+- **Coming back to an app starts on its first view.** Lookout should keep its view in the `LocalStore`.
+- **An observer is not gated by the state.** A system takes `run_if(in_state(..))`; an observer added in `build` hears events while another app is shown, so each one checks that the entity is its own. The shell should offer a way to say it once.
+- **Apps need the shell's test helpers** (a windowed test app, a stand-in second app). The example app had to write its own copies; the shell should ship them behind a `test-support` feature, as the kit does.
 
 ## The kit
 
@@ -97,7 +120,7 @@ Numbered within this proposal; where they sit among PLAN.md's phases is decided 
 
 Lane drives the order and decides when a phase is done. The groundwork (through the apps repo, at least) is done in interactive Claude Code sessions, not handed to the factory; once the shell can take a request, work moves into the app itself.
 
-Before any of it: the Lookout and factory changes now in review are merged, grade 3's gates are decided (see [Trust, grades and undo](#trust-grades-and-undo)), and the spike on [the contract between shell and app](#the-contract-between-shell-and-app) is done.
+Before any of it: the Lookout and factory changes now in review are merged, grade 3's gates are decided (see [Trust, grades and undo](#trust-grades-and-undo)). The spike on [the contract between shell and app](#the-contract-between-shell-and-app) is done (TRAIL-1575).
 
 1. **The kit as a library.** The lint that apps are held to, and the widgets the todo app will need.
 2. **The shell.** A shell crate (window, connection, settings, app switcher, the app trait); Lookout becomes an app inside it; `trailhead app` launches it. A refactor with no new features.
