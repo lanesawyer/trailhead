@@ -33,7 +33,7 @@ Lookout always ships with the shell: it is how asked-for work is watched, answer
 
 Every app is written against it, so a change to it later is a change to every app. A spike settled its shape (TRAIL-1575): the `trailhead-shell` crate (`clients/trailhead-shell`), with Lookout and the example app (`clients/trailhead-app-example`) both behind it. **Built** below means the spike has it and its tests hold it.
 
-**An app is a `ShellApp`. Built.** One type per app crate, with four parts:
+**An app is a `ShellApp`. Built.** One type per app crate, with five parts:
 
 | Part | What it is |
 | --- | --- |
@@ -41,6 +41,7 @@ Every app is written against it, so a change to it later is a change to every ap
 | `build` | Its state, resources and logic. Runs headless, so an app is tested without a window |
 | `build_ui` | What spawns and draws. Only a windowed shell calls it |
 | `paint` | Its own tokens on the theme all apps share: the colors that encode its data |
+| `link_jobs` | Its own work on the net thread while a control plane is held, as `LinkJob`s (Lookout's factory status and log streams). The shell takes them once, before `build`; they report over the app's own channels. Empty by default |
 
 **The shell says which app is shown, and an app hangs everything on that. Built.** The shown app is the `ActiveApp` state. An app spawns what it draws on entering its own value and despawns it on leaving, runs its systems only in it, and makes its own views a sub-state of it. Lookout's `View` is such a sub-state, so switching away leaves the view, which tears its panel down with no code of Lookout's own.
 
@@ -50,17 +51,17 @@ Every app is written against it, so a change to it later is a change to every ap
 
 **Local storage. Built.** `LocalStore` is a small JSON file per app on the client's disk, for what must outlive a switch or a restart: the view it was on, an unsent draft. An app reads it when it is built and writes to it when the thing changes; the shell saves the file after that frame. The shell keeps the app last shown there. It is not the app's data, which lives on the server.
 
-**Sync and mirrors as a shared layer. Leaning yes, not yet moved.** Lookout's connection (`connection.rs`, `net.rs`), commands (`commands.rs`), sync and mirror (`sync.rs`, `mirror.rs`) name nothing of Lookout's views: the mirror is entities keyed by kind and Trailhead id, replaced when a newer version arrives. They move to the shell as they are, as the task engine's mirror, which Lookout and Ticklist both read (TRAIL-1577). The app data store later gets a second mirror of the same shape, keyed by collection.
+**One connection, sync and mirror, the shell's. Built (TRAIL-1577).** The shell owns the connection to the server (`net.rs`, the net thread; `connection.rs`, the `Connection` state every app gates its commands on), commands (`commands.rs`, the outbox), and the sync and mirror (`sync.rs`, `mirror.rs`): the task engine's records as entities keyed by kind and Trailhead id, replaced when a newer version arrives, which Lookout and later Ticklist both read. The binary tells the shell how to connect (`Shell::connecting`, `signing_in_with`); without that a shell has no connection. While it isn't live the shell draws the panel that says why (`connect.rs`), over whatever app is shown. An app reads the API through the net thread with a `Fetch`, whose answer comes back as the app's own message, and sends writes as commands; work of its own over the link is a `LinkJob`. Its tests stand up an in-process server with the shell's `testing` module (the `test-support` feature). The app data store later gets a second mirror of the same shape, keyed by collection.
+
+**The window is the shell's. Built (TRAIL-1577).** `Shell` opens it, titled Trailhead with the app id `trailhead`, and sets its icon; it owns the theme and its file and the kit's plugins. What it keeps on this machine (the endpoint key, the control plane dialed last, the theme, each app's `LocalStore` under `apps/`) is in `shell` under Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `clients/trailhead-desktop` is the assembly: its binary, `trailhead-shell`, reads the environment, gives the shell its apps and runs it, as the apps repo's `shell/` will.
 
 **Reading other apps' data. Leaning.** An app's manifest names the collections of other apps it reads, and tasks if it reads those. Sharing is the usual case; an app can also mark a collection as its own alone. Adding a line is a grade 3 change. Search and quick capture across apps belong to the shell.
 
-What the spike found that the shell still has to take on (TRAIL-1577):
+What the spike found that the shell still has to take on:
 
-- **The window is still set up in Lookout's binary**, which is the shell's assembly for now: the window and its icon, the theme choice and its file, the kit's plugins. The shell owns these; an assembly crate then only lists apps, as the apps repo's `shell/` will.
-- **The connection is added by Lookout's `build`**, and the panel that says why it is not live is spawned whatever app is shown. Both are the shell's.
 - **Coming back to an app starts on its first view.** Lookout should keep its view in the `LocalStore`.
 - **An observer is not gated by the state.** A system takes `run_if(in_state(..))`; an observer added in `build` hears events while another app is shown, so each one checks that the entity is its own. The shell should offer a way to say it once.
-- **Apps need the shell's test helpers** (a windowed test app, a stand-in second app). The example app had to write its own copies; the shell should ship them behind a `test-support` feature, as the kit does.
+- **Apps need the shell's test helpers** (a windowed test app, a stand-in second app). The example app had to write its own copies; the shell should ship them behind its `test-support` feature, which so far has the record fixtures and the in-process server (`testing`).
 
 ## The kit
 
