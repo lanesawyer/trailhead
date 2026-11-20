@@ -23,6 +23,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests grade and open hosts for real languages.
+trailhead-factory = { workspace = true, features = ["rust", "python", "node", "go"] }
 axum.workspace = true
 tokio.workspace = true
 base64.workspace = true

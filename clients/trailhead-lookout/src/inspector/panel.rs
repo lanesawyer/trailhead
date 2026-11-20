@@ -424,6 +424,33 @@ mod tests {
     }
 
     #[test]
+    fn tidying_waits_for_a_change() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
+        app.init_resource::<Controls>().add_systems(Update, tidy_controls.after(super::super::settle));
+        let f = fixture();
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 5,
+            projects: vec![],
+            tasks: as_json(&f.tasks),
+            agents: as_json(&f.agents),
+            ..Default::default()
+        }));
+        app.update();
+        app.update();
+        let e = app.world_mut().spawn(Control::Done).id();
+        app.update();
+        // Slipped in without a change flag: only a quiet frame's skip leaves it alone.
+        let key = (Subject::Task(sid("nope")), Action::Undo);
+        app.world_mut().resource_mut::<Controls>().bypass_change_detection().0.insert(key, e);
+        app.update();
+        assert!(app.world().get_entity(e).is_ok(), "no change, so no tidying");
+        app.world_mut().resource_mut::<Controls>().set_changed();
+        app.update();
+        assert!(app.world().get_entity(e).is_err(), "a change wakes it");
+    }
+
+    #[test]
     fn notification_events_are_not_a_tasks_last_change() {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins).add_plugins(crate::mirror::MirrorPlugin).add_plugins(InspectorPlugin);
@@ -484,16 +511,7 @@ mod tests {
     }
 
     fn escape(app: &mut App, from: Entity) {
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: bevy::input::keyboard::Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: from,
-        };
-        let window = app.world_mut().spawn_empty().id();
-        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        trailhead_ui::test_support::press_escape(app.world_mut(), from);
         app.update();
     }
 
@@ -701,6 +719,47 @@ mod tests {
     }
 
     #[test]
+    fn a_task_is_labelled_from_the_gates_of_its_own_projects_repo() {
+        use crate::factory::{FactoryStatus, RepoState};
+        let mut app = app();
+        let repo = |queue: &str, human: Vec<Grade>| RepoState {
+            control: trailhead_factory::status::ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            holding: None,
+            human_grades: Some(human),
+            usage: Vec::new(),
+        };
+        let g = |n| Grade::new(n).unwrap();
+        {
+            let mut status = app.world_mut().resource_mut::<FactoryStatus>();
+            status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
+            status.repos.insert("o/b".into(), repo("OPS-1", vec![g(2), g(4)]));
+        }
+        for (i, (id, key)) in [("pa", "TRAIL"), ("pb", "OPS")].into_iter().enumerate() {
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
+                "id": 400 + i as i64, "entity": "project", "entity_id": sid(id), "kind": "project.created",
+                "after": crate::fixture::project_json(json!({"id": id, "key": key, "name": key})),
+            })));
+        }
+        for (i, (id, key, project)) in [("t20", "TRAIL-20", "pa"), ("t21", "OPS-21", "pb")].into_iter().enumerate() {
+            app.world_mut().write_message(crate::fixture::sync_event(json!({
+                "id": 410 + i as i64, "entity": "task", "entity_id": sid(id), "kind": "task.created",
+                "after": task_json(json!({"id": id, "key": key, "project_id": project, "grade": 2})),
+            })));
+        }
+        let treeline = |app: &mut App, id: &str| {
+            app.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid(id)));
+            settle(app);
+            texts(app).into_iter().filter(|t| t.contains(" Treeline:")).collect::<Vec<_>>()
+        };
+        // The same grade falls on either side of Treeline, by the gates of the repo that works the task's project.
+        assert_eq!(treeline(&mut app, "t20"), ["Below Treeline: merges once its gates pass"]);
+        assert_eq!(treeline(&mut app, "t21"), ["Above Treeline: a person merges it"]);
+        assert_eq!(treeline(&mut app, "t20"), ["Below Treeline: merges once its gates pass"]);
+    }
+
+    #[test]
     fn a_factory_event_that_leaves_the_human_grades_alone_dresses_nothing_again() {
         use crate::factory::FactoryStatus;
         let mut app = app();
@@ -715,5 +774,67 @@ mod tests {
         app.world_mut().resource_mut::<FactoryStatus>().set_changed();
         settle(&mut app);
         assert_eq!(stamps(&mut app), before);
+    }
+
+    #[test]
+    fn a_change_in_the_projects_human_grades_relabels_the_open_picker_and_another_projects_does_not() {
+        use crate::factory::{FactoryStatus, RepoState};
+        use trailhead_factory::status::ControlState;
+        use trailhead_ui::SelectOptions;
+        let mut app = app();
+        // The task's project is only known once the mirror has it.
+        app.world_mut().write_message(SyncItem::Snapshot(Snapshot {
+            at: 6,
+            projects: vec![crate::fixture::project_json(json!({"id": "p1", "key": "TRAIL"}))],
+            tasks: vec![task_json(
+                json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "in_progress", "priority": 1, "version": 4}),
+            )],
+            agents: vec![],
+            ..Default::default()
+        }));
+        settle(&mut app);
+        let options = |app: &mut App| {
+            let world = app.world_mut();
+            let found: Vec<Vec<String>> = world
+                .query::<&SelectOptions>()
+                .iter(world)
+                .filter(|o| o.0[0].starts_with("none (the factory"))
+                .map(|o| o.0.clone())
+                .collect();
+            assert_eq!(found.len(), 1, "the task's grade select is open");
+            found.into_iter().next().unwrap()
+        };
+        let say = |app: &mut App, repo: &str, queue: &str, grades: Vec<i64>| {
+            let human = grades.into_iter().map(|g| Grade::try_from(g).unwrap()).collect();
+            app.world_mut().resource_mut::<FactoryStatus>().repos.insert(
+                repo.into(),
+                RepoState {
+                    control: ControlState::Up,
+                    queue: vec![queue.into()],
+                    last_error: None,
+                    human_grades: Some(human),
+                    holding: None,
+                    usage: Vec::new(),
+                },
+            );
+            settle(app);
+        };
+        let marked = |o: &[String]| o.iter().filter(|s| s.ends_with("above Treeline")).count();
+
+        say(&mut app, "o/r", "TRAIL-102", vec![3, 4]);
+        let first = options(&mut app);
+        assert_eq!(marked(&first), 2);
+        assert!(first[3].ends_with("above Treeline") && first[4].ends_with("above Treeline"));
+
+        // The task's own project's repo changes its mind: the open picker is relabelled.
+        say(&mut app, "o/r", "TRAIL-102", vec![1]);
+        let second = options(&mut app);
+        assert_ne!(second, first);
+        assert!(second[1].ends_with("above Treeline"));
+        assert_eq!(marked(&second), 1);
+
+        // Another project's repo changing leaves it as it was.
+        say(&mut app, "o/other", "OPS-3", vec![2, 3, 4]);
+        assert_eq!(options(&mut app), second);
     }
 }

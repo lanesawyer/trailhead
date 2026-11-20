@@ -7,6 +7,7 @@
 
 mod mise;
 mod runner;
+#[cfg(feature = "rust")]
 pub mod trim;
 mod workspace;
 

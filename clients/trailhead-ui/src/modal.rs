@@ -342,16 +342,7 @@ mod tests {
     }
 
     fn escape(app: &mut App, from: Entity) {
-        let input = KeyboardInput {
-            key_code: KeyCode::Escape,
-            logical_key: bevy::input::keyboard::Key::Escape,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window: from,
-        };
-        let window = window(app);
-        app.world_mut().trigger(FocusedInput::new(from, input, window));
+        crate::test_support::press_escape(app.world_mut(), from);
         app.update();
     }
 

@@ -64,7 +64,7 @@ flowchart LR
 | Dependencies | Workers may install; gate at merge | New dependency raises the review grade |
 | Agent profiles | Per repo | Opus, Sonnet, Haiku mapped by role; utility calls run in sandboxes too |
 | Scheduling | One sandbox per task, cap per repo | No file locking; overlap resolved through PRs and merge conflicts |
-| Review gates | Configurable per repo | Fully autonomous repos allowed; top grade uses an independent agent quorum; loosening policy always needs a human |
+| Review gates | Configurable per repo | Grades are a ladder, each adding a gate; grade 3 merges on a majority of reviewers with different jobs and only grade 4 needs a person (2026-11-19, quorum not built); fully autonomous repos allowed; loosening policy always needs a human |
 | Run state | No control-plane database | Trailhead plus the Sprites API; reconcile on boot |
 | Trailhead access | Existing REST/MCP over Trailhead's iroh tunnel | One server, one SQLite file, wherever it runs; Turso deferred |
 | Protocol | Strongly typed | Shared Rust types over Iroh; daemon name TBD |
