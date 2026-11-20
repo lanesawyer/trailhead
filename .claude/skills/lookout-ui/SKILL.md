@@ -44,6 +44,6 @@ updates, plugins. This file is only what is Lookout's own. The design is in `doc
 ## Check it in the window
 
 - `cargo clippy -p trailhead-lookout --all-targets -- -D warnings` and `cargo test -p trailhead-lookout`.
-- With a display: `timeout 15 cargo run -p trailhead-lookout` and look for panics and
-  `bevy_feathers::theme: Theme color ... not found` in the log. The rest of the checking advice is in the
-  `trailhead-ui` skill, section 6.
+- With a display: `timeout 15 cargo run -p trailhead-desktop` (the Trailhead window, which holds Lookout) and look
+  for panics and `bevy_feathers::theme: Theme color ... not found` in the log. The rest of the checking advice is in
+  the `trailhead-ui` skill, section 6.

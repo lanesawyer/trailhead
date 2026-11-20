@@ -50,7 +50,7 @@ impl Server {
 
     pub fn config(&self, lookup: &Arc<MemoryLookup>) -> NetConfig {
         NetConfig {
-            config_dir: self.dir.path().join("lookout"),
+            config_dir: self.dir.path().join("shell"),
             trailhead_config_dir: self.dir.path().join("config"),
             trailhead_data_dir: self.dir.path().join("data"),
             keyring: false,

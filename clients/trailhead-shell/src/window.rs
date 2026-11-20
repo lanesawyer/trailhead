@@ -1,5 +1,5 @@
-//! The shell's window: [`Shell`] is what a binary builds and runs. It owns what every app shares: the window, the
-//! theme and the choice of light or dark, the kit's plugins, and the [`ShellPlugin`](crate::ShellPlugin) that holds
+//! The shell's window: [`Shell`] is what a binary builds and runs. It owns what every app shares: the window, titled
+//! Trailhead and wearing its icon ([`crate::icon`]), the theme and the choice of light or dark, the kit's plugins, and the [`ShellPlugin`](crate::ShellPlugin) that holds
 //! the apps and their connection. A binary names its apps and how to connect, and nothing else.
 
 use std::path::PathBuf;
@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
 use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
 
+use crate::icon::{IconUiPlugin, primary_window};
 use crate::net::NetConfig;
 use crate::{ShellApp, ShellPlugin};
 
@@ -57,7 +58,6 @@ fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local
 /// The shell as a binary runs it: a window holding the apps given, in the order the rail shows them.
 pub struct Shell {
     apps: ShellPlugin,
-    window: Window,
     dir: PathBuf,
 }
 
@@ -65,7 +65,7 @@ impl Shell {
     /// A shell that keeps what it remembers on this machine under `dir`: the theme picked (`theme`) and what each
     /// app keeps in its [`LocalStore`](crate::LocalStore) (`apps/`).
     pub fn new(dir: PathBuf) -> Self {
-        Shell { apps: ShellPlugin::new(), window: Window::default(), dir }
+        Shell { apps: ShellPlugin::new(), dir }
     }
 
     /// Adds an app, after the ones already given.
@@ -90,19 +90,12 @@ impl Shell {
         self
     }
 
-    /// The window to open: its title, and the name the desktop finds its icon by.
-    #[must_use]
-    pub fn window(mut self, window: Window) -> Self {
-        self.window = window;
-        self
-    }
-
     /// Opens the window and runs until it is closed.
     pub fn run(self) -> AppExit {
         let theme_file = ThemeFile(self.dir.join("theme"));
         let apps = self.apps.store_in(self.dir.join("apps")).windowed();
         App::new()
-            .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(self.window), ..default() }))
+            .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
             .insert_resource(WinitSettings {
@@ -112,6 +105,7 @@ impl Shell {
             .add_plugins(ThemePlugin { theme: apps.theme(), choice: theme_file.load() })
             .insert_resource(theme_file)
             .add_plugins(UiPlugin)
+            .add_plugins(IconUiPlugin)
             .add_plugins(apps)
             .add_systems(Update, keep_theme)
             .run()

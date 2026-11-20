@@ -51,7 +51,7 @@ async fn connects_signs_in_and_goes_live() {
     until(&mut app, "needs a login", |a| reason(a) == Some(Reason::NeedsLogin)).await;
     send(&mut app, NetCommand::Login("nope".into()));
     until(&mut app, "token rejected", |a| reason(a) == Some(Reason::TokenRejected)).await;
-    // An agent's token isn't a way in: Lookout acts only as the user.
+    // An agent's token isn't a way in: the shell acts only as the user.
     send(&mut app, NetCommand::Login(rig.agent_token.clone()));
     until(&mut app, "agent token refused", |a| reason(a) == Some(Reason::AgentToken)).await;
     assert!(app.world().get_resource::<Api>().is_none());
@@ -208,7 +208,7 @@ async fn a_bad_connect_replaces_the_old_target_and_its_error_stays() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_refused_lookout_is_offline_not_redirected() {
+async fn a_refused_shell_is_offline_not_redirected() {
     let rig = Rig::new().await;
     let lookup = Arc::new(MemoryLookup::new());
     let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;

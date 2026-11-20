@@ -1,22 +1,22 @@
-//! Lookout's app icon: "TL" in light letters on the kit's accent, on a rounded square.
+//! Trailhead's window icon: "TL" in light letters on the kit's accent, on a rounded square.
 //!
 //! [`render`] draws it at any size, `examples/make_icon.rs` writes the PNGs under `assets/icon/` with it, and a test
 //! fails if the committed ones drift from it. [`IconUiPlugin`] sets the 256 px one as the window's icon, and the
-//! window's [`APP_ID`] is what the desktop matches to `lookout.desktop` for the dock's icon.
+//! window's [`APP_ID`] is what the desktop matches to `trailhead.desktop` for the dock's icon.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy::winit::WINIT_WINDOWS;
 use winit::window::Icon;
 
-use crate::widgets::palette;
+use trailhead_ui::palette;
 
-/// The window's `Window.name`: the Wayland app id and X11 `WM_CLASS`, and `StartupWMClass` in `lookout.desktop`.
-pub const APP_ID: &str = "lookout";
+/// The window's `Window.name`: the Wayland app id and X11 `WM_CLASS`, and `StartupWMClass` in `trailhead.desktop`.
+pub const APP_ID: &str = "trailhead";
 
 /// The primary window: titled, and named [`APP_ID`] so the dock finds its icon.
 pub fn primary_window() -> Window {
-    Window { title: "Lookout".into(), name: Some(APP_ID.into()), ..default() }
+    Window { title: "Trailhead".into(), name: Some(APP_ID.into()), ..default() }
 }
 
 /// The sizes the PNGs are committed in.
@@ -96,7 +96,7 @@ pub fn decode(png_bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), png::DecodingErro
     Ok((info.width, info.height, pixels))
 }
 
-/// Sets the window icon. Drawing, so only `main.rs` adds it.
+/// Sets the window icon. Drawing, so only [`Shell`](crate::Shell) adds it.
 pub struct IconUiPlugin;
 
 impl Plugin for IconUiPlugin {
@@ -151,7 +151,7 @@ mod tests {
             let worst = pixels.iter().zip(&drawn).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
             assert!(
                 worst <= TOLERANCE,
-                "{size}.png is stale (off by {worst}): run `cargo run -p trailhead-lookout --example make_icon`"
+                "{size}.png is stale (off by {worst}): run `cargo run -p trailhead-shell --example make_icon`"
             );
         }
     }
@@ -169,7 +169,8 @@ mod tests {
 
     #[test]
     fn the_primary_window_has_a_stable_app_id() {
-        assert_eq!(primary_window().name.as_deref(), Some("lookout"));
+        assert_eq!(primary_window().name.as_deref(), Some("trailhead"));
+        assert_eq!(primary_window().title, "Trailhead");
     }
 
     #[test]

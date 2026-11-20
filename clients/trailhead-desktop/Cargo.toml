@@ -1,0 +1,20 @@
+[package]
+name = "trailhead-desktop"
+description = "Trailhead on the desktop: the shell's window with the apps it ships with"
+publish = false
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "trailhead-shell"
+path = "src/main.rs"
+
+[dependencies]
+trailhead-shell.workspace = true
+trailhead-lookout.workspace = true

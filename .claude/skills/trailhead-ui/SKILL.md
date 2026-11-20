@@ -115,15 +115,17 @@ over growing a private copy.
 ## 5. Plugins and tests
 
 - **Logic and drawing are separate plugins.** `XPlugin` holds the state and observers and runs under `MinimalPlugins`
-  in tests; `XUiPlugin` spawns and draws, and only `main.rs` adds it.
-- **The app wires its own dependencies** in `main.rs` (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`,
-  which brings feathers' plugins, the kit's `UiPlugin`, winit settings). A plugin never adds `StatesPlugin` or other
-  app-level plugins for its tests' sake; the test app adds what `MinimalPlugins` lacks (TRAIL-774).
+  in tests; `XUiPlugin` spawns and draws, and only a windowed app adds it (in the Trailhead shell, an app's
+  `ShellApp::build_ui`).
+- **The binary wires the app-level dependencies** (`DefaultPlugins`, the kit's `ThemePlugin` with its `Theme`, which
+  brings feathers' plugins, the kit's `UiPlugin`, winit settings); in the Trailhead shell, `trailhead_shell::Shell`
+  does it for every app. A plugin never adds `StatesPlugin` or other app-level plugins for its tests' sake; the test
+  app adds what `MinimalPlugins` lacks (TRAIL-774).
 - **Test the logic headless.** Pure functions that turn state into a view model carry most of the tests.
 
 ## 6. Check it
 
-No headless test builds what `main.rs` builds, and a factory sandbox can't open a window.
+No headless test builds what the binary builds, and a factory sandbox can't open a window.
 
 - `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for the
   app that uses the change.
@@ -134,7 +136,8 @@ No headless test builds what `main.rs` builds, and a factory sandbox can't open 
   that will take it off, if one will); an entry that finds nothing fails, so take it off when the file is fixed.
   Never widen a rule's exceptions inside the rule to get a line through. The rules read lines, not meaning: a number
   hidden in a constant named for nothing gets past them, so name constants for what they're for.
-- With a display, run the app and look for panics and `bevy_feathers::theme: Theme color ... not found` in the log.
+- With a display, run the app (the Trailhead shell's window: `timeout 15 cargo run -p trailhead-desktop`) and look for
+  panics and `bevy_feathers::theme: Theme color ... not found` in the log.
 - When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
   `inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives. A temporary
   `info!(target: "probe", ..)` you remove before committing. Never drive a person's mouse to test it.

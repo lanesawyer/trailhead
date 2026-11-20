@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Trailhead
+Comment=Your Trailhead apps, in one window
+Exec=trailhead-shell
+Icon=trailhead
+Terminal=false
+Categories=Development;
+StartupWMClass=trailhead

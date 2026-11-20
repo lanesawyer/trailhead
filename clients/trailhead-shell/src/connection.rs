@@ -39,7 +39,7 @@ pub struct ConnectionStatus {
     pub reason: Option<Reason>,
 }
 
-/// Lookout's own endpoint id, to give to `trailhead factory allow`. Empty until the endpoint is up.
+/// The shell's own endpoint id, to give to `trailhead factory allow`. Empty until the endpoint is up.
 #[derive(Resource, Default, Debug)]
 pub struct LocalEndpoint(pub Option<String>);
 

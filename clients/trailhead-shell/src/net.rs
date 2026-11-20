@@ -1,4 +1,4 @@
-//! The net thread (`docs/factory/ui.md#architecture`): a tokio runtime on its own thread that owns Lookout's iroh
+//! The net thread (`docs/factory/ui.md#architecture`): a tokio runtime on its own thread that owns the shell's iroh
 //! endpoint, dials the control plane's `trailhead/ui/0`, serves the forwarded API on a local port, signs in, and
 //! reports to Bevy over channels. Bevy sends [`NetCommand`]s and reads [`NetEvent`]s; neither side blocks the other.
 //!
@@ -54,7 +54,7 @@ pub enum Reason {
     NeedsLogin,
     /// The server turned the token down.
     TokenRejected,
-    /// The token belongs to an agent: Lookout acts only as the user.
+    /// The token belongs to an agent: the shell acts only as the user.
     AgentToken,
     /// Confirming the token with `/v1/me`.
     SigningIn,
@@ -79,16 +79,16 @@ impl Reason {
 impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Reason::NoTarget => write!(f, "paste your factory's endpoint id to connect"),
+            Reason::NoTarget => write!(f, "paste your Trailhead server's endpoint id to connect"),
             Reason::BadTarget(e) => write!(f, "that isn't an endpoint id: {e}"),
-            Reason::Dialing => write!(f, "connecting to the factory"),
+            Reason::Dialing => write!(f, "connecting to your Trailhead server"),
             Reason::NotAllowed => {
                 write!(
                     f,
-                    "the factory doesn't allow this Lookout yet: run `trailhead factory allow` with the endpoint id shown here"
+                    "your Trailhead server doesn't allow this app yet: run `trailhead factory allow` with the endpoint id shown here"
                 )
             }
-            Reason::Unreachable(e) => write!(f, "can't reach the factory: {e}"),
+            Reason::Unreachable(e) => write!(f, "can't reach your Trailhead server: {e}"),
             Reason::NeedsLogin => write!(f, "no saved token for this server: log in with a user token"),
             Reason::TokenRejected => write!(f, "the server rejected the token: log in again"),
             Reason::AgentToken => write!(f, "that is an agent's token: log in with a user token"),
@@ -118,7 +118,7 @@ pub enum NetCommand {
 /// What the net thread tells the app.
 #[derive(Debug)]
 pub enum NetEvent {
-    /// Lookout's own endpoint id, for `trailhead factory allow`.
+    /// The shell's own endpoint id, for `trailhead factory allow`.
     Endpoint(String),
     State(Link, Option<Reason>),
     /// The control plane the net thread is holding, as its parsed endpoint id; `None` once it has none (a failed
@@ -228,7 +228,7 @@ pub struct ApiAccess {
 /// Where the net thread keeps things and how it reaches the network.
 #[derive(Clone)]
 pub struct NetConfig {
-    /// Lookout's own config directory: the endpoint key and the last control plane dialed.
+    /// The shell's own config directory: the endpoint key and the last control plane dialed.
     pub config_dir: PathBuf,
     /// Trailhead's config and data directories, where the CLI saved its tokens and instance id.
     pub trailhead_config_dir: PathBuf,
@@ -251,17 +251,18 @@ pub enum Network {
 }
 
 impl NetConfig {
-    /// The OS locations: Lookout's own directory, and the same Trailhead directories the CLI uses
-    /// (`TRAILHEAD_CONFIG_DIR` and `TRAILHEAD_DATA_DIR` override them, as for the CLI).
+    /// The OS locations: the shell's own directory, `shell` in Trailhead's config directory (`TRAILHEAD_SHELL_DIR`
+    /// overrides it), and the same Trailhead directories the CLI uses (`TRAILHEAD_CONFIG_DIR` and
+    /// `TRAILHEAD_DATA_DIR` override them, as for the CLI).
     pub fn from_env() -> Option<NetConfig> {
         let pick = |var: &str, default: Option<&Path>| {
             std::env::var_os(var).map(PathBuf::from).or_else(|| default.map(Path::to_path_buf))
         };
         let trailhead = directories::ProjectDirs::from("", "", "trailhead");
-        let lookout = directories::ProjectDirs::from("", "", "lookout")?;
+        let shell = trailhead.as_ref().map(|d| d.config_dir().join("shell"));
         let trailhead_config_dir = pick("TRAILHEAD_CONFIG_DIR", trailhead.as_ref().map(|d| d.config_dir()))?;
         Some(NetConfig {
-            config_dir: pick("LOOKOUT_CONFIG_DIR", Some(lookout.config_dir()))?,
+            config_dir: pick("TRAILHEAD_SHELL_DIR", shell.as_deref())?,
             trailhead_config_dir: trailhead_config_dir.clone(),
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
@@ -310,7 +311,7 @@ impl NetHandle {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
-            .name("lookout-net".into())
+            .name("shell-net".into())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build() {
                     Ok(rt) => rt,
@@ -620,7 +621,7 @@ impl Net {
         self.probe_hold = None;
     }
 
-    /// Reports a refusal and holds the probe off for a growing gap, so a Lookout that is refused again doesn't ask
+    /// Reports a refusal and holds the probe off for a growing gap, so a shell that is refused again doesn't ask
     /// (and fill the factory's log) at the probe rate.
     fn refused(&mut self, reason: Reason) {
         let wait = self.probe_backoff.refused();
@@ -689,14 +690,14 @@ impl Net {
             }
             Err(_) => {
                 let reason = self.diagnose(id).await;
-                // A control plane that refuses this Lookout is up, so that is told rather than hidden.
+                // A control plane that refuses this shell is up, so that is told rather than hidden.
                 match reason {
                     Reason::NotAllowed => return self.refused(reason),
                     _ => return self.set(Link::Offline, Some(reason)),
                 }
             }
         };
-        // Health answered, so the factory isn't refusing this Lookout any more.
+        // Health answered, so the factory isn't refusing this shell any more.
         if matches!(&self.probe_hold, Some((_, Reason::NotAllowed))) {
             self.release_probe();
         }
@@ -747,7 +748,7 @@ impl Net {
             }
             Err(e) => return self.set(Link::Offline, Some(Reason::Unreachable(e.to_string()))),
         };
-        // The user token only: an agent's would let Lookout act as one.
+        // The user token only: an agent's would let the shell act as one.
         if !me["agent_id"].is_null() {
             self.token = None;
             self.resume.clear();
@@ -934,7 +935,7 @@ mod tests {
         jobs: Vec<Box<dyn LinkJob>>,
     ) -> (Net, mpsc::Receiver<NetEvent>) {
         let config = NetConfig {
-            config_dir: dir.join("lookout"),
+            config_dir: dir.join("shell"),
             trailhead_config_dir: dir.join("config"),
             trailhead_data_dir: dir.join("data"),
             keyring: false,
@@ -1032,7 +1033,7 @@ mod tests {
     fn a_failed_bind_clears_the_dialed_factory() {
         let dir = tempfile::tempdir().unwrap();
         let config = NetConfig {
-            config_dir: dir.path().join("lookout"),
+            config_dir: dir.path().join("shell"),
             trailhead_config_dir: dir.path().join("config"),
             trailhead_data_dir: dir.path().join("data"),
             keyring: false,

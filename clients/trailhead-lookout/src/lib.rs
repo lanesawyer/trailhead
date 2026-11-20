@@ -15,7 +15,6 @@ pub mod detail;
 pub mod factory;
 pub mod factory_link;
 pub mod form;
-pub mod icon;
 pub mod inspector;
 pub mod logs;
 pub mod map;
@@ -91,7 +90,6 @@ impl ShellApp for Lookout {
             inspector::InspectorUiPlugin,
             settings::SettingsUiPlugin,
             sidebar::SidebarUiPlugin,
-            icon::IconUiPlugin,
         ));
         let queue = self.queue.clone();
         app.add_systems(Startup, move |mut authoring: ResMut<author::Authoring>| {

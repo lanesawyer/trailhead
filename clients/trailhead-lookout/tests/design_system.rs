@@ -43,14 +43,13 @@ fn is_http_status(code: &str) -> bool {
 /// Where Lookout steps off, and why. Add to this only with a reason; an entry that finds nothing fails.
 const ALLOWED: &[Allowed] = &[
     Allowed { path: "src/widgets/theme.rs", rule: "color-literal", why: "builds Lookout's theme" },
-    Allowed { path: "src/icon.rs", rule: "palette", why: "draws the window icon's pixels, which no theme repaints" },
     Allowed { path: "tests/design_system.rs", rule: "*", why: "names what the rules find" },
 ];
 
 #[test]
 fn lookout_keeps_to_the_design_system() {
     let rules: Vec<Rule> = lint::APP.iter().copied().chain([STATUS_LABEL]).collect();
-    let found = lint::check(env!("CARGO_MANIFEST_DIR"), &["src", "tests", "examples", "Cargo.toml"], &rules, ALLOWED);
+    let found = lint::check(env!("CARGO_MANIFEST_DIR"), &["src", "tests", "Cargo.toml"], &rules, ALLOWED);
     assert!(found.is_empty(), "\n{}", found.join("\n"));
 }
 

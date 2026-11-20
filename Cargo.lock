@@ -8179,6 +8179,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-desktop"
+version = "0.1.0"
+dependencies = [
+ "trailhead-lookout",
+ "trailhead-shell",
+]
+
+[[package]]
 name = "trailhead-factory"
 version = "0.1.0"
 dependencies = [
@@ -8254,7 +8262,6 @@ dependencies = [
  "bevy",
  "iroh",
  "jiff",
- "png",
  "reqwest",
  "serde",
  "serde_json",
@@ -8267,7 +8274,6 @@ dependencies = [
  "trailhead-ui",
  "trailhead-wire",
  "uuid",
- "winit",
 ]
 
 [[package]]
@@ -8333,6 +8339,7 @@ dependencies = [
  "bevy",
  "directories",
  "iroh",
+ "png",
  "reqwest",
  "serde",
  "serde_json",
@@ -8347,6 +8354,7 @@ dependencies = [
  "trailhead-ui",
  "trailhead-wire",
  "uuid",
+ "winit",
 ]
 
 [[package]]

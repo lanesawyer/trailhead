@@ -1,5 +1,5 @@
-//! Connecting from the window while not [`Connection::Live`]: paste the factory's endpoint id, then a user token if
-//! the server asks for one, and copy the `trailhead factory allow` command for this Lookout.
+//! Connecting from the window while not [`Connection::Live`]: paste the Trailhead server's endpoint id, then a user
+//! token if the server asks for one, and copy the `trailhead factory allow` command for this app.
 
 use bevy::clipboard::Clipboard;
 use bevy::prelude::*;
@@ -30,7 +30,7 @@ pub enum ConnectAct {
     CopyAllow,
 }
 
-/// The `trailhead factory allow` command for this Lookout, once its endpoint is up.
+/// The `trailhead factory allow` command for this app, once its endpoint is up.
 pub fn allow_command(endpoint: &LocalEndpoint) -> Option<String> {
     endpoint.0.as_ref().map(|id| format!("trailhead factory allow {id}"))
 }
@@ -102,7 +102,7 @@ struct ConnectPanel;
 #[derive(Component)]
 struct TokenRow;
 
-/// The row with the `allow` command, shown once Lookout's endpoint is up.
+/// The row with the `allow` command, shown once the endpoint is up.
 #[derive(Component)]
 struct AllowRow;
 
@@ -122,7 +122,7 @@ fn spawn_panel(mut commands: Commands) {
         .id();
     let target = input_row(
         &mut commands,
-        "Factory endpoint id",
+        "Trailhead server endpoint id",
         ConnectField::Target,
         "Connect",
         ConnectAct::Dial,
@@ -182,7 +182,7 @@ fn show(
     nodes.p1().display = shown(wants_token(&status));
     let command = allow_command(&endpoint);
     nodes.p2().display = shown(command.is_some());
-    allow.0 = command.map_or_else(String::new, |c| format!("Allow this Lookout on the factory's machine: {c}"));
+    allow.0 = command.map_or_else(String::new, |c| format!("Allow this app on your Trailhead server's machine: {c}"));
 }
 
 fn copy_allow(
