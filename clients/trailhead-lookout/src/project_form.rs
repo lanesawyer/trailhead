@@ -13,11 +13,11 @@ use bevy::ui_widgets::Activate;
 use trailhead_client::http::{self as client, Call, ProjectUpdate};
 
 use trailhead_model::{Project, ProjectStatus};
+use trailhead_shell::commands::{CommandDone, Outcome, Request, Submit};
+use trailhead_shell::connection::Connection;
 use trailhead_shell::mirror::Mirrored;
 
 use crate::author::describe;
-use crate::commands::{CommandDone, Outcome, Request, Submit};
-use crate::connection::Connection;
 use crate::form::{self, FormState};
 use crate::project::{OpenProject, ProjectPage};
 use crate::widgets::{
@@ -456,7 +456,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::commands::{CommandId, CommandsPlugin, Outbox};
+    use trailhead_shell::commands::{CommandId, CommandsPlugin, Outbox};
 
     use trailhead_shell::fixture::project;
 

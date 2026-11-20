@@ -12,10 +12,10 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use trailhead_client::http::{Call, Client, TaskUpdate};
 use trailhead_core::{Ctx, NewProject, NewTask, Principal, Store};
-use trailhead_lookout::commands::*;
-use trailhead_lookout::connection::{Connection, SendNet};
-use trailhead_lookout::net::NetCommand;
 use trailhead_model::TaskKey;
+use trailhead_shell::commands::*;
+use trailhead_shell::connection::{Connection, SendNet};
+use trailhead_shell::net::NetCommand;
 
 // ---- the Bevy side ----
 

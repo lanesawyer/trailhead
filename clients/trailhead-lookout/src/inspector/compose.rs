@@ -245,10 +245,10 @@ mod tests {
             }))
         };
         // The reply and the task's own event land in the same frame.
-        app.world_mut().write_message(crate::commands::CommandDone {
+        app.world_mut().write_message(trailhead_shell::commands::CommandDone {
             source,
-            id: crate::commands::CommandId(1),
-            outcome: crate::commands::Outcome::Ok { version: Some(5) },
+            id: trailhead_shell::commands::CommandId(1),
+            outcome: trailhead_shell::commands::Outcome::Ok { version: Some(5) },
         });
         app.world_mut().write_message(task_event(200, 5));
         app.update();

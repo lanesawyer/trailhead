@@ -44,7 +44,6 @@ serde_json.workspace = true
 uuid.workspace = true
 jiff.workspace = true
 trailhead-factory.workspace = true
-directories.workspace = true
 tracing.workspace = true
 # The window icon goes through winit (bevy 0.20 has no icon field on `Window`); png decodes the embedded icon and writes the committed ones.
 winit = { version = "0.30", default-features = false }
@@ -53,7 +52,3 @@ png = "0.18"
 [dev-dependencies]
 trailhead-ui = { workspace = true, features = ["test-support"] }
 trailhead-shell = { workspace = true, features = ["test-support"] }
-trailhead-core.workspace = true
-trailhead-server.workspace = true
-axum.workspace = true
-tempfile.workspace = true

@@ -17,11 +17,11 @@ use bevy::text::{EditableText, LineBreak};
 use bevy::ui_widgets::{Activate, ValueChange};
 use trailhead_client::http::{Call, NewTask};
 use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
+use trailhead_shell::commands::{CommandDone, Outcome, Request, Submit};
+use trailhead_shell::connection::Connection;
 use trailhead_shell::mirror::Mirrored;
 
 use crate::board::View;
-use crate::commands::{CommandDone, Outcome, Request, Submit};
-use crate::connection::Connection;
 use crate::factory::{FactoryStatus, project_of};
 use crate::form::{self, FormState};
 use crate::inspector::{OpenComposer, Selection, Subject};
@@ -867,9 +867,9 @@ mod tests {
     use trailhead_shell::mirror::MirrorPlugin;
 
     use super::*;
-    use crate::commands::{CommandId, CommandsPlugin, Outbox};
     use reqwest::Method;
     use serde_json::{Value, json};
+    use trailhead_shell::commands::{CommandId, CommandsPlugin, Outbox};
 
     fn task() -> Value {
         task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,

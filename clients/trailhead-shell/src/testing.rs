@@ -1,8 +1,5 @@
-//! What `tests/connection.rs` and `tests/factory_link.rs` share: an in-process server behind a local iroh endpoint
-//! (no relay, no discovery service), and driving the app until it gets somewhere.
-
-// Each test binary compiles this module and uses a different part of it.
-#![allow(dead_code)]
+//! For tests of the connection and of an app's work over it: an in-process server behind a local iroh endpoint (no
+//! relay, no discovery service), and driving the app until it gets somewhere.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,18 +9,19 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use trailhead_core::{Ctx, NewProject, Principal, Store};
-use trailhead_lookout::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
-use trailhead_lookout::net::{NetCommand, NetConfig, Network, Reason};
 use trailhead_wire::ui::UiAllowlist;
 
-/// The server, and what a test needs to sign in to it and to allow Lookout's endpoint.
+use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
+use crate::net::{NetCommand, NetConfig, Network, Reason};
+
+/// The server, and what a test needs to sign in to it and to allow the app's endpoint.
 pub struct Server {
     pub dir: tempfile::TempDir,
     pub server: std::net::SocketAddr,
     pub allowed: UiAllowlist,
     pub token: String,
     pub agent_token: String,
-    /// The server's state and the user's context, to revoke the token while Lookout is signed in.
+    /// The server's state and the user's context, to revoke the token while the app is signed in.
     pub state: Arc<trailhead_server::AppState>,
     pub human: Ctx,
     pub token_id: uuid::Uuid,

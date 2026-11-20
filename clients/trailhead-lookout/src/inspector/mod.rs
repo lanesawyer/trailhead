@@ -37,6 +37,8 @@ use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
     Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
 };
+use trailhead_shell::commands::{CommandDone, Outcome, Request, Submit};
+use trailhead_shell::connection::{Api, Connection, ConnectionStatus};
 use trailhead_shell::mirror::{Mirror, Mirrored, Rev, rows};
 use trailhead_shell::sync::SyncItem;
 use uuid::Uuid;
@@ -45,8 +47,6 @@ use crate::author::{
     Act, grade_choices, grade_index, grade_options, grade_tones, priority_options, priority_tones, status_tones,
 };
 use crate::board::Input;
-use crate::commands::{CommandDone, Outcome, Request, Submit};
-use crate::connection::{Api, Connection, ConnectionStatus};
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
 use crate::project::OpenProject;

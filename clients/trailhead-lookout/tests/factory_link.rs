@@ -2,13 +2,10 @@
 //! log) and the sidebar's view of them, assembled as `Lookout::build` assembles them, against an in-process server and
 //! control plane over a local iroh connection.
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use common::{Server, allowed_and_live, endpoint, reason, state, until};
 use iroh::address_lookup::MemoryLookup;
 use iroh::protocol::Router;
 use iroh::{EndpointAddr, SecretKey};
@@ -17,12 +14,13 @@ use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
     ControlState, FactoryEvent, FactorySnapshot, FactoryState, SandboxState, SandboxStatus, Sequenced,
 };
-use trailhead_lookout::connection::{Api, Connection, ConnectionStatus};
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::logs::{FollowLogs, LogState};
-use trailhead_lookout::net::{NetConfig, Reason};
 use trailhead_lookout::{Lookout, sidebar};
 use trailhead_shell::ShellApp;
+use trailhead_shell::connection::{Api, Connection, ConnectionStatus};
+use trailhead_shell::net::{NetConfig, Reason};
+use trailhead_shell::testing::{Server, allowed_and_live, endpoint, reason, state, until};
 use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiProtocol, Unsupported};
 use trailhead_wire::{read_frame, write_frame};
 

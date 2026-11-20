@@ -2,8 +2,8 @@
 //! ([`crate::author`]) and the project form ([`crate::project_form`]) each add what they hold and how it is drawn.
 
 use bevy::prelude::*;
+use trailhead_shell::commands::{Request, Submit};
 
-use crate::commands::{Request, Submit};
 use crate::widgets::{ModalClosed, ModalLocked};
 
 /// The form on screen, holding an `O` while it is open. `generation` changes whenever it opens or closes, which is

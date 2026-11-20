@@ -2,15 +2,13 @@
 //! (`docs/app-platform.md`).
 
 use bevy::prelude::*;
-use trailhead_shell::{AppId, Manifest, ShellApp};
+use trailhead_shell::{AppId, Manifest, ShellApp, connection, net};
 use trailhead_ui::{Icon, Theme};
 
 pub mod author;
 pub mod board;
 pub mod claims;
-pub mod commands;
 pub mod connect;
-pub mod connection;
 pub mod detail;
 pub mod factory;
 pub mod factory_link;
@@ -19,7 +17,6 @@ pub mod icon;
 pub mod inspector;
 pub mod logs;
 pub mod map;
-pub mod net;
 pub mod project;
 pub mod project_form;
 pub mod projects_page;

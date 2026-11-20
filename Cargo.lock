@@ -8251,23 +8251,18 @@ dependencies = [
 name = "trailhead-lookout"
 version = "0.1.0"
 dependencies = [
- "axum",
  "bevy",
- "directories",
  "iroh",
  "jiff",
  "png",
  "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
  "trailhead-client",
- "trailhead-core",
  "trailhead-factory",
  "trailhead-model",
- "trailhead-server",
  "trailhead-shell",
  "trailhead-ui",
  "trailhead-wire",
@@ -8336,6 +8331,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bevy",
+ "directories",
+ "iroh",
  "reqwest",
  "serde",
  "serde_json",
@@ -8346,7 +8343,9 @@ dependencies = [
  "trailhead-core",
  "trailhead-model",
  "trailhead-server",
+ "trailhead-shell",
  "trailhead-ui",
+ "trailhead-wire",
  "uuid",
 ]
 

@@ -15,12 +15,12 @@ use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
 use trailhead_model::{Agent, Claim, Comment, CommentKind, Dependency, Project, Status, Task, User};
 use trailhead_shell::ActiveApp;
+use trailhead_shell::connection::Connection;
 use trailhead_shell::mirror::{Mirror, Mirrored, Rev, rows};
 use uuid::Uuid;
 
 use crate::LOOKOUT;
 use crate::author::{Act, Authoring};
-use crate::connection::Connection;
 use crate::factory::{FactoryStatus, PrLink, pr_link};
 use crate::inspector::{Neighbours, Selection, Subject};
 use crate::search::{Deep, DeepHit};

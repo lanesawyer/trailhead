@@ -11,10 +11,10 @@ use std::time::Duration;
 use bevy::prelude::*;
 use trailhead_client::http::Client;
 use trailhead_model::SearchHit;
+use trailhead_shell::connection::{Connection, SendNet};
+use trailhead_shell::net::{Fetch, NetCommand};
 
 use crate::board::Filter;
-use crate::connection::{Connection, SendNet};
-use crate::net::{Fetch, NetCommand};
 
 /// How long the query has to sit unchanged before it is put to the server.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);

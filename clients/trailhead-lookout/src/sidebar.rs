@@ -16,13 +16,13 @@ use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::{Project, ProjectStatus, Task};
 use trailhead_shell::ActiveApp;
+use trailhead_shell::connection::{Connection, ConnectionStatus};
 use trailhead_shell::mirror::Mirrored;
 use uuid::Uuid;
 
 use crate::LOOKOUT;
 use crate::author::Act;
 use crate::board::{Filter, View};
-use crate::connection::{Connection, ConnectionStatus};
 use crate::factory::{FactoryLink, FactoryStatus};
 use crate::project::{OpenProject, ProjectPage};
 use crate::project_form::NewProject;

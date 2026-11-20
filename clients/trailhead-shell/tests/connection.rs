@@ -1,19 +1,17 @@
-//! Lookout's net thread and `Connection` state, with no app jobs, against an in-process server and control plane over
-//! a local iroh connection (no relay, no discovery service). What Lookout runs over it of its own is in
+//! The net thread and `Connection` state, with no app jobs, against an in-process server and control plane over a
+//! local iroh connection (no relay, no discovery service). What Lookout runs over it of its own is in Lookout's
 //! `tests/factory_link.rs`.
-
-mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use common::{Server as Rig, allowed_and_live, endpoint, reason, send, state, until};
 use iroh::address_lookup::MemoryLookup;
 use iroh::protocol::Router;
 use iroh::{EndpointAddr, SecretKey};
-use trailhead_lookout::connection::{Api, Connection, ConnectionPlugin, Dialed, LocalEndpoint};
-use trailhead_lookout::net::{NetCommand, NetConfig, Reason};
+use trailhead_shell::connection::{Api, Connection, ConnectionPlugin, Dialed, LocalEndpoint};
+use trailhead_shell::net::{NetCommand, NetConfig, Reason};
+use trailhead_shell::testing::{Server as Rig, allowed_and_live, endpoint, reason, send, state, until};
 use trailhead_wire::ui::{UI_ALPN, UiProtocol};
 
 /// A control plane that forwards the API and serves nothing else.

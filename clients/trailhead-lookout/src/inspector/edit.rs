@@ -195,7 +195,7 @@ mod tests {
     }
 
     fn answer(app: &mut App, source: Entity, outcome: Outcome) {
-        app.world_mut().write_message(CommandDone { source, id: crate::commands::CommandId(0), outcome });
+        app.world_mut().write_message(CommandDone { source, id: trailhead_shell::commands::CommandId(0), outcome });
         settle(app);
     }
 

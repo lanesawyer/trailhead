@@ -6,9 +6,9 @@ use bevy::prelude::*;
 use bevy::scene::bsn;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
+use trailhead_shell::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
+use trailhead_shell::net::{NetCommand, Reason};
 
-use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
-use crate::net::{NetCommand, Reason};
 use crate::widgets::{
     BesideSidebar, ButtonKind, Icon, button, extent, field, layer, panel, row, size, text_dim, text_input, tool_button,
 };

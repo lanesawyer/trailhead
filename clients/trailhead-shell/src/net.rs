@@ -22,11 +22,11 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
-use trailhead_shell::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 use trailhead_wire::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, UiTunnel, open_ui_tunnel};
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
 use crate::commands::{self, CommandId, Reply, Request};
+use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
 /// three values as the net thread reports them.

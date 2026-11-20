@@ -5,12 +5,12 @@
 use bevy::prelude::*;
 use trailhead_client::http::Client;
 use trailhead_model::{Task, TaskDetail, TaskKey};
+use trailhead_shell::connection::{Connection, SendNet};
 use trailhead_shell::mirror::Mirrored;
+use trailhead_shell::net::{Fetch, NetCommand};
 use trailhead_shell::sync::{SyncItem, task_of};
 
-use crate::connection::{Connection, SendNet};
 use crate::inspector::{Selection, Subject};
-use crate::net::{Fetch, NetCommand};
 
 /// The server's answer to a fetch, as the net thread hands it back.
 #[derive(Message, Debug, Clone, PartialEq)]

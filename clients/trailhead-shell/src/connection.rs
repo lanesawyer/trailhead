@@ -6,11 +6,11 @@
 use std::sync::Mutex;
 
 use bevy::prelude::*;
-use trailhead_shell::mirror::{MirrorPlugin, apply_sync};
-use trailhead_shell::sync::SyncItem;
 
 use crate::commands::{CommandsPlugin, Reply};
+use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, LinkJob, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
+use crate::sync::SyncItem;
 
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Connection {

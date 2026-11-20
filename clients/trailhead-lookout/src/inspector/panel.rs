@@ -499,7 +499,7 @@ mod tests {
         let control = app.world_mut().spawn(Control::Busy).id();
         app.world_mut().write_message(CommandDone {
             source: control,
-            id: crate::commands::CommandId(1),
+            id: trailhead_shell::commands::CommandId(1),
             outcome: Outcome::Forbidden("humans only".into()),
         });
         app.update();
@@ -624,7 +624,7 @@ mod tests {
         // The server's refusal is kept on the control; the task's grade, and so the dropdown, stays as it was.
         app.world_mut().write_message(CommandDone {
             source,
-            id: crate::commands::CommandId(1),
+            id: trailhead_shell::commands::CommandId(1),
             outcome: Outcome::Forbidden("only a human can set the first grade".into()),
         });
         app.update();

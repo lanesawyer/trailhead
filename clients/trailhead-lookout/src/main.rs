@@ -1,7 +1,7 @@
 use trailhead_lookout::Lookout;
 use trailhead_lookout::icon::primary_window;
-use trailhead_lookout::net::NetConfig;
 use trailhead_shell::Shell;
+use trailhead_shell::net::NetConfig;
 
 /// `lookout [<control plane endpoint id>]`, with `LOOKOUT_TOKEN` to sign in with a pasted user token and
 /// `LOOKOUT_QUEUE` for the queue task a task queued for the factory goes under in its project, ahead of the

@@ -10,13 +10,13 @@ use bevy::clipboard::Clipboard;
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, ControlOrientation, SelectedTab, ValueChange};
 use trailhead_model::Task;
+use trailhead_shell::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use trailhead_shell::mirror::{Mirrored, rows};
+use trailhead_shell::net::NetCommand;
 
 use crate::author::Authoring;
-use crate::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use crate::factory::FactoryStatus;
 use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
-use crate::net::NetCommand;
 use crate::widgets::{
     Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group, field,
     open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
