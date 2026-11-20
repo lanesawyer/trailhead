@@ -11,7 +11,6 @@ use trailhead_ui::{Icon, Theme};
 pub mod author;
 pub mod board;
 pub mod claims;
-pub mod connect;
 pub mod detail;
 pub mod factory;
 pub mod factory_link;
@@ -90,7 +89,6 @@ impl ShellApp for Lookout {
             projects_page::ProjectsPageUiPlugin,
             author::AuthorUiPlugin,
             inspector::InspectorUiPlugin,
-            connect::ConnectUiPlugin,
             settings::SettingsUiPlugin,
             sidebar::SidebarUiPlugin,
             icon::IconUiPlugin,

@@ -20,7 +20,8 @@
 //!
 //! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
-//! [`ShellPlugin::windowed`] adds the rail and each app's drawing.
+//! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
+//! each app's drawing.
 
 use std::path::PathBuf;
 
@@ -31,6 +32,7 @@ use crate::connection::{ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
 
 pub mod commands;
+pub mod connect;
 pub mod connection;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
@@ -206,6 +208,9 @@ impl Plugin for ShellPlugin {
         }
         if self.windowed {
             app.add_plugins(rail::RailUiPlugin);
+            if self.connection.is_some() {
+                app.add_plugins(connect::ConnectUiPlugin);
+            }
             for shell_app in &self.apps {
                 shell_app.build_ui(app);
             }

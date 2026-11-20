@@ -183,9 +183,10 @@ pub(crate) fn show_edge_lines(
     }
 }
 
-/// Puts the sidebar after the [`rail`], if there is one, at [`SidebarWidth`] wide, and the pages after both. It
-/// compares every time it runs, since a rail or a sidebar coming or going moves the others; a node already in place
-/// is left untouched.
+/// Puts the sidebar after the [`rail`], if there is one, at [`SidebarWidth`] wide, and the pages after both. A page
+/// beside the sidebar while there is none (one the window shows whatever app is shown, under an app with no sidebar)
+/// starts where the rail ends. It compares every time it runs, since a rail or a sidebar coming or going moves the
+/// others; a node already in place is left untouched.
 #[allow(clippy::type_complexity)]
 pub(crate) fn fit_to_sidebar(
     width: Res<SidebarWidth>,
@@ -195,7 +196,8 @@ pub(crate) fn fit_to_sidebar(
     mut bare: Query<&mut Node, (With<BesideRail>, Without<SidebarFrame>, Without<BesideSidebar>)>,
 ) {
     let rail = if rails.is_empty() { 0.0 } else { extent::RAIL_WIDTH };
-    let (after_rail, wide, after_sidebar) = (px(rail), px(width.get()), px(rail + width.get()));
+    let sidebar = if frames.is_empty() { 0.0 } else { width.get() };
+    let (after_rail, wide, after_sidebar) = (px(rail), px(width.get()), px(rail + sidebar));
     for mut node in &mut frames {
         if node.left != after_rail {
             node.left = after_rail;
@@ -493,6 +495,29 @@ mod tests {
         app.update();
         assert_eq!(left(&app, frame), px(0));
         assert_eq!(left(&app, page), px(extent::SIDEBAR_WIDTH));
+    }
+
+    #[test]
+    fn a_page_beside_the_sidebar_with_no_sidebar_starts_where_the_rail_ends() {
+        let mut app = App::new();
+        app.init_resource::<SidebarWidth>().add_systems(Update, fit_to_sidebar);
+        let page = app.world_mut().spawn((BesideSidebar, beside_sidebar())).id();
+        let left = |app: &App| app.world().get::<Node>(page).unwrap().left;
+        app.update();
+        assert_eq!(left(&app), px(0), "with no rail either, it starts at the window's edge");
+
+        let rail = app.world_mut().spawn(RailFrame).id();
+        app.update();
+        assert_eq!(left(&app), px(extent::RAIL_WIDTH));
+
+        let frame = app.world_mut().spawn((SidebarFrame, Node::default())).id();
+        app.update();
+        assert_eq!(left(&app), px(extent::RAIL_WIDTH + extent::SIDEBAR_WIDTH), "a sidebar coming moves it over");
+
+        app.world_mut().despawn(frame);
+        app.world_mut().despawn(rail);
+        app.update();
+        assert_eq!(left(&app), px(0));
     }
 
     #[test]

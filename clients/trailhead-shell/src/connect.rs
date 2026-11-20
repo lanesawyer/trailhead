@@ -6,12 +6,12 @@ use bevy::prelude::*;
 use bevy::scene::bsn;
 use bevy::text::EditableText;
 use bevy::ui_widgets::Activate;
-use trailhead_shell::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
-use trailhead_shell::net::{NetCommand, Reason};
-
-use crate::widgets::{
+use trailhead_ui::{
     BesideSidebar, ButtonKind, Icon, button, extent, field, layer, panel, row, size, text_dim, text_input, tool_button,
 };
+
+use crate::connection::{Connection, ConnectionStatus, LocalEndpoint, SendNet};
+use crate::net::{NetCommand, Reason};
 
 /// A text field on the connect panel.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
