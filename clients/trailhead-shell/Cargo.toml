@@ -12,8 +12,21 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# Only what the contract and the rail name; the binary that assembles a shell picks the windowing features.
-bevy = { version = "0.20", default-features = false, features = ["std", "bevy_state", "bevy_ui_widgets", "bevy_scene"] }
+# Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a window of UI needs.
+bevy = { version = "0.20", default-features = false, features = [
+    "std",
+    "bevy_state",
+    "multi_threaded",
+    "ui_bevy_render",
+    "bevy_ui_widgets",
+    "bevy_scene",
+    # Paste into text fields, and copy to the clipboard (arboard, over X11; no system libraries).
+    "system_clipboard",
+    "bevy_winit",
+    "default_font",
+    "custom_cursor",
+    "x11",
+] }
 trailhead-ui.workspace = true
 serde.workspace = true
 serde_json.workspace = true

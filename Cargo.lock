@@ -8263,7 +8263,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
- "trailhead-app-example",
  "trailhead-client",
  "trailhead-core",
  "trailhead-factory",

@@ -13,8 +13,9 @@
 //! An app draws beside the shell's rail of apps: it fills `trailhead_ui::beside_rail`, or has a
 //! `trailhead_ui::sidebar` and fills `beside_sidebar`. Everything it draws comes from the `trailhead-ui` kit.
 //!
-//! The shell is [`ShellPlugin`], given its apps in the order the rail shows them. It runs headless under
-//! `MinimalPlugins` with `StatesPlugin`; [`ShellPlugin::windowed`] adds the rail and each app's drawing.
+//! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
+//! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
+//! [`ShellPlugin::windowed`] adds the rail and each app's drawing.
 
 use std::path::PathBuf;
 
@@ -23,9 +24,11 @@ use trailhead_ui::{Icon, Theme};
 
 mod rail;
 mod store;
+mod window;
 
 pub use rail::{OpenApp, Rail};
 pub use store::LocalStore;
+pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
 
 /// An app's name in code: what its state, its local store and its files are keyed by. Lowercase, and never changed
 /// once the app has stored anything.

@@ -1,5 +1,5 @@
 //! The settings modal (`docs/factory/ui.md#settings`), opened from the gear at the right of the header: pages picked
-//! from tabs across the top. General holds the appearance: light, dark or the desktop's theme, kept in [`ThemeFile`]
+//! from tabs across the top. General holds the appearance: light, dark or the desktop's theme, kept by the shell
 //! for the next launch. Connection holds where Lookout is connected and who it acts as, with Disconnect; Factory shows
 //! what the factory status already says, read-only. A new page is a [`Page`] variant and the fields and texts
 //! for it in [`fill`] and [`refresh`].
@@ -88,31 +88,6 @@ enum SettingsAct {
 /// The theme's buttons, one per [`ThemeChoice::ALL`].
 #[derive(Component, Clone, Default)]
 struct ThemePick;
-
-/// Where the theme picked is kept for the next launch: a file holding `light`, `dark` or `desktop`.
-#[derive(Resource, Clone, Debug)]
-pub struct ThemeFile(pub std::path::PathBuf);
-
-impl ThemeFile {
-    /// The choice kept last time, or the desktop's when there is none.
-    pub fn load(&self) -> ThemeChoice {
-        std::fs::read_to_string(&self.0).map_or(ThemeChoice::Desktop, |text| theme_from_word(&text))
-    }
-}
-
-/// A theme choice as it is kept.
-pub fn theme_word(choice: ThemeChoice) -> &'static str {
-    match choice {
-        ThemeChoice::Desktop => "desktop",
-        ThemeChoice::Light => "light",
-        ThemeChoice::Dark => "dark",
-    }
-}
-
-/// The choice a kept word means; anything else is the desktop's.
-pub fn theme_from_word(word: &str) -> ThemeChoice {
-    ThemeChoice::ALL.into_iter().find(|c| theme_word(*c) == word.trim()).unwrap_or_default()
-}
 
 /// A text in the modal, and what it shows.
 #[derive(Component, Clone, Default)]
@@ -306,23 +281,6 @@ fn on_theme_pick(picked: On<Picked>, picks: Query<(), With<ThemePick>>, mut appe
     }
 }
 
-/// Keeps the theme picked for the next launch.
-fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local<Option<ThemeChoice>>) {
-    if *kept == Some(appearance.choice) {
-        return;
-    }
-    // The first look is at what was loaded, which is already kept.
-    if kept.replace(appearance.choice).is_none() {
-        return;
-    }
-    if let Some(dir) = file.0.parent()
-        && let Err(e) =
-            std::fs::create_dir_all(dir).and_then(|()| std::fs::write(&file.0, theme_word(appearance.choice)))
-    {
-        warn!(error = %e, "couldn't keep the theme picked");
-    }
-}
-
 fn factory_page(commands: &mut Commands, page: Entity) {
     commands.spawn_scene(value(Value::Status, "Status")).insert(ChildOf(page));
     commands.spawn_scene(value(Value::Repos, "Repos it serves")).insert(ChildOf(page));
@@ -428,13 +386,12 @@ impl Plugin for SettingsPlugin {
     }
 }
 
-/// [`SettingsPlugin`] and its copy button, which needs the window's clipboard, and keeping the theme picked in the
-/// [`ThemeFile`] the app inserts.
+/// [`SettingsPlugin`] and its copy button, which needs the window's clipboard.
 pub struct SettingsUiPlugin;
 
 impl Plugin for SettingsUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SettingsPlugin).add_observer(copy_endpoint).add_systems(Update, keep_theme);
+        app.add_plugins(SettingsPlugin).add_observer(copy_endpoint);
     }
 }
 
@@ -678,16 +635,5 @@ mod tests {
         app.world_mut().trigger(Picked { entity: pick, index: light });
         settle(&mut app);
         assert_eq!(app.world().resource::<Appearance>().choice, ThemeChoice::Light);
-    }
-
-    #[test]
-    fn a_theme_is_kept_as_a_word_and_anything_else_is_the_desktops() {
-        for choice in ThemeChoice::ALL {
-            assert_eq!(theme_from_word(theme_word(choice)), choice);
-        }
-        assert_eq!(theme_from_word("light\n"), ThemeChoice::Light);
-        assert_eq!(theme_from_word("sepia"), ThemeChoice::Desktop);
-        let missing = ThemeFile(std::env::temp_dir().join("lookout-no-such-theme-file"));
-        assert_eq!(missing.load(), ThemeChoice::Desktop);
     }
 }
