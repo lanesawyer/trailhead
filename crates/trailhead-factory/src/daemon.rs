@@ -327,9 +327,8 @@ pub trait Daemon: Send + Sync {
     async fn shutdown(&self) {}
 }
 
-const GITHUB: &[&str] =
+pub(crate) const GITHUB: &[&str] =
     &["github.com", "api.github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
-const PYPI: &[&str] = &["pypi.org", "files.pythonhosted.org"];
 pub const MISE_VERSION_HOSTS: &[&str] = &["mise.jdx.dev", "mise-versions.jdx.dev"];
 
 /// The hosts installing a mise tool needs, by tool or backend (`docs/factory/sandbox.md`): the one table, so what a
@@ -342,17 +341,8 @@ pub fn hosts_for(tool: &str) -> Option<Vec<&'static str>> {
         None => ("", tool),
     };
     let hosts: &[&[&str]] = match (backend, name) {
-        ("npm", _) => &[&["registry.npmjs.org"]],
-        ("pipx" | "pypi", _) => &[PYPI],
         ("github" | "aqua" | "ubi", _) => &[GITHUB],
-        ("", "node") => &[&["nodejs.org"]],
-        ("", "rust") => &[&["static.rust-lang.org"]],
-        ("", "go") => &[&["go.dev", "dl.google.com"]],
-        // Prebuilt interpreters are GitHub release assets; pip comes from PyPI.
-        ("", "python") => &[GITHUB, PYPI],
-        // aqua's registry fetches pnpm from its GitHub releases.
-        ("", "pnpm") => &[GITHUB],
-        _ => return None,
+        _ => &[crate::language::tool_hosts(backend, name)?],
     };
     Some(hosts.concat())
 }
@@ -420,6 +410,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "node")]
     fn install_hosts_come_only_from_the_table_the_config_or_mise() {
         let req = request(&["node", "zig"], &[("zig", &["ziglang.org"])]);
         assert!(install_host_allowed(&req, &need("nodejs.org", "node")));

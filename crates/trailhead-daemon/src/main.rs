@@ -43,6 +43,7 @@ enum Command {
         #[arg(long, default_value = "info")]
         log: String,
     },
+    #[cfg(feature = "rust")]
     /// Trims a cargo `target` directory to a size, for a repo's `trim` check (`"$TRAILHEAD_DAEMON" trim-cargo`).
     TrimCargo {
         /// The size to trim to, in bytes.
@@ -97,6 +98,7 @@ fn read_secrets(path: &PathBuf) -> std::result::Result<(DaemonSecrets, String), 
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
     let args = match (cli.command, cli.daemon) {
+        #[cfg(feature = "rust")]
         (Some(Command::TrimCargo { cap, target }), _) => {
             return match trailhead_daemon::trim::trim_target(&target, cap) {
                 Ok(t) => {
@@ -151,6 +153,7 @@ async fn gateway_command(command: Command) -> std::process::ExitCode {
                 trailhead_log::init_stdout(trailhead_log::env_filter_or(&log));
                 gateway::run(listen, &socket).await.map_err(|e| e.to_string())
             }
+            #[cfg(feature = "rust")]
             Command::TrimCargo { .. } => unreachable!("handled in main"),
             Command::GatewayCtl { socket } => {
                 let mut input = String::new();

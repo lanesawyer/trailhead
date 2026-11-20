@@ -14,7 +14,12 @@ description = "Trailhead factory daemon: runs agents in a sandbox and speaks the
 workspace = true
 
 [features]
-default = ["net"]
+default = ["net", "rust", "python", "node", "go"]
+# Programming languages (`trailhead-factory`'s `language` module); `rust` also carries `trim-cargo`.
+rust = ["trailhead-factory/rust"]
+python = ["trailhead-factory/python"]
+node = ["trailhead-factory/node"]
+go = ["trailhead-factory/go"]
 # The iroh transport. The testkit turns it off to reuse the runner in-process.
 net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "dep:trailhead-log", "dep:trailhead-plugins", "dep:trailhead-codehost-github", "dep:reqwest", "dep:trailhead-tracker-rest"]
 

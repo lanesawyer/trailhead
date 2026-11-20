@@ -11,6 +11,7 @@ pub mod gateway;
 pub mod grade;
 pub mod harness;
 pub mod host;
+pub mod language;
 pub mod logs;
 pub mod messages;
 pub mod money;
@@ -47,6 +48,7 @@ pub use harness::{
     VerdictKind, conventional_title, is_conventional,
 };
 pub use host::HostConfig;
+pub use language::{Language, languages};
 pub use money::{Usage, Usd};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
