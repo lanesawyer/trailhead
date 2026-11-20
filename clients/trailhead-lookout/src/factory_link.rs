@@ -21,8 +21,8 @@ use crate::logs::{FollowLogs, LogItem, LogUpdate};
 /// What the Logs page says of a factory that doesn't send logs.
 pub const NO_LOGS: &str = "this factory is too old to send logs";
 
-/// Lookout's jobs for the net thread, and the plugin that takes what they report. The jobs go to
-/// [`trailhead_shell::connection::ConnectionPlugin::with_jobs`].
+/// Lookout's jobs for the net thread, and the plugin that takes what they report. The jobs go to the shell through
+/// `ShellApp::link_jobs`.
 pub fn factory_link() -> (FactoryLinkPlugin, Vec<Box<dyn LinkJob>>) {
     let (status_tx, status_rx) = mpsc::channel();
     let (logs_tx, logs_rx) = mpsc::channel();

@@ -1,5 +1,5 @@
 //! What Lookout runs over its connection of its own, its jobs on the net thread (the factory's status stream and its
-//! log) and the sidebar's view of them, assembled as `Lookout::build` assembles them, against an in-process server and
+//! log) and the sidebar's view of them, assembled as the shell assembles them, against an in-process server and
 //! control plane over a local iroh connection.
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use trailhead_factory::{
 use trailhead_lookout::factory::{Campsite, FactoryLink, FactoryStatus};
 use trailhead_lookout::logs::{FollowLogs, LogState};
 use trailhead_lookout::{Lookout, sidebar};
-use trailhead_shell::ShellApp;
+use trailhead_shell::ShellPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus};
 use trailhead_shell::net::{NetConfig, Reason};
 use trailhead_shell::testing::{Server, allowed_and_live, endpoint, reason, state, until};
@@ -140,8 +140,8 @@ impl std::ops::Deref for Rig {
 /// Lookout as the shell builds it, headless.
 fn app(config: NetConfig, target: Option<String>) -> App {
     let mut app = App::new();
-    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin));
-    Lookout::new(config).dialing(target).build(&mut app);
+    app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
+        .add_plugins(ShellPlugin::new().with(Lookout::new()).connecting(config, target));
     app
 }
 

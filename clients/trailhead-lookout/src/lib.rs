@@ -1,8 +1,11 @@
 //! Lookout, the Trailhead factory's Bevy client (`docs/factory/ui.md`), and the factory's app in the Trailhead shell
 //! (`docs/app-platform.md`).
 
+use std::sync::Mutex;
+
 use bevy::prelude::*;
-use trailhead_shell::{AppId, Manifest, ShellApp, connection, net};
+use trailhead_shell::net::LinkJob;
+use trailhead_shell::{AppId, Manifest, ShellApp};
 use trailhead_ui::{Icon, Theme};
 
 pub mod author;
@@ -31,30 +34,24 @@ pub const LOOKOUT: AppId = AppId("lookout");
 
 /// Lookout as the shell holds it.
 pub struct Lookout {
-    config: net::NetConfig,
-    /// The control plane to dial, ahead of the one dialed last time.
-    target: Option<String>,
-    /// A user token to sign in with at startup.
-    token: Option<String>,
     /// The queue task a task queued for the factory goes under, ahead of the factory's own queues.
     queue: Option<String>,
+    /// What takes the reports of Lookout's jobs on the net thread, added when Lookout is built.
+    factory_link: Mutex<Option<factory_link::FactoryLinkPlugin>>,
+    /// Lookout's jobs on the net thread, which the shell takes before it builds Lookout.
+    jobs: Mutex<Vec<Box<dyn LinkJob>>>,
+}
+
+impl Default for Lookout {
+    fn default() -> Self {
+        let (factory_link, jobs) = factory_link::factory_link();
+        Lookout { queue: None, factory_link: Mutex::new(Some(factory_link)), jobs: Mutex::new(jobs) }
+    }
 }
 
 impl Lookout {
-    pub fn new(config: net::NetConfig) -> Self {
-        Lookout { config, target: None, token: None, queue: None }
-    }
-
-    #[must_use]
-    pub fn dialing(mut self, target: Option<String>) -> Self {
-        self.target = target;
-        self
-    }
-
-    #[must_use]
-    pub fn signing_in_with(mut self, token: Option<String>) -> Self {
-        self.token = token;
-        self
+    pub fn new() -> Self {
+        Self::default()
     }
 
     #[must_use]
@@ -69,18 +66,19 @@ impl ShellApp for Lookout {
         Manifest { id: LOOKOUT, name: "Lookout", icon: Icon::Board }
     }
 
-    /// The connection is Lookout's for now. It is the shell's to own once a second app needs the server
-    /// (TRAIL-1577), and then this adds only Lookout's own logic.
+    fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> {
+        std::mem::take(&mut *self.jobs.lock().expect("jobs lock"))
+    }
+
     fn build(&self, app: &mut App) {
-        let (factory_link, jobs) = factory_link::factory_link();
-        app.add_plugins(connection::ConnectionPlugin::new(self.config.clone(), self.target.clone()).with_jobs(jobs))
-            .add_plugins((
-                factory_link,
-                factory::FactoryPlugin,
-                search::SearchPlugin,
-                detail::DetailPlugin,
-                logs::LogsPlugin,
-            ));
+        let factory_link = self.factory_link.lock().expect("factory link lock").take().expect("Lookout is built once");
+        app.add_plugins((
+            factory_link,
+            factory::FactoryPlugin,
+            search::SearchPlugin,
+            detail::DetailPlugin,
+            logs::LogsPlugin,
+        ));
     }
 
     fn build_ui(&self, app: &mut App) {
@@ -97,16 +95,11 @@ impl ShellApp for Lookout {
             sidebar::SidebarUiPlugin,
             icon::IconUiPlugin,
         ));
-        let (queue, token) = (self.queue.clone(), self.token.clone());
+        let queue = self.queue.clone();
         app.add_systems(Startup, move |mut authoring: ResMut<author::Authoring>| {
             if let Some(queue) = &queue {
                 authoring.queue = queue.clone();
                 authoring.pinned = true;
-            }
-        })
-        .add_systems(Startup, move |mut send: MessageWriter<connection::SendNet>| {
-            if let Some(token) = &token {
-                send.write(connection::SendNet(net::NetCommand::Login(token.clone())));
             }
         });
     }

@@ -1,6 +1,6 @@
 //! The shell's window: [`Shell`] is what a binary builds and runs. It owns what every app shares: the window, the
 //! theme and the choice of light or dark, the kit's plugins, and the [`ShellPlugin`](crate::ShellPlugin) that holds
-//! the apps. A binary names its apps and nothing else.
+//! the apps and their connection. A binary names its apps and how to connect, and nothing else.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,6 +9,7 @@ use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
 use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
 
+use crate::net::NetConfig;
 use crate::{ShellApp, ShellPlugin};
 
 /// Where the theme picked is kept for the next launch: a file holding `light`, `dark` or `desktop`.
@@ -71,6 +72,21 @@ impl Shell {
     #[must_use]
     pub fn with(mut self, app: impl ShellApp) -> Self {
         self.apps = self.apps.with(app);
+        self
+    }
+
+    /// Connects to the Trailhead server through `config`, dialing `target`, or the control plane dialed last time
+    /// without one ([`ShellPlugin::connecting`]).
+    #[must_use]
+    pub fn connecting(mut self, config: NetConfig, target: Option<String>) -> Self {
+        self.apps = self.apps.connecting(config, target);
+        self
+    }
+
+    /// Signs in with this user token at startup.
+    #[must_use]
+    pub fn signing_in_with(mut self, token: Option<String>) -> Self {
+        self.apps = self.apps.signing_in_with(token);
         self
     }
 

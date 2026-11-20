@@ -13,6 +13,11 @@
 //! An app draws beside the shell's rail of apps: it fills `trailhead_ui::beside_rail`, or has a
 //! `trailhead_ui::sidebar` and fills `beside_sidebar`. Everything it draws comes from the `trailhead-ui` kit.
 //!
+//! The shell holds the one connection to the Trailhead server ([`connection`]), which every app shares: its state,
+//! the mirror of the task engine's records ([`mirror`]), and the outbox of [`commands`]. An app reads the API with a
+//! [`net::Fetch`], and runs work of its own on the net thread while a control plane is held as
+//! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`].
+//!
 //! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail and each app's drawing.
@@ -21,6 +26,9 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 use trailhead_ui::{Icon, Theme};
+
+use crate::connection::{ConnectionPlugin, SendNet};
+use crate::net::{LinkJob, NetCommand, NetConfig};
 
 pub mod commands;
 pub mod connection;
@@ -89,6 +97,13 @@ pub trait ShellApp: Send + Sync + 'static {
     /// Paints the app's own tokens onto the theme every app shares: the colors that encode its data
     /// (`Theme::paint`) and its aliases of the kit's meanings (`Theme::alias`).
     fn paint(&self, _theme: &mut Theme) {}
+
+    /// The app's work on the net thread while a control plane is held, such as a stream of its own. A connected
+    /// shell takes them once, before it calls [`ShellApp::build`]; they report over the app's own channels, whose
+    /// other ends the app adds in `build`.
+    fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> {
+        Vec::new()
+    }
 }
 
 /// The shell's own entry in the [`LocalStore`].
@@ -102,6 +117,10 @@ pub struct ShellPlugin {
     apps: Vec<Box<dyn ShellApp>>,
     windowed: bool,
     store: Option<PathBuf>,
+    /// The net configuration, and the control plane to dial ahead of the one dialed last time.
+    connection: Option<(NetConfig, Option<String>)>,
+    /// A user token to sign in with at startup.
+    token: Option<String>,
 }
 
 impl ShellPlugin {
@@ -138,6 +157,22 @@ impl ShellPlugin {
         self.store = Some(dir);
         self
     }
+
+    /// Runs the connection ([`ConnectionPlugin`]) with the apps' [`ShellApp::link_jobs`], dialing `target`, or the
+    /// control plane dialed last time without one. Without this the shell has no connection, and an app that needs
+    /// one can't be built.
+    #[must_use]
+    pub fn connecting(mut self, config: NetConfig, target: Option<String>) -> Self {
+        self.connection = Some((config, target));
+        self
+    }
+
+    /// Signs in with this user token at startup, when connected.
+    #[must_use]
+    pub fn signing_in_with(mut self, token: Option<String>) -> Self {
+        self.token = token;
+        self
+    }
 }
 
 impl Plugin for ShellPlugin {
@@ -157,6 +192,15 @@ impl Plugin for ShellPlugin {
             .insert_state(ActiveApp(first))
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, (remember_active, store::save).chain());
+        if let Some((config, target)) = &self.connection {
+            let jobs = self.apps.iter().flat_map(|a| a.link_jobs());
+            app.add_plugins(ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs));
+            if let Some(token) = self.token.clone() {
+                app.add_systems(Startup, move |mut send: MessageWriter<SendNet>| {
+                    send.write(SendNet(NetCommand::Login(token.clone())));
+                });
+            }
+        }
         for shell_app in &self.apps {
             shell_app.build(app);
         }
@@ -182,9 +226,14 @@ fn remember_active(active: Res<State<ActiveApp>>, mut store: ResMut<LocalStore>)
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
     use bevy::state::app::StatesPlugin;
 
     use super::*;
+    use crate::connection::Connection;
 
     pub(crate) const NOTES: AppId = AppId("notes");
     pub(crate) const MAPS: AppId = AppId("maps");
@@ -264,6 +313,57 @@ mod tests {
         // An app that is no longer in the shell is forgotten, not shown.
         let without = app(ShellPlugin::new().with(Fake(NOTES)).store_in(dir.path().to_path_buf()));
         assert_eq!(active(&without), NOTES);
+    }
+
+    /// An app with a link job, noting when the shell takes its jobs and when it builds it.
+    struct Linked(Arc<Mutex<Vec<&'static str>>>);
+
+    struct Idle;
+
+    impl LinkJob for Idle {
+        fn start(&mut self, _link: net::HeldLink) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl ShellApp for Linked {
+        fn manifest(&self) -> Manifest {
+            Manifest { id: NOTES, name: "notes", icon: Icon::Board }
+        }
+
+        fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> {
+            self.0.lock().unwrap().push("jobs");
+            vec![Box::new(Idle)]
+        }
+
+        fn build(&self, _app: &mut App) {
+            self.0.lock().unwrap().push("build");
+        }
+    }
+
+    #[test]
+    fn a_connected_shell_takes_the_link_jobs_before_it_builds_the_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = NetConfig {
+            config_dir: dir.path().join("shell"),
+            trailhead_config_dir: dir.path().join("config"),
+            trailhead_data_dir: dir.path().join("data"),
+            keyring: false,
+            network: net::Network::Direct(Arc::new(iroh::address_lookup::MemoryLookup::new())),
+            status_retry: net::STATUS_RETRY,
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = app(ShellPlugin::new().with(Linked(seen.clone())).connecting(config, None));
+        assert_eq!(*seen.lock().unwrap(), ["jobs", "build"]);
+        assert_eq!(*app.world().resource::<State<Connection>>().get(), Connection::Offline);
+    }
+
+    #[test]
+    fn a_shell_not_told_how_to_connect_has_no_connection() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = app(ShellPlugin::new().with(Linked(seen.clone())));
+        assert_eq!(*seen.lock().unwrap(), ["build"]);
+        assert!(app.world().get_resource::<State<Connection>>().is_none());
     }
 
     #[test]

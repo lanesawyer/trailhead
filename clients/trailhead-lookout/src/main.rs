@@ -15,9 +15,10 @@ fn main() {
     };
     let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     let kept = config.config_dir.clone();
-    let lookout = Lookout::new(config)
-        .dialing(std::env::args().nth(1))
+    Shell::new(kept)
+        .window(primary_window())
+        .connecting(config, std::env::args().nth(1))
         .signing_in_with(var("LOOKOUT_TOKEN"))
-        .queueing_under(var("LOOKOUT_QUEUE"));
-    Shell::new(kept).window(primary_window()).with(lookout).run();
+        .with(Lookout::new().queueing_under(var("LOOKOUT_QUEUE")))
+        .run();
 }
