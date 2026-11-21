@@ -12,6 +12,7 @@ mod identity;
 mod metadata;
 mod projects;
 mod reminders;
+mod set_aside;
 mod store;
 mod tasks;
 mod tokens;

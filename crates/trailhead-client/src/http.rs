@@ -57,6 +57,7 @@ pub mod routes {
     pub const CLAIM: Route = Route::new(Method::POST, "/v1/tasks/{task}/claim");
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
+    pub const SET_ASIDE: Route = Route::new(Method::POST, "/v1/tasks/{task}/set-aside");
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
@@ -92,7 +93,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 39] {
+    pub fn all() -> [Route; 40] {
         [
             READY,
             LIST_TASKS,
@@ -103,6 +104,7 @@ pub mod routes {
             CLAIM,
             RENEW,
             RELEASE,
+            SET_ASIDE,
             UNDO,
             REVERT,
             MY_CLAIMS,
@@ -380,6 +382,11 @@ pub enum Call {
         answer: Option<String>,
     },
     Release(TaskKey),
+    /// Sets the task aside as a person, with what they wrote, if anything.
+    SetAside {
+        key: TaskKey,
+        note: Option<String>,
+    },
     Undo(Undo),
     Revert(Revert),
     CreateProject(NewProject),
@@ -397,6 +404,7 @@ impl Call {
             Call::AddComment { key, .. } => (routes::ADD_COMMENT, Some(&key.0)),
             Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
             Call::Release(key) => (routes::RELEASE, Some(&key.0)),
+            Call::SetAside { key, .. } => (routes::SET_ASIDE, Some(&key.0)),
             Call::Undo(_) => (routes::UNDO, None),
             Call::Revert(_) => (routes::REVERT, None),
             Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
@@ -415,6 +423,7 @@ impl Call {
             Call::AddComment { comment, .. } => Some(json(comment)),
             Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
             Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
+            Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
             Call::CreateProject(b) => Some(json(b)),
@@ -726,6 +735,11 @@ impl Client {
         self.send(self.request(routes::RELEASE, Some(key.as_str())).json(&serde_json::json!({}))).await
     }
 
+    /// `POST /v1/tasks/{task}/set-aside`: the task, open and ungraded, its questions resolved with a note saying so.
+    pub async fn set_aside(&self, key: &TaskKey, note: Option<&str>) -> Result<Task> {
+        self.send(self.request(routes::SET_ASIDE, Some(key.as_str())).json(&serde_json::json!({ "note": note }))).await
+    }
+
     /// `GET /v1/claims`: the live claims the token holds.
     pub async fn my_claims(&self) -> Result<Vec<HeldClaim>> {
         self.send(self.request(routes::MY_CLAIMS, None)).await
@@ -971,5 +985,8 @@ mod tests {
         let resolve = Call::ResolveComment { id: "c1".into(), answer: Some("yes".into()) };
         assert_eq!(resolve.path(), "/v1/comments/c1/resolve");
         assert_eq!(resolve.body(), Some(serde_json::json!({"answer": "yes"})));
+        let aside = Call::SetAside { key: TaskKey("TRAIL-2".into()), note: Some("later".into()) };
+        assert_eq!((aside.method(), aside.path()), (Method::POST, "/v1/tasks/TRAIL-2/set-aside".to_string()));
+        assert_eq!(aside.body(), Some(serde_json::json!({"note": "later"})));
     }
 }

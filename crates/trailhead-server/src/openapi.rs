@@ -276,6 +276,7 @@ impl Modify for Common {
         routes::claims::claim,
         routes::claims::renew,
         routes::claims::release,
+        routes::tasks::set_aside,
         routes::comments::list_comments,
         routes::comments::add_comment,
         routes::dependencies::list_blockers,

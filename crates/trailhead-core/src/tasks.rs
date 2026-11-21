@@ -252,7 +252,7 @@ pub(crate) async fn check_claim_access(tx: &Tx, task: &Task) -> Result<Option<Cl
 }
 
 /// Writes a changed task, releasing the claim when the new status doesn't keep one.
-async fn save_update(tx: &Tx, claim: Option<Claim>, before: &Task, after: Task) -> Result<Task> {
+pub(crate) async fn save_update(tx: &Tx, claim: Option<Claim>, before: &Task, after: Task) -> Result<Task> {
     let keeps_claim = matches!(after.status, Status::InProgress | Status::NeedsInput);
     if let Some(c) = claim
         && !keeps_claim

@@ -9,10 +9,10 @@
 //! and a ⋯ menu of what else can be done to it: release, cancel, undo, revert. An agent still shows in the side
 //! panel, which stays for anything that suits a panel better than a modal.
 //!
-//! There is no approve or done button. A factory task is approved by the merger once its gates pass and finished when
-//! its PR merges (`docs/factory/lifecycle.md`), so the panel links the PR and shows its merge state and gates from the
-//! task's `factory` metadata and leaves the merge to GitHub. Status moves on a factory task leave out `approved` and
-//! `done` for the same reason.
+//! There is no approve or done button: those are status moves, offered wherever the engine lets a person make them
+//! (`docs/factory/ui.md#status-moves-a-person-can-make`). A factory task is approved by the merger once its gates pass
+//! and finished when its PR merges (`docs/factory/lifecycle.md`), so the panel links the PR and shows its merge state
+//! and gates from the task's `factory` metadata, and says that marking it done by hand leaves the PR open.
 //!
 //! [`build`] is a pure function from the mirror's JSON to an [`InspectorView`], and [`plan`] turns an [`Action`] into
 //! the [`Request`] it sends, so both are tested without a window. "answer" sends an `OpenComposer`, which
@@ -52,12 +52,12 @@ use crate::factory::FactoryStatus;
 use crate::project::OpenProject;
 use crate::settings::OpenLogs;
 use crate::widgets::{
-    ButtonKind, DetailPanes, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal, ModalClosed,
-    ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble, bubble_head, button,
-    comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer, link_button, menu_item,
-    open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select,
-    select_iconed, size, space, spawn_detail_panes, spawn_icon_menu, status_label, text, text_dim, text_input,
-    text_toned, token, tool_button,
+    ButtonKind, DetailPanes, Hint, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal,
+    ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble,
+    bubble_head, button, comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer,
+    link_button, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar,
+    section_frame, select, select_iconed, size, space, spawn_detail_panes, spawn_icon_menu, status_label, text,
+    text_dim, text_input, text_toned, token, tool_button,
 };
 
 mod compose;

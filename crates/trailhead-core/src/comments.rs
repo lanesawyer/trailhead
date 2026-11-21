@@ -16,7 +16,7 @@ use trailhead_model::{Comment, CommentKind, Entity, Status, Verdict};
 pub(crate) const COMMENT_COLS: &str = "id, workspace_id, task_id, author_id, on_behalf_of, kind, addressed_to, body, \
      resolved_at, created_at, deleted_at, verdict, model";
 
-fn comment_from_row(row: &Row) -> Result<Comment> {
+pub(crate) fn comment_from_row(row: &Row) -> Result<Comment> {
     Ok(Comment {
         id: get_uuid(row, 0)?,
         workspace_id: get_uuid(row, 1)?,

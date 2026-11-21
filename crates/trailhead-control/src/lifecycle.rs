@@ -7,8 +7,8 @@ use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
     ChangesRequested, Error, Feedback, HumanContext, Merged, Patch, PrRef, PrState, Profile, RequestKind, Result, Role,
-    RunEvent, RunPatch, RunPhase, RunReport, RunRequest, RunResult, Sandbox, Status, Task, TaskKey, TaskSpec, Tracker,
-    Usd, VerdictKind, WorkerBreach, run_name,
+    RunEvent, RunPatch, RunPhase, RunReport, RunRequest, RunResult, Sandbox, SetAside, Status, Task, TaskKey, TaskSpec,
+    Tracker, Usd, VerdictKind, WorkerBreach, run_name,
 };
 
 use crate::infra::{Park, Setback};
@@ -69,6 +69,9 @@ impl Factory {
                 PrState::Open { .. } => {}
             }
         }
+        // A task a person set aside and graded again runs on fresh counts: the rest of the run reads them off `task`.
+        let (counts, aside, restarted) = (fresh_counts(task), task.run.set_aside.clone(), restarted(task));
+        let task = restarted.as_ref().unwrap_or(task);
         let attempt = task.run.attempt.unwrap_or(0) + 1;
         let profile = self.config.worker().clone();
         // A run that failed before its agent started gave its attempt back but revoked its sub-agent, which can't be
@@ -106,14 +109,12 @@ impl Factory {
         }
         let started = RunPatch {
             attempt: Patch::Set(attempt),
-            // A task parked for giving up and reopened starts its count again.
-            attempt_base: Patch::from(task.run.gave_up.filter(|g| *g > task.run.attempt_base.unwrap_or(0))),
             sandbox: Patch::Set(name.clone()),
             profile: Patch::Set(self.config.repo.worker.clone()),
             started: Patch::Set(unix_now()),
             // A sandbox given up while parked is no longer the task's to look for (TRAIL-601).
             released: if task.run.released.is_some() { Patch::Clear } else { Patch::Keep },
-            ..RunPatch::default()
+            ..counts
         };
         if let Err(e) = sub.report(&task.key, started).await {
             return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await);
@@ -125,18 +126,7 @@ impl Factory {
         let rework = task.run.pr.is_some();
         let prepared = async {
             let context = self.tracker.human_context(&task.key).await?;
-            // A review that never went through request_rework (an older one, or a task reopened by hand) left no
-            // changes_requested; the review comment is the feedback then (TRAIL-218).
-            let feedback = match task.run.last_changes().filter(|_| rework) {
-                Some(c) => Some(Feedback { body: messages::review_feedback(&c.reviewer, &c.body) }),
-                None if rework => match self.tracker.last_review(&task.key).await? {
-                    Some(v) if v.kind == VerdictKind::RequestChanges => {
-                        Some(Feedback { body: messages::review_feedback(&v.reviewer, &v.body) })
-                    }
-                    _ => None,
-                },
-                None => None,
-            };
+            let feedback = self.worker_feedback(task, rework, aside.as_ref()).await?;
             let merge_base = task.run.last_changes().is_some_and(|c| !c.kind.is_review());
             // A task whose sandbox was given up while parked, with no PR, may have pushed its branch before the PR failed
             // to open: it resumes from it when the remote has it (TRAIL-751). `started` clears `released`, so an
@@ -939,5 +929,56 @@ impl Factory {
         {
             tracing::warn!(task = %task.key, error = %e, "couldn't move the task to review");
         }
+    }
+}
+
+impl Factory {
+    /// What a worker is told before it starts on `task`: for a rework, what the review asked for, and after it set
+    /// aside, why this is a fresh start, first. A review that never went through request_rework (an older one, or a
+    /// task reopened by hand) left no changes_requested; the review comment is the feedback then (TRAIL-218).
+    async fn worker_feedback(&self, task: &Task, rework: bool, aside: Option<&SetAside>) -> Result<Option<Feedback>> {
+        let feedback = match task.run.last_changes().filter(|_| rework) {
+            Some(c) => Some(Feedback { body: messages::review_feedback(&c.reviewer, &c.body) }),
+            None if rework => match self.tracker.last_review(&task.key).await? {
+                Some(v) if v.kind == VerdictKind::RequestChanges => {
+                    Some(Feedback { body: messages::review_feedback(&v.reviewer, &v.body) })
+                }
+                _ => None,
+            },
+            None => None,
+        };
+        let Some(aside) = aside else { return Ok(feedback) };
+        let why = messages::set_aside_feedback(&aside.by, aside.question.as_deref(), aside.note.as_deref());
+        Ok(Some(Feedback { body: feedback.map_or(why.clone(), |f| format!("{why}\n\n{}", f.body)) }))
+    }
+}
+
+/// `task` with the counts it starts on when a person set it aside and graded it again ([`fresh_counts`]); none for
+/// any other task.
+fn restarted(task: &Task) -> Option<Task> {
+    task.run.set_aside.as_ref()?;
+    let mut fresh = task.clone();
+    fresh.run.apply(fresh_counts(task));
+    Some(fresh)
+}
+
+/// The counts a run starts `task` with. A task parked for giving up and reopened starts its count of failed attempts
+/// again (TRAIL-308). One a person set aside and graded again starts afresh: failed attempts count from the last one
+/// before, and the review rounds, conflict reworks and infrastructure failures from before don't count either, so
+/// nothing that piled up before it was set aside parks it again (TRAIL-1617). The mark is cleared in the same write.
+fn fresh_counts(task: &Task) -> RunPatch {
+    if task.run.set_aside.is_some() {
+        return RunPatch {
+            attempt_base: Patch::Set(task.run.attempt.unwrap_or(0).max(task.run.attempt_floor())),
+            review_rounds: Patch::Set(0),
+            conflict_reworks: Patch::Set(0),
+            infra_failures: Patch::Clear,
+            set_aside: Patch::Clear,
+            ..RunPatch::default()
+        };
+    }
+    RunPatch {
+        attempt_base: Patch::from(task.run.gave_up.filter(|g| *g > task.run.attempt_base.unwrap_or(0))),
+        ..RunPatch::default()
     }
 }

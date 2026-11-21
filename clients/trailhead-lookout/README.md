@@ -5,7 +5,8 @@ Lookout is the Trailhead factory's Bevy client (see `docs/factory/ui.md`), an ap
 ```sh
 cargo run -p trailhead-desktop      # opens the Trailhead window, with Lookout in it
 cargo test -p trailhead-lookout     # headless, no display needed
-mise run shell-install              # installs trailhead-shell with its desktop entry and icons
+mise run shell-install-standalone   # installs trailhead-shell with a desktop entry and icons
+                                    # (with `[shell] repo` set, `mise run shell-install` adds one for `trailhead app`)
 ```
 
 Linux only for now.

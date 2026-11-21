@@ -6,10 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-pub use trailhead_model::{Grade, Priority, ProjectRepo, Status, TaskKey, key_number};
+pub use trailhead_model::{Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
-pub const METADATA_KEY: &str = "factory";
+pub const METADATA_KEY: &str = trailhead_model::TASK_FACTORY_KEY;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -214,6 +214,9 @@ run_fields! {
     /// When the control plane gave up the parked task's pooled sandbox for waiting work (unix seconds), so reconcile
     /// and `factory status` don't look for it (TRAIL-601). Cleared when a new run starts.
     released: i64,
+    /// A person set the task aside (`Store::set_aside`): it waits, ungraded, until they grade it again, and the next
+    /// run starts afresh and is told why. Cleared when that run starts.
+    set_aside: SetAside,
 }
 
 impl RunRecord {

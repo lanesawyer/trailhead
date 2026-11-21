@@ -352,6 +352,36 @@ pub const PROJECT_REPO_KEY: &str = "factory";
 /// work.
 pub const FACTORY_AGENT: &str = "factory";
 
+/// The key in a task's metadata that holds the factory's record of its runs.
+pub const TASK_FACTORY_KEY: &str = "factory";
+
+/// A person set the task aside (`POST /v1/tasks/{task}/set-aside`, `docs/factory/operating.md`): its grade was cleared
+/// and it was reopened, so the factory leaves it until it is graded again. Kept as `set_aside` in the task's factory
+/// record, where the factory reads it to stay quiet about the missing grade and, once the task is graded again, to
+/// start it afresh and tell the worker why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetAside {
+    /// The person's name.
+    pub by: String,
+    /// Unix seconds.
+    pub at: i64,
+    /// The newest question that was waiting on the task, if one was.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// What the person wrote, if anything.
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// The note a task gets when `by` sets it aside, with what they wrote, if anything, on its second line.
+pub fn set_aside_note(by: &str, note: Option<&str>) -> String {
+    let first = format!("Set aside by {by}: the factory leaves it until it is graded again.");
+    match note.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(note) => format!("{first}\n{note}"),
+        None => first,
+    }
+}
+
 /// The repo a project's work is built in, and the path inside it, read from `metadata.factory`
 /// (`{"repo": "owner/name", "path": "apps/ticklist"}`). The factory of that repo works the project's graded tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

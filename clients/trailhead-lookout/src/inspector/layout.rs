@@ -42,7 +42,9 @@ pub(super) enum Block {
     /// A comment in the activity. An open question has answer and resolve buttons; its key holds whether it is open.
     Entry { key: String, entry: Entry, live: bool, note: Option<Control> },
     /// The comment box at the foot of the activity, spawned once per task so what is typed survives redraws.
-    Composer { answering: Option<String>, live: bool, note: Option<Control> },
+    /// While it answers a factory task's question, it offers to set the task aside instead (`aside`, with why it
+    /// can't when it can't).
+    Composer { answering: Option<String>, live: bool, aside: Option<Result<(), String>>, note: Option<Control> },
     /// The title or the description, edited where it is read. Its key doesn't hold the words, so an edit in progress
     /// survives a change from elsewhere.
     Inline { field: Field, value: String },
@@ -86,6 +88,9 @@ pub(super) struct Parts {
     pub(super) resolve: Option<Entity>,
     pub(super) select: Option<Entity>,
     pub(super) note: Option<Entity>,
+    /// The comment box's Set aside button, and the words saying why it can't be pressed.
+    pub(super) aside: Option<Entity>,
+    pub(super) why: Option<Entity>,
 }
 
 pub(super) type Plan = Vec<(String, Vec<(String, Block)>)>;
@@ -202,6 +207,9 @@ pub(super) fn layout(
     if let (Some(current), false) = (view.status, moves.is_empty()) {
         let statuses = std::iter::once(current).chain(moves).collect();
         items.push(("move".to_string(), Block::Move { statuses, note: note(&MOVE_CONTROL) }));
+        if let Some(hint) = view.done_hint {
+            items.push(("move/hint".to_string(), text_block(hint, size::SECONDARY, Tone::Dim)));
+        }
     }
     for action in &view.actions {
         let action = match action {
@@ -305,7 +313,12 @@ pub(super) fn layout_task(
     }
     activity.push((
         "a/compose".into(),
-        Block::Composer { answering: answering.map(str::to_string), live, note: note(&Action::Comment) },
+        Block::Composer {
+            answering: answering.map(str::to_string),
+            live,
+            aside: set_aside_now(view.aside.as_ref(), live),
+            note: note(&Action::Comment),
+        },
     ));
     add(&mut main, "m/activity", "Activity", activity);
     if let Some(why) = &facts.fetch_error {
@@ -338,6 +351,9 @@ pub(super) fn layout_task(
             "s/fields/status".to_string(),
             Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },
         ));
+        if let Some(hint) = view.done_hint {
+            fields.push(("s/fields/status/hint".to_string(), text_block(hint, size::SECONDARY, Tone::Dim)));
+        }
         let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
         fields.push((
             "s/fields/priority".to_string(),
@@ -444,6 +460,69 @@ pub(super) fn gate_button(commands: &mut Commands, button: Entity, live: bool) {
     } else {
         commands.entity(button).insert(InteractionDisabled);
     }
+}
+
+/// The comment box: what it answers, the kind's dropdown, the input, and Send with Set aside beside it.
+fn spawn_composer(
+    commands: &mut Commands,
+    controls: &mut Controls,
+    subject: &Subject,
+    answering: &Option<String>,
+    note: &Option<Control>,
+) -> Entity {
+    let item =
+        commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() }).id();
+    let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+    let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
+    let shown = display(answering.is_some());
+    let answering_text = commands
+        .spawn_scene(bsn! {
+            @text_dim(words, size::SECONDARY)
+            Node { display: { shown }, flex_shrink: 1.0, min_width: px(0) }
+        })
+        .insert((ComposePart::Answering, ChildOf(line)))
+        .id();
+    let stop = commands
+        .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonKind::Plain) })
+        .insert((ComposePart::StopAnswering, ChildOf(line)))
+        .id();
+    let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
+    let kind = commands
+        .spawn_scene(select_iconed(labels, COMPOSE_KINDS.map(comment_icon).to_vec(), Some(0), COMPOSE_KINDS.len()))
+        .insert((ComposePart::Kind, ChildOf(line)))
+        .id();
+    commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));
+    let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+    let send = commands
+        .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
+        .insert((ComposePart::Send, ChildOf(foot), InteractionDisabled))
+        .id();
+    // Beside Send while it answers: what is typed is kept as the note's second line.
+    let aside = commands
+        .spawn_scene(bsn! {
+            @button("Set aside", Some(Icon::Archive), ButtonKind::Normal)
+            Hint({ SET_ASIDE_HINT.to_string() })
+        })
+        .insert((ComposePart::SetAside, ChildOf(foot), InteractionDisabled))
+        .id();
+    let why = commands
+        .spawn_scene(bsn! { @text_dim("", size::SECONDARY) Node { display: Display::None } })
+        .insert((ComposePart::AsideWhy, ChildOf(foot)))
+        .id();
+    // The box's answer goes to its own control, which outlives redraws like every other.
+    control(controls, commands, subject, &Action::Comment);
+    let note = spawn_note(commands, foot, note);
+    commands.entity(item).insert(Parts {
+        text: Some(answering_text),
+        answer: Some(stop),
+        resolve: Some(send),
+        select: Some(kind),
+        note: Some(note),
+        aside: Some(aside),
+        why: Some(why),
+    });
+    // The answering line and the kind's dropdown take turns; `dress` sets which once the parts exist.
+    item
 }
 
 /// Makes the entity for a new block, not yet parented.
@@ -566,53 +645,7 @@ pub(super) fn spawn_block(
             }
             item
         }
-        Block::Composer { answering, note, .. } => {
-            let item = commands
-                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
-                .id();
-            let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
-            let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
-            let shown = display(answering.is_some());
-            let answering_text = commands
-                .spawn_scene(bsn! {
-                    @text_dim(words, size::SECONDARY)
-                    Node { display: { shown }, flex_shrink: 1.0, min_width: px(0) }
-                })
-                .insert((ComposePart::Answering, ChildOf(line)))
-                .id();
-            let stop = commands
-                .spawn_scene(bsn! { @tool_button(Icon::X, "Comment instead", ButtonKind::Plain) })
-                .insert((ComposePart::StopAnswering, ChildOf(line)))
-                .id();
-            let labels: Vec<String> = COMPOSE_KINDS.iter().map(|k| kind_label(*k).to_string()).collect();
-            let kind = commands
-                .spawn_scene(select_iconed(
-                    labels,
-                    COMPOSE_KINDS.map(comment_icon).to_vec(),
-                    Some(0),
-                    COMPOSE_KINDS.len(),
-                ))
-                .insert((ComposePart::Kind, ChildOf(line)))
-                .id();
-            commands.spawn_scene(text_input(COMPOSE_LINES, bsn! { ComposePart::Input })).insert(ChildOf(item));
-            let foot = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
-            let send = commands
-                .spawn_scene(bsn! { @button("Send", Some(Icon::Send), ButtonKind::Primary) })
-                .insert((ComposePart::Send, ChildOf(foot), InteractionDisabled))
-                .id();
-            // The box's answer goes to its own control, which outlives redraws like every other.
-            control(controls, commands, subject, &Action::Comment);
-            let note = spawn_note(commands, foot, note);
-            commands.entity(item).insert(Parts {
-                text: Some(answering_text),
-                answer: Some(stop),
-                resolve: Some(send),
-                select: Some(kind),
-                note: Some(note),
-            });
-            // The answering line and the kind's dropdown take turns; `dress` sets which once the parts exist.
-            item
-        }
+        Block::Composer { answering, note, .. } => spawn_composer(commands, controls, subject, answering, note),
         Block::Inline { field, value } => {
             let (hint, lines, font) = match field {
                 Field::Title => ("Add a title", 1.0, size::DETAIL_TITLE),
@@ -675,6 +708,11 @@ pub(super) fn spawn_block(
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} }),
                 Action::Revert(_) => commands
                     .spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} }),
+                Action::SetAside => commands.spawn_scene(bsn! {
+                    @button(action.label(), Some(Icon::Archive), ButtonKind::Normal)
+                    Hint({ SET_ASIDE_HINT.to_string() })
+                    @{press}
+                }),
                 // Not drawn as an action block: they have their own controls, or none.
                 Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
                     commands.spawn_empty()
@@ -840,17 +878,32 @@ pub(super) fn dress(
                     dress_note(&mut commands, &mut texts, &mut nodes, n, note);
                 }
             }
-            Block::Composer { answering, note, .. } => {
+            Block::Composer { answering, aside, note, .. } => {
                 let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
                 if let Some(Ok(mut t)) = parts.text.map(|e| texts.get_mut(e))
                     && t.0 != words
                 {
                     t.0 = words;
                 }
+                let why = match aside {
+                    Some(Err(why)) => why.clone(),
+                    _ => String::new(),
+                };
+                if let Some(Ok(mut t)) = parts.why.map(|e| texts.get_mut(e))
+                    && t.0 != why
+                {
+                    t.0 = why;
+                }
+                if let Some(button) = parts.aside {
+                    gate_button(&mut commands, button, matches!(aside, Some(Ok(()))));
+                }
+                let offered = answering.is_some() && aside.is_some();
                 let turns = [
                     (parts.text, answering.is_some()),
                     (parts.answer, answering.is_some()),
                     (parts.select, answering.is_none()),
+                    (parts.aside, offered),
+                    (parts.why, offered && matches!(aside, Some(Err(_)))),
                 ];
                 for (part, shown) in turns {
                     if let Some(Ok(mut node)) = part.map(|e| nodes.get_mut(e))

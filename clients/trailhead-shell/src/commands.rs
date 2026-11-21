@@ -113,7 +113,7 @@ pub enum Outcome {
     Ok {
         version: Option<i64>,
     },
-    /// The version the control saw is stale (`412 version_conflict`, or a `409`).
+    /// The version the control saw is stale (`412 version_conflict`).
     Conflict {
         current_version: Option<i64>,
         message: String,
@@ -123,7 +123,9 @@ pub enum Outcome {
         retry_after: Option<Duration>,
         message: String,
     },
-    /// Any other refusal, or no answer after [`MAX_ATTEMPTS`].
+    /// Any other refusal, with the server's words, or no answer after [`MAX_ATTEMPTS`]. A `409` that isn't about the
+    /// version (`invalid_transition`, `claim_held`, `blocked_by`, `undo_conflict`, ...) is one: sending again on a newer
+    /// version would be refused the same way.
     Failed(String),
 }
 
@@ -333,7 +335,7 @@ pub async fn execute(api: &Client, request: &Request) -> Result<Outcome, String>
     Ok(match (status.as_u16(), code) {
         (_, "idempotency_key_in_flight") => return Err(message),
         (500..=599, _) => return Err(message),
-        (_, "version_conflict") | (409 | 412, _) => {
+        (_, "version_conflict") | (412, _) => {
             Outcome::Conflict { current_version: error["current_version"].as_i64(), message }
         }
         (_, "forbidden") | (403, _) => Outcome::Forbidden(message),

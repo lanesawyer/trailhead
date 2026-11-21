@@ -104,6 +104,7 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
         Cmd::Mine => claims::mine(&cx).await,
         Cmd::Renew { task, ttl } => claims::renew(&cx, &task, ttl).await,
         Cmd::Release { task } => claims::release(&cx, &task).await,
+        Cmd::SetAside { task, message } => claims::set_aside(&cx, &task, message.as_deref()).await,
         Cmd::Done { task, message } => tasks::finish(&cx, &task, Status::Done, message).await,
         Cmd::Review { task, message } => tasks::finish(&cx, &task, Status::InReview, message).await,
         Cmd::Approve { task, message } => tasks::finish(&cx, &task, Status::Approved, message).await,

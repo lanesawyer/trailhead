@@ -114,6 +114,8 @@ pub fn lock(path: &Path, holder: &str) -> Result<std::fs::File, String> {
 mod lock_tests {
     #[test]
     fn a_second_holder_is_refused_naming_the_first() {
+        // A child forked meanwhile would hold the lock after `held` drops.
+        let _no_forks = crate::FORKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server.lock");
         let held = super::lock(&path, "a server at 127.0.0.1:7241").unwrap();

@@ -1017,6 +1017,27 @@ async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
 }
 
 #[tokio::test]
+async fn a_failed_in_flight_listing_keeps_the_merge_path_and_the_tick_still_returns() {
+    let (r, queue) = queued_rig_with(&merging());
+    let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    r.codehost.queue_updates(true);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
+
+    // The listing is unknown, not empty: reconcile reports it, and the merger forgets nothing.
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 100);
+    assert!(r.factory.reconcile().await.is_err());
+    assert!(r.factory.awaiting_branch_update(&key), "a tracker error must not wipe the tracked update");
+    assert!(r.factory.caches_pr_files(&key));
+    r.factory.tick().await.unwrap();
+    assert!(r.factory.awaiting_branch_update(&key));
+    assert!(r.factory.caches_pr_files(&key));
+}
+
+#[tokio::test]
 async fn a_queued_update_is_forgotten_when_a_person_closes_the_pr() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
