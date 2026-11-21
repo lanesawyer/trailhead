@@ -54,7 +54,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
                 if let Some(unit) = local_scope(&paths, local, &info) {
                     println!("scope {unit}");
                     if client::is_shared_scope(&unit) {
-                        println!("{}", shared_scope_warning(client::can_start_scoped()));
+                        println!("{}", shared_scope_warning(&unit, client::can_start_scoped()));
                     }
                 }
                 if let Some(runs) = info.runs_in_flight {
@@ -111,16 +111,26 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
 
 /// The warning for a server in a shared scope. A restart only helps when a scoped start would work from here;
 /// otherwise `start_local_server` falls back to running unscoped and lands in the same scope again.
-fn shared_scope_warning(can_scope: bool) -> String {
+fn shared_scope_warning(unit: &str, can_scope: bool) -> String {
     let base =
         "warning: the server shares a scope with an app, terminal or login session; ending it would stop the server";
     if can_scope {
         format!("{base} (`trailhead server restart` starts it in its own)")
+    } else if is_container_scope(unit) {
+        format!(
+            "{base}. This looks like a container, where there is no systemd user manager to give it its own scope and `loginctl enable-linger` doesn't apply. Run the server as the container's main process instead (`trailhead serve`), so the container's lifetime is the server's"
+        )
     } else {
         format!(
             "{base}. `trailhead server restart` can't help: there is no reachable systemd user manager to give it its own scope (no user runtime dir, or `systemd-run --user` unavailable). On a login session, `loginctl enable-linger` keeps a user manager running"
         )
     }
+}
+
+/// Whether a cgroup scope belongs to a container runtime (`docker-<id>.scope`, `libpod-<id>.scope`, `crio-`,
+/// `cri-containerd-`), which has no login session or user manager behind it.
+fn is_container_scope(unit: &str) -> bool {
+    ["docker-", "libpod-", "crio-", "cri-containerd-"].iter().any(|p| unit.starts_with(p))
 }
 
 /// The systemd unit the server runs in, when it is local, ours and this machine can say.
@@ -179,10 +189,19 @@ mod tests {
 
     #[test]
     fn shared_scope_warning_suggests_restart_only_when_it_can_scope() {
-        assert!(shared_scope_warning(true).contains("`trailhead server restart` starts it"));
-        let w = shared_scope_warning(false);
+        assert!(shared_scope_warning("session-3.scope", true).contains("`trailhead server restart` starts it"));
+        let w = shared_scope_warning("session-3.scope", false);
         assert!(!w.contains("starts it in its own"));
         assert!(w.contains("loginctl enable-linger"));
+    }
+
+    #[test]
+    fn shared_scope_warning_points_containers_at_the_main_process() {
+        let w = shared_scope_warning("docker-0123abcd.scope", false);
+        assert!(w.contains("container's main process"));
+        assert!(!w.contains("keeps a user manager running"));
+        assert!(is_container_scope("libpod-ab12.scope"));
+        assert!(!is_container_scope("session-3.scope"));
     }
 
     #[test]
