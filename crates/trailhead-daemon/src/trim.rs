@@ -19,7 +19,9 @@ pub struct Trimmed {
 /// `.fingerprint/<name>-<hash>` with its `deps/<name>-<hash>.*` files and its `build/<name>-<hash>` directory, and it
 /// is removed together or not at all: cargo judges a build script fresh by its fingerprint and `output` file and never
 /// looks inside `OUT_DIR`, so deleting single files could leave a "fresh" script whose generated files or native
-/// libraries are gone. Without the fingerprint cargo rebuilds the unit, build script included. A unit's last use is
+/// libraries are gone. Cargo 1.100 lays a profile out differently, a unit to a directory
+/// (`build/<package>/<hash>` holding its `fingerprint` and `out`), and that directory is the unit there
+/// (TRAIL-1649: a trim that knew only the first layout found no profile in the second and cut nothing). Without the fingerprint cargo rebuilds the unit, build script included. A unit's last use is
 /// the mtime of its fingerprint's `invoked.timestamp`, which cargo touches whenever a build considers the unit.
 /// A missing `target` is fine.
 pub fn trim_target(target: &Path, cap: u64) -> io::Result<Trimmed> {
@@ -75,7 +77,13 @@ struct Unit {
     used: SystemTime,
 }
 
-/// The profile directories (`target/debug`, `target/<triple>/release`, ...): those holding a `.fingerprint`.
+/// Whether `dir` is a profile directory: it holds a `.fingerprint` (cargo before 1.100), or cargo's lock beside a
+/// `build` directory (the layout since, which has no `.fingerprint`).
+fn is_profile(dir: &Path) -> bool {
+    dir.join(".fingerprint").is_dir() || (dir.join(".cargo-lock").is_file() && dir.join("build").is_dir())
+}
+
+/// The profile directories (`target/debug`, `target/<triple>/release`, ...).
 fn profile_dirs(target: &Path) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(target)? {
@@ -84,13 +92,13 @@ fn profile_dirs(target: &Path) -> io::Result<Vec<PathBuf>> {
             continue;
         }
         let path = entry.path();
-        if path.join(".fingerprint").is_dir() {
+        if is_profile(&path) {
             out.push(path);
             continue;
         }
         for inner in fs::read_dir(&path)? {
             let inner = inner?;
-            if inner.file_type()?.is_dir() && inner.path().join(".fingerprint").is_dir() {
+            if inner.file_type()?.is_dir() && is_profile(&inner.path()) {
                 out.push(inner.path());
             }
         }
@@ -98,7 +106,41 @@ fn profile_dirs(target: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// The units of a profile laid out a unit to a directory: `build/<package>/<hash>`, with the files cargo linked to
+/// its artifacts from the profile root and `examples/`. A unit without a fingerprint is a leftover.
+fn units_by_directory(profile: &Path) -> io::Result<Vec<Unit>> {
+    let links = outside_links(profile)?;
+    let mut units = Vec::new();
+    for package in fs::read_dir(profile.join("build"))? {
+        let package = package?;
+        if !package.file_type()?.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(package.path())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let dir = entry.path();
+            let fingerprint = dir.join("fingerprint");
+            let used = if fingerprint.is_dir() { last_used(&fingerprint)? } else { SystemTime::UNIX_EPOCH };
+            let mut files = Vec::new();
+            collect(&dir, &mut files)?;
+            let mut paths = vec![dir.clone()];
+            // Deleting an artifact frees nothing while a hard link to it survives, so those go with the unit.
+            paths.extend(files.iter().filter_map(|f| f.3).filter_map(|id| links.get(&id)).flatten().cloned());
+            paths.sort();
+            paths.dedup();
+            units.push(Unit { paths, size: dir_size(&dir)?, used });
+        }
+    }
+    Ok(units)
+}
+
 fn units_of(profile: &Path) -> io::Result<Vec<Unit>> {
+    if !profile.join(".fingerprint").is_dir() {
+        return units_by_directory(profile);
+    }
     let mut units: BTreeMap<String, Unit> = BTreeMap::new();
     let fresh = || Unit { paths: Vec::new(), size: 0, used: SystemTime::UNIX_EPOCH };
     for entry in fs::read_dir(profile.join(".fingerprint"))? {
@@ -390,6 +432,49 @@ mod tests {
         assert_eq!(present(&p, "old-1"), [false; 3]);
         assert_eq!(present(&p, "mid-2"), [false; 3]);
         assert_eq!(present(&p, "new-3"), [true; 3]);
+    }
+
+    /// A unit as cargo 1.100 lays it out: `build/<package>/<hash>` with its fingerprint stamped `age_secs` ago and
+    /// its artifact in `out`.
+    fn unit_dir(profile: &Path, package: &str, hash: &str, len: usize, age_secs: u64) -> PathBuf {
+        file(&profile.join(".cargo-lock"), 0, age_secs);
+        let dir = profile.join("build").join(package).join(hash);
+        file(&dir.join("fingerprint/invoked.timestamp"), 0, age_secs);
+        file(&dir.join(format!("out/lib{package}-{hash}.rlib")), len, age_secs);
+        dir
+    }
+
+    #[test]
+    fn a_profile_laid_out_a_unit_to_a_directory_is_trimmed_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("debug");
+        let old = unit_dir(&profile, "serde", "aaaa", 4000, 300);
+        let older_build_of_it = unit_dir(&profile, "serde", "bbbb", 4000, 900);
+        let new = unit_dir(&profile, "tokio", "cccc", 4000, 10);
+        file(&profile.join("incremental/x/cache.bin"), 3000, 5);
+
+        let trimmed = trim_target(dir.path(), 9000).unwrap();
+        assert!(trimmed.before == 15000 && trimmed.after == 8000, "{trimmed:?}");
+        assert!(!profile.join("incremental").exists(), "incremental caches go first");
+        assert!(!older_build_of_it.exists(), "then the unit used longest ago, whole");
+        assert!(old.join("fingerprint").exists() && new.join("out").exists(), "the rest stay whole");
+    }
+
+    #[test]
+    fn a_unit_directory_takes_the_files_linked_to_its_artifacts_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("debug");
+        let app = unit_dir(&profile, "app", "aaaa", 5000, 900);
+        fs::hard_link(app.join("out/libapp-aaaa.rlib"), profile.join("libapp.rlib")).unwrap();
+        let kept = unit_dir(&profile, "serde", "bbbb", 5000, 10);
+        let bare = profile.join("build/gone/dddd");
+        file(&bare.join("out/left.o"), 5000, 10);
+
+        let trimmed = trim_target(dir.path(), 6000).unwrap();
+        assert!(trimmed.after <= 6000, "{trimmed:?}");
+        assert!(!bare.exists(), "a unit with no fingerprint is a leftover and goes first");
+        assert!(!app.exists() && !profile.join("libapp.rlib").exists(), "the link would have kept the bytes");
+        assert!(kept.exists());
     }
 
     #[test]
