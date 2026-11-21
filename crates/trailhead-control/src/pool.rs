@@ -413,6 +413,8 @@ impl Factory {
         };
         p.compute.set_labels(&sandbox.id, &labels).await?;
         self.status.sandbox(&Sandbox { labels, ..sandbox.clone() });
+        // Idle again: a failure count left by an earlier reconcile mustn't back off or abandon it later.
+        self.pool.troubled.lock().unwrap().remove(&sandbox.name);
         Ok(())
     }
 
