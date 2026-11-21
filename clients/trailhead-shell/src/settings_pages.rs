@@ -2,7 +2,8 @@
 //!
 //! - **Appearance**: the theme (light, dark or the desktop's), kept in the shell's `theme` file, and the text size,
 //!   every step of the kit's [`TextSize`] with the one drawn at marked, kept in `shell.json`. Both apply at once, and a
-//!   change made elsewhere (the keys, the desktop) shows here in place.
+//!   change made elsewhere (the keys, the desktop) shows here in place. Then how the window switches apps
+//!   ([`crate::transition`]), each way a small preview playing it ([`crate::previews`]), kept in `shell.json`.
 //! - **Connection**: the server dialed, the state of the link and why it isn't live, who it signed in as, this
 //!   window's endpoint id and the `trailhead factory allow` command for it, both with a copy button, and Re-dial and
 //!   Disconnect. Listed only in a shell with a connection.
@@ -26,6 +27,7 @@ use trailhead_ui::{
 use crate::connect::allow_command;
 use crate::connection::{Api, Connection, ConnectionStatus, Dialed, LocalEndpoint, SendNet};
 use crate::net::NetCommand;
+use crate::previews::transition_setting;
 use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, SHELL_GROUP, SettingsPage};
 use crate::update::{ThisBuild, UpdateReady};
 use crate::{AppId, Apps, SHELL};
@@ -115,6 +117,8 @@ fn appearance_page(
     );
     let control = bsn_list! { @button_group(sizes, Some(text_size.step())) TextSizePick };
     commands.spawn_scene(setting("Text size", note, control)).insert(ChildOf(page));
+
+    commands.spawn_scene(transition_setting()).insert(ChildOf(page));
 }
 
 fn connection_page(In(page): In<Entity>, mut commands: Commands) {

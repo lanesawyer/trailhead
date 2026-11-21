@@ -1,5 +1,5 @@
 //! The window's settings: one modal, "Settings", with its pages listed down its side. The shell's own come first,
-//! under Trailhead: Appearance (the theme and the text size), Connection (while the shell has one) and About. Then each
+//! under Trailhead: Appearance (the theme, the text size and how the window switches apps), Connection (while the shell has one) and About. Then each
 //! app's, under the app's name, in the order the rail shows the apps, whichever app is shown: an app's settings are
 //! found in one place, and the list doesn't change under a person who switches apps.
 //!
@@ -40,7 +40,7 @@ impl PageId {
     }
 }
 
-/// The theme and the text size.
+/// The theme, the text size and how the window switches apps.
 pub const APPEARANCE: PageId = PageId::new(SHELL, "appearance");
 /// The server, this window's endpoint, and why the connection isn't live. Listed only in a shell with a connection.
 pub const CONNECTION: PageId = PageId::new(SHELL, "connection");

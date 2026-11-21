@@ -52,6 +52,7 @@ pub mod lint;
 pub mod mirror;
 pub mod net;
 mod place;
+mod previews;
 mod rail;
 pub mod settings;
 mod settings_modal;
@@ -284,6 +285,7 @@ impl Plugin for ShellPlugin {
                 rail::RailUiPlugin,
                 settings_modal::SettingsModalUiPlugin,
                 cover::CoverUiPlugin,
+                previews::PreviewsUiPlugin,
             ));
             if self.build.is_some() {
                 app.add_plugins(update_panel::UpdatePanelUiPlugin);
