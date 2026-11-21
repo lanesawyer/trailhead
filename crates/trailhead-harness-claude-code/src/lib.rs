@@ -768,12 +768,20 @@ async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileChange>> {
 /// A nested repository with no commit can't be staged as an embedded repository: `git add` fails on it. Remove the
 /// `.git` of each one (git lists a nested repository as a `dir/` entry among the untracked paths), so its files are
 /// staged as ordinary files, and log it. One with a commit is left alone: `read_change` publishes its files.
+/// Git lists only the outermost nested repository, so the pass repeats until it removes nothing: a commitless
+/// repository inside another shows up once the outer `.git` is gone.
 async fn unnest_commitless_repositories(dir: &Path) {
+    while unnest_pass(dir).await > 0 {}
+}
+
+/// One pass of `unnest_commitless_repositories`: how many `.git` entries it removed.
+async fn unnest_pass(dir: &Path) -> usize {
+    let mut count = 0;
     let listed = match git(dir, &["ls-files", "-z", "--others", "--exclude-standard"]).await {
         Ok(listed) => listed,
         Err(e) => {
             tracing::warn!(error = %e, "could not look for nested repositories");
-            return;
+            return 0;
         }
     };
     for name in listed.split(|b| *b == 0).filter(|n| n.ends_with(b"/")) {
@@ -789,11 +797,13 @@ async fn unnest_commitless_repositories(dir: &Path) {
         };
         match removed {
             Ok(()) => {
+                count += 1;
                 tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit")
             }
             Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
         }
     }
+    count
 }
 
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
@@ -950,6 +960,23 @@ mod tests {
         paths.sort();
         let base = ".claude/skills/trailhead-ui";
         assert_eq!(paths, [".gitignore", "SKILL.md", "refs/b.md"].map(|p| format!("{base}/{p}")));
+    }
+
+    #[tokio::test]
+    async fn commitless_repositories_nested_in_each_other_are_read_as_their_files() {
+        let (dir, start) = started().await;
+        let outer = dir.path().join("a/outer");
+        let inner = outer.join("deep/inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(outer.join("o"), "o").unwrap();
+        std::fs::write(inner.join("f"), "x").unwrap();
+        run_git(&["init", "-q"], &outer);
+        run_git(&["init", "-q"], &inner);
+        let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+        paths.sort();
+        assert_eq!(paths, ["a/outer/deep/inner/f", "a/outer/o"]);
+        assert!(!outer.join(".git").exists());
+        assert!(!inner.join(".git").exists());
     }
 
     #[tokio::test]
