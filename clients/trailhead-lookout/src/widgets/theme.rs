@@ -62,6 +62,14 @@ pub mod token {
     /// An agent walking the trail map, and the initial written on it.
     pub const AGENT: Token = Token::new("lookout.agent");
     pub const AGENT_TEXT: Token = Token::new("lookout.agent.text");
+
+    /// The trail map's peak, night in the dark theme and day in the light: the sky behind it, the light on it, and
+    /// its facets from the foot up.
+    pub const PEAK_SKY: Token = Token::new("lookout.peak.sky");
+    pub const PEAK_LIGHT: Token = Token::new("lookout.peak.light");
+    pub const PEAK_GROUND: Token = Token::new("lookout.peak.ground");
+    pub const PEAK_ROCK: Token = Token::new("lookout.peak.rock");
+    pub const PEAK_SNOW: Token = Token::new("lookout.peak.snow");
 }
 
 /// The background token of a status column.
@@ -200,6 +208,14 @@ pub fn paint(theme: &mut Theme) {
 
     theme.paint(&token::AGENT, Color::srgb(0.95, 0.75, 0.3));
     theme.paint(&token::AGENT_TEXT, Color::BLACK);
+
+    // The peak by night under a cool moon, and by day under a warm sun: each its own color in the light theme, since
+    // a night sky turned over is no day sky.
+    theme.paint_both(&token::PEAK_SKY, Color::oklch(0.19, 0.045, 265.0), Color::oklch(0.88, 0.05, 235.0));
+    theme.paint_both(&token::PEAK_LIGHT, Color::oklch(0.86, 0.05, 255.0), Color::oklch(0.98, 0.035, 85.0));
+    theme.paint_both(&token::PEAK_GROUND, Color::oklch(0.40, 0.06, 165.0), Color::oklch(0.66, 0.10, 140.0));
+    theme.paint_both(&token::PEAK_ROCK, Color::oklch(0.52, 0.035, 265.0), Color::oklch(0.64, 0.03, 60.0));
+    theme.paint_both(&token::PEAK_SNOW, Color::oklch(0.90, 0.035, 250.0), Color::oklch(0.97, 0.012, 240.0));
 }
 
 #[cfg(test)]

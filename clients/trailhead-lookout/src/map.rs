@@ -14,6 +14,10 @@
 //! [`build`] is a pure function over the mirrors' data and gives positions in map pixels, so the layout and what
 //! moves are tested without a window. [`MapPlugin`] keeps a [`TrailMap`] from the mirrors; [`MapUiPlugin`] draws it
 //! with UI nodes in [`View::Map`], and agents glide to a new spot instead of jumping.
+//!
+//! This flat map is being replaced by the 3D peak ([`crate::peak`]), which the map shows first; a toggle at the top
+//! right switches to the flat one, which shows what the peak doesn't yet (camps, waypoints, holders, the factory's
+//! notes).
 
 use std::collections::HashMap;
 
@@ -27,8 +31,10 @@ use uuid::Uuid;
 use crate::board::View;
 use crate::claims::live_claims;
 use crate::factory::{Campsite, FactoryStatus, Run};
+use crate::peak::{MapMode, PeakUiPlugin};
 use crate::widgets::{
-    self, BackgroundTone, Keyed, TextTone, sandbox_token, size, space, status_label, status_tone, text_toned, token,
+    self, BackgroundTone, ButtonGroup, Keyed, Picked, TextTone, button_group, sandbox_token, size, space, status_label,
+    status_tone, text_toned, token,
 };
 
 /// Campsites sit on a grid on the left, this many to a row.
@@ -336,15 +342,26 @@ pub struct MapUiPlugin;
 
 impl Plugin for MapUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(MapPlugin)
+        app.add_plugins((MapPlugin, PeakUiPlugin))
             .add_systems(OnEnter(View::Map), spawn_panel)
             .add_systems(OnExit(View::Map), despawn_panel)
-            .add_systems(Update, (redraw, glide).chain().run_if(in_state(View::Map)));
+            .add_observer(on_mode_picked)
+            .add_systems(Update, (redraw, glide, show_mode).chain().run_if(in_state(View::Map)));
     }
 }
 
+/// The map's panel beside the sidebar. It lets the pointer through to the peak's meshes under it, and takes the drags
+/// and wheel that orbit the peak's camera.
 #[derive(Component)]
-struct MapPanel;
+pub(crate) struct MapPanel;
+
+/// The toggle between the peak and the flat map.
+#[derive(Component)]
+struct ModeToggle;
+
+/// The flat map's layer of agents' tokens.
+#[derive(Component)]
+struct TokenLayer;
 
 /// The layer holding the camps, waypoints and their text, under the tokens.
 #[derive(Component)]
@@ -357,7 +374,57 @@ struct Token {
 }
 
 fn spawn_panel(mut commands: Commands) {
-    commands.spawn((Name::new("trail map"), MapPanel, crate::widgets::beside_sidebar(), crate::widgets::BesideSidebar));
+    let through = Pickable { should_block_lower: false, is_hoverable: true };
+    let panel = commands
+        .spawn((
+            Name::new("trail map"),
+            MapPanel,
+            through,
+            crate::widgets::beside_sidebar(),
+            crate::widgets::BesideSidebar,
+        ))
+        .id();
+    let corner = Node {
+        position_type: PositionType::Absolute,
+        top: px(space::PANEL_INSET),
+        right: px(space::PANEL_INSET),
+        ..default()
+    };
+    let options = MapMode::ALL.iter().map(|m| (m.label().to_string(), None)).collect();
+    commands.spawn_scene(button_group(options, Some(0))).insert((ModeToggle, Name::new("map mode"))).insert((
+        corner,
+        ZIndex(TOKEN_Z + 1),
+        ChildOf(panel),
+    ));
+}
+
+/// The toggle picks the peak or the flat map.
+fn on_mode_picked(picked: On<Picked>, toggles: Query<(), With<ModeToggle>>, mut next: ResMut<NextState<MapMode>>) {
+    if toggles.contains(picked.entity)
+        && let Some(mode) = MapMode::ALL.get(picked.index)
+    {
+        next.set(*mode);
+    }
+}
+
+/// Shows the flat map's layers only in [`MapMode::Flat`], and the toggle's choice as the mode is.
+#[allow(clippy::type_complexity)]
+fn show_mode(
+    mode: Option<Res<State<MapMode>>>,
+    mut layers: Query<&mut Visibility, Or<(With<Terrain>, With<TokenLayer>)>>,
+    mut toggles: Query<&mut ButtonGroup, With<ModeToggle>>,
+) {
+    let Some(mode) = mode else { return };
+    let flat = *mode.get() == MapMode::Flat;
+    for mut visibility in &mut layers {
+        visibility.set_if_neq(if flat { Visibility::Inherited } else { Visibility::Hidden });
+    }
+    let chosen = MapMode::ALL.iter().position(|m| m == mode.get());
+    for mut toggle in &mut toggles {
+        if toggle.chosen != chosen {
+            toggle.chosen = chosen;
+        }
+    }
 }
 
 fn despawn_panel(mut commands: Commands, panel: Query<Entity, With<MapPanel>>) {
@@ -483,7 +550,7 @@ fn redraw(
         let fill =
             Node { position_type: PositionType::Absolute, width: percent(100), height: percent(100), ..default() };
         drawn.layer = Some(commands.spawn((Terrain, fill.clone(), ChildOf(panel))).id());
-        drawn.token_layer = Some(commands.spawn((fill, ChildOf(panel))).id());
+        drawn.token_layer = Some(commands.spawn((TokenLayer, fill, ChildOf(panel))).id());
     }
     let (layer, token_layer) = (drawn.layer.expect("spawned with the panel"), drawn.token_layer.expect("likewise"));
     let wanted = terrain(&map.0, &factory);
