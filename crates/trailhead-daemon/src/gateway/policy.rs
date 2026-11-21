@@ -149,7 +149,8 @@ pub fn check(provider: &str, labels: &Labels, method: &str, path: &str) -> Resul
 /// Refuses a request whose path [`check`] allows but whose body asks for more: creating a ref names it in the
 /// body, so a worker's `POST .../git/refs` must name its own branch.
 pub fn check_body(provider: &str, labels: &Labels, method: &str, path: &str, body: &[u8]) -> Result<(), String> {
-    // Segments as `check` reads them, so an empty one (`git//refs`, a trailing slash) doesn't slip past.
+    // Defence in depth: `check` already refuses empty segments (`git//refs`, a trailing slash) for exact rules,
+    // but dropping them here too means this match can't be sidestepped if that ever changes.
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let creates_ref = provider == "github"
         && method.eq_ignore_ascii_case("POST")
