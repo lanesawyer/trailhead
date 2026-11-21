@@ -72,6 +72,8 @@ pub mod routes {
     pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
     pub const ME: Route = Route::new(Method::GET, "/v1/me");
     pub const SHELL_BUILD: Route = Route::new(Method::GET, "/v1/shell/build");
+    pub const SHELL_ASK_TARGETS: Route = Route::new(Method::GET, "/v1/shell/ask");
+    pub const SHELL_ASK: Route = Route::new(Method::POST, "/v1/shell/ask");
     pub const LIST_AGENTS: Route = Route::new(Method::GET, "/v1/agents");
     pub const CREATE_AGENT: Route = Route::new(Method::POST, "/v1/agents");
     pub const REVOKE_AGENT: Route = Route::new(Method::POST, "/v1/agents/{agent}/revoke");
@@ -90,7 +92,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 37] {
+    pub fn all() -> [Route; 39] {
         [
             READY,
             LIST_TASKS,
@@ -115,6 +117,8 @@ pub mod routes {
             SHOW_PROJECT,
             ME,
             SHELL_BUILD,
+            SHELL_ASK_TARGETS,
+            SHELL_ASK,
             LIST_AGENTS,
             CREATE_AGENT,
             REVOKE_AGENT,
@@ -792,6 +796,25 @@ impl Client {
         let mut req = self.request(routes::SHELL_BUILD, None);
         if let Some(since) = since {
             req = req.query(&[("since", since)]);
+        }
+        self.send(req).await
+    }
+
+    /// `GET /v1/shell/ask`: what can be asked for from the window, the projects pointed at the apps repo.
+    pub async fn shell_ask_targets(&self) -> Result<trailhead_model::shell::AskTargets> {
+        self.send(self.request(routes::SHELL_ASK_TARGETS, None)).await
+    }
+
+    /// `POST /v1/shell/ask`: a change to an app or a new app, as the person this client acts for. A retry with the
+    /// same `idempotency_key` and ask gets the first answer back instead of asking twice.
+    pub async fn shell_ask(
+        &self,
+        ask: &trailhead_model::shell::Ask,
+        idempotency_key: Option<&str>,
+    ) -> Result<trailhead_model::shell::Asked> {
+        let mut req = self.request(routes::SHELL_ASK, None).json(ask);
+        if let Some(key) = idempotency_key {
+            req = req.header("Idempotency-Key", key);
         }
         self.send(req).await
     }
