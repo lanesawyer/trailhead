@@ -1,6 +1,7 @@
 //! A few choices side by side, drawn as one control: a row of buttons joined at a seam, only the outer ends rounded,
 //! the chosen one primary. For a choice of two to four short options that should all show at once (a theme's light,
-//! dark or the desktop's); a longer list is a [`super::select`].
+//! dark or the desktop's), or a short ladder of steps where a person wants to see where they are on it (the text
+//! sizes); a longer list is a [`super::select`].
 //!
 //! Pressing an option chooses it and triggers [`Picked`] on the group with its index, as a select does. Set
 //! [`ButtonGroup::chosen`] to show a choice made elsewhere.

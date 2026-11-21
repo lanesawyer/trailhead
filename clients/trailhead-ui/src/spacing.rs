@@ -100,6 +100,8 @@ pub mod extent {
     pub const DETAIL_WIDTH: f32 = 960.0;
     /// The sidebar of facts in a detail modal.
     pub const DETAIL_SIDEBAR_WIDTH: f32 = 280.0;
+    /// The tabs down the side of a settings modal with pages (`spawn_settings_tabs`): room for a page's name.
+    pub const SETTINGS_TABS_WIDTH: f32 = 180.0;
 }
 
 /// How thick a line is: a border, a rule between panes.

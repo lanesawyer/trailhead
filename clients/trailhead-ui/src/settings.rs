@@ -7,15 +7,19 @@
 //! - [`setting`]: one setting, its label over its control (a select, a button group, a value), with a dim note under
 //!   it saying what it does when there is one.
 //! - [`setting_toggle`]: a setting that is on or off, a toggle switch with its label after it, and its note.
+//! - [`spawn_settings_tabs`]: a settings modal with pages, its tabs down the side (under [`crate::tab_heading`]s when
+//!   they come in groups) and the page shown beside them.
 //!
 //! A list of toggles stacked bare, with nothing between them, read as one block of text (TRAIL-1610); in a section
 //! they stand a row apart under their heading.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::ControlOrientation;
 
 use crate::containers::section;
 use crate::patch::display;
-use crate::spacing::space;
+use crate::spacing::{extent, space};
+use crate::tabs::tab_strip;
 use crate::text::{size, text_dim};
 use crate::toggle::toggle_switch;
 
@@ -85,6 +89,52 @@ pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String
         ))
         .id();
     SettingsSection { section, rows }
+}
+
+/// A [`spawn_settings_tabs`]'s parts.
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsTabs {
+    /// The whole: tabs and pane side by side.
+    pub root: Entity,
+    /// A [`tab_strip`] down the side: fill it with [`crate::tab`]s, a [`crate::tab_heading`] over each group of them,
+    /// and answer its `ValueChange<Option<Entity>>` by setting its `SelectedTab` and showing that tab's page.
+    pub strip: Entity,
+    /// Where the page shown goes: a [`settings_page`], spawned when its tab is picked and despawned when another is.
+    pub pane: Entity,
+}
+
+/// The tabs of a settings modal with pages, down its side, and the pane beside them that holds the page shown,
+/// spawned under `parent` (a modal's body). It grows into a tall modal's height, so a page can fill what is left (a
+/// log that scrolls on its own); a page longer than the modal scrolls with the body.
+pub fn spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsTabs {
+    let root = commands
+        .spawn((
+            Name::new("settings tabs"),
+            Node { column_gap: px(space::GROUPS), flex_grow: 1.0, min_height: px(0), ..default() },
+            ChildOf(parent),
+        ))
+        .id();
+    let strip = commands
+        .spawn_scene(bsn! {
+            @tab_strip(ControlOrientation::Vertical)
+            Node { width: { px(extent::SETTINGS_TABS_WIDTH) }, flex_shrink: 0.0 }
+        })
+        .insert(ChildOf(root))
+        .id();
+    let pane = commands
+        .spawn((
+            Name::new("settings pane"),
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                min_width: px(0),
+                min_height: px(0),
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .id();
+    SettingsTabs { root, strip, pane }
 }
 
 #[cfg(test)]
@@ -167,6 +217,25 @@ mod tests {
         let rows = world.get::<Node>(parts.rows).unwrap();
         assert_eq!((rows.flex_direction, rows.row_gap), (FlexDirection::Column, px(space::ROWS)));
         assert!(world.get::<Children>(parts.rows).is_none(), "the box is the caller's to fill");
+    }
+
+    #[test]
+    fn the_tabs_keep_their_width_down_the_side_and_the_pane_takes_the_rest() {
+        let mut app = app();
+        let body = app.world_mut().spawn(Node::default()).id();
+        let parts = spawn_settings_tabs(&mut app.world_mut().commands(), body);
+        app.world_mut().flush();
+        app.update();
+        let world = app.world();
+        let children: Vec<Entity> = world.get::<Children>(parts.root).unwrap().iter().collect();
+        assert_eq!(children, [parts.strip, parts.pane]);
+        let list = world.get::<bevy::ui_widgets::TabList>(parts.strip).unwrap();
+        assert_eq!(list.orientation, ControlOrientation::Vertical);
+        let strip = world.get::<Node>(parts.strip).unwrap();
+        assert_eq!((strip.width, strip.flex_shrink), (px(extent::SETTINGS_TABS_WIDTH), 0.0));
+        let pane = world.get::<Node>(parts.pane).unwrap();
+        assert_eq!((pane.flex_grow, pane.min_width, pane.min_height), (1.0, px(0), px(0)));
+        assert_eq!(world.get::<Node>(parts.root).unwrap().flex_grow, 1.0, "fills a tall modal's body");
     }
 
     #[test]

@@ -101,7 +101,7 @@ panel.
 | `button` | `button(caption: Into<String>, icon: Option<Icon>, kind: ButtonKind) -> impl Scene` | A button with words, after an icon when given. | The caption is the button's descendant `Text`: walk `Children` and `set_text` it (the kit has no `ButtonEdit` yet). Disable with `InteractionDisabled`; the caption dims itself. |
 | `tool_button` | `tool_button(icon: Icon, hint: Into<String>, kind: ButtonKind) -> impl Scene` | An icon alone, with a `Hint` saying what it does. `Plain` on cards and lists, `Normal` in a toolbar. | Its `Hint`'s `.0`. |
 | `ButtonKind` | `Normal` (default), `Primary`, `Plain`, `Danger` | How much a button stands out. One `Primary` per surface (New task, Save); `Danger` for something destructive (cancel, revert): a normal button with its caption in the danger color; `Plain` has no background until hovered. | Fixed at spawn. |
-| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop). Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
+| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop), or a short ladder of steps a person should see all of (a text size's eight). Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
 | `ButtonGroup` | `ButtonGroup { chosen: Option<usize> }` (component) | A button group's state. | |
 | `link_button` | `link_button(icon: Icon, text: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | A button that opens a URL in the system's browser. `Plain` reads as a link in running text. | Its `ExternalLink { url }`. |
 | `link_tool_button` | `link_tool_button(icon: Icon, hint: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | The same as an icon-only tool button. | Its `ExternalLink`. |
@@ -138,7 +138,8 @@ if let Ok(mut check) = checks.get_mut(check_entity) {
 | `slider` | `slider(value: f32, range: (f32, f32), decimals: i32) -> impl Scene` | A number picked on a track; a click sets the value where it lands. The kit writes the value back. | Read `SliderValue`, or observe `ValueChange<f32>`. |
 
 A fixed set of choices is a dropdown, never a button that cycles through values. Two to four short options that
-should all show at once are a `button_group`. A list floating under a text field (a search's suggestions) is a
+should all show at once are a `button_group`, and so is a ladder of a few short steps where you are on it
+matters (the text sizes, 80% to 200%). A list floating under a text field (a search's suggestions) is a
 `dropdown_list`, not a `select`.
 
 ### A text field
@@ -216,10 +217,13 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 | `setting` | `setting(label: Into<String>, note: Into<String>, control: impl SceneList) -> impl Scene` | One setting: its label over its control (a `select`, a `button_group`, a value's `text`), with a dim note under it saying what it does; an empty note is hidden. Pass the control into the scene with your marker on it, as for `field`. | The control's own way; the note is `SettingNote`'s `Text` (`set_text`). |
 | `setting_toggle` | `setting_toggle(label: Into<String>, note: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off: a `toggle_switch` with its label after it, and the note under it. `own` goes on the switch, which sends `ValueChange<bool>`. | The switch keeps its own state. |
 | `SettingNote` | component | A setting's note. | |
+| `spawn_settings_tabs` | `spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsTabs` | A settings modal with pages: a vertical `tab_strip` `extent::SETTINGS_TABS_WIDTH` wide down the side, and a pane beside it for the page shown, spawned under `parent` (a modal's body). It grows into a tall modal's height, so a page can fill what is left. | |
+| `SettingsTabs` | `SettingsTabs { root: Entity, strip: Entity, pane: Entity }` | Fill `strip` with `tab`s (a `tab_heading` over each group); spawn the page shown as a `settings_page()` in `pane` when its tab is picked, and despawn it when another is. | The strip's `SelectedTab`. |
 
 Every settings surface is built from these, Lookout's settings modal included, so settings look alike in every app.
 Never stack `toggle_switch`es or `field`s in a modal body by hand: bare, with no gap, a list of toggles reads as one
-block of text (TRAIL-1610). Recipe 6 is a settings modal.
+block of text (TRAIL-1610). Recipe 6 is a settings modal. In the Trailhead shell an app does not open a settings modal
+of its own: it adds pages to the shell's (the shell's guide, "Settings pages").
 
 ### A sidebar, the rail and navigation
 
@@ -245,6 +249,7 @@ block of text (TRAIL-1610). Recipe 6 is a settings modal.
 | `tab_strip` | `tab_strip(orientation: ControlOrientation) -> impl Scene` | A strip of tabs, ruled along the edge it shares with what it shows. A click or an arrow key raises `ValueChange<Option<Entity>>` on the strip, naming the tab. | Insert `SelectedTab(Some(tab))` on the strip from what you keep as the page shown (or add `bevy::ui_widgets::tablist_self_update` when the strip is all there is). |
 | `tab` | `tab(caption: Into<String>, orientation: ControlOrientation) -> impl Scene` | One tab, a child of a strip of the same orientation. Captions are cut to the strip's room. | |
 | `TabCaption` | component | A tab's caption, holding the whole of it; the kit cuts the `Text`. | |
+| `tab_heading` | `tab_heading(words: Into<String>) -> impl Scene` | Dim words over a group of tabs in a strip down the side (one app's settings pages), lined up with the captions. Not a tab: clicks and arrow keys pass over it. | |
 
 When the kit moves the sidebar, `beside_sidebar` and `beside_rail` pages, it compares every frame, because a rail or a
 sidebar coming or going moves the others; a node already in place is left untouched.
@@ -384,8 +389,8 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
 ### Near-synonyms: which to use when
 
 - **`select` / `button_group` / `toggle_switch` / `dropdown_list` / `spawn_icon_menu`.** A choice from a fixed set is a
-  `select`. Two to four short options that should all show at once are a `button_group`. On or off is a
-  `toggle_switch`. Suggestions under a text field are a `dropdown_list`. Actions behind a button are a menu.
+  `select`. Two to four short options that should all show at once, or a short ladder of steps, are a
+  `button_group`. On or off is a `toggle_switch`. Suggestions under a text field are a `dropdown_list`. Actions behind a button are a menu.
 - **`select` / `select_toned` / `select_iconed` / `inline_field`.** Plain options, options in colors that encode data,
   options with icons, and a labelled select in a sidebar whose change the caller confirms or refuses.
 - **`text_input` / `inline_text` / `spawn_search_field`.** A field in a form; a value edited where it is read, with
@@ -515,6 +520,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `SEARCH_WIDTH` | 220 | A search box in a row of controls |
 | `FIELD_LABEL_WIDTH` | 90 | The label column in a sidebar field |
 | `DETAIL_WIDTH`, `DETAIL_SIDEBAR_WIDTH` | 960, 280 | A detail modal and its sidebar of facts |
+| `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
 
 The lint reads lines, not meaning: a number hidden in a constant named for nothing gets past it. Name constants for
 what they are for, and prefer the kit's names over constants of your own.
@@ -1118,8 +1124,10 @@ fn on_toggle(change: On<ValueChange<bool>>, toggles: Query<&ProjectToggle>, mut 
 ```
 
 `ProjectsShown` (a resource holding `Vec<Shown>`), `SetShown` and the observer of `Picked` for `SortSelect` are the
-app's own. A modal with pages behind tabs (Lookout's) spawns a `settings_page()` per tab into the body, shows one at a
-time with `set_display`, and puts its settings and sections in each page.
+app's own. A modal with pages spawns `spawn_settings_tabs` into the body, a `tab` per page in its strip, and the page
+shown as a `settings_page()` in its pane: spawned when its tab is picked and despawned when another is, its settings and
+sections in it. The Trailhead shell's settings modal (`clients/trailhead-shell/src/settings_modal.rs`) is built this way,
+and an app in the shell adds pages to it rather than opening a modal of its own.
 
 ## 6. Checking your work
 

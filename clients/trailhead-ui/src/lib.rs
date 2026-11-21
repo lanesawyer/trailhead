@@ -49,7 +49,8 @@
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Borders: [`stroke`]. Panel widths and offsets: [`extent`].
 //! - Pages picked from a row (or column) of tabs: a [`tab_strip`] holding [`tab`]s; observe
-//!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`.
+//!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`. A settings modal with pages: its tabs down
+//!   the side with [`spawn_settings_tabs`], under a [`tab_heading`] per group, and each page a [`settings_page`].
 //! - A section that opens and closes: [`spawn_accordion`], a pane or a group by [`SectionLevel`]; fill its body, add
 //!   controls to its header with [`spawn_header_button`].
 //! - Text cut to a width with an ellipsis: [`truncate_to_width`], measured by the same estimate as [`width_of`]; or
@@ -174,12 +175,15 @@ pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
 pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
-pub use settings::{SettingNote, SettingsSection, setting, setting_toggle, settings_page, spawn_settings_section};
+pub use settings::{
+    SettingNote, SettingsSection, SettingsTabs, setting, setting_toggle, settings_page, spawn_settings_section,
+    spawn_settings_tabs,
+};
 pub use skeleton::{SkeletonBar, skeleton};
 pub use slider::slider;
 pub use spacing::{extent, radius, space, stroke};
 pub use table::{CellAlign, ColumnWidth, TableColumn, table_head, table_row};
-pub use tabs::{TabCaption, tab, tab_strip};
+pub use tabs::{TabCaption, tab, tab_heading, tab_strip};
 pub use text::{Size, size, text, text_dim, text_mono, text_toned, text_truncated};
 pub use text_size::{ChangeTextSize, TextSize, TextSizePlugin};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};

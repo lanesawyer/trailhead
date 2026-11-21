@@ -25,7 +25,7 @@ use bevy::window::SystemCursorIcon;
 use crate::hover::HoverTone;
 use crate::patch::set_text;
 use crate::spacing::space;
-use crate::text::size;
+use crate::text::{size, text_dim};
 use crate::theme::{BackgroundTone, BorderTone, TextTone, token};
 use crate::truncate::{truncate_to_width, width_of};
 
@@ -92,6 +92,21 @@ pub fn tab(caption: impl Into<String>, orientation: ControlOrientation) -> impl 
             TextLayout { linebreak: { LineBreak::NoWrap } }
             TabCaption({ full })
         ]
+    }
+}
+
+/// Dim words over a group of tabs in a [`tab_strip`] down the side (the pages of one app in a settings modal), lined
+/// up with the tabs' captions and a group's distance below the tab before them. It is not a tab: the strip's clicks
+/// and arrow keys pass over it.
+pub fn tab_heading(words: impl Into<String>) -> impl Scene {
+    let words = words.into();
+    bsn! {
+        @text_dim(words, size::SECONDARY)
+        Node {
+            padding: { UiRect::new(px(space::PANEL_INSET), px(space::PANEL_INSET), px(space::GROUPS), px(space::STACKED)) },
+            flex_shrink: { 0.0_f32 },
+        }
+        TextLayout { linebreak: { LineBreak::NoWrap } }
     }
 }
 
