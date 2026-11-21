@@ -87,6 +87,7 @@ mod badge;
 mod bubble;
 mod button_group;
 mod buttons;
+mod check_circle;
 mod chip;
 mod containers;
 mod desktop;
@@ -133,6 +134,7 @@ pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
 pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
+pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
@@ -221,7 +223,7 @@ impl Plugin for UiPlugin {
                     nav::show_edge_lines,
                     truncate::fit_truncated,
                     button_group::paint_groups,
-                    hover::paint_hover_tones,
+                    (hover::paint_hover_tones, check_circle::paint_check_circles),
                     buttons::dim_disabled_captions,
                     select::style_select_captions,
                     select::show_chosen_icons,

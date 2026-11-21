@@ -106,10 +106,23 @@ panel.
 | `link_button` | `link_button(icon: Icon, text: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | A button that opens a URL in the system's browser. `Plain` reads as a link in running text. | Its `ExternalLink { url }`. |
 | `link_tool_button` | `link_tool_button(icon: Icon, hint: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | The same as an icon-only tool button. | Its `ExternalLink`. |
 | `ExternalLink` | `ExternalLink { url: String }` (component) | The URL a link button opens; the kit's observer opens it. | |
+| `check_circle` | `check_circle(checked: bool, hint: Into<String>) -> impl Scene` | A round check to mark something done (a todo's "complete"): an empty ring that draws its check in the accent under the pointer, and is filled with the accent and the check while checked or held down. No square background. A press, Enter or Space sends `Activate` from it; it does not check itself, so the caller sets the state from its data. Focusable, with `hint` as its `Hint`; `InteractionDisabled` dims it and stops presses. | Set `CheckCircle { checked }` with `set_if_neq`; the kit repaints it. |
+| `CheckCircle`, `CheckRing`, `CheckMark` | `CheckCircle { checked: bool }` (component on the root); markers | The check's state, and its ring and mark, which the kit paints. | |
 | `HoverTone` | `HoverTone { rest: Token, hover: Token }` (component) | Something pressable that is not a button (a card, a hand-built row, a tab) answering the pointer as a button does. The hover token must show against the surface the node sits on. | Insert a new one. |
 
 What a press does is the caller's: put a marker on the button and observe `Activate` for it (recipe 2). A button that
 opens a menu is `spawn_icon_menu`, with its chevron; a button that acts never has a chevron.
+
+A todo row's check, spawned with the row and kept in step with it in place (the press is the caller's, as for a
+button; the check shows what the data says, not what was pressed):
+
+```rust
+commands.spawn_scene(check_circle(row.done, "Complete")).insert((CompleteCheck(row.key.clone()), ChildOf(line)));
+// In the row's `Keyed` update, with `checks: Query<&mut CheckCircle>`:
+if let Ok(mut check) = checks.get_mut(check_entity) {
+    check.set_if_neq(CheckCircle { checked: row.done });
+}
+```
 
 ### A choice
 
@@ -349,9 +362,10 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   options with icons, and a labelled select in a sidebar whose change the caller confirms or refuses.
 - **`text_input` / `inline_text` / `spawn_search_field`.** A field in a form; a value edited where it is read, with
   Save and Cancel; a search box with a hint and a clear button.
-- **`button` / `tool_button` / `link_button` / `nav_item` / `menu_item` / `dropdown_item` / `table_row` / `HoverTone`.**
-  A button with words; one with an icon only; one that opens a URL; a place to go in a sidebar; a row of a menu; a row
-  of a dropdown list; a table row; anything else pressable.
+- **`button` / `tool_button` / `check_circle` / `link_button` / `nav_item` / `menu_item` / `dropdown_item` / `table_row` /
+  `HoverTone`.** A button with words; one with an icon only; a round check that marks an item done; one that opens a
+  URL; a place to go in a sidebar; a row of a menu; a row of a dropdown list; a table row; anything else pressable.
+  A setting that is on or off is a `toggle_switch`, not a check.
 - **`badge` / `chip` / `notice`.** Something an item says about itself (a key, a priority); state that is always
   there, with a dot and a hint; a message about how something went. All three are updated in place.
 - **`panel` / `section` / `field_well` / `sidebar_card` / `spawn_accordion`.** A surface over the content; a group of
@@ -455,6 +469,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | --- | --- | --- |
 | `HAIRLINE` | 1 | A border, a divider |
 | `GRIP` | 2 | The line a drag edge shows while hovered or dragged |
+| `RING` | 1.5 | A round check's ring |
 
 | `extent::` | px | For |
 | --- | --- | --- |
@@ -463,6 +478,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `SIDEBAR_MIN_WIDTH`, `SIDEBAR_MAX_WIDTH` | 200, 500 | How far the sidebar is dragged |
 | `DRAG_EDGE` | 6 | The strip along a sidebar's edge that drags it |
 | `CONTROL_HEIGHT` | 24 | A control one line high: a button, a select, a one-line text input (feathers' row height) |
+| `CHECK_SIZE` | 16 | A round check's ring, across |
 | `PROGRESS_HEIGHT` | 6 | A progress bar |
 | `SIDE_PANEL_WIDTH` | 360 | A panel down the right of the window (an inspector) |
 | `MODAL_WIDTH` | 640 | A modal, unless its kind says otherwise |
@@ -550,7 +566,7 @@ changed:
   open: it returns `false` and you try again);
 - a chip's tone, words and hint with `ChipEdit`; a badge's words, icon, tone and whether it shows with `BadgeEdit`; a
   noted nav item's caption, note and end with `NavEdit`;
-- a nav item's `NavItem { current }`, a button group's `ButtonGroup { chosen }`, a bar's `Progress`, a notice's
+- a nav item's `NavItem { current }`, a check's `CheckCircle { checked }`, a button group's `ButtonGroup { chosen }`, a bar's `Progress`, a notice's
   `Notice`, an accordion's `Accordion { open }`, a truncated text's `Truncated { full }`;
 - a disabled state with `InteractionDisabled`;
 - a list that gains, loses and reorders items with `Keyed`.

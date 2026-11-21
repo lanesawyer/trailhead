@@ -81,6 +81,8 @@ pub mod extent {
     /// How tall a control one line high is: a button, a select, a one-line text input. Feathers' own row height,
     /// which its buttons and selects are drawn at; the kit's text input takes it too, so it lines up beside them.
     pub const CONTROL_HEIGHT: f32 = 24.0;
+    /// A round check's ring, across: an icon's size, in a target [`CONTROL_HEIGHT`] across.
+    pub const CHECK_SIZE: f32 = 16.0;
     /// How tall a progress bar is.
     pub const PROGRESS_HEIGHT: f32 = 6.0;
     /// How wide the strip along a sidebar's edge that drags it is, half over the sidebar and half over the page.
@@ -106,6 +108,8 @@ pub mod stroke {
     pub const HAIRLINE: f32 = 1.0;
     /// The line a drag edge shows under the pointer and while dragged.
     pub const GRIP: f32 = 2.0;
+    /// A round check's ring: a little heavier than a hairline, as an icon's lines are.
+    pub const RING: f32 = 1.5;
 }
 
 #[cfg(test)]
