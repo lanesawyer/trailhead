@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{ControlOrientation, Scrollbar, ScrollbarDragState};
 use bevy::window::RequestRedraw;
 
+use crate::scroll::scroll_range;
 use crate::space;
 
 /// How thick a scrollbar is.
@@ -77,11 +78,11 @@ fn placement(orientation: ControlOrientation) -> Node {
     Node { display: Display::None, ..node }
 }
 
-/// Whether content of `content` length in a node of `size` has anything to scroll along `orientation`.
-fn overflows(orientation: ControlOrientation, size: Vec2, content: Vec2) -> bool {
+/// Whether an area with `range` to scroll (the wheel's, [`scroll_range`]) has anything to scroll along `orientation`.
+fn overflows(orientation: ControlOrientation, range: Vec2) -> bool {
     match orientation {
-        ControlOrientation::Vertical => content.y > size.y + 0.5,
-        ControlOrientation::Horizontal => content.x > size.x + 0.5,
+        ControlOrientation::Vertical => range.y > 0.0,
+        ControlOrientation::Horizontal => range.x > 0.0,
     }
 }
 
@@ -119,7 +120,7 @@ pub(super) fn show_scrollbars(
             }
         };
         let dragging = children.iter_descendants(entity).any(|e| drags.get(e).is_ok_and(|d| d.dragging));
-        let overflowing = overflows(bar.orientation, target.size(), target.content_size());
+        let overflowing = overflows(bar.orientation, scroll_range(target));
         let shown = overflowing && ((hovered && in_window) || dragging);
         let Some(mut fade) = fade else {
             commands.entity(entity).insert(ScrollbarFade::default());
@@ -197,11 +198,10 @@ mod tests {
 
     #[test]
     fn it_shows_only_along_the_way_the_area_overflows() {
-        let size = Vec2::new(100.0, 100.0);
-        let wide = Vec2::new(300.0, 100.0);
-        assert!(overflows(ControlOrientation::Horizontal, size, wide));
-        assert!(!overflows(ControlOrientation::Vertical, size, wide));
-        assert!(!overflows(ControlOrientation::Horizontal, size, size));
+        let wide = Vec2::new(200.0, 0.0);
+        assert!(overflows(ControlOrientation::Horizontal, wide));
+        assert!(!overflows(ControlOrientation::Vertical, wide));
+        assert!(!overflows(ControlOrientation::Horizontal, Vec2::ZERO));
     }
 
     /// A holder with an area of `content` height in 100 and a vertical bar, in an app that runs [`show_scrollbars`],
@@ -294,6 +294,14 @@ mod tests {
     #[test]
     fn an_area_that_fits_shows_no_bar_even_under_the_pointer() {
         let (mut app, holder, bar) = holder(100.0);
+        app.world_mut().entity_mut(holder).insert(Hovered(true));
+        app.update();
+        assert!(!shown(&app, bar));
+    }
+
+    #[test]
+    fn an_area_a_rounded_pixel_past_its_content_shows_no_bar() {
+        let (mut app, holder, bar) = holder(101.0);
         app.world_mut().entity_mut(holder).insert(Hovered(true));
         app.update();
         assert!(!shown(&app, bar));

@@ -16,6 +16,9 @@
 //! Give a node the marker and the matching `overflow` (`Overflow::scroll()` or `scroll_x()` for [`ScrollBoth`],
 //! `scroll_y()` for [`ScrollDown`]). A view that rebuilds its nodes keeps the [`ScrollPosition`] itself and puts it
 //! back on the new node, or the area jumps to its start on every redraw. Better, keep the node (see `Keyed`).
+//!
+//! How far an area scrolls is [`scroll_range`], which the wheel, the scrollbar and [`clamp_scroll_positions`] share:
+//! content overflowing by no more than layout's rounding is no range at all.
 
 use bevy::input::mouse::MouseScrollPixelsPerLine;
 use bevy::picking::events::PointerScroll;
@@ -113,10 +116,7 @@ fn route(shift: bool, wheel: Vec2, has_down: bool) -> Route {
 
 fn move_by(areas: &mut Query<(&ComputedNode, &mut ScrollPosition)>, area: Entity, delta: Vec2) {
     let Ok((computed, mut position)) = areas.get_mut(area) else { return };
-    // Layout is in physical pixels and `ScrollPosition` in logical ones. Scrollbars take a lane out of what's visible.
-    let scale = computed.inverse_scale_factor;
-    let visible = (computed.size() - computed.scrollbar_size) * scale;
-    let range = (computed.content_size() * scale - visible).max(Vec2::ZERO);
+    let range = scroll_range(computed);
     let next = Vec2::new(scrolled(position.x, delta.x, range.x), scrolled(position.y, delta.y, range.y));
     // Only write a change, so a turn at the end doesn't mark the position changed.
     if next != position.0 {
@@ -127,6 +127,39 @@ fn move_by(areas: &mut Query<(&ComputedNode, &mut ScrollPosition)>, area: Entity
 /// Where a wheel turn of `delta` leaves an area at `from` that can move as far as `range`.
 fn scrolled(from: f32, delta: f32, range: f32) -> f32 {
     (from - delta).clamp(0.0, range.max(0.0))
+}
+
+/// How far past its area content may reach, in physical pixels, and still count as fitting. Layout rounds each edge
+/// to a whole physical pixel, so content that fits can come out a pixel past the area holding it (at any scale
+/// factor, since the rounding is in physical pixels); scrolling that pixel moved a list that fit (TRAIL-1610).
+const ROUNDING_SLACK: f32 = 1.0;
+
+/// How far an area scrolls each way, in logical pixels as [`ScrollPosition`] is: nothing along an axis its content
+/// overflows by no more than [`ROUNDING_SLACK`]. The wheel, the scrollbar and the clamp below all ask this, so an
+/// area that has no range shows no bar and does not move.
+pub(crate) fn scroll_range(computed: &ComputedNode) -> Vec2 {
+    // Layout is in physical pixels. Scrollbars take a lane out of what's visible.
+    let over = computed.content_size() - (computed.size() - computed.scrollbar_size);
+    let real = over.cmpgt(Vec2::splat(ROUNDING_SLACK));
+    Vec2::select(real, over, Vec2::ZERO) * computed.inverse_scale_factor
+}
+
+/// Brings an area's [`ScrollPosition`] back within its range once layout has found it shorter: content that shrank
+/// to fit leaves no position behind for the next growth to jump to. Layout draws within the range anyway; this keeps
+/// the position the wheel starts from honest.
+#[allow(clippy::type_complexity)]
+pub(super) fn clamp_scroll_positions(
+    mut areas: Query<
+        (&ComputedNode, &mut ScrollPosition),
+        (Or<(With<ScrollDown>, With<ScrollBoth>)>, Changed<ComputedNode>),
+    >,
+) {
+    for (computed, mut position) in &mut areas {
+        let clamped = position.0.clamp(Vec2::ZERO, scroll_range(computed));
+        if clamped != position.0 {
+            position.0 = clamped;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +198,150 @@ mod tests {
     fn with_no_column_the_board_takes_both_ways() {
         assert_eq!(route(false, Vec2::new(0.0, -3.0), false), Route { down: None, both: Vec2::new(0.0, -3.0) });
         assert_eq!(route(true, Vec2::new(0.0, -3.0), false), Route { down: None, both: Vec2::new(-3.0, 0.0) });
+    }
+
+    /// An app that lays out UI nodes headless, on a camera of `scale` with no window, as Bevy's own layout tests do.
+    fn layout_app(scale: f32) -> App {
+        use bevy::app::{HierarchyPropagatePlugin, PropagateSet};
+        use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
+        use bevy::ui::update::propagate_ui_target_cameras;
+        use bevy::ui::{ComputedUiRenderTargetInfo, ComputedUiTargetCamera, ui_layout_system};
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(HierarchyPropagatePlugin::<ComputedUiTargetCamera>::new(PostUpdate))
+            .add_plugins(HierarchyPropagatePlugin::<ComputedUiRenderTargetInfo>::new(PostUpdate))
+            .init_resource::<UiScale>()
+            .init_resource::<bevy::ui::ui_surface::UiSurface>()
+            .init_resource::<bevy::text::FontCx>()
+            .init_resource::<bevy::text::RemSize>()
+            .add_systems(PostUpdate, (ApplyDeferred, propagate_ui_target_cameras, ui_layout_system).chain())
+            .configure_sets(
+                PostUpdate,
+                PropagateSet::<ComputedUiTargetCamera>::default()
+                    .after(propagate_ui_target_cameras)
+                    .before(ui_layout_system),
+            )
+            .configure_sets(
+                PostUpdate,
+                PropagateSet::<ComputedUiRenderTargetInfo>::default()
+                    .after(propagate_ui_target_cameras)
+                    .before(ui_layout_system),
+            );
+        let physical_size = UVec2::new(800, 600);
+        app.world_mut().spawn((
+            Camera2d,
+            Camera {
+                computed: ComputedCameraValues {
+                    target_info: Some(RenderTargetInfo { physical_size, scale_factor: scale }),
+                    ..default()
+                },
+                viewport: Some(Viewport { physical_size, ..default() }),
+                ..default()
+            },
+        ));
+        app
+    }
+
+    /// A body of three rows in a sidebar-like column `height` high, laid out at `scale`, the last row holding
+    /// something `poke` taller than itself (as a text whose measured box overhangs its node does). Returns its range.
+    fn laid_out_range(scale: f32, height: f32, poke: f32) -> Vec2 {
+        let mut app = layout_app(scale);
+        let world = app.world_mut();
+        let root = world
+            .spawn(Node { flex_direction: FlexDirection::Column, width: px(220), height: px(height), ..default() })
+            .id();
+        // A title of a text's fractional height, so the body starts off the pixel grid.
+        world.spawn((Node { height: px(21.6), flex_shrink: 0.0, ..default() }, ChildOf(root)));
+        let frame = world.spawn((scroll_frame(), ChildOf(root))).id();
+        let body = world.spawn((scroll_body(), ChildOf(frame))).id();
+        let mut last = body;
+        for _ in 0..3 {
+            last = world.spawn((Node { height: px(24), flex_shrink: 0.0, ..default() }, ChildOf(body))).id();
+        }
+        world.spawn((Node { width: px(24), height: px(24.0 + poke), ..default() }, ChildOf(last)));
+        app.update();
+        scroll_range(app.world().get::<ComputedNode>(body).unwrap())
+    }
+
+    #[test]
+    fn a_body_that_fits_has_no_range_at_any_scale_even_a_rounded_pixel_over() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            assert_eq!(laid_out_range(scale, 400.0, 0.0), Vec2::ZERO, "fits at {scale}");
+            // Under a physical pixel over in layout's own sums comes out a whole one over at some of these once
+            // rounded: still no range.
+            for tenths in 1..10 {
+                let poke = tenths as f32 / 10.0 / scale;
+                assert_eq!(laid_out_range(scale, 400.0, poke), Vec2::ZERO, "{poke} over at {scale}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_taller_than_its_frame_scrolls_as_far_as_it_overflows() {
+        for scale in [1.0, 1.5, 2.0] {
+            // 21.6 of title, then 88 of rows in the 60 left over.
+            let range = laid_out_range(scale, 81.6, 0.0);
+            assert_eq!(range.x, 0.0);
+            assert!((range.y - 28.0).abs() <= 1.0, "{range} at {scale}");
+        }
+    }
+
+    fn area(content: Vec2, inverse_scale_factor: f32) -> ComputedNode {
+        ComputedNode { size: Vec2::splat(100.0), content_size: content, inverse_scale_factor, ..default() }
+    }
+
+    #[test]
+    fn a_physical_pixel_of_overflow_is_rounding_not_range_both_ways() {
+        assert_eq!(scroll_range(&area(Vec2::new(101.0, 101.0), 1.0)), Vec2::ZERO);
+        assert_eq!(scroll_range(&area(Vec2::new(101.0, 140.0), 1.0)), Vec2::new(0.0, 40.0));
+        assert_eq!(scroll_range(&area(Vec2::new(140.0, 101.0), 1.0)), Vec2::new(40.0, 0.0));
+        // At twice the scale a physical pixel is half a logical one, and the range comes out logical.
+        assert_eq!(scroll_range(&area(Vec2::new(101.0, 101.0), 0.5)), Vec2::ZERO);
+        assert_eq!(scroll_range(&area(Vec2::new(140.0, 140.0), 0.5)), Vec2::new(20.0, 20.0));
+    }
+
+    /// Where a wheel turn of `delta` leaves an area at the top with `content` in its 100 by 100.
+    fn wheeled(content: Vec2, delta: Vec2) -> Vec2 {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let area = world.spawn((ScrollBoth, area(content, 1.0))).id();
+        world
+            .run_system_once(move |mut areas: Query<(&ComputedNode, &mut ScrollPosition)>| {
+                move_by(&mut areas, area, delta);
+            })
+            .unwrap();
+        world.get::<ScrollPosition>(area).unwrap().0
+    }
+
+    #[test]
+    fn the_wheel_does_not_move_an_area_whose_content_fits_to_a_pixel() {
+        assert_eq!(wheeled(Vec2::new(101.0, 101.0), Vec2::new(-40.0, -40.0)), Vec2::ZERO);
+        assert_eq!(wheeled(Vec2::new(101.0, 300.0), Vec2::new(-40.0, -40.0)), Vec2::new(0.0, 40.0));
+        assert_eq!(wheeled(Vec2::new(300.0, 101.0), Vec2::new(-40.0, -40.0)), Vec2::new(40.0, 0.0));
+    }
+
+    #[test]
+    fn a_position_left_from_taller_content_comes_back_when_it_shrinks() {
+        let mut app = App::new();
+        app.add_systems(Update, clamp_scroll_positions);
+        let down = app.world_mut().spawn((ScrollDown, area(Vec2::new(100.0, 300.0), 1.0))).id();
+        let both = app.world_mut().spawn((ScrollBoth, area(Vec2::new(300.0, 300.0), 1.0))).id();
+        app.world_mut().get_mut::<ScrollPosition>(down).unwrap().0 = Vec2::new(0.0, 150.0);
+        app.world_mut().get_mut::<ScrollPosition>(both).unwrap().0 = Vec2::new(150.0, 150.0);
+        app.update();
+        let at = |app: &App, e| app.world().get::<ScrollPosition>(e).unwrap().0;
+        assert_eq!((at(&app, down), at(&app, both)), (Vec2::new(0.0, 150.0), Vec2::new(150.0, 150.0)));
+        // Shorter, but still taller than the area: back to its new end.
+        app.world_mut().get_mut::<ComputedNode>(down).unwrap().content_size = Vec2::new(100.0, 120.0);
+        app.world_mut().get_mut::<ComputedNode>(both).unwrap().content_size = Vec2::new(130.0, 300.0);
+        app.update();
+        assert_eq!((at(&app, down), at(&app, both)), (Vec2::new(0.0, 20.0), Vec2::new(30.0, 150.0)));
+        // Fits, to within a rounded pixel: back to the start.
+        app.world_mut().get_mut::<ComputedNode>(down).unwrap().content_size = Vec2::new(100.0, 101.0);
+        app.world_mut().get_mut::<ComputedNode>(both).unwrap().content_size = Vec2::new(101.0, 100.0);
+        app.update();
+        assert_eq!((at(&app, down), at(&app, both)), (Vec2::ZERO, Vec2::new(0.0, 0.0)));
     }
 
     #[test]

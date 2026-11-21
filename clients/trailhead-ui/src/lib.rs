@@ -198,7 +198,10 @@ impl Plugin for UiPlugin {
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
             .add_systems(Update, select::fit_select_captions.in_set(UiPlace).after(select::show_chosen_icons))
-            .add_systems(PostUpdate, scrollbar::show_scrollbars.after(bevy::ui::UiSystems::Layout))
+            .add_systems(
+                PostUpdate,
+                (scroll::clamp_scroll_positions, scrollbar::show_scrollbars).after(bevy::ui::UiSystems::Layout),
+            )
             .add_systems(
                 Update,
                 (

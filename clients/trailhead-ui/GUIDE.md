@@ -289,6 +289,11 @@ let places = commands.spawn((scroll_body(), Places)).insert(ChildOf(frame)).id()
 commands.queue_spawn_scene(scrollbar(places, ControlOrientation::Vertical)).insert(ChildOf(frame));
 ```
 
+An area scrolls only while its content overflows it by more than a physical pixel: layout rounds each edge to whole
+physical pixels, so a list that fits can come out a pixel past its area, and the wheel once moved it by that pixel
+(TRAIL-1610). The wheel, the scrollbar and the kit's clamp all measure the same range, so an area with none shows no
+bar and does not move, and a position left over from taller content is brought back when the content shrinks.
+
 ### Icons
 
 | Item | Signature | What it is for |
