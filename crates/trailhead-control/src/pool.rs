@@ -210,41 +210,10 @@ impl Factory {
         drop(pick);
         let mine = held.iter().any(|s| s.name == sandbox.name);
         let began = Instant::now();
-        let mut short = false;
-        let started = async {
-            p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
-            if let Some(cp) = &warm {
-                p.compute.restore(&sandbox.id, &CheckpointId(cp.clone())).await?;
-                p.daemon.restored(&sandbox.id).await;
-            }
-            let restored = began.elapsed();
-            if let Err(e) = p.compute.preflight(&sandbox.id).await {
-                short = matches!(e, Error::Unavailable(_));
-                return Err(e);
-            }
-            Ok::<_, Error>(restored)
-        }
-        .await;
-        let restored = match started {
-            Ok(restored) => {
-                self.pool.short_preflights.lock().unwrap().remove(&sandbox.id);
-                restored
-            }
-            Err(e) => {
-                // A warm sandbox is a cache, and its checkpoints are what fills its host. One the task was parked
-                // in may hold work nobody has pushed, so that one always waits.
-                if short && warm.is_some() && !mine && self.short_too_often(&sandbox.id) {
-                    tracing::warn!(sandbox = %sandbox.name, error = %e, "no room for a run after repeated waits; destroying the warm sandbox so the next run builds a fresh one");
-                    p.daemon.forget(&sandbox.id).await;
-                    match self.destroy_pooled(p, &sandbox).await {
-                        Ok(()) => return Err(e),
-                        Err(d) => {
-                            tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy it; returning it to the pool");
-                        }
-                    }
-                }
-                // Labelled busy but never handed out: without this it holds its disk until reconcile.
-                self.give_back(&sandbox, &busy).await;
+        let restored = match self.start_worker(p, &sandbox, warm.as_deref(), began).await {
+            Ok(restored) => restored,
+            Err((e, short)) => {
+                self.not_started(p, &sandbox, &busy, short && warm.is_some() && !mine, &e).await;
                 return Err(e);
             }
         };
@@ -359,6 +328,51 @@ impl Factory {
                 Err(e)
             }
         }
+    }
+
+    /// Opens install egress on a worker sandbox picked for a run, restores its warm checkpoint and checks its host has
+    /// room. How long the restore took, or the error with whether it was the host having no room.
+    async fn start_worker(
+        &self,
+        p: &Placed,
+        sandbox: &Sandbox,
+        warm: Option<&str>,
+        began: Instant,
+    ) -> std::result::Result<Duration, (Error, bool)> {
+        let restore = async {
+            p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
+            if let Some(cp) = warm {
+                p.compute.restore(&sandbox.id, &CheckpointId(cp.to_string())).await?;
+                p.daemon.restored(&sandbox.id).await;
+            }
+            Ok::<_, Error>(began.elapsed())
+        };
+        let restored = restore.await.map_err(|e| (e, false))?;
+        if let Err(e) = p.compute.preflight(&sandbox.id).await {
+            let short = matches!(e, Error::Unavailable(_));
+            return Err((e, short));
+        }
+        self.pool.short_preflights.lock().unwrap().remove(&sandbox.id);
+        Ok(restored)
+    }
+
+    /// Deals with a worker sandbox that was labelled busy but couldn't be started. `no_room` is a warm sandbox, not
+    /// one the task was parked in, whose host had no room for a run: a warm sandbox is a cache, and its checkpoints
+    /// are what fills its host, so after enough of those in a row it is destroyed. One a task was parked in may hold
+    /// work nobody has pushed, so that one always waits. Anything else goes back to the pool.
+    async fn not_started(&self, p: &Placed, sandbox: &Sandbox, busy: &Labels, no_room: bool, e: &Error) {
+        if no_room && self.short_too_often(&sandbox.id) {
+            tracing::warn!(sandbox = %sandbox.name, error = %e, "no room for a run after repeated waits; destroying the warm sandbox so the next run builds a fresh one");
+            p.daemon.forget(&sandbox.id).await;
+            match self.destroy_pooled(p, sandbox).await {
+                Ok(()) => return,
+                Err(d) => {
+                    tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy it; returning it to the pool");
+                }
+            }
+        }
+        // Labelled busy but never handed out: without this it holds its disk until reconcile.
+        self.give_back(sandbox, busy).await;
     }
 
     /// Releases a worker sandbox that `acquire_worker` labelled busy but isn't handing out. A failure is logged and
