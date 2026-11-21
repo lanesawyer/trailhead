@@ -136,6 +136,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_on_a_terminal_restores_echo_and_dies_of_sigint() {
+        let _forking = crate::FORKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: the child only makes plain libc calls before `_exit` or dying of the signal.
         unsafe {
             let (mut master, mut slave) = (0, 0);
@@ -150,6 +151,13 @@ mod tests {
                 // Child: the pty is its controlling terminal and stdin, then it waits for Ctrl-C.
                 // The alarm keeps a failed run from leaking the child.
                 libc::alarm(30);
+                // A process on a terminal, where Ctrl-C kills: the test may have been started with SIGINT ignored or
+                // blocked (a `cmd &` in a script ignores it), which `NoEcho` rightly leaves alone (TRAIL-1606).
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                let mut sigint: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut sigint);
+                libc::sigaddset(&mut sigint, libc::SIGINT);
+                libc::sigprocmask(libc::SIG_UNBLOCK, &sigint, std::ptr::null_mut());
                 libc::setsid();
                 libc::ioctl(slave, libc::TIOCSCTTY, 0);
                 libc::dup2(slave, libc::STDIN_FILENO);
@@ -190,7 +198,7 @@ mod tests {
 
     #[test]
     fn ignored_sigint_stays_ignored() {
-        // The only test that touches SIGINT's disposition, so nothing races it.
+        // The only test that touches this process's SIGINT disposition; the child the Ctrl-C test forks sets its own.
         // SAFETY: plain `sigaction` calls; the original disposition is put back at the end.
         unsafe {
             let mut ign: libc::sigaction = std::mem::zeroed();

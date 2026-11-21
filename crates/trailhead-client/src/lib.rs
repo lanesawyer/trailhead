@@ -16,6 +16,11 @@ pub mod text;
 
 use std::path::PathBuf;
 
+/// Held by the tests that fork a child that lives a while (`echo`'s Ctrl-C test) and by those such a child breaks: it
+/// holds a copy of every descriptor the process had open, and with it any file lock (`paths`' lock test), until it dies.
+#[cfg(test)]
+static FORKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// `/v1/health` as a client reads it. Every field is optional so an older or newer
 /// server still counts as running.
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
