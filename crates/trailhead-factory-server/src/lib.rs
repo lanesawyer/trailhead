@@ -1141,17 +1141,22 @@ mod tests {
         assert_eq!(feed.state(), FactoryState::Stopped);
     }
 
+    /// The smallest config file that parses: a repo and a worker and a reviewer profile.
+    const BASE_CONFIG: &str = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
+
+    /// `BASE_CONFIG` with `extra` (more sections) put in front of it.
+    fn parse_with(extra: &str) -> trailhead_factory::FactoryConfig {
+        trailhead_factory::FactoryConfig::parse_table(&format!("{extra}\n{BASE_CONFIG}"), "TRAIL", None).unwrap()
+    }
+
     #[test]
     fn a_changed_setting_other_than_merge_mode_warns_once() {
-        use trailhead_factory::FactoryConfig;
-        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
-        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
-        let base = parse("");
+        let base = parse_with("");
         let started = super::started_baseline(&base);
         let mut warned = None;
         // A mode change is applied live, so it isn't a reason to restart.
-        assert!(super::changed_without_restart(&started, parse("[merge]\nmode = \"on\""), &mut warned).is_empty());
-        let edited = parse("[checks]\nfmt = \"cargo fmt\"");
+        assert!(super::changed_without_restart(&started, parse_with("[merge]\nmode = \"on\""), &mut warned).is_empty());
+        let edited = parse_with("[checks]\nfmt = \"cargo fmt\"");
         assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks"]);
         assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
         assert!(super::changed_without_restart(&started, base, &mut warned).is_empty());
@@ -1159,28 +1164,22 @@ mod tests {
 
     #[test]
     fn several_changed_sections_are_listed_in_order() {
-        use trailhead_factory::FactoryConfig;
-        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
-        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
-        let started = super::started_baseline(&parse(""));
+        let started = super::started_baseline(&parse_with(""));
         let mut warned = None;
         // Listed in the order the sections are compared, not the order the file has them.
-        let edited = parse("[egress]\nalways = [\"example.com\"]\n[checks]\nfmt = \"cargo fmt\"");
+        let edited = parse_with("[egress]\nalways = [\"example.com\"]\n[checks]\nfmt = \"cargo fmt\"");
         assert_eq!(super::changed_without_restart(&started, edited.clone(), &mut warned), ["checks", "egress"]);
         assert!(super::changed_without_restart(&started, edited, &mut warned).is_empty());
     }
 
     #[test]
     fn a_follow_up_edit_adding_a_section_warns_again_with_both() {
-        use trailhead_factory::FactoryConfig;
-        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
-        let parse = |extra: &str| FactoryConfig::parse_table(&format!("{extra}\n{src}"), "TRAIL", None).unwrap();
-        let started = super::started_baseline(&parse(""));
+        let started = super::started_baseline(&parse_with(""));
         let mut warned = None;
-        let first = parse("[checks]\nfmt = \"cargo fmt\"");
+        let first = parse_with("[checks]\nfmt = \"cargo fmt\"");
         assert_eq!(super::changed_without_restart(&started, first.clone(), &mut warned), ["checks"]);
         assert!(super::changed_without_restart(&started, first, &mut warned).is_empty());
-        let second = parse("[checks]\nfmt = \"cargo fmt\"\n[egress]\nalways = [\"example.com\"]");
+        let second = parse_with("[checks]\nfmt = \"cargo fmt\"\n[egress]\nalways = [\"example.com\"]");
         assert_eq!(super::changed_without_restart(&started, second.clone(), &mut warned), ["checks", "egress"]);
         assert!(super::changed_without_restart(&started, second, &mut warned).is_empty());
     }
@@ -1188,12 +1187,11 @@ mod tests {
     #[test]
     fn egress_added_at_runtime_is_not_a_change_to_the_file() {
         use trailhead_factory::FactoryConfig;
-        let src = "[repo]\nowner = \"o\"\nname = \"n\"\n[profiles.worker]\nrole = \"worker\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"sonnet\"\nbudget = { usd = 5, minutes = 60, steps = 40 }\n[profiles.reviewer]\nrole = \"reviewer\"\nadapter = \"claude-code\"\nprovider = \"anthropic\"\nmodel = \"opus\"\nbudget = { usd = 2, minutes = 20, steps = 20 }\n";
-        let mut config = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        let mut config = FactoryConfig::parse_table(BASE_CONFIG, "TRAIL", None).unwrap();
         let started = super::started_baseline(&config);
         // What `wire` does in subscription mode, after the baseline is taken.
         config.egress.always.push("api.anthropic.com".into());
-        let reread = FactoryConfig::parse_table(src, "TRAIL", None).unwrap();
+        let reread = FactoryConfig::parse_table(BASE_CONFIG, "TRAIL", None).unwrap();
         assert!(super::changed_without_restart(&started, reread, &mut None).is_empty());
         assert_ne!(started.egress, config.egress);
     }
