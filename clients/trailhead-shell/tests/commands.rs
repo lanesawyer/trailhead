@@ -130,7 +130,7 @@ fn a_stale_no_answer_does_not_resend_a_later_attempt() {
     set(&mut app, Connection::Live);
     let (resent, _) = step(&mut app);
     assert_eq!(resent[0].1, 2);
-    reply(&mut app, id, 1, Err("connection reset".into()));
+    reply(&mut app, id, 1, Err(SendError::Failed("connection reset".into())));
     let (again, done) = step(&mut app);
     assert!(again.is_empty() && done.is_empty());
 }
@@ -212,7 +212,7 @@ fn a_command_that_never_gets_an_answer_is_reported_failed() {
         }
         if let Some((id, n, _)) = sent.first() {
             attempt = *n;
-            reply(&mut app, *id, *n, Err("timed out".into()));
+            reply(&mut app, *id, *n, Err(SendError::Failed("timed out".into())));
         }
     }
     let done = finished.expect("reported, not dropped");
@@ -249,7 +249,7 @@ fn resends_after_reconnects_and_not_connected_refusals_are_not_failed_attempts()
     let mut finished = None;
     for _ in 0..20 {
         let (id, n, _) = sent[0].clone();
-        reply(&mut app, id, n, Err("timed out".into()));
+        reply(&mut app, id, n, Err(SendError::Failed("timed out".into())));
         let (again, done) = step(&mut app);
         if let Some(d) = done.into_iter().next() {
             finished = Some(d);
