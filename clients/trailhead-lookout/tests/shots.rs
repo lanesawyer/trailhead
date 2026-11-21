@@ -13,6 +13,10 @@ use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
 use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
 use trailhead_lookout::logs::{LogItem, LogUpdate};
+use trailhead_lookout::peak::MapMode;
+use trailhead_lookout::peak::orbit::Orbit;
+use trailhead_lookout::peak::place;
+use trailhead_lookout::peak::terrain::{Peak, SEED, Trail};
 use trailhead_lookout::settings::{FACTORY_SETTINGS, LOGS_SETTINGS};
 use trailhead_shell::connection::Connection;
 use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json, user_json};
@@ -119,6 +123,52 @@ fn factory() -> FactoryItem {
     FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }]))
 }
 
+/// Runs in every phase, so the hikers stand at five heights on the peak: the snapshot's tasks, and OPS-1 in a second
+/// repo.
+fn climbing() -> FactoryItem {
+    let run = |task: &str, phase| RunStatus {
+        task: TaskKey(task.into()),
+        phase,
+        sandbox: None,
+        steps: 12,
+        tool_calls: 20,
+        spend: Usd(640_000),
+        last_tool: None,
+        started: 0,
+        phase_started: 0,
+    };
+    let snapshot = |runs| FactorySnapshot {
+        control: ControlState::Up,
+        last_error: None,
+        sandboxes: Vec::new(),
+        runs,
+        seq: 2,
+        holding: None,
+        targets: Vec::new(),
+        human_grades: None,
+        queue: Vec::new(),
+        usage: Vec::new(),
+    };
+    let trail = vec![
+        run("TRAIL-2", RunPhase::Preparing { cold: false }),
+        run("TRAIL-7", RunPhase::Agent),
+        run("TRAIL-3", RunPhase::Checks),
+        run("TRAIL-6", RunPhase::Reviewing),
+    ];
+    let ops = vec![run("OPS-1", RunPhase::Publishing)];
+    FactoryItem(FactoryUpdate::Snapshot(vec![
+        RepoSnapshot { repo: "o/r".into(), snapshot: snapshot(trail) },
+        RepoSnapshot { repo: "o/ops".into(), snapshot: snapshot(ops) },
+    ]))
+}
+
+/// The peak from a fixed place on its orbit, with the clock it turns by stopped, so the picture is the same each run.
+fn look_from(shot: &mut ShotApp, orbit: Orbit) {
+    shot.world_mut().resource_mut::<Time<Virtual>>().pause();
+    *shot.world_mut().resource_mut::<Orbit>() = orbit;
+    settle(shot);
+}
+
 fn close_modals(shot: &mut ShotApp) {
     let world = shot.world_mut();
     let open: Vec<Entity> = world.query_filtered::<Entity, With<ModalRoot>>().iter(world).collect();
@@ -211,7 +261,91 @@ fn shots() {
     // Wide enough for the camps and both columns of waypoints.
     shot.set_size((1440, 800));
     go(&mut shot, View::Map);
+    shot.world_mut().resource_mut::<NextState<MapMode>>().set(MapMode::Flat);
+    settle(&mut shot);
     save(&mut shot, "map");
     shot.set_text_size(TextSize::nearest(150));
     save(&mut shot, "map");
+    shot.set_text_size(TextSize::DEFAULT);
+
+    // The peak, with a hiker for each run, by night and by day, and from higher up round the far side, where the
+    // peak hides some of them and their labels.
+    shot.world_mut().write_message(climbing());
+    shot.world_mut().resource_mut::<NextState<MapMode>>().set(MapMode::Peak);
+    look_from(&mut shot, Orbit::new(0.92, 0.42, 27.0));
+    save(&mut shot, "peak");
+    // At 150% the labels still sit by their hikers: the scene keeps its size, the labels are placed in UI pixels.
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "peak");
+    shot.set_text_size(TextSize::DEFAULT);
+    shot.set_theme(ShotTheme::Light);
+    save(&mut shot, "peak");
+    shot.set_theme(ShotTheme::Dark);
+    look_from(&mut shot, Orbit::new(3.6, 0.7, 22.0));
+    save(&mut shot, "peak-above");
+}
+
+/// Presses the mouse at `at` (logical pixels in the shot's image), moves it by `drag`, and lets go.
+fn press_and_release(shot: &mut ShotApp, at: Vec2, drag: Vec2) {
+    use bevy::picking::pointer::{Location, PointerAction, PointerButton, PointerId, PointerInput};
+    let world = shot.world_mut();
+    let target = world.query_filtered::<&bevy::camera::RenderTarget, With<Camera2d>>().single(world).unwrap();
+    let target = target.normalize(None).expect("the shot's image");
+    let input = |position: Vec2, action| {
+        PointerInput::new(PointerId::Mouse, Location { target: target.clone(), position }, action)
+    };
+    let steps = [
+        input(at, PointerAction::Move { delta: Vec2::ZERO }),
+        input(at, PointerAction::Press(PointerButton::Primary)),
+        input(at + drag, PointerAction::Move { delta: drag }),
+        input(at + drag, PointerAction::Release(PointerButton::Primary)),
+    ];
+    for step in steps {
+        shot.world_mut().write_message(step);
+        settle(shot);
+    }
+}
+
+/// Where a run in `phase` stands on screen, through the peak's camera.
+fn on_screen(shot: &mut ShotApp, phase: RunPhase) -> Vec2 {
+    let trail = Trail::new(&Peak::new(SEED));
+    let hiker = trail.at(place::distance(phase)) + Vec3::Y * 0.3;
+    let world = shot.world_mut();
+    let (camera, eye) =
+        world.query_filtered::<(&Camera, &GlobalTransform), With<Camera3d>>().single(world).expect("the peak's camera");
+    camera.world_to_viewport(eye, hiker).expect("the hiker is in view")
+}
+
+/// Clicks on the peak go through the UI over it to the meshes, with Bevy's mesh picking: a hiker opens its task, and
+/// a drag that ends on one turns the camera instead.
+#[test]
+#[ignore = "needs a render adapter: run with `mise run shots`"]
+fn clicking_a_hiker_opens_its_task_and_dragging_turns_the_camera() {
+    let mut shot = shot(ShellPlugin::new().with(Lookout::new()), ShotOptions::default());
+    // Bevy's pointer rays are made only where there is a primary window, though the cameras draw into the shot's
+    // image; one that is never opened stands in for it.
+    shot.world_mut().spawn((Window::default(), bevy::window::PrimaryWindow));
+    set_connection(&mut shot, Connection::Live);
+    fill(&mut shot, snapshot());
+    shot.world_mut().write_message(climbing());
+    go(&mut shot, View::Map);
+    look_from(&mut shot, Orbit::new(0.92, 0.42, 27.0));
+    let hiker = on_screen(&mut shot, RunPhase::Checks);
+
+    press_and_release(&mut shot, hiker, Vec2::new(0.0, 60.0));
+    assert_eq!(shot.world().resource::<Selection>().0, None, "a drag opens nothing");
+    assert_ne!(shot.world().resource::<Orbit>().pitch, 0.42, "and tips the camera");
+
+    look_from(&mut shot, Orbit::new(0.92, 0.42, 27.0));
+    press_and_release(&mut shot, hiker, Vec2::ZERO);
+    assert_eq!(shot.world().resource::<Selection>().0, Some(Subject::Task(sid("t3"))), "TRAIL-3 is open");
+
+    // Its modal now covers the peak: a click on another hiker lands on the modal, not on the hiker under it.
+    let other = on_screen(&mut shot, RunPhase::Agent);
+    press_and_release(&mut shot, other, Vec2::ZERO);
+    assert_ne!(shot.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "the UI on top wins");
+    shot.world_mut().resource_mut::<Selection>().0 = None;
+    settle(&mut shot);
+    press_and_release(&mut shot, other, Vec2::ZERO);
+    assert_eq!(shot.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "with the modal shut it opens");
 }
