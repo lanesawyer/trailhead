@@ -2,12 +2,17 @@
 //! update buttons, the Ask form, the update panel listing what a newer build brings, the settings on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
-//! (`transition-<kind>-reveal`). What moves is caught at a fixed frame, with time stepped by hand and held still while
+//! (`transition-<kind>-reveal`), and the rail of four apps with one dragged partway down it (`rail-drag`, at 100% and
+//! 150%) and after it is let go (`rail-reordered`). What moves is caught at a fixed frame, with time stepped by hand and held still while
 //! the picture is taken, so these too are the same from run to run on one renderer. `#[ignore]`d, since it needs a render adapter: `mise run shots` runs every app's, and says
 //! where the pictures went.
 
 use std::time::Duration;
 
+use bevy::camera::NormalizedRenderTarget;
+use bevy::picking::backend::HitData;
+use bevy::picking::events::{Pointer, PointerDrag, PointerDragEnd, PointerDragStart, PointerPress, PointerRelease};
+use bevy::picking::pointer::{Location, PointerId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy::ui_widgets::Activate;
@@ -22,7 +27,7 @@ use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle, show};
 use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
 use trailhead_shell::update::{Newer, UpdateReady};
-use trailhead_shell::{ActiveApp, AppId, AskButton, Manifest, OpenApp, ShellApp, ShellPlugin, UpdateButton};
+use trailhead_shell::{ActiveApp, AppId, Apps, AskButton, Manifest, OpenApp, ShellApp, ShellPlugin, UpdateButton};
 use trailhead_ui::{
     BesideRail, Icon, Surface, TextSize, badge, beside_rail, row, setting, setting_toggle, size, space,
     spawn_settings_section, text, text_dim, token,
@@ -30,6 +35,7 @@ use trailhead_ui::{
 
 const NOTES: AppId = AppId("notes");
 const TRAILS: AppId = AppId("trails");
+const CAMP: AppId = AppId("camp");
 /// How far time moves a frame, as the shots helper steps it.
 const FRAME: Duration = Duration::from_millis(16);
 
@@ -144,6 +150,92 @@ fn shell() -> ShellPlugin {
 /// Trails first, so a switch to Notes runs down the rail from a page full to its foot.
 fn switching_shell() -> ShellPlugin {
     ShellPlugin::new().with(Trails).with(Notes)
+}
+
+/// An app with nothing to draw, to fill the rail.
+struct Plain(AppId, &'static str, Icon);
+
+impl ShellApp for Plain {
+    fn manifest(&self) -> Manifest {
+        Manifest { id: self.0, name: self.1, icon: self.2 }
+    }
+
+    fn build(&self, _: &mut App) {}
+}
+
+/// Four apps, so a drag has others to pass.
+fn four_app_shell() -> ShellPlugin {
+    ShellPlugin::new().with(Notes).with(Trails).with(Plain(CAMP, "Camp", Icon::Footprints)).with(Plain(
+        AppId("signs"),
+        "Signs",
+        Icon::Signpost,
+    ))
+}
+
+/// Where a pointer at `logical` on the window is, as picking reports it.
+fn pointer(logical: Vec2) -> Pointer {
+    let target = NormalizedRenderTarget::None { width: 1, height: 1 };
+    Pointer::new(PointerId::Mouse, Location { target, position: logical })
+}
+
+/// The rail's button for `id`, and its middle on the window, in logical pixels.
+fn rail_button(shot: &mut ShotApp, id: AppId) -> (Entity, Vec2) {
+    let ui_scale = shot.world().resource::<UiScale>().0;
+    let world = shot.world_mut();
+    let mut buttons = world.query::<(Entity, &OpenApp, &ComputedNode, &UiGlobalTransform)>();
+    let (entity, _, node, transform) = buttons.iter(world).find(|(_, open, _, _)| open.0 == id).unwrap();
+    (entity, transform.translation * node.inverse_scale_factor() * ui_scale)
+}
+
+/// Presses Notes on the rail and drags it `places` buttons down (up, less than none), as picking reports it, and lets
+/// the others slide aside.
+fn drag_notes(shot: &mut ShotApp, places: f32) -> (Entity, Vec2, Vec2) {
+    let (notes, from) = rail_button(shot, NOTES);
+    // Trails and Camp are next to each other in every order these shots leave the rail in.
+    let step = (rail_button(shot, CAMP).1.y - rail_button(shot, TRAILS).1.y).abs();
+    let distance = Vec2::new(0.0, step * places);
+    let (button, hit) = (PointerButton::Primary, HitData::new(Entity::PLACEHOLDER, 0.0, None, None));
+    let world = shot.world_mut();
+    world.trigger(PointerPress { entity: notes, pointer: pointer(from), button, hit: hit.clone(), count: 1 });
+    world.flush();
+    world.trigger(PointerDragStart { entity: notes, pointer: pointer(from), button, hit });
+    world.trigger(PointerDrag { entity: notes, pointer: pointer(from + distance), button, distance, delta: distance });
+    world.flush();
+    for _ in 0..12 {
+        shot.update();
+    }
+    (notes, from, distance)
+}
+
+/// Lets Notes go where it was dragged.
+fn drop_notes(shot: &mut ShotApp, (notes, from, distance): (Entity, Vec2, Vec2)) {
+    let (button, hit) = (PointerButton::Primary, HitData::new(Entity::PLACEHOLDER, 0.0, None, None));
+    let world = shot.world_mut();
+    world.trigger(PointerRelease { entity: notes, pointer: pointer(from + distance), button, hit });
+    world.trigger(PointerDragEnd { entity: notes, pointer: pointer(from + distance), button, distance });
+    world.flush();
+    settle(shot);
+}
+
+/// The rail of four apps with Notes held between Camp and Signs, the gap open where it will land, then let go there.
+fn reordering(shot: &mut ShotApp) {
+    let held = drag_notes(shot, 2.6);
+    hold_still(shot, true);
+    save(shot, "rail-drag");
+    hold_still(shot, false);
+    drop_notes(shot, held);
+    let order: Vec<&str> = shot.world().resource::<Apps>().iter().map(|m| m.name).collect();
+    assert_eq!(order, ["Trails", "Camp", "Notes", "Signs"], "let go between Camp and Signs");
+    save(shot, "rail-reordered");
+    // Held at 150%, where the pointer's pixels and the UI's differ.
+    shot.set_text_size(TextSize::nearest(150));
+    let held = drag_notes(shot, -1.6);
+    hold_still(shot, true);
+    save(shot, "rail-drag");
+    hold_still(shot, false);
+    drop_notes(shot, held);
+    let order: Vec<&str> = shot.world().resource::<Apps>().iter().map(|m| m.name).collect();
+    assert_eq!(order, ["Trails", "Notes", "Camp", "Signs"], "and back up between Trails and Camp at 150%");
 }
 
 /// Holds time still while a picture is taken, so what moves stays where it was caught.
@@ -330,4 +422,12 @@ fn shots() {
     );
     hold_still(&mut shot, false);
     transitions(&mut shot);
+    drop(shot);
+
+    let mut shot = trailhead_shell::testing::shot::shot(
+        four_app_shell(),
+        ShotOptions { size: (1024, 360), ..ShotOptions::default() },
+    );
+    hold_still(&mut shot, false);
+    reordering(&mut shot);
 }
