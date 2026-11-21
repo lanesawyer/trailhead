@@ -113,6 +113,7 @@ mod scroll;
 mod scrollbar;
 mod search;
 mod select;
+mod settings;
 mod skeleton;
 mod slider;
 mod spacing;
@@ -169,6 +170,7 @@ pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
 pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
+pub use settings::{SettingNote, SettingsSection, setting, setting_toggle, settings_page, spawn_settings_section};
 pub use skeleton::{SkeletonBar, skeleton};
 pub use slider::slider;
 pub use spacing::{extent, radius, space, stroke};

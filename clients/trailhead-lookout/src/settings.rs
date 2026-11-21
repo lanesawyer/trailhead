@@ -18,8 +18,8 @@ use crate::author::Authoring;
 use crate::factory::FactoryStatus;
 use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
 use crate::widgets::{
-    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group, field,
-    open_modal, row, set_text, size, space, tab, tab_strip, text, text_dim, tool_button,
+    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group,
+    open_modal, row, set_text, setting, settings_page, size, tab, tab_strip, text, tool_button,
 };
 
 /// A page of the modal, in tab order.
@@ -151,7 +151,7 @@ pub fn queue_text(queue: &str, tasks: &[Task]) -> String {
 }
 
 fn value(which: Value, label: &str) -> impl Scene {
-    field(label.to_string(), bsn_list! { @text("", size::BODY) Shows({ which }) })
+    setting(label.to_string(), "", bsn_list! { @text("", size::BODY) Shows({ which }) })
 }
 
 /// Show the settings Logs tab filtered to a task, given by key; sent from the inspector.
@@ -221,13 +221,11 @@ fn fill(
         commands.entity(strip).insert(SelectedTab(picked));
 
         for page in Page::ALL {
-            let node = Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: px(space::ROWS),
-                display: if page == first { Display::Flex } else { Display::None },
-                ..default()
-            };
-            let holder = commands.spawn((Name::new(page.label()), SettingsPage(page), node, ChildOf(slots.body))).id();
+            let shown = if page == first { Display::Flex } else { Display::None };
+            let holder = commands
+                .spawn_scene(bsn! { @settings_page() Node { display: { shown } } })
+                .insert((Name::new(page.label()), SettingsPage(page), ChildOf(slots.body)))
+                .id();
             match page {
                 Page::General => general_page(&mut commands, holder, appearance.choice),
                 Page::Connection => connection_page(&mut commands, holder),
@@ -255,10 +253,9 @@ fn connection_page(commands: &mut Commands, page: Entity) {
 fn general_page(commands: &mut Commands, page: Entity, choice: ThemeChoice) {
     let options = ThemeChoice::ALL.iter().map(|c| (c.label().to_string(), Some(c.icon()))).collect();
     let at = ThemeChoice::ALL.iter().position(|c| *c == choice);
-    commands.spawn_scene(field("Appearance", bsn_list! { @button_group(options, at) ThemePick })).insert(ChildOf(page));
-    commands
-        .spawn_scene(text_dim("Desktop follows your desktop's light or dark setting.", size::SECONDARY))
-        .insert(ChildOf(page));
+    let note = "Desktop follows your desktop's light or dark setting.";
+    let control = bsn_list! { @button_group(options, at) ThemePick };
+    commands.spawn_scene(setting("Appearance", note, control)).insert(ChildOf(page));
 }
 
 /// Shows a theme chosen elsewhere on the theme's buttons.

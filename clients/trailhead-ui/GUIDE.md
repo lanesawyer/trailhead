@@ -206,6 +206,21 @@ columns do this with `PAGE` and "show more").
 
 Pages that fill the window are under "A sidebar, the rail and navigation".
 
+### Settings
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `settings_page` | `settings_page() -> impl Scene` | A page of settings (a settings modal's body, or one tab's page of it): a column, its settings `space::ROWS` apart and its sections a group apart. Spawn them as its children, in order. | |
+| `spawn_settings_section` | `spawn_settings_section(commands: &mut Commands, heading: Into<String>) -> SettingsSection` | A group of settings under a dim heading, spawned unparented. | Fill or `Keyed`-sync its `rows`. |
+| `SettingsSection` | `SettingsSection { section: Entity, rows: Entity }` | Put `section` in the page with `ChildOf`; put the settings in `rows`, which holds nothing else. | |
+| `setting` | `setting(label: Into<String>, note: Into<String>, control: impl SceneList) -> impl Scene` | One setting: its label over its control (a `select`, a `button_group`, a value's `text`), with a dim note under it saying what it does; an empty note is hidden. Pass the control into the scene with your marker on it, as for `field`. | The control's own way; the note is `SettingNote`'s `Text` (`set_text`). |
+| `setting_toggle` | `setting_toggle(label: Into<String>, note: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off: a `toggle_switch` with its label after it, and the note under it. `own` goes on the switch, which sends `ValueChange<bool>`. | The switch keeps its own state. |
+| `SettingNote` | component | A setting's note. | |
+
+Every settings surface is built from these, Lookout's settings modal included, so settings look alike in every app.
+Never stack `toggle_switch`es or `field`s in a modal body by hand: bare, with no gap, a list of toggles reads as one
+block of text (TRAIL-1610). Recipe 6 is a settings modal.
+
 ### A sidebar, the rail and navigation
 
 | Item | Signature | What it is for | Updated by |
@@ -368,6 +383,8 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   A setting that is on or off is a `toggle_switch`, not a check.
 - **`badge` / `chip` / `notice`.** Something an item says about itself (a key, a priority); state that is always
   there, with a dot and a hint; a message about how something went. All three are updated in place.
+- **`field` / `setting` / `setting_toggle`.** A label over a control in a form; the same in a settings page, with a
+  note under it; a setting that is on or off.
 - **`panel` / `section` / `field_well` / `sidebar_card` / `spawn_accordion`.** A surface over the content; a group of
   rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
 - **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
@@ -958,6 +975,114 @@ fn on_add(
 
 In a test, `trailhead_ui::test_support::press_key(world, field, KeyCode::Enter, Key::Enter)` presses Enter on the field;
 `TextEntered` is triggered from an observer, so call `world.flush()` before looking for what it caused (section 6).
+
+### Recipe 6: a settings modal for your app
+
+Modelled on Ticklist's settings (in the apps repo) and Lookout's, `clients/trailhead-lookout/src/settings.rs`. A gear
+opens a modal; its body is filled once, when `ModalSlots` arrives, with a section per group of settings. Settings
+fixed at spawn are spawned into the section's `rows`; a list that follows data (one toggle per project) is kept there by
+`Keyed`, so the modal is never redrawn. What a switch or a pick does is an observer of the app's, as for any control.
+
+```rust
+use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, ValueChange};
+use trailhead_ui::{Keyed, Modal, ModalSlots, open_modal, select, setting, setting_toggle, spawn_settings_section};
+
+/// The settings modal.
+#[derive(Component)]
+pub struct SettingsModal;
+
+impl Modal for SettingsModal {
+    fn title(&self) -> String {
+        "My app settings".into()
+    }
+}
+
+/// The gear that opens it (a `tool_button(Icon::Settings, "Settings", ButtonKind::Plain)` in the sidebar's footer).
+#[derive(Component)]
+pub struct SettingsButton;
+
+/// The dropdown for how the list is sorted.
+#[derive(Component, Clone, Default)]
+struct SortSelect;
+
+/// The box the project toggles are kept in.
+#[derive(Component)]
+struct ProjectToggles;
+
+/// On a toggle: the key of the project it shows or hides.
+#[derive(Component, Clone, Default)]
+struct ProjectToggle(String);
+
+/// One project's toggle, by key: its label and whether it is shown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shown {
+    pub key: String,
+    pub label: String,
+    pub shown: bool,
+}
+
+#[derive(Resource, Default)]
+struct Toggles(Keyed<Shown>);
+
+fn on_gear(
+    activate: On<Activate>,
+    gear: Query<(), With<SettingsButton>>,
+    open: Query<(), With<SettingsModal>>,
+    mut commands: Commands,
+) {
+    if gear.contains(activate.entity) && open.is_empty() {
+        open_modal(&mut commands, SettingsModal);
+    }
+}
+
+/// Fills a new modal: a section of fixed settings, and one whose toggles follow the projects.
+fn fill(new: Query<&ModalSlots, (With<SettingsModal>, Added<ModalSlots>)>, mut commands: Commands) {
+    for slots in &new {
+        let list = spawn_settings_section(&mut commands, "List");
+        commands.entity(list.section).insert(ChildOf(slots.body));
+        let sorts = vec!["Due date".to_string(), "Priority".to_string()];
+        let control = bsn_list! { @select(sorts, Some(0), 8) SortSelect };
+        let sort = setting("Sort by", "How the list orders what is due.", control);
+        commands.spawn_scene(sort).insert(ChildOf(list.rows));
+
+        let projects = spawn_settings_section(&mut commands, "Projects shown");
+        commands.entity(projects.section).insert(ChildOf(slots.body));
+        commands.entity(projects.rows).insert(ProjectToggles);
+    }
+}
+
+/// One toggle per project, kept by key while the modal is open (forget `Toggles` on `ModalClosed`).
+fn sync_toggles(
+    wanted: Res<ProjectsShown>,
+    rows: Query<Entity, With<ProjectToggles>>,
+    mut kept: ResMut<Toggles>,
+    mut commands: Commands,
+) {
+    let Ok(rows) = rows.single() else { return };
+    let wanted = [(rows, wanted.0.iter().map(|p| (p.key.clone(), p.clone())).collect::<Vec<_>>())];
+    kept.0.sync(
+        &mut commands,
+        &wanted,
+        |commands, _, p| {
+            let own = bsn! { ProjectToggle({ p.key.clone() }) };
+            commands.spawn_scene(setting_toggle(p.label.clone(), "", p.shown, own)).id()
+        },
+        // A switch keeps its own state, which is the one that was just written.
+        |_, _, _| {},
+    );
+}
+
+fn on_toggle(change: On<ValueChange<bool>>, toggles: Query<&ProjectToggle>, mut commands: Commands) {
+    if let Ok(ProjectToggle(key)) = toggles.get(change.source) {
+        commands.trigger(SetShown { key: key.clone(), shown: change.value });
+    }
+}
+```
+
+`ProjectsShown` (a resource holding `Vec<Shown>`), `SetShown` and the observer of `Picked` for `SortSelect` are the
+app's own. A modal with pages behind tabs (Lookout's) spawns a `settings_page()` per tab into the body, shows one at a
+time with `set_display`, and puts its settings and sections in each page.
 
 ## 6. Checking your work
 
