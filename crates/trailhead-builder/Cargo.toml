@@ -1,0 +1,28 @@
+[package]
+name = "trailhead-builder"
+description = "Builds the Trailhead shell from an apps repo on the server's machine, keeping the newest build and the one before"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trailhead-model.workspace = true
+tokio = { workspace = true, features = ["process", "fs"] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+jiff.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

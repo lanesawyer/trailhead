@@ -15,5 +15,6 @@ pub fn local_config(dir: &Path) -> LocalConfig {
         foreground: false,
         instance: None,
         factory: None,
+        shell: None,
     }
 }

@@ -165,6 +165,7 @@ pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: boo
         foreground,
         instance: Some(paths.instance_or_create()?),
         factory: Some(paths.clone()),
+        shell: Some(paths.clone()),
     };
     match trailhead_server::serve_local(cfg).await.map_err(anyhow::Error::from_boxed)? {
         trailhead_server::Exit::Stopped => Ok(()),

@@ -45,6 +45,8 @@ pub struct AppState {
     pub draining: std::sync::atomic::AtomicBool,
     /// Set once SIGUSR1 asked for a restart onto a new binary; `/v1/health` reports it.
     pub upgrade_pending: std::sync::atomic::AtomicBool,
+    /// Where the shell's builder keeps its builds, when this server runs one; `/v1/shell/build` reads it.
+    pub shell: std::sync::OnceLock<trailhead_builder::Layout>,
 }
 
 impl AppState {
@@ -58,6 +60,7 @@ impl AppState {
             runs_in_flight: Default::default(),
             draining: Default::default(),
             upgrade_pending: Default::default(),
+            shell: Default::default(),
         }
     }
 }
@@ -152,6 +155,9 @@ pub struct LocalConfig {
     /// Where the factory's control plane finds the user config and keeps its state. With the `factory` feature and
     /// `[factory] repos` listed there, the server runs the control plane; `None` never does.
     pub factory: Option<Paths>,
+    /// Where the shell's builder finds the user config's `[shell]` table and keeps its builds. With `[shell] repo`
+    /// set there, the server builds the shell from that apps repo (`trailhead_builder`); `None` never does.
+    pub shell: Option<Paths>,
 }
 
 /// Opens the local database, makes sure the workspace, user and a CLI token exist,
@@ -288,6 +294,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     }
     #[cfg(not(feature = "factory"))]
     let _ = &cfg.factory;
+    let builder = cfg.shell.as_ref().and_then(|paths| start_builder(&state, paths));
     if let Some(pid_file) = &cfg.pid_file {
         if let Some(dir) = pid_file.parent() {
             std::fs::create_dir_all(dir)?;
@@ -363,6 +370,9 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     if let Some(factory) = factory {
         factory.stop(FACTORY_STOP).await;
     }
+    if let Some(builder) = builder {
+        builder.stop().await;
+    }
     let restart = restart.load(std::sync::atomic::Ordering::SeqCst);
     // Before the pid file goes, which the CLI waits for: a server it starts next then finds the lock free.
     drop(lock);
@@ -380,6 +390,22 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     }
     tracing::info!("trailhead stopped");
     Ok(Exit::Stopped)
+}
+
+/// Starts the shell's builder when the user config asks for one. A broken `[shell]` table is logged, and the server
+/// runs without a builder: unlike the factory's, nothing else depends on it.
+fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::Running> {
+    match trailhead_builder::start(&paths.config_dir, &paths.data_dir) {
+        Ok(Some(running)) => {
+            let _ = state.shell.set(trailhead_builder::Layout::new(&paths.data_dir));
+            Some(running)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(target: "shell", error = %e, "the shell's builder is off: its configuration is broken");
+            None
+        }
+    }
 }
 
 /// Why [`serve_local`] returned.

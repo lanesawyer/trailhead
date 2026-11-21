@@ -18,6 +18,10 @@ pub struct UserConfig {
     /// `trailhead_factory::HostConfig` checks the keys when the factory reads it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub factory: Option<toml::Table>,
+    /// The shell's builder (`[shell] repo` and its build settings), kept unparsed like `factory`; the server's
+    /// builder reads it (`trailhead_builder::ShellConfig`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<toml::Table>,
 }
 
 pub fn path(paths: &Paths) -> PathBuf {
@@ -48,7 +52,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths { data_dir: dir.path().join("data"), config_dir: dir.path().join("config") };
         assert!(load(&paths).unwrap().url.is_none());
-        save(&paths, &UserConfig { url: Some("http://127.0.0.1:7242".into()), factory: None }).unwrap();
+        save(&paths, &UserConfig { url: Some("http://127.0.0.1:7242".into()), factory: None, shell: None }).unwrap();
         assert_eq!(load(&paths).unwrap().url.as_deref(), Some("http://127.0.0.1:7242"));
     }
 

@@ -57,6 +57,7 @@ trailhead-codehost-github = { path = "crates/trailhead-codehost-github" }
 trailhead-provider-anthropic = { path = "crates/trailhead-provider-anthropic" }
 trailhead-tracker-rest = { path = "crates/trailhead-tracker-rest" }
 trailhead-factory-server = { path = "crates/trailhead-factory-server" }
+trailhead-builder = { path = "crates/trailhead-builder" }
 trailhead-ui = { path = "clients/trailhead-ui" }
 trailhead-shell = { path = "clients/trailhead-shell" }
 trailhead-app-example = { path = "clients/trailhead-app-example" }

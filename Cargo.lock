@@ -8038,6 +8038,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-builder"
+version = "0.1.0"
+dependencies = [
+ "jiff",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "trailhead-model",
+]
+
+[[package]]
 name = "trailhead-client"
 version = "0.1.0"
 dependencies = [
@@ -8323,6 +8338,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-http 0.7.1",
  "tracing",
+ "trailhead-builder",
  "trailhead-client",
  "trailhead-core",
  "trailhead-factory-server",

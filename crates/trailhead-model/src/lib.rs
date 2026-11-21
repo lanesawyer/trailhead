@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod shell;
+
 /// A value that isn't a valid status, kind or other model value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
