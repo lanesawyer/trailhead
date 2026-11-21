@@ -3,8 +3,8 @@
 use std::path::Path;
 use std::process::Command;
 
-use trailhead_daemon::{GitWorkspace, Mise, Workspace};
-use trailhead_factory::{Check, PrepareRequest, Repo};
+use trailhead_daemon::{GitWorkspace, Mise, Shot, Workspace};
+use trailhead_factory::{Check, PrepareRequest, Repo, Shots};
 
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -864,4 +864,127 @@ async fn conflict_markers_the_base_added_are_not_the_agents_after_a_fast_forward
     assert!(ws.conflict_markers(&start, "main").await.unwrap().is_empty(), "fast-forward");
     std::fs::write(dir.join("a.md"), "<<<<<<< HEAD\n").unwrap();
     assert_eq!(ws.conflict_markers(&start, "main").await.unwrap(), ["a.md"]);
+}
+
+/// A checkout of a repo whose "views" are the files in `views/`, which its shots command copies out.
+async fn shot_workspace(root: &Path) -> GitWorkspace {
+    let src = upstream(root);
+    std::fs::create_dir_all(src.join("views")).unwrap();
+    std::fs::write(src.join("views/board.png"), "board v1").unwrap();
+    std::fs::write(src.join("views/same.png"), "same").unwrap();
+    std::fs::write(src.join("views/old.png"), "old").unwrap();
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "--quiet", "-m", "views"]);
+    git(&src, &["push", "--quiet", root.join("remote/acme/widget.git").to_str().unwrap(), "main"]);
+    let remote = format!("file://{}", root.join("remote").display());
+    let ws = GitWorkspace::with_remote(root.join("work/widget"), remote);
+    let req = PrepareRequest {
+        repo: Repo { owner: "acme".into(), name: "widget".into() },
+        base_branch: "main".into(),
+        branch: None,
+        merge_base: false,
+        branch_if_present: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        setup: None,
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    };
+    ws.prepare(&req).await.unwrap();
+    ws
+}
+
+const COPY_VIEWS: &str = "cp views/*.png \"$SHOTS_DIR\"/";
+
+fn shots(command: &str) -> Shots {
+    Shots { command: command.into(), paths: Vec::new() }
+}
+
+#[tokio::test]
+async fn shots_are_taken_of_the_change_and_of_its_base_and_only_the_views_that_differ_are_kept() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = shot_workspace(root.path()).await;
+    // The agent's work, uncommitted as it is when the checks have just passed.
+    std::fs::write(ws.dir().join("views/board.png"), "board v2").unwrap();
+    std::fs::write(ws.dir().join("views/fresh.png"), "fresh").unwrap();
+    std::fs::remove_file(ws.dir().join("views/old.png")).unwrap();
+
+    let taken = ws.shots(&shots(COPY_VIEWS), "main").await;
+
+    assert_eq!(taken.failed, None);
+    let got: Vec<_> = taken
+        .shots
+        .iter()
+        .map(|s| (s.name.as_str(), s.before.as_deref().map(<[u8]>::to_vec), s.after.as_deref().map(<[u8]>::to_vec)))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("board", Some(b"board v1".to_vec()), Some(b"board v2".to_vec())),
+            ("fresh", None, Some(b"fresh".to_vec())),
+            ("old", Some(b"old".to_vec()), None),
+        ],
+        "`same` drew the same, so it isn't kept"
+    );
+    // Nothing of it is left in the checkout or in git's record of worktrees.
+    let scratch = root.path().join("work/widget.shots");
+    assert!(!scratch.join("base").exists(), "the base's checkout is gone");
+    let trees = Command::new("git").args(["worktree", "list"]).current_dir(ws.dir()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&trees.stdout).lines().count(), 1);
+    assert_eq!(ws.changed_files("main").await.unwrap(), ["views/board.png", "views/fresh.png", "views/old.png"]);
+
+    // A second take, as a rework's, starts clean.
+    std::fs::write(ws.dir().join("views/board.png"), "board v1").unwrap();
+    let again = ws.shots(&shots(COPY_VIEWS), "main").await;
+    let names: Vec<_> = again.shots.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["fresh", "old"]);
+}
+
+#[tokio::test]
+async fn the_shots_command_runs_in_each_checkout_and_is_told_where_the_task_s_is() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = shot_workspace(root.path()).await;
+    std::fs::write(ws.dir().join("views/board.png"), "board v2").unwrap();
+    // Where it ran and what it was told, as a picture of its own.
+    let command = "printf '%s %s' \"$(pwd)\" \"$TRAILHEAD_CHECKOUT\" > \"$SHOTS_DIR/where.png\"";
+    let taken = ws.shots(&shots(command), "main").await;
+    assert_eq!(taken.failed, None);
+    let checkout = ws.dir().canonicalize().unwrap();
+    let base = checkout.with_file_name("widget.shots").join("base");
+    let said = |png: &Option<Vec<u8>>| String::from_utf8(png.clone().unwrap()).unwrap();
+    assert_eq!(said(&taken.shots[0].after), format!("{0} {0}", checkout.display()));
+    assert_eq!(said(&taken.shots[0].before), format!("{} {}", base.display(), checkout.display()));
+}
+
+#[tokio::test]
+async fn a_shots_command_that_fails_says_why_and_a_base_that_fails_makes_every_view_new() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = shot_workspace(root.path()).await;
+    let failed = ws.shots(&shots("echo no render adapter; exit 3"), "main").await;
+    assert!(failed.shots.is_empty());
+    let why = failed.failed.unwrap();
+    assert!(why.contains("failed") && why.contains("no render adapter"), "{why}");
+
+    // Only the change can draw: the base has no `ready` file.
+    std::fs::write(ws.dir().join("ready"), "").unwrap();
+    let taken = ws.shots(&shots(&format!("test -f ready && {COPY_VIEWS}")), "main").await;
+    let names: Vec<_> = taken.shots.iter().map(|s| (s.name.as_str(), s.before.is_none())).collect();
+    assert_eq!(names, [("board", true), ("old", true), ("same", true)]);
+    assert!(taken.failed.unwrap().contains("the base's pictures are missing"));
+}
+
+#[tokio::test]
+async fn kept_shots_are_files_beside_the_checkout() {
+    let root = tempfile::tempdir().unwrap();
+    let ws = shot_workspace(root.path()).await;
+    let shot = Shot { name: "board-dark".into(), before: Some(b"old".to_vec()), after: None };
+    let files = ws.keep_shots(std::slice::from_ref(&shot)).await.unwrap();
+    assert_eq!(files.len(), 1);
+    let before = files[0].before.clone().unwrap();
+    assert!(before.ends_with("widget.shots/review/board-dark.before.png"), "{}", before.display());
+    assert_eq!(std::fs::read(&before).unwrap(), b"old");
+    assert_eq!(files[0].after, None);
+    assert!(!ws.unpublished("main").await.unwrap(), "nothing of them is in the checkout");
 }

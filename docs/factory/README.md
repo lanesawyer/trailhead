@@ -10,7 +10,7 @@ Read this index first, then open only the file the work in front of you needs.
 | --- | --- |
 | [overview.md](overview.md) | The big picture: principles, how the factory fits into Trailhead, the decisions table |
 | [seams.md](seams.md) | The five plugin traits (`Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost`), the daemon contract, crate layout, test fakes |
-| [sandbox.md](sandbox.md) | Sprites, connectors and credentials, egress, standard checks, bootstrap and checkpoints |
+| [sandbox.md](sandbox.md) | Sprites, connectors and credentials, egress, standard checks, pictures of a change, bootstrap and checkpoints |
 | [targets.md](targets.md) | Running on several computes at once: local first, Sprites as overflow, spend caps, giving the machine back |
 | [agents.md](agents.md) | The in-sandbox daemon and its contract, agent profiles and models, specs and agent context |
 | [lifecycle.md](lifecycle.md) | How a task moves from spec to merged PR, mapped onto Trailhead statuses and claims |

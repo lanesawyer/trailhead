@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CodeHost, Commit, Compute, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker, Usd, VerdictKind,
-    label,
+    AttachmentRole, CodeHost, Commit, Compute, FileChange, MergeOutcome, Role, RunOutcome, Status, TaskKey, Tracker,
+    Usd, VerdictKind, label,
 };
-use trailhead_testkit::{FAKE_BASE, Script, TrackerOp};
+use trailhead_testkit::{FAKE_BASE, Script, Shot, Taken, TrackerOp};
 
 use crate::common::*;
 
@@ -1426,6 +1426,155 @@ async fn a_path_scoped_check_runs_when_the_diff_touches_its_paths() {
     let ran = r.factory.tick().await.unwrap();
     assert!(matches!(&ran[0].1, Outcome::Failed { .. }), "{:?}", ran[0].1);
     assert!(r.codehost.prs().is_empty(), "the failing UI check stopped the PR");
+}
+
+const SHOTS: &str = "\n[shots]\nrun = \"make shots\"\npaths = [\"clients/**\"]\n";
+
+fn shot(name: &str, before: Option<&[u8]>, after: Option<&[u8]>) -> Shot {
+    Shot { name: name.into(), before: before.map(<[u8]>::to_vec), after: after.map(<[u8]>::to_vec) }
+}
+
+#[tokio::test]
+async fn a_ui_change_gets_its_pictures_on_the_task_the_pr_and_in_front_of_the_reviewer() {
+    let r = rig_with(&format!("{CONFIG}{SHOTS}"));
+    let key = r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["clients/lookout/src/main.rs"]);
+    r.daemon.take_shots(Taken {
+        shots: vec![shot("board-dark", Some(b"old"), Some(b"new")), shot("peak-dark", None, Some(b"peak"))],
+        more: 0,
+        failed: None,
+    });
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+
+    let taken = r.daemon.shots_taken();
+    assert_eq!(taken.len(), 1, "once, by the worker");
+    assert_eq!((taken[0].0.command.as_str(), taken[0].1.as_str()), ("make shots", "main"));
+    let pr = &r.codehost.prs()[0];
+    assert!(
+        pr.spec.body.contains("Pictures that differ from the base: `board-dark`, `peak-dark` (new)")
+            && pr.spec.body.contains(&format!("on {} in Trailhead", key.0)),
+        "{}",
+        pr.spec.body
+    );
+    // Attached as the set the PR's head names, which is where the reviewer's daemon looks.
+    let head = CodeHost::head(&r.codehost, &pr.pr).await.unwrap();
+    let attached: Vec<_> =
+        r.tracker.pictures_of(&key).into_iter().map(|(set, p)| (set, p.name, p.role, p.png)).collect();
+    assert_eq!(
+        attached,
+        [
+            (head.clone(), "board-dark".to_string(), AttachmentRole::Before, b"old".to_vec()),
+            (head.clone(), "board-dark".to_string(), AttachmentRole::After, b"new".to_vec()),
+            (head, "peak-dark".to_string(), AttachmentRole::After, b"peak".to_vec()),
+        ]
+    );
+    assert_eq!(
+        r.daemon.shots_kept(),
+        [vec![shot("board-dark", Some(b"old"), Some(b"new")), shot("peak-dark", None, Some(b"peak"))]]
+    );
+    let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
+    let files: Vec<_> = review.shots.iter().map(|s| (s.name.as_str(), s.before.is_some(), s.after.is_some())).collect();
+    assert_eq!(files, [("board-dark", true, true), ("peak-dark", false, true)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rework_s_pictures_are_filed_under_the_head_it_pushed_though_the_host_still_shows_the_old_one() {
+    let r = rig_with(&format!("{CONFIG}{SHOTS}"));
+    let key = r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["clients/lookout/src/main.rs"]);
+    r.daemon.take_shots(Taken { shots: vec![shot("board-dark", Some(b"old"), Some(b"wrong"))], more: 0, failed: None });
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(request_changes("The board's header is clipped.")));
+    r.factory.tick().await.unwrap();
+    let pr = r.codehost.prs()[0].pr.clone();
+    let first = CodeHost::head(&r.codehost, &pr).await.unwrap();
+
+    r.daemon.take_shots(Taken { shots: vec![shot("board-dark", Some(b"old"), Some(b"right"))], more: 0, failed: None });
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // The rework reads the head once before its push; the two reads after it still get the old one.
+    r.codehost.stale_heads(2);
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+
+    let second = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    assert_ne!(first, second);
+    let sets: Vec<_> = r.tracker.pictures_of(&key).into_iter().map(|(set, p)| (set, p.role, p.png)).collect();
+    assert_eq!(
+        sets,
+        [
+            (first.clone(), AttachmentRole::Before, b"old".to_vec()),
+            (first, AttachmentRole::After, b"wrong".to_vec()),
+            (second.clone(), AttachmentRole::Before, b"old".to_vec()),
+            (second, AttachmentRole::After, b"right".to_vec()),
+        ]
+    );
+    // Each reviewer saw its own round's pictures.
+    let kept: Vec<_> = r.daemon.shots_kept().into_iter().map(|round| round[0].after.clone().unwrap()).collect();
+    assert_eq!(kept, [b"wrong".to_vec(), b"right".to_vec()]);
+    let comments = &r.codehost.prs()[0].comments;
+    assert!(comments.iter().any(|c| c.contains("Pictures that differ from the base: `board-dark`")), "{comments:?}");
+}
+
+#[tokio::test]
+async fn pictures_are_not_taken_for_a_change_outside_their_paths_or_in_a_repo_without_them() {
+    let r = rig_with(&format!("{CONFIG}{SHOTS}"));
+    let key = r.tracker.add_task("TRAIL", "Backend only", "");
+    r.daemon.change_files(&["crates/a/src/lib.rs"]);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert!(r.daemon.shots_taken().is_empty() && r.tracker.pictures_of(&key).is_empty());
+    assert!(r.daemon.shots_kept().is_empty(), "a reviewer with no pictures is handed none");
+    assert!(!r.codehost.prs()[0].spec.body.contains("Pictures"), "{}", r.codehost.prs()[0].spec.body);
+
+    let r = rig();
+    r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["clients/lookout/src/main.rs"]);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    assert!(r.daemon.shots_taken().is_empty(), "no [factory.shots], no pictures");
+}
+
+#[tokio::test]
+async fn pictures_that_fail_never_fail_the_change() {
+    // The command fails: the PR says so and goes to review as usual.
+    let r = rig_with(&format!("{CONFIG}{SHOTS}"));
+    let key = r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["clients/lookout/src/main.rs"]);
+    r.daemon.take_shots(Taken::failed("`make shots` failed:\n```\nno render adapter\n```"));
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    let body = &r.codehost.prs()[0].spec.body;
+    assert!(body.contains("The pictures couldn't all be taken") && body.contains("no render adapter"), "{body}");
+    assert!(r.tracker.pictures_of(&key).is_empty());
+
+    // The task refuses them: the PR, which already names them, gets a comment, and the review still happens.
+    let r = rig_with(&format!("{CONFIG}{SHOTS}"));
+    let key = r.tracker.add_task("TRAIL", "Touch the UI", "");
+    r.daemon.change_files(&["clients/lookout/src/main.rs"]);
+    r.daemon.take_shots(Taken { shots: vec![shot("board-dark", Some(b"old"), Some(b"new"))], more: 3, failed: None });
+    r.tracker.fail_next("factory/trail-1-a1", TrackerOp::Attach, 1);
+    r.harness.push(Role::Worker, Script::new(changes()).steps(1, 10));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(&ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    let pr = &r.codehost.prs()[0];
+    assert!(pr.spec.body.contains("`board-dark`, and 3 more that aren't attached"), "{}", pr.spec.body);
+    assert!(
+        pr.comments.iter().any(|c| c.contains("couldn't be attached to the task")),
+        "the PR says the pictures aren't there: {:?}",
+        pr.comments
+    );
+    assert!(r.tracker.pictures_of(&key).is_empty() && r.daemon.shots_kept().is_empty());
 }
 
 #[tokio::test]

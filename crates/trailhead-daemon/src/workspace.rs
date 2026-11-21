@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use trailhead_factory::{Check, CheckResult, Error, InstallHost, PrepareRequest, Result};
+use trailhead_factory::{Check, CheckResult, Error, InstallHost, PrepareRequest, Result, ShotFiles, Shots};
 
+use crate::shots::{self, Shot, Taken};
 use crate::{Mise, Workspace};
 
 /// Keep the end of a check's output, where failures usually are.
@@ -15,6 +16,12 @@ const OUTPUT_TAIL: usize = 16 * 1024;
 /// Git sends a request body bigger than `http.postBuffer` chunked, which the gateway refuses (it wants a
 /// Content-Length, 32 MiB at most). Set to that limit, a fetch is chunked only if the gateway would refuse it anyway.
 const POST_BUFFER: &str = "http.postBuffer=33554432";
+
+/// How long one run of a repo's shots command may take, building included, before it is given up on.
+const SHOTS_PATIENCE: Duration = Duration::from_secs(20 * 60);
+
+/// How much of a failed shots command's output the PR quotes.
+const SHOTS_OUTPUT_TAIL: usize = 600;
 
 /// How long to wait for narrowed egress to take effect. Sprites took under a second in M0's tests.
 const BLOCK_PATIENCE: Duration = Duration::from_secs(15);
@@ -150,6 +157,87 @@ impl GitWorkspace {
 
     async fn git(&self, cwd: &Path, args: &[&str]) -> Result<()> {
         self.git_output(cwd, args).await.map(drop)
+    }
+
+    /// The commit the checkout's change is measured against. While a rework's merge of the base is in progress that
+    /// is the commit being merged (MERGE_HEAD, not `origin/<base>`, which a `git fetch` in the session moves on):
+    /// against the merge-base, every base change since the branch point would count as the PR's.
+    async fn change_base(&self, base: &str) -> Result<String> {
+        if let Some(head) = self.merge_head().await? {
+            return Ok(head.trim().to_string());
+        }
+        let remote = format!("origin/{base}");
+        self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await
+    }
+
+    /// Where the pictures and the second checkout go: beside the checkout, so nothing of them is in the change.
+    fn shots_dir(&self) -> PathBuf {
+        let mut name = self.dir.file_name().unwrap_or_default().to_os_string();
+        name.push(".shots");
+        self.dir.with_file_name(name)
+    }
+
+    /// Runs the shots command in `cwd`, which writes its PNGs to `out`, and reads them back.
+    async fn shoot(&self, command: &str, cwd: &Path, out: &Path) -> std::result::Result<shots::Read, String> {
+        fresh_dir(out).await?;
+        let env = self.env.lock().unwrap().clone();
+        let run = self
+            .mise
+            .shell(cwd)
+            .arg(format!("exec 2>&1\n{command}"))
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .envs(env)
+            .env("SHOTS_DIR", out)
+            .env("TRAILHEAD_CHECKOUT", &self.dir)
+            .kill_on_drop(true)
+            .output();
+        let done = match tokio::time::timeout(SHOTS_PATIENCE, run).await {
+            Ok(Ok(done)) => done,
+            Ok(Err(e)) => return Err(format!("couldn't run `{command}`: {e}")),
+            Err(_) => return Err(format!("`{command}` took over {} minutes", SHOTS_PATIENCE.as_secs() / 60)),
+        };
+        if !done.status.success() {
+            let output = String::from_utf8_lossy(&done.stdout);
+            let output = output.trim_end();
+            let mut cut = output.len().saturating_sub(SHOTS_OUTPUT_TAIL);
+            while !output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            return Err(format!("`{command}` failed:\n```\n{}\n```", &output[cut..]));
+        }
+        let out = out.to_path_buf();
+        match tokio::task::spawn_blocking(move || shots::read(&out)).await {
+            Ok(Ok(read)) => Ok(read),
+            Ok(Err(e)) => Err(format!("couldn't read the pictures: {e}")),
+            Err(e) => Err(format!("couldn't read the pictures: {e}")),
+        }
+    }
+
+    /// Takes the pictures of the commit the change is against, in a second checkout of it that is gone afterwards.
+    async fn shoot_base(&self, command: &str, base: &str, scratch: &Path) -> std::result::Result<shots::Read, String> {
+        let tree = scratch.join("base");
+        let at = tree.to_string_lossy().into_owned();
+        let from = self.change_base(base).await.map_err(|e| e.to_string())?;
+        self.drop_tree(&tree).await;
+        self.git(&self.dir, &["worktree", "add", "--quiet", "--detach", "--force", &at, &from])
+            .await
+            .map_err(|e| e.to_string())?;
+        let read = self.shoot(command, &tree, &scratch.join("before")).await;
+        self.drop_tree(&tree).await;
+        read
+    }
+
+    /// Removes the second checkout, and git's record of it, whether or not either is there.
+    async fn drop_tree(&self, tree: &Path) {
+        let at = tree.to_string_lossy().into_owned();
+        let _ = self.git(&self.dir, &["worktree", "remove", "--force", &at]).await;
+        if let Err(e) = tokio::fs::remove_dir_all(tree).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(error = %e, tree = %tree.display(), "couldn't remove the base's checkout");
+        }
+        let _ = self.git(&self.dir, &["worktree", "prune"]).await;
     }
 
     async fn git_output(&self, cwd: &Path, args: &[&str]) -> Result<String> {
@@ -342,15 +430,8 @@ impl Workspace for GitWorkspace {
     async fn changed_files(&self, base: &str) -> Result<Vec<String>> {
         // New files count, as in conflict_markers.
         let _ = self.git(&self.dir, &["add", "--intent-to-add", "--all"]).await;
-        // While the rework's merge of the base is in progress, diff against the commit being merged (MERGE_HEAD, not
-        // `origin/<base>`, which a `git fetch` in the session moves on): against the merge-base, every base change
-        // since the branch point would count as the PR's and trigger scoped checks.
-        let from = if let Some(head) = self.merge_head().await? {
-            head.trim().to_string()
-        } else {
-            let remote = format!("origin/{base}");
-            self.git_output(&self.dir, &["merge-base", &remote, "HEAD"]).await?
-        };
+        // Against the merge-base, every base change since the branch point would trigger scoped checks.
+        let from = self.change_base(base).await?;
         let names =
             self.git_output(&self.dir, &["diff", "--name-only", "--no-renames", "--no-ext-diff", "-z", &from]).await?;
         Ok(names.split('\0').filter(|f| !f.is_empty()).map(str::to_string).collect())
@@ -376,6 +457,43 @@ impl Workspace for GitWorkspace {
 
     async fn head(&self) -> Result<String> {
         self.git_output(&self.dir, &["rev-parse", "HEAD"]).await
+    }
+
+    async fn shots(&self, shots: &Shots, base: &str) -> Taken {
+        let scratch = self.shots_dir();
+        // The change first: if its pictures can't be taken there is nothing to compare, and the base isn't built.
+        let (after, mut left_out) = match self.shoot(&shots.command, &self.dir, &scratch.join("after")).await {
+            Ok(read) => read,
+            Err(why) => return Taken::failed(why),
+        };
+        let (before, failed) = match self.shoot_base(&shots.command, base, &scratch).await {
+            Ok((before, _)) => (Some(before), None),
+            Err(why) => (None, Some(format!("the base's pictures are missing, so every view counts as new. {why}"))),
+        };
+        if !left_out.is_empty() {
+            left_out.insert(0, failed.unwrap_or_default());
+            left_out.retain(|l| !l.is_empty());
+            return Taken::compare(before, after, Some(left_out.join("; ")));
+        }
+        Taken::compare(before, after, failed)
+    }
+
+    async fn keep_shots(&self, shots: &[Shot]) -> Result<Vec<ShotFiles>> {
+        let dir = self.shots_dir().join("review");
+        fresh_dir(&dir).await.map_err(Error::Other)?;
+        let mut files = Vec::with_capacity(shots.len());
+        for shot in shots {
+            let write = async |side: &str, png: &Option<Vec<u8>>| -> Result<Option<PathBuf>> {
+                let Some(png) = png else { return Ok(None) };
+                let path = dir.join(format!("{}.{side}.png", shot.name));
+                tokio::fs::write(&path, png).await.map_err(|e| Error::Other(format!("{}: {e}", path.display())))?;
+                Ok(Some(path))
+            };
+            let before = write("before", &shot.before).await?;
+            let after = write("after", &shot.after).await?;
+            files.push(ShotFiles { name: shot.name.clone(), before, after });
+        }
+        Ok(files)
     }
 
     async fn confirm_blocked(&self, hosts: &[String]) -> Result<()> {
@@ -416,6 +534,15 @@ impl Workspace for GitWorkspace {
         };
         CheckResult { name: check.name.clone(), passed, output: tail(output), skipped: false }
     }
+}
+
+/// An empty directory at `dir`, whatever was there.
+async fn fresh_dir(dir: &Path) -> std::result::Result<(), String> {
+    match tokio::fs::remove_dir_all(dir).await {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("{}: {e}", dir.display())),
+        _ => {}
+    }
+    tokio::fs::create_dir_all(dir).await.map_err(|e| format!("{}: {e}", dir.display()))
 }
 
 /// Appended to a failed check's output when the kernel's OOM killer, not the check itself, probably ended it.

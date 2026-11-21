@@ -9,10 +9,12 @@ use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 use trailhead_factory::messages::{self, Filed};
 use trailhead_factory::{
-    Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr, Patch, PrRef,
-    PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunPatch, RunReport, RunRequest, RunResult,
-    TaskKey, Tracker, Usage, Verdict, VerdictKind,
+    AttachmentRole, Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr,
+    Patch, Picture, PrRef, PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunPatch, RunReport,
+    RunRequest, RunResult, ShotFiles, Shots, TaskKey, Tracker, Usage, Verdict, VerdictKind,
 };
+
+use crate::shots::{Shot, Taken};
 
 /// Turns a run's credential into a tracker handle acting as the sandbox's sub-agent.
 pub type Connect =
@@ -51,6 +53,11 @@ pub trait Workspace: Send + Sync {
     async fn changed_files(&self, base: &str) -> Result<Vec<String>>;
     /// Whether the checkout has uncommitted changes or commits that are not on `origin/<remote_branch>`.
     async fn unpublished(&self, remote_branch: &str) -> Result<bool>;
+    /// Draws the repo's views with `shots`' command, on the checkout as it is and on the commit its change is
+    /// against (as `changed_files` reads it), and keeps the views that differ.
+    async fn shots(&self, shots: &Shots, base: &str) -> Taken;
+    /// Writes `shots` as PNG files outside the checkout, where a reviewing agent can open them.
+    async fn keep_shots(&self, shots: &[Shot]) -> Result<Vec<ShotFiles>>;
 }
 
 /// What became of the merge of the base branch that a run's checkout started with, if any.
@@ -97,6 +104,11 @@ impl Quiet {
 
 /// The most follow-ups one review may file, so a runaway reviewer can't flood the project.
 const MAX_FOLLOW_UPS: usize = 10;
+
+/// How many times, and how far apart, a PR's head is read again while it still names the commit from before a push:
+/// a host can answer with the old one for a moment, and the pictures have to be filed under the new one.
+const HEAD_READS: u32 = 5;
+const HEAD_READ_EVERY: Duration = Duration::from_secs(2);
 
 /// How long publishing keeps retrying a transient failure before the task is parked.
 const PUBLISH_RETRY_FOR: Duration = Duration::from_secs(10 * 60);
@@ -163,6 +175,7 @@ impl Runner {
             title,
             base_branch: (req.role == Role::Reviewer).then(|| req.base_branch.clone()),
             env: self.workspace.agent_env().await,
+            shots: self.reviewer_shots(&req, tracker.as_ref()).await,
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
@@ -240,6 +253,105 @@ impl Runner {
             }
         };
         Ok(RunReport { result, checks, usage })
+    }
+
+    /// For a reviewer of a repo that takes pictures: the ones the worker attached for the PR's head, as files it can
+    /// open. A review goes ahead without them, so a failure is logged and comes to none.
+    async fn reviewer_shots(&self, req: &RunRequest, tracker: &dyn Tracker) -> Vec<ShotFiles> {
+        let (Role::Reviewer, Some(_), Some(pr)) = (req.role, &req.shots, &req.pr) else { return Vec::new() };
+        let key = &req.task.key;
+        let kept = async {
+            let head = self.codehost.head(pr).await?;
+            let mut shots: Vec<Shot> = Vec::new();
+            for picture in tracker.pictures(key, &head).await? {
+                let at = match shots.iter().position(|s| s.name == picture.name) {
+                    Some(at) => at,
+                    None => {
+                        shots.push(Shot { name: picture.name.clone(), before: None, after: None });
+                        shots.len() - 1
+                    }
+                };
+                match picture.role {
+                    AttachmentRole::Before => shots[at].before = Some(picture.png),
+                    AttachmentRole::After => shots[at].after = Some(picture.png),
+                }
+            }
+            if shots.is_empty() {
+                return Ok(Vec::new());
+            }
+            self.workspace.keep_shots(&shots).await
+        };
+        match kept.await {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!(task = %key, error = %e, "couldn't hand the reviewer the change's pictures");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Takes the change's pictures when the repo has a `[factory.shots]` whose paths the change touches. What comes
+    /// back is never a failure of the run.
+    async fn take_shots(&self, req: &RunRequest) -> Taken {
+        let Some(shots) = &req.shots else { return Taken::default() };
+        match self.workspace.changed_files(&req.base_branch).await {
+            Ok(files) if !shots.applies_to(&files) => Taken::default(),
+            Ok(_) => {
+                tracing::info!(task = %req.task.key, "taking the change's pictures");
+                let taken = self.workspace.shots(shots, &req.base_branch).await;
+                tracing::info!(task = %req.task.key, differ = taken.shots.len() + taken.more, failed = ?taken.failed, "pictures taken");
+                taken
+            }
+            Err(e) => Taken::failed(format!("the changed files couldn't be listed: {e}")),
+        }
+    }
+
+    /// The head of a rework's PR before its push, when there are pictures to file under the one after it.
+    async fn head_before_push(&self, req: &RunRequest, taken: &Taken) -> Option<String> {
+        let pr = req.pr.as_ref().filter(|_| !taken.shots.is_empty())?;
+        self.codehost.head(pr).await.ok()
+    }
+
+    /// Attaches a published change's pictures to its task, as the set its PR's head names, which is how a reviewer
+    /// finds them. `pushed_over` is the head a rework's push replaced. The PR already says the pictures exist, so a
+    /// failure is said there too; it never fails the run.
+    async fn attach_shots(
+        &self,
+        req: &RunRequest,
+        tracker: &dyn Tracker,
+        pr: &PrRef,
+        pushed_over: Option<String>,
+        shots: Vec<Shot>,
+    ) {
+        if shots.is_empty() {
+            return;
+        }
+        let key = &req.task.key;
+        let attached = async {
+            let mut head = self.codehost.head(pr).await?;
+            for _ in 1..HEAD_READS {
+                if Some(&head) != pushed_over.as_ref() {
+                    break;
+                }
+                tokio::time::sleep(HEAD_READ_EVERY).await;
+                head = self.codehost.head(pr).await?;
+            }
+            for shot in shots {
+                for (role, png) in [(AttachmentRole::Before, shot.before), (AttachmentRole::After, shot.after)] {
+                    if let Some(png) = png {
+                        tracker.attach(key, &head, Picture { name: shot.name.clone(), role, png }).await?;
+                    }
+                }
+            }
+            Ok::<_, Error>(())
+        };
+        if let Err(e) = attached.await {
+            tracing::warn!(task = %key, error = %e, "couldn't attach the change's pictures");
+            let body = format!("{}{}", messages::shots_not_attached(&e.to_string()), pr_footer(req, tracker.agent()));
+            if let Err(e) = self.codehost.comment(pr, &body).await {
+                tracing::warn!(task = %key, error = %e, "couldn't say so on the PR");
+            }
+        }
     }
 
     /// Renews the claim, logging a failure.
@@ -492,8 +604,21 @@ impl Runner {
                     tracker.release(key).await?;
                     return Ok((RunResult::Failed(reason), checks));
                 }
+                // After the checks, which built what the pictures need, and before publishing, so the PR names them.
+                let taken = tokio::select! {
+                    biased;
+                    _ = cancel.notified() => return Err(Error::Cancelled),
+                    taken = self.take_shots(req) => taken,
+                };
                 let _ = events.send(RunEvent::Publishing);
-                let notes = format!("{}{}", messages::flaky_checks(&retried), messages::skipped_checks(&checks));
+                let differ: Vec<_> = taken.shots.iter().map(|s| (s.name.clone(), s.change())).collect();
+                let notes = format!(
+                    "{}{}{}",
+                    messages::flaky_checks(&retried),
+                    messages::skipped_checks(&checks),
+                    messages::shots_note(key, &differ, taken.more, taken.failed.as_deref())
+                );
+                let pushed_over = self.head_before_push(req, &taken).await;
                 let pr = match self.publish(req, tracker.agent(), start, commits, summary, &notes).await {
                     Ok(pr) => pr,
                     // The agent's work is done and checked; retrying the whole run would only hit the same wall, so
@@ -543,6 +668,7 @@ impl Runner {
                 if !(reported && review_requested) {
                     tracing::warn!(task = %key, "the PR is open but the tracker wouldn't take it; leaving it to the control plane");
                 }
+                self.attach_shots(req, tracker, &pr, pushed_over, taken.shots).await;
                 Ok((RunResult::PrOpened(pr), checks))
             }
             RunOutcome::Verdict { kind, body, follow_ups, raise_grade } => {

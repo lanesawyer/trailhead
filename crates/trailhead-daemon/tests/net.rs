@@ -178,6 +178,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
         allowed_hosts: Vec::new(),
         env: Default::default(),
         credential,
+        shots: None,
     }
 }
 

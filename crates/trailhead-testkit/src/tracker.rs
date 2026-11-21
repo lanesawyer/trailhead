@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, ProjectRepo, Result, RunPatch, RunRecord,
-    Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Picture, Priority, ProjectRepo, Result, RunPatch,
+    RunRecord, Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,8 @@ struct Agent {
 struct State {
     tasks: BTreeMap<TaskKey, Task>,
     comments: HashMap<TaskKey, Vec<FakeComment>>,
+    /// Each task's pictures with the set they were attached in, oldest first.
+    pictures: HashMap<TaskKey, Vec<(String, Picture)>>,
     agents: HashMap<String, Agent>,
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
@@ -71,6 +73,7 @@ pub enum TrackerOp {
     Ask,
     Note,
     Finish,
+    Attach,
     RevokeSubAgent,
     InFlight,
 }
@@ -86,6 +89,7 @@ impl std::fmt::Display for TrackerOp {
             Self::Ask => "ask",
             Self::Note => "note",
             Self::Finish => "finish",
+            Self::Attach => "attach",
             Self::RevokeSubAgent => "revoke_sub_agent",
             Self::InFlight => "in_flight",
         })
@@ -320,6 +324,11 @@ impl FakeTracker {
     /// The priority a task was filed with, if it was given one.
     pub fn priority(&self, key: &TaskKey) -> Option<Priority> {
         self.state.lock().unwrap().priorities.get(key).copied()
+    }
+
+    /// The task's pictures, each with the set it was attached in, oldest first.
+    pub fn pictures_of(&self, key: &TaskKey) -> Vec<(String, Picture)> {
+        self.state.lock().unwrap().pictures.get(key).cloned().unwrap_or_default()
     }
 
     pub fn comments(&self, key: &TaskKey) -> Vec<FakeComment> {
@@ -778,6 +787,18 @@ impl Tracker for FakeTracker {
         self.check_live()?;
         self.comment(task, "note", body);
         Ok(())
+    }
+
+    async fn attach(&self, task: &TaskKey, set: &str, picture: Picture) -> Result<()> {
+        self.inject(TrackerOp::Attach)?;
+        self.check_live()?;
+        self.state.lock().unwrap().pictures.entry(task.clone()).or_default().push((set.to_string(), picture));
+        Ok(())
+    }
+
+    async fn pictures(&self, task: &TaskKey, set: &str) -> Result<Vec<Picture>> {
+        self.check_live()?;
+        Ok(self.pictures_of(task).into_iter().filter(|(s, _)| s == set).map(|(_, p)| p).collect())
     }
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {

@@ -45,6 +45,10 @@ struct State {
     heads: BTreeMap<(String, String), String>,
     /// The commit each branch was first published on top of.
     starts: BTreeMap<(String, String), String>,
+    /// Each branch's head before its latest publish, and how many more `head` reads still answer with it, as a host
+    /// does for a moment after a push.
+    heads_before: BTreeMap<(String, String), String>,
+    stale_head_reads: usize,
     prs: Vec<FakePr>,
     conflicts: bool,
     /// Updates the host accepted but hasn't made yet, like GitHub's 202.
@@ -100,6 +104,11 @@ impl FakeCodeHost {
     /// Makes every later publish fail with this message, like GitHub refusing a push.
     pub fn refuse_publish(&self, why: &str) {
         self.state.lock().unwrap().refuse_publish = Some(why.to_string());
+    }
+
+    /// Makes the next `times` reads of a PR's head answer with the head from before its branch's latest publish.
+    pub fn stale_heads(&self, times: usize) {
+        self.state.lock().unwrap().stale_head_reads = times;
     }
 
     /// Makes the next `times` publishes fail with a transient error (`Error::Other`), like a GitHub 500.
@@ -316,7 +325,9 @@ impl CodeHost for FakeCodeHost {
         }
         s.starts.entry(key.clone()).or_insert_with(|| start.to_string());
         let n = s.branches.get(&key).map_or(0, Vec::len) + commits.len();
-        s.heads.insert(key.clone(), format!("{branch}@{n}"));
+        if let Some(before) = s.heads.insert(key.clone(), format!("{branch}@{n}")) {
+            s.heads_before.insert(key.clone(), before);
+        }
         // A push is a new head: the host works out afresh whether it merges, and the conflict a rework fixed is gone.
         for p in s.prs.iter_mut().filter(|p| {
             p.pr.repo == *repo && p.spec.branch == branch && p.mergeable == Some(false) && !p.conflict_survives_push
@@ -523,7 +534,19 @@ impl CodeHost for FakeCodeHost {
 
     async fn head(&self, pr: &PrRef) -> Result<String> {
         self.count("head");
-        self.head_sha(pr)
+        let branch = self.find(pr, |p, _| (pr.repo.slug(), p.spec.branch.clone()))?;
+        let stale = {
+            let mut s = self.state.lock().unwrap();
+            let before = s.heads_before.get(&branch).cloned().filter(|_| s.stale_head_reads > 0);
+            if before.is_some() {
+                s.stale_head_reads -= 1;
+            }
+            before
+        };
+        match stale {
+            Some(before) => Ok(before),
+            None => self.head_sha(pr),
+        }
     }
 
     async fn ci(&self, pr: &PrRef) -> Result<Ci> {

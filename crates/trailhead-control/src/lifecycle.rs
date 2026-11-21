@@ -181,6 +181,7 @@ impl Factory {
             allowed_hosts: self.allowed_hosts(),
             env: self.config.stack.env.clone(),
             credential,
+            shots: self.config.shots(),
         };
         let prior = task.run.spend.unwrap_or_default();
         let run =

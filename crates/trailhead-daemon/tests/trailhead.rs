@@ -11,11 +11,11 @@ use iroh::{Endpoint, EndpointAddr, RelayMode, SecretKey};
 use trailhead_control::{CoreTracker, Factory, Host, Outcome};
 use trailhead_core::{CommentKind, Ctx, NewProject, NewTask, Priority, Store, TaskFilter};
 use trailhead_daemon::net::DaemonProtocol;
-use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
+use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Shot, Taken};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role, RunOutcome, SandboxId, Status,
-    TaskKey, Tracker, VerdictKind,
+    AttachmentRole, CodeHost, Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role,
+    RunOutcome, SandboxId, Status, TaskKey, Tracker, VerdictKind,
 };
 use trailhead_plugins::CLAUDE_CODE;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeWorkspace, Script, ScriptedHarness};
@@ -68,6 +68,8 @@ struct Rig {
     compute: FakeCompute,
     codehost: FakeCodeHost,
     harness: Arc<ScriptedHarness>,
+    /// The one checkout every daemon here stands on.
+    workspace: Arc<FakeWorkspace>,
     lookup: Arc<MemoryLookup>,
     control: EndpointAddr,
     remote: Arc<RemoteDaemon>,
@@ -117,6 +119,7 @@ impl Rig {
             compute,
             codehost: FakeCodeHost::new(),
             harness: Arc::new(ScriptedHarness::new()),
+            workspace: Arc::new(FakeWorkspace::default()),
             lookup,
             control,
             remote,
@@ -141,7 +144,7 @@ impl Rig {
         let runner = Runner {
             harness: self.harness.clone(),
             codehost: Arc::new(self.codehost.clone()),
-            workspace: Arc::new(FakeWorkspace::default()),
+            workspace: self.workspace.clone(),
             connect,
             renew_every: RENEW_EVERY,
             heartbeat_every: HEARTBEAT_EVERY,
@@ -151,8 +154,12 @@ impl Rig {
     }
 
     fn factory(&self) -> Factory {
+        self.factory_with(CONFIG)
+    }
+
+    fn factory_with(&self, config: &str) -> Factory {
         Factory::new(
-            FactoryConfig::parse_table(CONFIG, "TRAIL", None).unwrap(),
+            FactoryConfig::parse_table(config, "TRAIL", None).unwrap(),
             Arc::new(self.compute.clone()),
             Arc::new(self.tracker.clone()),
             Arc::new(FakeProvider::new(1)),
@@ -270,6 +277,70 @@ async fn a_follow_up_already_open_is_found_through_the_tunnel() {
     let keys: Vec<_> = tasks.iter().map(|t| t.key.as_str()).collect();
     assert_eq!(tasks.len(), 2, "no duplicate was filed: {keys:?}");
     assert!(keys.contains(&key.0.as_str()) && keys.contains(&existing.0.as_str()), "{keys:?}");
+}
+
+/// The least the engine takes for a PNG: the signature and a header chunk saying 2 by 3 pixels, then `tail`.
+fn png(tail: &[u8]) -> Vec<u8> {
+    let mut b = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13];
+    b.extend(b"IHDR");
+    b.extend([0, 0, 0, 2, 0, 0, 0, 3, 8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    b.extend(tail);
+    b
+}
+
+#[tokio::test]
+async fn a_change_s_pictures_reach_the_task_and_its_reviewer_through_the_tunnel() {
+    let mut r = Rig::new().await;
+    r.serve("trailhead-w1").await;
+    r.serve("trail-1-a1-r1").await;
+    let key = r.task("Redraw the board").await;
+    r.workspace.change_files(&["clients/app/src/board.rs"]);
+    r.workspace.take_shots(Taken {
+        shots: vec![Shot { name: "board-dark".into(), before: Some(png(b"old")), after: Some(png(b"new")) }],
+        more: 0,
+        failed: None,
+    });
+    r.harness.push(Role::Worker, Script::new(changes()).steps(2, 100_000));
+    r.harness.push(
+        Role::Reviewer,
+        Script::new(RunOutcome::Verdict {
+            kind: VerdictKind::Approve,
+            body: "Looks right.".into(),
+            follow_ups: vec![],
+            raise_grade: None,
+        }),
+    );
+
+    let config = format!("{CONFIG}\n[shots]\nrun = \"make shots\"\npaths = [\"clients/**\"]\n");
+    let ran = r.factory_with(&config).tick().await.unwrap();
+    let Outcome::Reviewed { pr, .. } = &ran[0].1 else { panic!("{:?}", ran[0].1) };
+
+    // The worker's sub-agent attached them over REST, as the set the PR's head names, and the engine took them.
+    let head = CodeHost::head(&r.codehost, pr).await.unwrap();
+    let attached = r.store.list_attachments(&r.human, &key.0).await.unwrap();
+    let got: Vec<_> =
+        attached.iter().map(|a| (a.name.as_str(), a.role, a.set.as_deref(), (a.width, a.height))).collect();
+    assert_eq!(
+        got,
+        [
+            ("board-dark", Some(AttachmentRole::Before), Some(head.as_str()), (2, 3)),
+            ("board-dark", Some(AttachmentRole::After), Some(head.as_str()), (2, 3)),
+        ]
+    );
+    let agents = r.store.list_agents(&r.human).await.unwrap();
+    let by = agents.iter().find(|a| a.id == attached[0].created_by).expect("attached by an agent");
+    assert_eq!(by.name, "factory/trail-1-a1");
+    // The reviewer's daemon read them back, bytes and all, and handed them to its agent.
+    assert_eq!(
+        r.workspace.shots_kept(),
+        [vec![Shot { name: "board-dark".into(), before: Some(png(b"old")), after: Some(png(b"new")) }]]
+    );
+    let review = r.harness.contexts().into_iter().find(|c| c.role == Role::Reviewer).unwrap();
+    assert_eq!(review.shots.len(), 1);
+    // The control plane's own tracker reads the same set.
+    let seen = r.tracker.pictures(&key, &head).await.unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(r.tracker.pictures(&key, "another-set").await.unwrap().is_empty());
 }
 
 #[tokio::test]

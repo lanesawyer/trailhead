@@ -46,6 +46,9 @@ pub trait Tools: Send + Sync + 'static {
     /// Builds the shell, and says where the binary is.
     fn build<'a>(&'a self, job: &'a Job) -> Boxed<'a, Result<PathBuf, String>>;
 
+    /// The files of `rev` in the clone at `src`, as a gzipped tar, for a machine that builds the shell itself.
+    fn archive<'a>(&'a self, src: &'a Path, rev: &'a str) -> Boxed<'a, Result<Vec<u8>, String>>;
+
     /// The subject lines of the commits in the clone at `src` after `since` up to `until`, newest first. Both are
     /// commit hashes the caller has checked.
     fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>>;
@@ -171,6 +174,22 @@ impl Tools for System {
             }
             let binary = job.target.join(profile_dir(&job.profile)).join(BINARY);
             if binary.is_file() { Ok(binary) } else { Err(format!("cargo built no {}", binary.display())) }
+        })
+    }
+
+    fn archive<'a>(&'a self, src: &'a Path, rev: &'a str) -> Boxed<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move {
+            let mut cmd = Command::new("git");
+            cmd.arg("-C").arg(src).args(["archive", "--format=tar.gz", rev]).stdin(Stdio::null()).kill_on_drop(true);
+            let out = tokio::time::timeout(GIT_TIMEOUT, cmd.output())
+                .await
+                .map_err(|_| format!("git archive took longer than {}s", GIT_TIMEOUT.as_secs()))?
+                .map_err(|e| format!("git archive: {e}"))?;
+            if out.status.success() {
+                Ok(out.stdout)
+            } else {
+                Err(format!("git archive failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+            }
         })
     }
 

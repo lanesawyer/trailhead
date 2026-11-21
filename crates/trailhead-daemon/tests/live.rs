@@ -174,9 +174,11 @@ async fn daemon_in_a_sprite() {
                 allowed_hosts: vec!["api.anthropic.com".into()],
                 env: Default::default(),
                 credential: cred,
+                shots: None,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let t = Instant::now();
+            let worker = req.clone();
             let report = remote.run(&sandbox.id, req, events).await.expect("the run reports");
             eprintln!("run finished in {:.1}s: {:?}", t.elapsed().as_secs_f64(), report.result);
             if subscription().is_some() {
@@ -211,31 +213,18 @@ async fn daemon_in_a_sprite() {
                 url: "https://github.com/lanesawyer/trailhead/pull/3".into(),
             };
             let review = RunRequest {
-                grade: None,
                 run: "live-r1".into(),
                 role: Role::Reviewer,
-                task: TaskSpec {
-                    key: key.clone(),
-                    title: "Live run".into(),
-                    description: "Say hi.".into(),
-                    previous_failure: None,
-                    context: Default::default(),
-                    path: None,
-                },
+                task: TaskSpec { description: "Say hi.".into(), ..worker.task.clone() },
                 repo: pr.repo.clone(),
-                base_branch: "main".into(),
                 branch: "spike/m0-github-connector".into(),
                 pr: Some(pr),
-                feedback: None,
                 model: ModelId("claude-opus-4-5".into()),
                 endpoint: ModelEndpoint { base_url: DEAD_MODEL.into() },
-                max_steps: 1,
-                required_checks: Vec::new(),
-                worker_checks: Vec::new(),
                 blocked_hosts: Vec::new(),
                 allowed_hosts: Vec::new(),
-                env: Default::default(),
                 credential: cred,
+                ..worker
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let t = Instant::now();

@@ -15,12 +15,12 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
-use trailhead_control::StatusBoard;
+use trailhead_control::{Factory, Refreshed, StatusBoard};
 use trailhead_factory::{FactorySnapshot, FactoryState, Sequenced};
 use trailhead_wire::ui::{RepoFeed, StatusFeed};
 
@@ -34,6 +34,8 @@ struct Inner {
     boards: Mutex<Boards>,
     /// Repos whose loop stopped on an error, with the error.
     stopped: Mutex<Vec<(String, String)>>,
+    /// Each repo's control plane, for the routes that act on one (`POST /refresh`).
+    factories: Mutex<Vec<(String, Arc<Factory>)>>,
     /// Notified when the state, the boards or a stopped repo change.
     changed: watch::Sender<()>,
 }
@@ -47,6 +49,7 @@ impl Feed {
             state: Mutex::new(state),
             boards: Mutex::default(),
             stopped: Mutex::default(),
+            factories: Mutex::default(),
             changed: watch::channel(()).0,
         }))
     }
@@ -63,6 +66,14 @@ impl Feed {
     pub fn set_boards(&self, boards: Boards) {
         *self.0.boards.lock().unwrap_or_else(|e| e.into_inner()) = boards;
         self.0.changed.send_modify(|_| {});
+    }
+
+    pub fn set_factories(&self, factories: Vec<(String, Arc<Factory>)>) {
+        *self.0.factories.lock().unwrap_or_else(|e| e.into_inner()) = factories;
+    }
+
+    fn factories(&self) -> Vec<(String, Arc<Factory>)> {
+        self.0.factories.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn boards(&self) -> Boards {
@@ -120,6 +131,8 @@ impl StatusFeed for Feed {
 
 /// How long a client waits to connect and to hear a snapshot.
 const CONNECT: Duration = Duration::from_secs(2);
+/// How long `factory refresh` waits for every idle sandbox and its checkpoints to be removed.
+const REFRESH_PATIENCE: Duration = Duration::from_secs(600);
 
 /// One repo's snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,10 +162,56 @@ pub struct RepoEvent {
     pub event: Sequenced,
 }
 
-/// `GET /status` and `GET /events` for `feed`, with no authentication of their own: the server mounts them under
-/// `/v1/factory` behind its bearer token.
+/// One repo's part of the reply to `POST /refresh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepoRefreshed {
+    pub repo: String,
+    #[serde(flatten)]
+    pub refreshed: Refreshed,
+    /// Why this repo's pool couldn't be listed at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The reply to `POST /refresh`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshReply {
+    pub repos: Vec<RepoRefreshed>,
+}
+
+#[derive(Deserialize)]
+struct RefreshQuery {
+    /// Only this repo's pool, as `owner/name`.
+    repo: Option<String>,
+}
+
+/// `GET /status`, `GET /events` and `POST /refresh` for `feed`, with no authentication of their own: the server
+/// mounts them under `/v1/factory` behind its bearer token.
 pub fn routes(feed: Feed) -> Router {
-    Router::new().route("/status", get(status)).route("/events", get(events)).with_state(feed)
+    Router::new()
+        .route("/status", get(status))
+        .route("/events", get(events))
+        .route("/refresh", post(refresh))
+        .with_state(feed)
+}
+
+/// Empties every repo's worker pool (or one repo's), so its sandboxes are made again from the image.
+async fn refresh(State(feed): State<Feed>, Query(q): Query<RefreshQuery>) -> Response {
+    let mut repos = Vec::new();
+    for (repo, factory) in feed.factories() {
+        if q.repo.as_ref().is_some_and(|only| only != &repo) {
+            continue;
+        }
+        let (refreshed, error) = match factory.refresh_pool().await {
+            Ok(refreshed) => (refreshed, None),
+            Err(e) => (Refreshed::default(), Some(e.to_string())),
+        };
+        repos.push(RepoRefreshed { repo, refreshed, error });
+    }
+    if repos.is_empty() {
+        return (StatusCode::CONFLICT, "no control plane is running a pool to refresh").into_response();
+    }
+    axum::Json(RefreshReply { repos }).into_response()
 }
 
 async fn status(State(feed): State<Feed>) -> Response {
@@ -246,6 +305,22 @@ pub async fn fetch(remote: &Remote) -> Option<StatusReply> {
     reply.json().await.ok()
 }
 
+/// Asks `remote` to empty its worker pools (`repo`'s only, when given).
+pub async fn ask_refresh(remote: &Remote, repo: Option<&str>) -> Result<RefreshReply> {
+    // Destroying a sandbox removes gigabytes of images, so this waits far longer than a status read.
+    let mut req = client(Some(REFRESH_PATIENCE)).post(format!("{}/refresh", remote.base)).bearer_auth(&remote.token);
+    if let Some(repo) = repo {
+        req = req.query(&[("repo", repo)]);
+    }
+    let reply = req.send().await.map_err(Error::Unreachable)?;
+    if !reply.status().is_success() {
+        let status = reply.status();
+        let why = reply.text().await.unwrap_or_default();
+        return Err(Error::Backend(format!("the server refused the refresh ({status}): {why}").into()));
+    }
+    reply.json().await.map_err(Error::Unreachable)
+}
+
 /// Calls `on_event` for each event `remote` streams (about `task` when given) until it stops or `stop` resolves.
 /// `Err` when it doesn't answer.
 pub async fn follow(
@@ -295,6 +370,13 @@ mod tests {
         let app = Router::new().nest("/v1/factory", routes(feed));
         tokio::spawn(async move { axum::serve(listener, app).await });
         Remote::server(addr, "t".into())
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_no_control_plane_running_is_refused_in_words() {
+        let remote = server(Feed::new(FactoryState::Starting { reason: None })).await;
+        let err = ask_refresh(&remote, None).await.unwrap_err().to_string();
+        assert!(err.contains("409") && err.contains("no control plane is running a pool"), "{err}");
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/me", get(me))
         .route("/config", get(config::show).patch(config::change))
         .route("/shell/build", get(shell_build))
+        .route("/shell/source/{rev}", get(shell_source))
         .route("/shell/ask", get(shell::ask_targets).post(shell::ask))
         .route("/projects", get(projects::list_projects).post(projects::create_project))
         .route("/projects/{project}", get(projects::get_project).patch(projects::update_project))
@@ -176,6 +177,38 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Me>> {
         None => None,
     };
     Ok(Json(Me { workspace_id: ctx.workspace_id, user, agent_id: ctx.agent_id, agent }))
+}
+
+#[utoipa::path(
+    get, path = "/v1/shell/source/{rev}", tag = "meta",
+    params(("rev" = String, Path, description = "A build the server keeps: `current` or `previous` of `GET /v1/shell/build`")),
+    responses(
+        (status = 200, description = "The apps repo at that build, as a gzipped tar, for a launcher on another machine to build the shell itself (`trailhead app --from`)", content_type = "application/gzip"),
+        (status = 403, description = "The caller is an agent: the apps repo's source is a person's to fetch"),
+        (status = 404, description = "No builder runs here, or it keeps no build of that commit")
+    )
+)]
+async fn shell_source(
+    State(s): S,
+    Auth(ctx): Auth,
+    axum::extract::Path(rev): axum::extract::Path<String>,
+) -> ApiResult<Response> {
+    use trailhead_core::Error;
+    if !ctx.is_human() {
+        return Err(Error::Forbidden("only a person can fetch the shell's source".into()).into());
+    }
+    let source = match s.shell.get() {
+        Some(builds) => builds.source(&rev).await,
+        None => None,
+    };
+    match source {
+        Some(Ok(tar)) => Ok(([(header::CONTENT_TYPE, "application/gzip")], tar).into_response()),
+        Some(Err(e)) => {
+            tracing::warn!(target: "shell", rev, error = %e, "couldn't read a build's source");
+            Ok((StatusCode::INTERNAL_SERVER_ERROR, format!("reading the build's source: {e}")).into_response())
+        }
+        None => Err(Error::NotFound(format!("the server keeps no build of {rev}")).into()),
+    }
 }
 
 #[derive(Deserialize, IntoParams)]

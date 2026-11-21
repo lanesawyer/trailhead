@@ -12,6 +12,11 @@ pub const RESTART_CODE: u8 = 75;
 /// is without being compiled to know it. A shell started without it never offers an update.
 pub const BUILD_ENV: &str = "TRAILHEAD_SHELL_BUILD";
 
+/// The environment variable a launcher that builds the shell on its own machine (`[shell] from`) sets to its
+/// builder's state file. A shell started with it offers an update when that file names a newer build than its own,
+/// not when the server does: the server's newest build isn't one this machine can start until it has built it too.
+pub const LOCAL_STATE_ENV: &str = "TRAILHEAD_SHELL_LOCAL_STATE";
+
 /// The most commit subjects [`ShellBuild::changes`] lists.
 pub const MAX_CHANGES: usize = 30;
 

@@ -115,7 +115,7 @@ Decided 2026-11-05 (TRAIL-796), after Lane's first real use: Lookout worked but 
 
 **Modals.** Every form and dialog is one kit widget, `clients/trailhead-ui/src/modal.rs` (TRAIL-840): feathers' `FeathersDialog` on a backdrop over the window, centered, with a title and a close X. It closes on the X, Escape or a click outside, by default for every modal; a save in flight locks it (`ModalLocked`). The dialog is never taller than `MAX_HEIGHT_VH` of the window: the body scrolls with the kit's scrollbar and the footer (Save, Cancel) stays in view. A kind of modal is a marker type implementing `Modal` (title, width).
 
-**Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). TRAIL-796's follow-ups include rendering screenshots headlessly, with a software Vulkan driver, so a worker and its reviewer can see what they built.
+**Checking the look.** A sandbox can't open a window, so the look gets a human review (the `clients/**` grade rule). Since TRAIL-1614 a worker's sandbox draws the views its change alters, before and after, with a software Vulkan driver; they go on the task and to the reviewer ([sandbox.md](sandbox.md#pictures)), which informs that review and doesn't replace it.
 
 ## Settings
 

@@ -35,6 +35,25 @@ impl Check {
     }
 }
 
+/// `[factory.shots]`: the command that draws the repo's views to PNGs, and the paths a change has to touch for the
+/// daemon to run it (`docs/factory/sandbox.md#pictures`). The daemon sets `SHOTS_DIR`, where the PNGs go, and
+/// `TRAILHEAD_CHECKOUT`, the task's checkout, which the command also runs in for the change's own pictures; for the
+/// ones from before it, it runs in a second checkout of the commit the change is against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shots {
+    pub command: String,
+    /// Path globs, as on a [`Check`]. Empty means every change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+}
+
+impl Shots {
+    /// Whether a change touching `files` gets its pictures taken.
+    pub fn applies_to(&self, files: &[String]) -> bool {
+        self.paths.is_empty() || files.iter().any(|f| self.paths.iter().any(|g| crate::grade::glob_match(g, f)))
+    }
+}
+
 /// Gets a sandbox's checkout ready before any agent runs: clone or refresh the
 /// repo at the base branch, then run the repo's `setup` and `trim` checks. Runs while the
 /// sandbox has install-phase egress.
@@ -122,6 +141,11 @@ pub struct RunRequest {
     pub env: BTreeMap<String, String>,
     /// The sandbox's own Trailhead sub-agent.
     pub credential: Credential,
+    /// The repo's `[factory.shots]`. A worker takes the pictures once its checks pass and attaches the ones its
+    /// change alters to the task; a reviewer is handed the ones attached for the PR's head. A daemon from before
+    /// this field ignores it, and takes none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shots: Option<Shots>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

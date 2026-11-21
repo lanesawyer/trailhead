@@ -49,6 +49,18 @@ pub struct RunContext {
     /// and `python` are the pinned ones.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// For reviewers: the pictures the worker took of what the change alters, as PNG files outside the checkout.
+    #[serde(default)]
+    pub shots: Vec<ShotFiles>,
+}
+
+/// One view the change alters, as files a reviewer can open: how it looked before, how it looks now, or only one of
+/// them for a view the change adds or removes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShotFiles {
+    pub name: String,
+    pub before: Option<PathBuf>,
+    pub after: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

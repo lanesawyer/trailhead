@@ -29,6 +29,7 @@ mod timing;
 mod usage;
 
 pub use core_tracker::CoreTracker;
+pub use pool::Refreshed;
 pub use status::StatusBoard;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -268,6 +269,11 @@ struct PoolState {
     warm_cost: Mutex<HashMap<SandboxId, Duration>>,
     /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
     prepare_failures: Mutex<HashMap<SandboxId, u32>>,
+    /// Consecutive runs that found no room on each warm pooled sandbox's host, cleared by one that did (TRAIL-1633).
+    short_preflights: Mutex<HashMap<SandboxId, u32>>,
+    /// Busy pooled sandboxes a refresh asked for, by name: destroyed on release rather than restored. In memory: a
+    /// restart forgets them, and the refresh is asked again.
+    refresh: Mutex<HashSet<String>>,
 }
 
 /// Where runs being started have been placed, and what the paid targets have cost.
@@ -347,7 +353,9 @@ impl Factory {
     /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
     #[doc(hidden)]
     pub fn sandbox_entries(&self) -> usize {
-        self.pool.prepare_failures.lock().unwrap().len() + self.pool.warm_cost.lock().unwrap().len()
+        self.pool.prepare_failures.lock().unwrap().len()
+            + self.pool.warm_cost.lock().unwrap().len()
+            + self.pool.short_preflights.lock().unwrap().len()
     }
 
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).

@@ -835,6 +835,11 @@ async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
         json!({"configured": true, "current": "b", "previous": "a", "building": "c", "error": null, "bad": ["x"],
                "changes": [], "changes_total": 0})
     );
+    for rev in ["x", "c", "HEAD"] {
+        let r = api.as_human("GET", &format!("/v1/shell/source/{rev}"), None).await;
+        assert_eq!(r.status, StatusCode::NOT_FOUND, "{rev}: only a build that is kept has its source handed out");
+    }
+    assert_eq!(api.call(None, "GET", "/v1/shell/source/b", None, &[]).await.status, StatusCode::UNAUTHORIZED);
     for since in ["0123456789abcdef", "HEAD", "--upload-pack=x", "%20"] {
         let r = api.as_human("GET", &format!("/v1/shell/build?since={since}"), None).await;
         assert_eq!(r.status, StatusCode::OK, "{since}");
