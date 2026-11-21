@@ -103,6 +103,8 @@ impl Layout {
             building: state.building,
             error: state.error,
             bad: self.bad(),
+            changes: Vec::new(),
+            changes_total: 0,
         }
     }
 }

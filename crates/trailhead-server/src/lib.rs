@@ -46,7 +46,7 @@ pub struct AppState {
     /// Set once SIGUSR1 asked for a restart onto a new binary; `/v1/health` reports it.
     pub upgrade_pending: std::sync::atomic::AtomicBool,
     /// Where the shell's builder keeps its builds, when this server runs one; `/v1/shell/build` reads it.
-    pub shell: std::sync::OnceLock<trailhead_builder::Layout>,
+    pub shell: std::sync::OnceLock<trailhead_builder::Builds>,
 }
 
 impl AppState {
@@ -397,7 +397,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
 fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::Running> {
     match trailhead_builder::start(&paths.config_dir, &paths.data_dir) {
         Ok(Some(running)) => {
-            let _ = state.shell.set(trailhead_builder::Layout::new(&paths.data_dir));
+            let _ = state.shell.set(running.builds());
             Some(running)
         }
         Ok(None) => None,

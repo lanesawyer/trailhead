@@ -10,12 +10,13 @@ mod layout;
 mod tools;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use tokio::sync::watch;
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
-use trailhead_model::shell::BuildError;
+use trailhead_model::shell::{BuildError, MAX_CHANGES, ShellBuild};
 
 pub use config::ShellConfig;
 pub use layout::{BINARY, Built, Layout, State};
@@ -23,6 +24,10 @@ pub use tools::{Boxed, Job, Origin, System, Tools};
 
 /// How many of cargo's last lines a failure keeps in the state.
 const TAIL_LINES: usize = 40;
+
+/// How long a read of the changes since a build waits, for a checkout to finish and for git, before it answers
+/// without them.
+const CHANGES_WAIT: Duration = Duration::from_secs(5);
 
 /// What one look at the apps repo did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,15 +40,23 @@ pub enum Step {
 
 /// The builder for one apps repo.
 pub struct Builder<T> {
-    tools: T,
+    tools: Arc<T>,
     config: ShellConfig,
     repo: PathBuf,
     layout: Layout,
+    /// Held to write while the clone is checked out (fetched, checked out, cleaned), and to read while [`Builds`]
+    /// reads its history, so the two never meet.
+    checkout: Arc<RwLock<()>>,
 }
 
 impl<T: Tools> Builder<T> {
     pub fn new(tools: T, config: ShellConfig, repo: PathBuf, layout: Layout) -> Self {
-        Builder { tools, config, repo, layout }
+        Builder { tools: Arc::new(tools), config, repo, layout, checkout: Arc::default() }
+    }
+
+    /// What this builder has built, for the server to answer from.
+    pub fn builds(&self) -> Builds {
+        Builds { layout: self.layout.clone(), tools: self.tools.clone(), checkout: self.checkout.clone() }
     }
 
     /// Looks at the base branch once, and builds its head when it is new: not built, not failed and not bad.
@@ -92,7 +105,10 @@ impl<T: Tools> Builder<T> {
             .and_then(|()| std::fs::write(self.layout.log(), ""))
             .map_err(|e| e.to_string())?;
         let src = self.layout.src();
-        self.tools.checkout(&src, origin, rev).await?;
+        {
+            let _checking_out = self.checkout.write().await;
+            self.tools.checkout(&src, origin, rev).await?;
+        }
         let job = Job {
             src,
             target: self.layout.target(),
@@ -174,17 +190,75 @@ impl<T: Tools> Builder<T> {
     /// Runs the builder on its own task until [`Running::stop`].
     pub fn spawn(self) -> Running {
         let (stop, stopped) = watch::channel(false);
-        Running { stop, task: tokio::spawn(self.run(stopped)) }
+        let builds = self.builds();
+        Running { stop, builds, task: tokio::spawn(self.run(stopped)) }
     }
+}
+
+/// What a builder has built, read for `GET /v1/shell/build`: its state, and the commits since a build in its clone.
+#[derive(Clone)]
+pub struct Builds {
+    layout: Layout,
+    tools: Arc<dyn Tools>,
+    checkout: Arc<RwLock<()>>,
+}
+
+impl Builds {
+    /// Builds kept in `layout`, their history read with `tools`. A builder's own is [`Builder::builds`], which
+    /// never reads the history while it checks the clone out; this one has no builder to wait for.
+    pub fn new(layout: Layout, tools: impl Tools) -> Builds {
+        Builds { layout, tools: Arc::new(tools), checkout: Arc::default() }
+    }
+
+    /// The state and the bad builds, and with `since` the commits after it up to the newest build
+    /// ([`ShellBuild::changes`]). The changes are left empty, never an error, when `since` isn't a commit hash, is
+    /// the newest build or isn't in the builder's clone, and when git doesn't answer within [`CHANGES_WAIT`].
+    pub async fn read(&self, since: Option<&str>) -> ShellBuild {
+        let mut build = self.layout.read();
+        let Some(since) = since.filter(|s| is_rev(s)) else { return build };
+        let Some(newest) = build.newest().filter(|n| is_rev(n) && *n != since).map(String::from) else { return build };
+        let src = self.layout.src();
+        let read = async {
+            let _reading = self.checkout.read().await;
+            self.tools.log(&src, since, &newest).await
+        };
+        match tokio::time::timeout(CHANGES_WAIT, read).await {
+            Ok(Ok(mut subjects)) => {
+                build.changes_total = subjects.len();
+                subjects.truncate(MAX_CHANGES);
+                build.changes = subjects;
+            }
+            Ok(Err(e)) => tracing::debug!(target: "shell", since, error = %e, "no changes since that build"),
+            Err(_) => tracing::debug!(target: "shell", since, "reading the changes since a build took too long"),
+        }
+        build
+    }
+}
+
+impl std::fmt::Debug for Builds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Builds").field("layout", &self.layout).finish_non_exhaustive()
+    }
+}
+
+/// Whether `rev` is a commit hash, whole or abbreviated: 7 to 40 hex digits. Anything else never reaches git.
+fn is_rev(rev: &str) -> bool {
+    (7..=40).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// A builder running on its own task.
 pub struct Running {
     stop: watch::Sender<bool>,
+    builds: Builds,
     task: JoinHandle<()>,
 }
 
 impl Running {
+    /// What it has built, for the server to answer from.
+    pub fn builds(&self) -> Builds {
+        self.builds.clone()
+    }
+
     /// Stops it, killing a build in progress, and waits for it to finish.
     pub async fn stop(self) {
         self.stop.send_replace(true);

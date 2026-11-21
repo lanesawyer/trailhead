@@ -786,9 +786,14 @@ impl Client {
         self.send(self.request(routes::ME, None)).await
     }
 
-    /// `GET /v1/shell/build`: the shells the server's builder keeps.
-    pub async fn shell_build(&self) -> Result<trailhead_model::shell::ShellBuild> {
-        self.send(self.request(routes::SHELL_BUILD, None)).await
+    /// `GET /v1/shell/build`: the shells the server's builder keeps, and with `since` (the build a shell runs) the
+    /// commits after it up to the newest build.
+    pub async fn shell_build(&self, since: Option<&str>) -> Result<trailhead_model::shell::ShellBuild> {
+        let mut req = self.request(routes::SHELL_BUILD, None);
+        if let Some(since) = since {
+            req = req.query(&[("since", since)]);
+        }
+        self.send(req).await
     }
 
     /// `GET /v1/agents`.

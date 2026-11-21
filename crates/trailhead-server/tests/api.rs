@@ -825,13 +825,19 @@ async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
         trailhead_builder::State { current: built("b"), previous: built("a"), building: Some("c".into()), error: None };
     layout.save(&saved).unwrap();
     layout.mark_bad("x").unwrap();
-    state.shell.set(layout).unwrap();
+    state.shell.set(trailhead_builder::Builds::new(layout, trailhead_builder::System::new())).unwrap();
     let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
     let api = Api { app: router(Arc::new(state)), human, _dir: dir };
     let r = api.as_human("GET", "/v1/shell/build", None).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(
         r.body,
-        json!({"configured": true, "current": "b", "previous": "a", "building": "c", "error": null, "bad": ["x"]})
+        json!({"configured": true, "current": "b", "previous": "a", "building": "c", "error": null, "bad": ["x"],
+               "changes": [], "changes_total": 0})
     );
+    for since in ["0123456789abcdef", "HEAD", "--upload-pack=x", "%20"] {
+        let r = api.as_human("GET", &format!("/v1/shell/build?since={since}"), None).await;
+        assert_eq!(r.status, StatusCode::OK, "{since}");
+        assert_eq!((r.body["current"].as_str(), &r.body["changes"]), (Some("b"), &json!([])), "{since}");
+    }
 }

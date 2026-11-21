@@ -1,7 +1,7 @@
 //! The builder's state machine, on a fake git and cargo.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::*;
 
@@ -18,6 +18,12 @@ struct Fake {
     /// Run while a build is going, with the layout: a test moving the head, or looking at the state.
     during: Mutex<Option<During>>,
     layout: Mutex<Option<Layout>>,
+    /// What `git log` answers, and what it was asked.
+    log: Mutex<Option<Result<Vec<String>, String>>>,
+    logged: Mutex<Vec<(PathBuf, String, String)>>,
+    /// The builder's checkout lock, and whether it was held while checking out.
+    lock: Mutex<Option<Arc<RwLock<()>>>>,
+    locked_in_checkout: Mutex<Option<bool>>,
 }
 
 impl Fake {
@@ -38,7 +44,17 @@ impl Tools for Fake {
     fn checkout<'a>(&'a self, _src: &'a Path, _origin: &'a Origin, rev: &'a str) -> Boxed<'a, Result<(), String>> {
         Box::pin(async move {
             *self.checked_out.lock().unwrap() = rev.into();
+            if let Some(lock) = self.lock.lock().unwrap().as_ref() {
+                *self.locked_in_checkout.lock().unwrap() = Some(lock.try_read().is_err());
+            }
             Ok(())
+        })
+    }
+
+    fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            self.logged.lock().unwrap().push((src.to_path_buf(), since.into(), until.into()));
+            self.log.lock().unwrap().clone().unwrap_or(Ok(Vec::new()))
         })
     }
 
@@ -84,6 +100,10 @@ impl Tools for std::sync::Arc<Fake> {
 
     fn build<'a>(&'a self, job: &'a Job) -> Boxed<'a, Result<PathBuf, String>> {
         (**self).build(job)
+    }
+
+    fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>> {
+        (**self).log(src, since, until)
     }
 }
 
@@ -210,6 +230,63 @@ async fn stopping_the_builder_clears_a_build_left_in_progress() {
     running.stop().await;
     let read = layout.read();
     assert_eq!((read.current, read.building), (some("a"), None));
+}
+
+/// Commit hashes for the tests that read the changes since a build.
+fn hash(c: char) -> String {
+    c.to_string().repeat(40)
+}
+
+#[tokio::test]
+async fn the_changes_since_a_build_are_the_newest_first_capped_and_counted() {
+    let rig = rig();
+    let (a, b) = (hash('a'), hash('b'));
+    rig.step_at(&a).await;
+    rig.step_at(&b).await;
+    let subjects: Vec<String> = (1..=41).rev().map(|n| format!("feat(x): change {n}")).collect();
+    *rig.fake.log.lock().unwrap() = Some(Ok(subjects));
+    let builds = rig.builder.builds();
+
+    let read = builds.read(Some(&a)).await;
+    assert_eq!((read.current.as_deref(), read.changes_total), (Some(b.as_str()), 41));
+    assert_eq!(read.changes.len(), MAX_CHANGES);
+    assert_eq!((read.changes[0].as_str(), read.changes[29].as_str()), ("feat(x): change 41", "feat(x): change 12"));
+    assert_eq!(*rig.fake.logged.lock().unwrap(), [(rig.layout.src(), a.clone(), b.clone())]);
+
+    rig.layout.mark_bad(&b).unwrap();
+    builds.read(Some("aaaaaaa")).await;
+    let asked = rig.fake.logged.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((asked.1.as_str(), asked.2), ("aaaaaaa", a), "up to the newest good build, from a short hash");
+}
+
+#[tokio::test]
+async fn no_changes_are_read_without_a_commit_hash_before_the_newest_build() {
+    let rig = rig();
+    let a = hash('a');
+    *rig.fake.log.lock().unwrap() = Some(Ok(vec!["fix: one".into()]));
+    let builds = rig.builder.builds();
+    assert_eq!(builds.read(Some(&hash('0'))).await.changes, Vec::<String>::new(), "nothing is built yet");
+    rig.step_at(&a).await;
+    for since in
+        [None, Some(a.as_str()), Some("abc123"), Some("HEAD~3"), Some("--output=/tmp/x"), Some(&*"f".repeat(41))]
+    {
+        let read = builds.read(since).await;
+        assert_eq!((read.changes.len(), read.changes_total), (0, 0), "{since:?}");
+    }
+    assert!(rig.fake.logged.lock().unwrap().is_empty(), "git was never asked");
+
+    *rig.fake.log.lock().unwrap() = Some(Err("bad revision".into()));
+    let read = builds.read(Some(&hash('9'))).await;
+    assert_eq!((read.current, read.changes.len()), (Some(a), 0), "a commit the clone doesn't have is no error");
+}
+
+#[tokio::test]
+async fn the_history_is_never_read_while_the_clone_is_checked_out() {
+    let rig = rig();
+    *rig.fake.lock.lock().unwrap() = Some(rig.builder.checkout.clone());
+    rig.step_at("a").await;
+    assert_eq!(*rig.fake.locked_in_checkout.lock().unwrap(), Some(true));
+    assert!(rig.builder.checkout.try_write().is_ok(), "and let go after");
 }
 
 #[test]

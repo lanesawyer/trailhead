@@ -18,10 +18,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use utoipa::IntoParams;
 
 use crate::AppState;
 use crate::auth::Auth;
-use crate::error::{ApiResult, Json, invalid};
+use crate::error::{ApiResult, Json, Query, invalid};
 use crate::openapi::Health;
 use crate::params::split_list;
 use trailhead_core::Me;
@@ -164,10 +165,21 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Me>> {
     Ok(Json(Me { workspace_id: ctx.workspace_id, user, agent_id: ctx.agent_id, agent }))
 }
 
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub(crate) struct ShellBuildQuery {
+    /// The build a shell runs (a commit hash, 7 to 40 hex digits): the answer's `changes` are the commits after it up
+    /// to the newest build. Anything else, or a commit the builder doesn't have, leaves them empty.
+    since: Option<String>,
+}
+
 #[utoipa::path(
-    get, path = "/v1/shell/build", tag = "meta",
+    get, path = "/v1/shell/build", tag = "meta", params(ShellBuildQuery),
     responses((status = 200, description = "The shells the server's builder keeps: `configured` is false, and the rest empty, when the user config has no `[shell] repo`", body = ShellBuild))
 )]
-async fn shell_build(State(s): S, Auth(_): Auth) -> Json<ShellBuild> {
-    Json(s.shell.get().map(trailhead_builder::Layout::read).unwrap_or_default())
+async fn shell_build(State(s): S, Auth(_): Auth, Query(q): Query<ShellBuildQuery>) -> Json<ShellBuild> {
+    match s.shell.get() {
+        Some(builds) => Json(builds.read(q.since.as_deref()).await),
+        None => Json(ShellBuild::default()),
+    }
 }

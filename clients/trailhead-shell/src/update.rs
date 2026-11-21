@@ -68,7 +68,7 @@ fn ask(time: Res<Time<Real>>, mut asked: ResMut<Asked>, mut net: MessageWriter<S
 fn read() -> Fetch {
     Fetch::new(|api| async move {
         BuildReply(match api {
-            Some(api) => api.shell_build().await.map_err(|e| e.chain()),
+            Some(api) => api.shell_build(None).await.map_err(|e| e.chain()),
             None => Err("not connected".into()),
         })
     })

@@ -45,6 +45,10 @@ pub trait Tools: Send + Sync + 'static {
 
     /// Builds the shell, and says where the binary is.
     fn build<'a>(&'a self, job: &'a Job) -> Boxed<'a, Result<PathBuf, String>>;
+
+    /// The subject lines of the commits in the clone at `src` after `since` up to `until`, newest first. Both are
+    /// commit hashes the caller has checked.
+    fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>>;
 }
 
 /// The system's git and cargo.
@@ -169,6 +173,14 @@ impl Tools for System {
             if binary.is_file() { Ok(binary) } else { Err(format!("cargo built no {}", binary.display())) }
         })
     }
+
+    fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>> {
+        Box::pin(async move {
+            let range = format!("{since}..{until}");
+            let out = git(Some(src), &["log", "--format=%s", &range, "--"]).await?;
+            Ok(out.lines().map(String::from).collect())
+        })
+    }
 }
 
 impl System {
@@ -287,5 +299,14 @@ mod tests {
         assert_eq!(std::fs::read_to_string(src.join("a")).unwrap(), "two");
         assert_eq!(sh(&src, &["rev-parse", "HEAD"]), second);
         assert_eq!(sh(&checkout, &["rev-parse", "HEAD"]), first, "the person's checkout is untouched");
+
+        std::fs::write(upstream.join("a"), "three").unwrap();
+        sh(&upstream, &["commit", "--quiet", "-am", "feat(a): three: the third [A-3]"]);
+        let third = system.head(&origin).await.unwrap();
+        system.checkout(&src, &origin, &third).await.unwrap();
+        let log = system.log(&src, &first, &third).await.unwrap();
+        assert_eq!(log, ["feat(a): three: the third [A-3]", "two"], "newest first, after `since`");
+        assert_eq!(system.log(&src, &third, &third).await.unwrap(), Vec::<String>::new());
+        assert!(system.log(&src, &"0".repeat(40), &third).await.is_err(), "a commit the clone doesn't have");
     }
 }

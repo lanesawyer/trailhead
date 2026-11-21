@@ -12,6 +12,9 @@ pub const RESTART_CODE: u8 = 75;
 /// is without being compiled to know it. A shell started without it never offers an update.
 pub const BUILD_ENV: &str = "TRAILHEAD_SHELL_BUILD";
 
+/// The most commit subjects [`ShellBuild::changes`] lists.
+pub const MAX_CHANGES: usize = 30;
+
 /// `GET /v1/shell/build`: the builds the server's builder keeps, by the apps repo's commit each was built from.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -30,6 +33,14 @@ pub struct ShellBuild {
     /// Builds the launcher found failing at start and fell back from. Never run again, and never built again.
     #[serde(default)]
     pub bad: Vec<String>,
+    /// Asked with `?since=<rev>` (the build a shell runs): the subject lines of the commits after it up to
+    /// [`ShellBuild::newest`], newest first, at most [`MAX_CHANGES`] of them. Empty without `since`, when `since` is
+    /// the newest build or unknown to the builder, and when there is no builder.
+    #[serde(default)]
+    pub changes: Vec<String>,
+    /// How many commits there are after `since` in all, of which `changes` lists the newest.
+    #[serde(default)]
+    pub changes_total: usize,
 }
 
 impl ShellBuild {
