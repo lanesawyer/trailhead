@@ -55,6 +55,8 @@ pub mod net;
 mod place;
 mod previews;
 mod rail;
+mod server_page;
+pub mod server_settings;
 pub mod settings;
 mod settings_modal;
 mod settings_pages;
@@ -319,6 +321,9 @@ impl Plugin for ShellPlugin {
             shell_app.build(app);
         }
         let connected = app.world().contains_resource::<State<Connection>>();
+        if connected {
+            app.add_plugins(server_settings::ServerSettingsPlugin);
+        }
         let mut pages = settings_pages::shell_pages(connected);
         let apps = app.world().resource::<Apps>();
         let mut on_rail: Vec<&dyn ShellApp> = self.apps.iter().map(|a| a.as_ref()).collect();
@@ -341,6 +346,9 @@ impl Plugin for ShellPlugin {
             app.add_plugins(ask_panel::AskPanelUiPlugin);
             if self.connection.is_some() {
                 app.add_plugins(connect::ConnectUiPlugin);
+            }
+            if connected {
+                app.add_plugins(server_page::ServerPageUiPlugin);
             }
             for shell_app in &self.apps {
                 shell_app.build_ui(app);

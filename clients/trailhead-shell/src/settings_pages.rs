@@ -7,6 +7,8 @@
 //! - **Connection**: the server dialed, the state of the link and why it isn't live, who it signed in as, this
 //!   window's endpoint id and the `trailhead factory allow` command for it, both with a copy button, and Re-dial and
 //!   Disconnect. Listed only in a shell with a connection.
+//! - **Server**: what the server's user config says, edited from the window ([`crate::server_page`]). Listed only in
+//!   a shell with a connection.
 //! - **About**: the build the launcher started (or that the shell was run directly), whether a newer one is ready,
 //!   the apps the window holds, and where the shell keeps its files. Read-only.
 //!
@@ -28,7 +30,7 @@ use crate::connect::allow_command;
 use crate::connection::{Api, Connection, ConnectionStatus, Dialed, LocalEndpoint, SendNet};
 use crate::net::NetCommand;
 use crate::previews::transition_setting;
-use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, SHELL_GROUP, SettingsPage};
+use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, SERVER, SHELL_GROUP, SettingsPage};
 use crate::update::{ThisBuild, UpdateReady};
 use crate::{AppId, Apps, SHELL};
 
@@ -37,11 +39,12 @@ use crate::{AppId, Apps, SHELL};
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ShellDir(pub PathBuf);
 
-/// The shell's own pages, in the order they are listed: Connection only with a connection.
+/// The shell's own pages, in the order they are listed: Connection and Server only with a connection.
 pub(crate) fn shell_pages(connected: bool) -> Vec<(AppId, &'static str, SettingsPage)> {
     let mut pages = vec![SettingsPage::new(APPEARANCE.key, "Appearance", appearance_page)];
     if connected {
         pages.push(SettingsPage::new(CONNECTION.key, "Connection", connection_page));
+        pages.push(SettingsPage::new(SERVER.key, "Server", crate::server_page::server_page));
     }
     pages.push(SettingsPage::new(ABOUT.key, "About", about_page));
     pages.into_iter().map(|page| (SHELL, SHELL_GROUP, page)).collect()

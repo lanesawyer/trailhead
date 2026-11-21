@@ -255,7 +255,13 @@ mod tests {
         let listed: Vec<(&str, &str)> = pages.iter().map(|p| (p.group, p.title)).collect();
         assert_eq!(
             listed,
-            [("Trailhead", "Appearance"), ("Trailhead", "Connection"), ("Trailhead", "About"), ("Notes", "Tidying")]
+            [
+                ("Trailhead", "Appearance"),
+                ("Trailhead", "Connection"),
+                ("Trailhead", "Server"),
+                ("Trailhead", "About"),
+                ("Notes", "Tidying")
+            ]
         );
         open(&mut app, None);
         let strip = one::<With<SettingsStrip>>(&mut app);
@@ -273,7 +279,10 @@ mod tests {
             })
             .map(Option::unwrap)
             .collect();
-        assert_eq!(words, ["Trailhead", "tab appearance", "tab connection", "tab about", "Notes", "tab tidy"]);
+        assert_eq!(
+            words,
+            ["Trailhead", "tab appearance", "tab connection", "tab server", "tab about", "Notes", "tab tidy"]
+        );
     }
 
     #[test]

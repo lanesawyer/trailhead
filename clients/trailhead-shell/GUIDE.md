@@ -67,7 +67,7 @@ app decides is testable without a window, and only what draws needs one.
 
 The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
 from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme, the
-text size and how the window switches apps; Connection; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
+text size and how the window switches apps; Connection; Server, the server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
 An app does not open a settings modal of its own; it adds pages to this one.
 
 ```rust
