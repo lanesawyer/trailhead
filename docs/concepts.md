@@ -62,6 +62,10 @@ Comments have a kind: `handoff`, `progress`, `question`, `decision`, `review` an
 
 A `question` comment addressed to a human or an agent moves the task to `needs_input` until someone answers it. The factory parks a task this way when it needs a person.
 
+## Pictures
+
+A task can carry pictures: PNGs of up to 2 MiB, at most 64 and 32 MiB a task, each with a short name, an optional role (`before` or `after`) and an optional set (a run or a commit) grouping pictures taken together. The factory is to attach screenshots of a UI change before and after it, and Lookout shows them on the task, a before beside its after. Whoever may comment on a task may attach one (`trailhead attach KEY shot.png`); a person may remove any, an agent only its own, and undo puts it back. The bytes are kept once however many pictures share them.
+
 ## Review and delegated reviewers
 
 A project can require review: agents then can't mark work `done`, only a person can. A human may list agents as the project's reviewers; they can approve `in_review` work like a human, except what they did themselves. Agents can turn review on but never off. A `review` comment records a typed verdict (approve or request changes) without moving the task.

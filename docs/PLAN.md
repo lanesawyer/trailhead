@@ -111,6 +111,7 @@ Every record carries a `workspace_id`, and every write records the actor and the
 | Dependency | Task A blocks task B, across projects too | `blocker_id`, `blocked_id` |
 | Claim | A lease on a task | `task_id`, `agent_id`, `expires_at` |
 | Comment | Typed discussion, handoffs and questions on a task | `id`, `task_id`, `author_id`, `on_behalf_of`, `kind`, `addressed_to`, `body`, `resolved_at`, `created_at` |
+| Attachment | A picture on a task (a PNG: a screenshot before or after a change); its bytes are a blob kept once by their SHA-256 | `id`, `task_id`, `name`, `content_type`, `size`, `sha256`, `width`, `height`, `role` (`before` or `after`), `set`, `created_by`, `on_behalf_of`, `created_at`, `deleted_at` |
 | Event | Append-only log of every write | `id`, `batch_id`, `actor_id`, `on_behalf_of`, `task_id`, `kind`, `before`, `after`, `at` |
 | Webhook | Outbound notification | `url`, `event_kinds`, `secret` |
 
@@ -119,6 +120,7 @@ Every record carries a `workspace_id`, and every write records the actor and the
 - **`deleted_at`** makes deletes soft, so they can always be undone.
 - **`source` and `external_id`** exist only so a rerun import doesn't create duplicates.
 - **`description` vs comments.** The description is the task's current spec and gets edited. Comments are the append-only history of the work.
+- **Attachments** are comments' sibling: whoever may comment on a task may attach a picture, and adding and removing one are events (`attachment.created`, `attachment.deleted`) with the metadata and the hash as their snapshots, never the bytes, so undo, the sync stream and webhooks treat them like a comment. Removing is a soft delete: a person may remove any picture, an agent only those it or its sub-agents added, and undo restores one under the same rule and the task's limits. The bytes live in `blobs`, keyed by hash, so the same picture attached twice (one run's after, the next run's before) is stored once, and a list never reads them. Only PNGs, checked by their bytes, of at most 2 MiB; a task holds at most 64 live, 32 MiB together.
 
 ## Projects
 
@@ -226,6 +228,8 @@ Deferred:
 ## Decisions log
 
 Decisions made while building, including where the build refines or departs from the text above. Factory decisions live in `docs/factory/overview.md`; the ones that change the engine are also recorded here.
+
+- **Pictures are kept in the engine (2026-11-21, TRAIL-1630).** Screenshots of a change, before and after, are attachments on the task in Trailhead's own database (migration 0019: `attachments` for the metadata, `blobs` for the bytes, keyed by SHA-256 so identical pictures are stored once), not on the code host's pull request. They then work with any code host, or none, and Lookout shows them without credentials for or access to the code host: it reads them through the same API and tunnel as everything else (`GET /v1/attachments/{id}`, cached for good by its hash). The engine is a task store, not a file store, so the limits are tight and checked in core: PNG only, 2 MiB a picture, 64 and 32 MiB a task. Nothing is ever hard-deleted, so the bytes stay for undo; a purge of blobs no attachment names is left for when the database's size asks for it. Upload is the raw body (`POST /v1/tasks/{task}/attachments?name=&role=&set=`), the first binary route; MCP only lists them. The factory attaching its screenshots is a later task.
 
 - **Trailhead becomes a shell of apps (2026-11-19, TRAIL-1572).** The Bevy client becomes a shell that holds apps and can be asked for new ones, with the factory building them; Lookout is the factory's app inside it. This replaces "the todo use case becomes a separate client" below with Ticklist, an app in the maintainer's own apps repo, and narrows principle 6 to tasks. An app is a crate compiled into the shell and built only from `trailhead-ui`; a change is a rebuild and a relaunch. Apps live in one separate repo per person, on GitHub, a project per app, under the factory's grades. App data goes in a generic store in the server, one SQLite file per app with its own event log, and connectors to outside services run as supervised processes acting through the API. For the engine this means, when those phases are reached: a default grade on a project, so tasks an agent creates for an app can be worked; the app data store; and backups. Grades change with it: each grade keeps the gates below it, grade 3 merges on a quorum of reviewers with different jobs, and a person is needed only at grade 4 (`docs/factory/review.md`). Design and open questions in `docs/app-platform.md`.
 

@@ -263,7 +263,7 @@ The other resources: `Api(ApiAccess { base, token, user, user_id })` once signed
 
 The shell keeps a mirror of the task engine's records as entities (`trailhead_shell::mirror`). Each holds its record
 as its `trailhead-model` type in a `Mirrored<T>` component (`Task`, `Project`, `Comment`, `Claim`, `Agent`, `User`,
-`Dependency`), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
+`Dependency`, and `Attachment`, a picture's metadata), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
 the lot, and an event replaces one entity only if it is newer. An app never writes to them.
 
 ```rust
@@ -325,6 +325,10 @@ fn read(seq: u64, key: String) -> Fetch {
 
 Ask only while `Live`, and ask again on `OnEnter(Connection::Live)` for what was in flight when the link dropped,
 since it will not be answered (detail.rs's `DetailPlugin` does both).
+
+The client reads bytes as well as JSON: `api.attachment_bytes(id)` returns a picture's PNG, which comes through the
+tunnel intact (`tests/connection.rs` reads a 2 MiB one). Read only what is shown, a few at a time, and keep what was
+read by its hash: Lookout's `clients/trailhead-lookout/src/pictures.rs` does, and decodes with the kit's `png_image`.
 
 ### A write: the commands
 
