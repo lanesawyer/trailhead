@@ -1,8 +1,9 @@
 //! The rail of apps down the left edge of the window: a button for each app, the one shown marked, and at its foot
 //! the window's own buttons: Ask ([`crate::ask`]), while connected to a server with an apps repo, which opens the form
 //! for asking for a change or a new app ([`crate::ask_panel`]); and the update notice ([`crate::update`]) while a newer
-//! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]). A shell with a single
-//! app has no rail, and the app has the whole window.
+//! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]); and last the gear,
+//! which opens the window's settings ([`crate::settings`]). A shell with a single app has no rail, and the app has the
+//! whole window.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
@@ -10,6 +11,7 @@ use trailhead_ui::{ButtonKind, Hint, Icon, NavItem, rail, rail_foot, rail_item, 
 
 use crate::ask::Askable;
 use crate::connection::Connection;
+use crate::settings::SettingsGear;
 use crate::update::UpdateReady;
 use crate::{ActiveApp, AppId, Apps};
 
@@ -35,6 +37,10 @@ pub struct AskButton;
 #[derive(Component)]
 pub struct UpdateButton;
 
+/// The gear at the [`RailFoot`], under Ask and the update notice, that opens the settings.
+#[derive(Component)]
+pub struct SettingsButton;
+
 /// What the Ask button's hint says.
 pub const ASK_HINT: &str = "Ask for a change or a new app";
 
@@ -48,11 +54,11 @@ impl Plugin for RailUiPlugin {
     }
 }
 
-/// The rail, its items in the order of the apps, then its foot with Ask above the update notice. Each is put down at
+/// The rail, its items in the order of the apps, then its foot with Ask, the update notice and the gear. Each is put down at
 /// once (`spawn_scene`), so the foot comes after the items and its buttons' nodes are there to hide before the first
 /// frame is drawn.
 fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
-    if apps.len() < 2 {
+    if !apps.has_rail() {
         return;
     }
     let root = commands.spawn_scene(rail()).insert((Name::new("rail"), Rail)).id();
@@ -65,6 +71,8 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     let update =
         bsn! { @tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary) Node { display: Display::None } };
     commands.spawn_scene(update).insert((UpdateButton, ChildOf(foot)));
+    let gear = tool_button(Icon::Settings, "Settings", ButtonKind::Plain);
+    commands.spawn_scene(gear).insert((SettingsButton, SettingsGear, ChildOf(foot)));
 }
 
 /// Shows Ask while the connection is live and the server has an apps repo to ask about.
@@ -201,7 +209,9 @@ mod tests {
         let (foot, buttons) = foot(&mut app);
         assert_eq!(children.last(), Some(&foot), "the foot comes after the apps");
         let (ask, _) = shown::<AskButton>(&mut app);
-        assert_eq!(buttons, [ask, button], "Ask above the update");
+        let (gear, display) = shown::<SettingsButton>(&mut app);
+        assert_eq!(buttons, [ask, button, gear], "Ask above the update, and the gear last");
+        assert_eq!(display, Display::Flex, "the gear always shows");
 
         let subjects = ["feat(a): one".to_string(), "fix(a): two".to_string(), "chore: three".to_string()];
         app.world_mut().resource_mut::<UpdateReady>().0 = Some(Newer::new("b", &subjects, 3));

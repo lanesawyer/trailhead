@@ -13,6 +13,7 @@ use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
 use crate::icon::{IconUiPlugin, primary_window};
 use crate::net::NetConfig;
 use crate::place::{PlaceFile, keep_place};
+use crate::settings::ShellDir;
 use crate::{ShellApp, ShellPlugin};
 
 /// Where the theme picked is kept for the next launch: a file holding `light`, `dark` or `desktop`.
@@ -41,7 +42,7 @@ pub fn theme_from_word(word: &str) -> ThemeChoice {
 }
 
 /// Keeps the theme picked for the next launch.
-fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local<Option<ThemeChoice>>) {
+pub(crate) fn keep_theme(appearance: Res<Appearance>, file: Res<ThemeFile>, mut kept: Local<Option<ThemeChoice>>) {
     if *kept == Some(appearance.choice) {
         return;
     }
@@ -108,6 +109,7 @@ impl Shell {
         let exit = App::new()
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
             .insert_resource(place)
+            .insert_resource(ShellDir(self.dir.clone()))
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
             .insert_resource(WinitSettings {

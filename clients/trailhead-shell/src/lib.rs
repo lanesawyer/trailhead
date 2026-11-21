@@ -23,15 +23,17 @@
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
 //! each app's drawing. While connected to a server with an apps repo, the rail's Ask button asks it for a change to an
-//! app or a new one ([`ask`]).
+//! app or a new one ([`ask`]). The gear under it opens the window's [`settings`], whose pages are the shell's own and
+//! those each app adds with [`ShellApp::settings_pages`].
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use trailhead_ui::{Icon, TextSize, TextSizePlugin, Theme};
 
-use crate::connection::{ConnectionPlugin, SendNet};
+use crate::connection::{Connection, ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
+use crate::settings::SettingsPage;
 
 pub mod ask;
 mod ask_panel;
@@ -46,6 +48,9 @@ pub mod mirror;
 pub mod net;
 mod place;
 mod rail;
+pub mod settings;
+mod settings_modal;
+mod settings_pages;
 mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
@@ -55,7 +60,7 @@ mod update_panel;
 pub mod view;
 mod window;
 
-pub use rail::{AskButton, OpenApp, Rail, UpdateButton};
+pub use rail::{AskButton, OpenApp, Rail, SettingsButton, UpdateButton};
 pub use store::LocalStore;
 pub use view::RememberView;
 pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
@@ -84,6 +89,11 @@ pub struct ActiveApp(pub AppId);
 pub struct Apps(Vec<Manifest>);
 
 impl Apps {
+    /// The apps given, as the shell holds them: a test of an app's drawing outside a shell makes its own.
+    pub fn new(apps: Vec<Manifest>) -> Self {
+        Apps(apps)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Manifest> {
         self.0.iter()
     }
@@ -94,6 +104,12 @@ impl Apps {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Whether the shell draws a rail: only for more than one app. Without one there is no settings gear at its foot,
+    /// and an app with a place for one puts a [`settings::SettingsGear`] of its own there.
+    pub fn has_rail(&self) -> bool {
+        self.len() > 1
     }
 }
 
@@ -117,10 +133,16 @@ pub trait ShellApp: Send + Sync + 'static {
     fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> {
         Vec::new()
     }
+
+    /// The app's pages in the shell's settings, listed under its name after the shell's own. The shell takes them
+    /// once, after [`ShellApp::build`]; each page's fill runs when the page is shown ([`settings::SettingsPage`]).
+    fn settings_pages(&self) -> Vec<SettingsPage> {
+        Vec::new()
+    }
 }
 
 /// The shell's own entry in the [`LocalStore`].
-const SHELL: AppId = AppId("shell");
+pub(crate) const SHELL: AppId = AppId("shell");
 /// Where the shell keeps the id of the app last shown.
 const ACTIVE: &str = "active";
 /// Where the shell keeps the [`TextSize`] picked, in percent, for every app.
@@ -220,7 +242,7 @@ impl Plugin for ShellPlugin {
         if let Some(text_size) = text_size {
             app.insert_resource(text_size);
         }
-        app.insert_resource(Apps(manifests))
+        app.insert_resource(Apps::new(manifests))
             .insert_resource(store)
             .insert_state(ActiveApp(first))
             .add_systems(Startup, spawn_camera)
@@ -237,12 +259,19 @@ impl Plugin for ShellPlugin {
         if let Some(build) = &self.build {
             app.add_plugins(update::UpdatePlugin(build.clone()));
         }
-        app.add_plugins(ask::AskPlugin);
+        app.add_plugins((ask::AskPlugin, settings::SettingsPlugin));
         for shell_app in &self.apps {
             shell_app.build(app);
         }
+        let connected = app.world().contains_resource::<State<Connection>>();
+        let mut pages = settings_pages::shell_pages(connected);
+        for shell_app in &self.apps {
+            let manifest = shell_app.manifest();
+            pages.extend(shell_app.settings_pages().into_iter().map(|page| (manifest.id, manifest.name, page)));
+        }
+        settings::register(app, pages);
         if self.windowed {
-            app.add_plugins(rail::RailUiPlugin);
+            app.add_plugins((rail::RailUiPlugin, settings_modal::SettingsModalUiPlugin));
             if self.build.is_some() {
                 app.add_plugins(update_panel::UpdatePanelUiPlugin);
             }
