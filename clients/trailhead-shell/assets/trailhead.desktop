@@ -2,7 +2,7 @@
 Type=Application
 Name=Trailhead
 Comment=Your Trailhead apps, in one window
-Exec=trailhead-shell
+Exec=trailhead app
 Icon=trailhead
 Terminal=false
 Categories=Development;

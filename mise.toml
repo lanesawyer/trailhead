@@ -125,20 +125,17 @@ depends = ["docs-mermaid"]
 run = "mdbook serve"
 
 [tasks.shell-install]
-description = "Install the Trailhead window, trailhead-shell, with its desktop entry and icons (~/.cargo/bin, ~/.local/share; the desktop entry's Exec is the binary's absolute path), so the dock shows the TL icon (the desktop entry's name must match the window's app id, `trailhead`)"
+description = "Install the Trailhead window's desktop entry and icons (~/.local/share), so the dock starts the window with the TL icon: the entry runs `trailhead app` (by the CLI's absolute path), which starts the newest shell the server built from `[shell] repo`. Install the CLI first; without `[shell] repo` there is nothing to start, so use shell-install-standalone"
+run = """
+# Exec gets the absolute path: ~/.cargo/bin is often not on the graphical session's PATH
+bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/trailhead"
+[ -x "$bin" ] || { echo "shell-install: no trailhead CLI at $bin; install it first: cargo install --path crates/trailhead --locked" >&2; exit 1; }
+sh clients/trailhead-shell/install-desktop-entry.sh "$bin" app
+"""
+
+[tasks.shell-install-standalone]
+description = "Install the framework-only window, trailhead-shell from clients/trailhead-desktop (Lookout alone, ~/.cargo/bin), with a desktop entry that runs it and the icons: for a machine with no `[shell] repo` for the server to build from"
 run = """
 cargo install --path clients/trailhead-desktop --locked
-# Exec gets the absolute path: ~/.cargo/bin is often not on the graphical session's PATH
-bin="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/trailhead-shell"
-q='"'
-mkdir -p ~/.local/share/applications
-sed "s|^Exec=trailhead-shell$|Exec=$q$bin$q|" clients/trailhead-shell/assets/trailhead.desktop > ~/.local/share/applications/trailhead.desktop
-grep -qF "Exec=$q$bin$q" ~/.local/share/applications/trailhead.desktop || { echo 'trailhead.desktop: Exec line not rewritten (the asset must have exactly "Exec=trailhead-shell")' >&2; exit 1; }
-chmod 644 ~/.local/share/applications/trailhead.desktop
-for size in 32 64 128 256; do
-  install -Dm644 clients/trailhead-shell/assets/icon/$size.png ~/.local/share/icons/hicolor/${size}x${size}/apps/trailhead.png
-done
-install -Dm644 clients/trailhead-shell/assets/icon/trailhead.svg ~/.local/share/icons/hicolor/scalable/apps/trailhead.svg
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
-gtk-update-icon-cache -q -t ~/.local/share/icons/hicolor 2>/dev/null || true
+sh clients/trailhead-shell/install-desktop-entry.sh "${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}/bin/trailhead-shell"
 """

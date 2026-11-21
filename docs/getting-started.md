@@ -87,3 +87,5 @@ trailhead app           # opens the window on the newest build
 ```
 
 The server keeps a clone of its own and builds each new commit on the base branch under `<data dir>/shell` (`~/.local/share/trailhead/shell`; cargo's output is in `build.log` there), so the first build takes as long as a release build of the apps repo. Your checkout is never touched. When a newer build is ready the window shows a button at the foot of its rail; pressing it restarts the window onto it. A build that fails as it starts is marked bad and the one before it is run instead.
+
+To start it from the dock, `mise run shell-install` in a checkout of this repo installs a desktop entry and icons under `~/.local/share` whose `Exec` is the absolute path of the installed `trailhead` CLI followed by `app`, so it starts whatever the server built last and never goes stale; install the CLI first. Without `[shell] repo` there is nothing for `trailhead app` to start: `mise run shell-install-standalone` installs the window this repo builds (`trailhead-shell` from `clients/trailhead-desktop`, with Lookout alone) to `~/.cargo/bin` and points the entry at it instead.
