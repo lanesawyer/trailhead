@@ -15,14 +15,14 @@ The factory is what makes this practical: it already turns a spec into a checked
 | The shell | Trailhead | Leaning |
 | The factory's app inside it | Lookout (what the whole Bevy client is called today) | Leaning |
 | The UI kit | `trailhead-ui`, unchanged | Leaning |
-| How you start it | `trailhead app`, the only command a person types. It is a launcher in the CLI that runs the newest built shell and falls back to the previous one | Leaning |
-| The built shell | A file the builder writes and the launcher manages (`trailhead-shell` in Trailhead's data directory), never run by hand. It is separate from the CLI because it is rebuilt on every app change, and the CLI, the server and the launcher that does the fallback must not be | Leaning |
+| How you start it | `trailhead app`, the only command a person types. It is a launcher in the CLI that runs the newest built shell and falls back to the previous one | Built (TRAIL-1578) |
+| The built shell | A file the builder writes and the launcher manages (`shell/builds/<rev>/trailhead-shell` in Trailhead's data directory), never run by hand. It is separate from the CLI because it is rebuilt on every app change, and the CLI, the server and the launcher that does the fallback must not be | Built (TRAIL-1578) |
 | The todo app | Ticklist, a climber's list of routes to send (from [naming.md](factory/naming.md)) | Leaning |
 
 ## What an app is
 
 - A Rust crate that exposes a Bevy plugin and a manifest (name, icon, the data collections it uses). **Leaning.**
-- Compiled into the shell binary. A change means a rebuild and a relaunch: the shell shows "your update is ready", and the button restarts it with its state restored. **Leaning.** Loading `bsn!` scenes from files, once Bevy has it, may later let views reload without a rebuild.
+- Compiled into the shell binary. A change means a rebuild and a relaunch: the shell shows "your update is ready", and the button restarts it with its state restored. **Built (TRAIL-1578):** a button at the foot of the rail, which saves the `LocalStore` and restarts onto the newest build. Loading `bsn!` scenes from files, once Bevy has it, may later let views reload without a rebuild.
 - Built only from `trailhead-ui`. A lint in the apps repo refuses any other UI code, so an app that needs something the kit lacks cannot work around it. **Leaning.**
 - A client of the API only, like Lookout today: it never touches the server's database.
 - Limited in what it may reach: no file, network or process access of its own, enforced by lint. **Leaning** (see [Trust, grades and undo](#trust-grades-and-undo)).
@@ -93,7 +93,12 @@ One repo, not one per app, because the shell is a single binary that needs one l
 - **A project per app.** Asking for an app creates a Trailhead project for it, with a brief and its first tasks, scoped to `apps/<name>/`. **Built (TRAIL-1595):** a project says which repo and path it builds in through `metadata.factory` (`{"repo": "owner/name", "path": "apps/<name>"}`, set by a person), and that repo's factory works its graded tasks from the next poll, telling the agents to stay inside the path ([operating.md](factory/operating.md), "Pointing a project at a repo"). Creating the project when an app is asked for is not built.
 - **GitHub, with the code host that exists.** Changes are pull requests that merge themselves when they stay inside one app's directory and pass checks and agent review. Nobody has to open them. A code host over a plain local repo is a later option.
 - **Review is trying it.** The person's gate on an app change is using the new build and keeping or rejecting it, not reading a diff. Rejecting is a revert and a rebuild.
-- **The builder.** After a merge, a builder on the server's machine pulls the apps repo and builds the shell, the event stream tells the running shell, and the launcher keeps the previous binary to fall back to.
+- **The builder. Built (TRAIL-1578).** After a merge, a builder in the server pulls the apps repo and builds the shell, the running shell hears of it, and the launcher keeps the previous binary to fall back to. As built:
+  - `[shell] repo` in the user config names the apps repo's checkout; without it there is no builder. The builder (`crates/trailhead-builder`) runs in the server whether or not the factory does, and a failure in it never stops the server.
+  - Every `poll_secs` (60) it `git ls-remote`s the checkout's `origin` at its default branch, and builds a head it has not built, failed on or been told is bad, in a clone of its own (`<data dir>/shell/src`), with `cargo build --locked --profile <profile> -p <package> -j <jobs>` (release, 3 jobs) into a target directory of its own. One build at a time; a head that moves during a build is built after it.
+  - Under `<data dir>/shell`: `builds/<rev>/trailhead-shell` for the current build and the one before it (older ones are removed), `state.json` (current, previous, building, the last failure with the tail of cargo's output), `build.log` and `bad`. `GET /v1/shell/build` and `trailhead app status` show them.
+  - The running shell hears of a build by asking `GET /v1/shell/build` every 30 seconds while connected, not from the event stream, which carries the task engine's stored and undoable events. It knows its own build from `TRAILHEAD_SHELL_BUILD`, which the launcher sets, so the binary is not rebuilt to know it; started any other way it shows no notice.
+  - `trailhead app` runs the newest good build. A shell that exits with the restart code (75, `trailhead_model::shell::RESTART_CODE`) is run again on the newest build; one that exits with an error within ten seconds of starting is marked bad (in `bad`, which the builder reads too) and the build before it is run.
 
 The personal todo app lives in the apps repo, not in `trailhead`: it is the app Lane will keep asking to change, which is the point of the whole design, and upstream should not take that churn. **Leaning.**
 
@@ -200,7 +205,7 @@ Lane wants UI changes shown, live if possible. Three steps, each useful alone, c
 
 **Undo.** Three paths, each of which has to work without thought:
 
-- **A bad build:** the launcher falls back to the previous shell on its own when the new one fails to start, and offers the previous one from a menu when it starts but is wrong.
+- **A bad build:** the launcher falls back to the previous shell on its own when the new one fails to start (built, TRAIL-1578), and offers the previous one from a menu when it starts but is wrong (not built).
 - **A bad change:** rejecting it in the shell reverts the merge and rebuilds.
 - **Bad data:** app data is in the event log, so undo and revert-since cover whatever an app, an agent or a connector wrote.
 
@@ -211,7 +216,7 @@ Text a connector brings in from outside is one way a bad instruction could reach
 - **How long a request takes. Accepted for now.** A small change still goes through a sandbox, the agent, checks, CI, review, a merge and a build of the shell, which Rust makes slow; requests are queued work to come back to, not edits that appear as you watch. A faster path for small changes inside one app (a warm local sandbox, no second CI pass) is designed only if the wait proves bad.
 - **A crash in one app takes the shell down.** The launcher's fallback covers a crash at startup only. A way to start with one app switched off would cover the rest.
 - **Version skew.** The server is built from the `trailhead` repo and the shell from the apps repo's pin. They need a protocol version check and a rule for moving the pin when the server is upgraded.
-- **Build load.** Every merged app change builds the shell on the machine that also runs the server and perhaps the factory's local sandboxes. The builder needs a job limit and a build profile chosen for build time.
+- **Build load.** Every merged app change builds the shell on the machine that also runs the server and perhaps the factory's local sandboxes. The builder has a job limit and a profile (`[shell] jobs` and `profile`), and a target directory of its own beside the apps repo's, which costs the disk of a second release build. Nothing yet keeps a build from running beside the factory's sandboxes.
 - **The factory has to run unattended.** This design leans on self-merging changes with nobody watching, which is what phase 5 of PLAN.md is still hardening.
 - **This goes ahead of TRAIL-114. Leaning.** TRAIL-114 makes the factory installable by someone who has only their own repo (`cargo install trailhead`, `trailhead factory init`, `login`, `start`). For now this is all for Lane, with other people a someday aim, and this proposal changes what they would install. TRAIL-114's `factory init` is still needed in phase 3, to set up the apps repo.
 - **License.** The shell and Lookout are AGPL-3.0 and the kit is MIT OR Apache-2.0. A private apps repo linking them is fine; distributing a built shell carries the AGPL.

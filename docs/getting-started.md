@@ -66,3 +66,24 @@ Reach the server through a tunnel to its loopback port, and give each machine's 
 ## Factory secrets
 
 If you run the factory, it needs `SPRITES_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` and `GITHUB_TOKEN`. It takes each from the first of three places that has it: the environment variable; [fnox](https://fnox.jdx.dev), if it's installed and its config names the secret (only the names it needs, read with `fnox get`; never required); then the OS keyring, where `trailhead factory login sprites|claude|github` saves them. At start it logs which source each came from, never the values. See [Operating the factory](factory/operating.md).
+
+## The window
+
+The desktop window, the Trailhead shell, is built from your apps repo ([Trailhead as a shell of apps](app-platform.md)), not installed with the CLI. The server builds it: name the apps repo's checkout in the user `config.toml` and restart the server.
+
+```toml
+[shell]
+repo = "~/Dev/trailhead-apps"   # its `origin` and default branch say what to build
+# package = "trailhead-apps-shell"   # default: the package with a `trailhead-shell` binary
+# profile = "release"                # cargo profile
+# jobs = 3                           # cargo -j
+# poll_secs = 60                     # how often to look for a new commit
+```
+
+```sh
+trailhead server restart
+trailhead app status    # current and previous builds, one building, the last failure
+trailhead app           # opens the window on the newest build
+```
+
+The server keeps a clone of its own and builds each new commit on the base branch under `<data dir>/shell` (`~/.local/share/trailhead/shell`; cargo's output is in `build.log` there), so the first build takes as long as a release build of the apps repo. Your checkout is never touched. When a newer build is ready the window shows a button at the foot of its rail; pressing it restarts the window onto it. A build that fails as it starts is marked bad and the one before it is run instead.
