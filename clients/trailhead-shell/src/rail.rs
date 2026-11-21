@@ -1,12 +1,12 @@
 //! The rail of apps down the left edge of the window: a button for each app, the one shown marked, and at its foot
-//! the update notice ([`crate::update`]) while a newer build is ready. A shell with a single app has no rail, and the
-//! app has the whole window.
+//! the update notice ([`crate::update`]) while a newer build is ready, whose button opens the panel saying what it
+//! brings ([`crate::update_panel`]). A shell with a single app has no rail, and the app has the whole window.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
-use trailhead_ui::{ButtonKind, Icon, NavItem, rail, rail_foot, rail_item, set_display, tool_button};
+use trailhead_ui::{ButtonKind, Hint, Icon, NavItem, rail, rail_foot, rail_item, set_display, tool_button};
 
-use crate::update::{Restart, UpdateReady};
+use crate::update::UpdateReady;
 use crate::{ActiveApp, AppId, Apps};
 
 /// The rail's root.
@@ -21,18 +21,15 @@ pub struct OpenApp(pub AppId);
 #[derive(Component)]
 pub struct UpdateNotice;
 
-/// The button in the [`UpdateNotice`] that restarts onto the newer build.
+/// The button in the [`UpdateNotice`] that opens the update's panel, its hint saying how many changes it brings.
 #[derive(Component)]
-pub struct RestartButton;
+pub struct UpdateButton;
 
 pub(crate) struct RailUiPlugin;
 
 impl Plugin for RailUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_rail)
-            .add_observer(on_open)
-            .add_observer(on_restart)
-            .add_systems(Update, (mark_shown, show_update));
+        app.add_systems(Startup, spawn_rail).add_observer(on_open).add_systems(Update, (mark_shown, show_update));
     }
 }
 
@@ -48,25 +45,29 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     }
     let foot = commands.spawn_scene(rail_foot()).insert((Name::new("update notice"), UpdateNotice, ChildOf(root))).id();
     commands
-        .spawn_scene(tool_button(Icon::Refresh, "Update ready: restart", ButtonKind::Primary))
-        .insert((RestartButton, ChildOf(foot)));
+        .spawn_scene(tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary))
+        .insert((UpdateButton, ChildOf(foot)));
 }
 
-/// Shows the foot while a newer build is ready, in place. A shell the launcher didn't start never shows it.
+/// Shows the foot while a newer build is ready, and says on its button how many changes it brings, in place. A shell
+/// the launcher didn't start never shows it.
 fn show_update(
     ready: Option<Res<UpdateReady>>,
     notices: Query<Entity, With<UpdateNotice>>,
     mut nodes: Query<&mut Node>,
+    mut hints: Query<&mut Hint, With<UpdateButton>>,
 ) {
-    let shown = ready.is_some_and(|r| r.0.is_some());
+    let newer = ready.as_ref().and_then(|r| r.0.as_ref());
     for notice in &notices {
-        set_display(&mut nodes, notice, shown);
+        set_display(&mut nodes, notice, newer.is_some());
     }
-}
-
-fn on_restart(activate: On<Activate>, buttons: Query<(), With<RestartButton>>, mut commands: Commands) {
-    if buttons.contains(activate.entity) {
-        commands.trigger(Restart);
+    if let Some(newer) = newer.filter(|_| ready.as_ref().is_some_and(|r| r.is_changed())) {
+        let words = newer.hint();
+        for mut hint in &mut hints {
+            if hint.0 != words {
+                hint.0.clone_from(&words);
+            }
+        }
     }
 }
 
@@ -90,6 +91,7 @@ mod tests {
     use super::*;
     use crate::ShellPlugin;
     use crate::tests::{Fake, MAPS, NOTES, Seen};
+    use crate::update::Newer;
 
     fn windowed(shell: ShellPlugin) -> App {
         let mut app = App::new();
@@ -146,25 +148,35 @@ mod tests {
             .unwrap()
     }
 
+    fn hint(app: &mut App) -> (Entity, String) {
+        let world = app.world_mut();
+        world
+            .query_filtered::<(Entity, &Hint), With<UpdateButton>>()
+            .single(world)
+            .map(|(e, h)| (e, h.0.clone()))
+            .unwrap()
+    }
+
     #[test]
-    fn the_update_notice_sits_at_the_rails_foot_shows_in_place_when_a_build_is_ready_and_restarts() {
+    fn the_update_notice_sits_at_the_rails_foot_and_shows_in_place_saying_how_many_changes() {
         let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).built_as(Some("a".into())));
         let (foot, display) = notice(&mut app);
         assert_eq!(display, Display::None, "hidden while this is the newest build");
         let rail = app.world_mut().query_filtered::<Entity, With<Rail>>().single(app.world()).unwrap();
         let children: Vec<Entity> = app.world().get::<Children>(rail).unwrap().iter().collect();
         assert_eq!(children.last(), Some(&foot), "the foot comes after the apps");
+        let (button, _) = hint(&mut app);
+        assert_eq!(app.world().get::<ChildOf>(button).map(ChildOf::parent), Some(foot));
 
-        app.world_mut().resource_mut::<UpdateReady>().0 = Some(crate::update::Newer::new("b", &[], 0));
+        let subjects = ["feat(a): one".to_string(), "fix(a): two".to_string(), "chore: three".to_string()];
+        app.world_mut().resource_mut::<UpdateReady>().0 = Some(Newer::new("b", &subjects, 3));
         app.update();
         assert_eq!(notice(&mut app), (foot, Display::Flex), "the same entity, shown");
+        assert_eq!(hint(&mut app), (button, "Update ready: 3 changes".into()));
 
-        let button = app.world_mut().query_filtered::<Entity, With<RestartButton>>().single(app.world()).unwrap();
-        assert_eq!(app.world().get::<ChildOf>(button).map(ChildOf::parent), Some(foot));
-        app.world_mut().trigger(Activate { entity: button });
-        app.world_mut().flush();
-        let exits: Vec<AppExit> = app.world_mut().resource_mut::<Messages<AppExit>>().drain().collect();
-        assert_eq!(exits, [AppExit::from_code(trailhead_model::shell::RESTART_CODE)]);
+        app.world_mut().resource_mut::<UpdateReady>().0 = Some(Newer::new("c", &[], 0));
+        app.update();
+        assert_eq!(hint(&mut app), (button, "Update ready".into()), "an older server says no changes");
     }
 
     #[test]

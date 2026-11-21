@@ -48,6 +48,7 @@ pub mod sync;
 #[cfg(feature = "test-support")]
 pub mod testing;
 pub mod update;
+mod update_panel;
 pub mod view;
 mod window;
 
@@ -228,6 +229,9 @@ impl Plugin for ShellPlugin {
         }
         if self.windowed {
             app.add_plugins(rail::RailUiPlugin);
+            if self.build.is_some() {
+                app.add_plugins(update_panel::UpdatePanelUiPlugin);
+            }
             if self.connection.is_some() {
                 app.add_plugins(connect::ConnectUiPlugin);
             }

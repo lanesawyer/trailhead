@@ -469,8 +469,9 @@ id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugi
 its `UiPlugin`, then the `ShellPlugin` with the apps, and runs until the window is closed. In the apps repo, its
 `shell/` crate is the same binary with that repo's apps, which the server's builder builds after each merge and
 `trailhead app` runs. Started that way (`TRAILHEAD_SHELL_BUILD` names the build), the shell shows an update notice at
-the foot of the rail when a newer build is ready, and pressing it ends `Shell::run` with the restart code the launcher
-answers; a binary needs nothing of its own for this, as long as it ends by calling `Shell::run`.
+the foot of the rail when a newer build is ready. Pressing it opens a panel listing the commits the newer build brings,
+whose Restart ends `Shell::run` with the restart code the launcher answers; a binary needs nothing of its own for this,
+as long as it ends by calling `Shell::run`.
 
 ## 10. Views
 
