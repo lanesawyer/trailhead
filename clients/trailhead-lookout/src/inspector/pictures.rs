@@ -107,7 +107,8 @@ pub(super) fn spawn_fold(commands: &mut Commands, set: &str, count: usize, open:
     } else {
         (format!("Show {count} unchanged"), Icon::ChevronDown)
     };
-    commands.spawn_scene(button(caption, Some(icon), ButtonKind::Plain)).insert(ToggleUnchanged(set.to_string())).id()
+    let fold = bsn! { @button(caption, Some(icon), ButtonKind::Plain) Node { align_self: AlignSelf::FlexStart } };
+    commands.spawn_scene(fold).insert(ToggleUnchanged(set.to_string())).id()
 }
 
 /// A press on a thumbnail opens its pair large; one on a fold opens or shuts it.
