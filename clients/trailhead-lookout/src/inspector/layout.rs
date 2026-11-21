@@ -207,6 +207,9 @@ pub(super) fn layout(
     if let (Some(current), false) = (view.status, moves.is_empty()) {
         let statuses = std::iter::once(current).chain(moves).collect();
         items.push(("move".to_string(), Block::Move { statuses, note: note(&MOVE_CONTROL) }));
+        if let Some(hint) = view.done_hint {
+            items.push(("move/hint".to_string(), text_block(hint, size::SECONDARY, Tone::Dim)));
+        }
     }
     for action in &view.actions {
         let action = match action {
@@ -348,6 +351,9 @@ pub(super) fn layout_task(
             "s/fields/status".to_string(),
             Block::Choice { field: Field::Status, options, tones, selected: Some(0), statuses },
         ));
+        if let Some(hint) = view.done_hint {
+            fields.push(("s/fields/status/hint".to_string(), text_block(hint, size::SECONDARY, Tone::Dim)));
+        }
         let selected = view.priority.and_then(|p| Priority::ALL.iter().position(|q| *q == p));
         fields.push((
             "s/fields/priority".to_string(),

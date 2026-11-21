@@ -84,6 +84,8 @@ pub struct InspectorView {
     pub merge_note: Option<String>,
     /// The task's own status; none for an agent.
     pub status: Option<Status>,
+    /// Why done is not among the moves, under the status dropdown ([`done_hint`]).
+    pub done_hint: Option<&'static str>,
     /// The task's priority; none for an agent.
     pub priority: Option<Priority>,
     /// The task's risk grade; none for an agent, or a task with none.
@@ -195,17 +197,34 @@ pub fn pr_panel(run: &RunRecord) -> Option<PrPanel> {
     })
 }
 
-/// The statuses a task can be moved to by hand from the panel: any the task can go to next, but not cancelled (its
-/// own action) and, on the factory's tasks, not done: the factory closes those once their PR merges. Approving one is
-/// the human gate, which the merger merges after (`docs/factory/review.md`).
+/// The statuses a task can be moved to by hand from the panel: any the engine lets a person move it to next
+/// (`docs/factory/ui.md#status-moves-a-person-can-make`), but not cancelled (its own action) and not done for a factory
+/// task in progress, whose run may be going. Done on a factory task whose PR is open leaves the PR open, which the
+/// merge note says; approving one instead is the human gate, which the merger merges after (`docs/factory/review.md`).
 pub(super) fn status_moves(current: Status, factory: bool) -> Vec<Action> {
     Status::ALL
         .into_iter()
         .filter(|to| *to != current && *to != Status::Cancelled && current.can_transition_to(*to))
-        .filter(|to| !factory || *to != Status::Done)
+        .filter(|to| !(factory && current == Status::InProgress && *to == Status::Done))
         .map(Action::Status)
         .collect()
 }
+
+/// Why done is not among a task's moves, said under the status dropdown, when a person would look for it there: the
+/// engine has no step from waiting for an answer to done, and a factory task in progress may have a run going.
+pub fn done_hint(status: Status, factory: bool) -> Option<&'static str> {
+    match (status, factory) {
+        (Status::NeedsInput, false) => Some("To finish it, move it to Open, then to Done."),
+        (Status::NeedsInput, true) => {
+            Some("To finish it, set it aside, then mark it Done. Moving it to Open may queue it for the factory again.")
+        }
+        (Status::InProgress, true) => Some("A run is going: mark it Done once it stops."),
+        _ => None,
+    }
+}
+
+/// What the merge note adds while the PR is open and the task could be marked done by hand.
+const DONE_LEAVES_PR_OPEN: &str = "Marking it Done here leaves the PR open.";
 
 /// What a button that sets a task aside says over it.
 pub const SET_ASIDE_HINT: &str = "Stop the factory working this; it stays open and ungraded until you grade it again";
@@ -269,6 +288,7 @@ pub fn build(
                 pr: None,
                 merge_note: None,
                 status: None,
+                done_hint: None,
                 priority: None,
                 grade: None,
                 actions: vec![Action::Revert(1)],
@@ -313,6 +333,9 @@ pub fn build(
                 .collect();
 
             let pr = run.as_ref().and_then(pr_panel);
+            let moves = status_moves(status, is_factory);
+            let pr_open = pr.as_ref().is_some_and(|p| p.state == "open");
+            let done_here = pr_open && moves.contains(&Action::Status(Status::Done));
             let merge_note = (is_factory && !status.is_closed()).then(|| match &pr {
                 Some(p) if p.state == "open" && status == Status::Approved => {
                     "Approved: the merger merges the PR, and the factory closes the task once it has.".to_string()
@@ -326,6 +349,7 @@ pub fn build(
                 Some(_) => "The PR is merged; the factory is closing the task.".to_string(),
                 None => "No PR yet; the factory finishes the task when its PR merges.".to_string(),
             });
+            let merge_note = merge_note.map(|n| if done_here { format!("{n} {DONE_LEAVES_PR_OPEN}") } else { n });
 
             let mut actions = Vec::new();
             if holder.is_some() {
@@ -334,7 +358,7 @@ pub fn build(
             if status != Status::Cancelled && status.can_transition_to(Status::Cancelled) {
                 actions.push(Action::Cancel);
             }
-            actions.extend(status_moves(status, is_factory));
+            actions.extend(moves);
             actions.extend(questions.iter().map(|q| Action::Resolve(q.id.clone())));
             // Among a parked factory task's actions; the answer form offers it too.
             if is_factory && status == Status::NeedsInput {
@@ -354,6 +378,7 @@ pub fn build(
                 pr,
                 merge_note,
                 status: Some(status),
+                done_hint: done_hint(status, is_factory),
                 priority: Some(task.priority),
                 grade: task.grade,
                 actions,
@@ -710,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_factory_task_shows_its_pr_and_gates_and_has_no_path_to_done() {
+    fn a_factory_task_shows_its_pr_and_gates_and_can_be_marked_done_leaving_its_pr_open() {
         let f = fixture();
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert_eq!(v.title, "TRAIL-7 do it");
@@ -723,8 +748,10 @@ mod tests {
             (vec!["checks".into(), "ci".into()], vec!["agent_review".into()], Grade::new(2))
         );
         // The fixture's PR waits on agent review, not on a person.
-        assert!(v.merge_note.unwrap().contains("Merge on GitHub"));
-        assert!(!v.actions.contains(&Action::Status(Status::Done)), "the factory closes its tasks");
+        let note = v.merge_note.unwrap();
+        assert!(note.contains("Merge on GitHub") && note.ends_with(DONE_LEAVES_PR_OPEN), "{note}");
+        assert!(v.actions.contains(&Action::Status(Status::Done)), "a person may finish it by hand (TRAIL-1618)");
+        assert_eq!(v.done_hint, None);
         assert_eq!(v.questions.len(), 1);
         for want in [Action::Release, Action::Cancel, Action::Undo, Action::Revert(1), Action::Resolve(sid("c1"))] {
             assert!(v.actions.contains(&want), "{want:?}");
@@ -752,14 +779,59 @@ mod tests {
         t7.metadata["factory"]["merge"]["waiting"] = json!(["human"]);
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert!(v.actions.contains(&Action::Status(Status::Approved)), "{:?}", v.actions);
-        assert!(!v.actions.contains(&Action::Status(Status::Done)));
+        assert!(v.actions.contains(&Action::Status(Status::Done)));
         assert!(v.merge_note.unwrap().starts_with("Waiting for you"));
 
         let t7 = f.tasks.iter_mut().find(|t| t.key.0 == "TRAIL-7").unwrap();
         t7.status = Status::Approved;
         let v = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
         assert!(v.merge_note.unwrap().starts_with("Approved: the merger merges"));
-        assert!(!v.actions.contains(&Action::Status(Status::Done)));
+        assert!(v.actions.contains(&Action::Status(Status::Done)), "approved goes straight to done");
+    }
+
+    #[test]
+    fn done_is_offered_wherever_a_person_can_reach_it_and_said_why_where_not() {
+        let moves = |status, factory| status_moves(status, factory);
+        for factory in [false, true] {
+            for from in [Status::Open, Status::InReview, Status::Approved] {
+                assert!(moves(from, factory).contains(&Action::Status(Status::Done)), "{from:?}, factory {factory}");
+                assert_eq!(done_hint(from, factory), None);
+            }
+            // The engine has no step from waiting for an answer to done.
+            assert!(!moves(Status::NeedsInput, factory).contains(&Action::Status(Status::Done)));
+            assert!(done_hint(Status::NeedsInput, factory).is_some());
+        }
+        assert!(done_hint(Status::NeedsInput, true).unwrap().contains("set it aside"));
+        assert!(done_hint(Status::NeedsInput, false).unwrap().contains("Open, then to Done"));
+        assert!(moves(Status::InProgress, false).contains(&Action::Status(Status::Done)));
+        assert!(!moves(Status::InProgress, true).contains(&Action::Status(Status::Done)), "its run may be going");
+        assert!(done_hint(Status::InProgress, true).unwrap().contains("run is going"));
+        assert_eq!(done_hint(Status::InProgress, false), None);
+    }
+
+    #[test]
+    fn the_done_hint_sits_under_the_status_dropdown_in_the_panel_and_the_modal() {
+        let mut f = fixture();
+        f.tasks[0].status = Status::NeedsInput;
+        let view = build(f.input(), &latest(), &Subject::Task(sid("t7")), Fetched::default()).unwrap();
+        let hint = view.done_hint.expect("a parked factory task says how to finish it");
+        let says = |plan: &Plan, key: &str| {
+            plan.iter()
+                .flat_map(|(_, items)| items)
+                .any(|(k, b)| k == key && matches!(b, Block::Text { text, .. } if text == hint))
+        };
+        let panel = layout(&view, true, "offline", 0, &[], &|_| None);
+        let keys: Vec<&str> = panel.iter().flat_map(|(_, items)| items).map(|(k, _)| k.as_str()).collect();
+        let at = keys.iter().position(|k| *k == "move").expect("the dropdown");
+        assert_eq!(keys[at + 1], "move/hint");
+        assert!(says(&panel, "move/hint"));
+        let facts = view.task.clone().unwrap();
+        let (_, side) = layout_task(&view, &facts, true, "offline", &[], None, &|_| None);
+        assert!(says(&side, "s/fields/status/hint"));
+        // Offline there is no dropdown to explain.
+        assert!(!says(&layout(&view, false, "offline", 0, &[], &|_| None), "move/hint"));
+        let (_, side) = layout_task(&view, &facts, false, "offline", &[], None, &|_| None);
+        assert!(!says(&side, "s/fields/status/hint"));
     }
 
     #[test]
