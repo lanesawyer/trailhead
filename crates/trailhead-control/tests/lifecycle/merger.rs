@@ -1348,6 +1348,43 @@ async fn a_failed_marker_write_still_parks_a_pr_merged_before_approval() {
     assert_eq!(r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count(), 1);
 }
 
+/// TRAIL-1522: a parked task is claimed where it is, so a refused finish plus a failed marker write must still hand it
+/// back parked and unheld, not leave it in progress for its lease to lapse to open and be closed as done.
+#[tokio::test]
+async fn a_failed_marker_write_re_parks_a_claimed_needs_input_task_merged_before_approval() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 3, "docs/a.md").await;
+    let head = CodeHost::head(&r.codehost, &pr).await.unwrap();
+    // Parked for a closed PR, whose lease has lapsed; a person then reopens and merges it by hand.
+    r.codehost.close(&pr);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
+    r.tracker.lapse_lease(&key);
+    r.codehost.merge(&pr, &head).await.unwrap();
+    let asked = |r: &Rig| r.tracker.comments(&key).iter().filter(|c| c.kind == "question").count();
+    let before = asked(&r);
+
+    // The merge record is the first report; the unapproved-merge marker is the second.
+    r.tracker.fail_after("factory", TrackerOp::Report, 1, 1);
+    // The claim succeeds, core then refuses the finish, every time (as for a person's merge the factory may not close).
+    r.tracker.fail_next_with(
+        "factory",
+        TrackerOp::Finish,
+        2,
+        trailhead_factory::Error::Forbidden("needs human review".into()),
+    );
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "parked again, not left in progress under the factory");
+    assert_eq!(asked(&r), before + 1);
+
+    // The asker's lease lapses; a further pass parks it again (the marker now written) rather than closing it as done.
+    r.tracker.lapse_lease(&key);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput, "still parked, not closed as done");
+}
+
 /// TRAIL-1220: the stale check and the gates both ask whether an updated head still carries the verdict; the host is
 /// asked once, and not again while the head stays where it is.
 #[tokio::test]
