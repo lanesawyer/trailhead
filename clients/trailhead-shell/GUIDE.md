@@ -150,6 +150,8 @@ store.remove(MY_APP, "draft");
 
 - **What it is for:** what must outlive a switch to another app or a restart of the shell: the view the app was on, a
   filter, an unsent draft, a count of the reader's own. The shell keeps the app last shown there too.
+- **When it is saved:** after the frame a value changed in, and once more when the shell restarts onto a newer
+  build (the update notice on the rail), so nothing kept is lost to a restart.
 - **What it is not for:** the app's data. That lives on the server, as tasks or (later) in the app data store. Losing
   this file loses nothing a person cannot put back in a moment, and a write that fails is logged and tried again on
   the next change, never worth stopping the shell for.
@@ -465,7 +467,10 @@ theme picked, in `theme`, and each app's `LocalStore`, under `apps/`); `NetConfi
 Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `Shell::run` opens the window (titled Trailhead, with the app
 id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugin` with every app's `paint` applied and
 its `UiPlugin`, then the `ShellPlugin` with the apps, and runs until the window is closed. In the apps repo, its
-`shell/` crate is the same binary with that repo's apps.
+`shell/` crate is the same binary with that repo's apps, which the server's builder builds after each merge and
+`trailhead app` runs. Started that way (`TRAILHEAD_SHELL_BUILD` names the build), the shell shows an update notice at
+the foot of the rail when a newer build is ready, and pressing it ends `Shell::run` with the restart code the launcher
+answers; a binary needs nothing of its own for this, as long as it ends by calling `Shell::run`.
 
 ## 10. Views
 

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};
+use trailhead_model::shell::BUILD_ENV;
 use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
 
 use crate::icon::{IconUiPlugin, primary_window};
@@ -90,11 +91,15 @@ impl Shell {
         self
     }
 
-    /// Opens the window and runs until it is closed.
+    /// Opens the window and runs until it is closed. A shell the launcher started ([`BUILD_ENV`] names its build)
+    /// offers to restart onto a newer build. An exit with an error code ends the process with that code, since the
+    /// launcher reads it ([`RESTART_CODE`](trailhead_model::shell::RESTART_CODE) asks for the newest build) and a
+    /// binary's `main` drops what this returns.
     pub fn run(self) -> AppExit {
         let theme_file = ThemeFile(self.dir.join("theme"));
-        let apps = self.apps.store_in(self.dir.join("apps")).windowed();
-        App::new()
+        let build = std::env::var(BUILD_ENV).ok().filter(|b| !b.is_empty());
+        let apps = self.apps.built_as(build).store_in(self.dir.join("apps")).windowed();
+        let exit = App::new()
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
@@ -108,7 +113,11 @@ impl Shell {
             .add_plugins(IconUiPlugin)
             .add_plugins(apps)
             .add_systems(Update, keep_theme)
-            .run()
+            .run();
+        if let AppExit::Error(code) = exit {
+            std::process::exit(code.get().into());
+        }
+        exit
     }
 }
 

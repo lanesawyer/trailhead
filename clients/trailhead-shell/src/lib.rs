@@ -46,6 +46,7 @@ mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
 pub mod testing;
+pub mod update;
 pub mod view;
 mod window;
 
@@ -128,6 +129,8 @@ pub struct ShellPlugin {
     connection: Option<(NetConfig, Option<String>)>,
     /// A user token to sign in with at startup.
     token: Option<String>,
+    /// The build the launcher started this shell from, which turns on the update notice ([`update`]).
+    build: Option<String>,
 }
 
 impl ShellPlugin {
@@ -180,6 +183,14 @@ impl ShellPlugin {
         self.token = token;
         self
     }
+
+    /// Says which build the launcher started this shell from. While connected, the shell then offers to restart
+    /// onto a newer one ([`update`]); without it there is no notice.
+    #[must_use]
+    pub fn built_as(mut self, build: Option<String>) -> Self {
+        self.build = build;
+        self
+    }
 }
 
 impl Plugin for ShellPlugin {
@@ -207,6 +218,9 @@ impl Plugin for ShellPlugin {
                     send.write(SendNet(NetCommand::Login(token.clone())));
                 });
             }
+        }
+        if let Some(build) = &self.build {
+            app.add_plugins(update::UpdatePlugin(build.clone()));
         }
         for shell_app in &self.apps {
             shell_app.build(app);

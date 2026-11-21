@@ -209,6 +209,7 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 | `BesideSidebar` | component | On a page beside the sidebar. | |
 | `rail` | `rail() -> impl Scene` | The strip of apps down the left edge of a window that holds several. The Trailhead shell draws it; an app never does. | |
 | `rail_item` | `rail_item(icon: Icon, name: Into<String>) -> impl Scene` | An app's button on the rail. | `NavItem`. |
+| `rail_foot` | `rail_foot() -> impl Scene` | The bottom of the rail, for what the window says about itself rather than about an app (the shell's update ready to restart onto): `tool_button`s, spawned after the rail items. The shell draws it; an app never does. | Hide or show the foot with `set_display`. |
 | `beside_rail` | `beside_rail() -> Node` | The whole window right of the rail, for an app with no sidebar. Put `BesideRail` on the page too. With no rail it starts at the window's left edge. | The kit moves it. |
 | `BesideRail` | component | On a page beside the rail. | |
 | `SidebarWidth` | resource: `SidebarWidth::new(width: f32)`, `get(self) -> f32` | How wide the sidebar is, held between `extent::SIDEBAR_MIN_WIDTH` and `SIDEBAR_MAX_WIDTH`. Set it to restore a saved width. | |

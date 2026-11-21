@@ -10,7 +10,7 @@
 //! [`beside_sidebar`] and carry [`BesideSidebar`], so they follow its width and the two never overlap.
 //!
 //! A window that holds several apps has a [`rail`] down its left edge, a narrow strip with a [`rail_item`] for each
-//! app. While there is one, the sidebar and the pages beside it start where the rail ends; an app with no sidebar
+//! app, and a [`rail_foot`] at its bottom for what the window says about itself. While there is one, the sidebar and the pages beside it start where the rail ends; an app with no sidebar
 //! fills [`beside_rail`] and carries [`BesideRail`].
 
 use bevy::ecs::lifecycle::HookContext;
@@ -249,6 +249,21 @@ pub fn rail_item(icon: Icon, name: impl Into<String>) -> impl Scene {
         @tool_button(icon, name, ButtonKind::Plain)
         Node { flex_shrink: { 0.0_f32 } }
         NavItem
+    }
+}
+
+/// The bottom of a [`rail`], pushed down to its foot: what the window says about itself rather than about an app (an
+/// update ready to restart onto). Spawn it after the [`rail_item`]s, then its contents as its children: a
+/// [`tool_button`] each, hidden with [`set_display`](crate::set_display) on the foot while there is nothing to say.
+pub fn rail_foot() -> impl Scene {
+    bsn! {
+        Node {
+            margin: { UiRect::top(Val::Auto) },
+            flex_shrink: { 0.0_f32 },
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: { px(space::ROWS) },
+        }
     }
 }
 

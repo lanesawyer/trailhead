@@ -65,25 +65,34 @@ fn file_name(app: AppId) -> String {
     format!("{}.json", app.0)
 }
 
-/// Writes the files of the apps that changed something. A write that fails is logged and tried again the next time
-/// that app changes something: this is a convenience, and never worth stopping the shell for.
-pub(crate) fn save(mut store: ResMut<LocalStore>) {
-    if store.unsaved.is_empty() {
-        return;
-    }
-    let unsaved: Vec<&'static str> = store.unsaved.drain().collect();
-    let Some(dir) = store.dir.clone() else { return };
-    for app in unsaved {
-        let text = serde_json::to_string_pretty(&store.apps[app]).unwrap_or_default();
-        let path = dir.join(file_name(AppId(app)));
-        // Written beside the file and moved over it, so a crash mid-write leaves the old one whole.
-        let beside = path.with_extension("json.new");
-        let written = std::fs::create_dir_all(&dir)
-            .and_then(|()| std::fs::write(&beside, text))
-            .and_then(|()| std::fs::rename(&beside, &path));
-        if let Err(e) = written {
-            warn!(app, error = %e, "couldn't save what the app keeps on this machine");
+impl LocalStore {
+    /// Writes the files of the apps that changed something. A write that fails is logged and tried again the next
+    /// time that app changes something: this is a convenience, and never worth stopping the shell for.
+    pub(crate) fn flush(&mut self) {
+        if self.unsaved.is_empty() {
+            return;
         }
+        let unsaved: Vec<&'static str> = self.unsaved.drain().collect();
+        let Some(dir) = self.dir.clone() else { return };
+        for app in unsaved {
+            let text = serde_json::to_string_pretty(&self.apps[app]).unwrap_or_default();
+            let path = dir.join(file_name(AppId(app)));
+            // Written beside the file and moved over it, so a crash mid-write leaves the old one whole.
+            let beside = path.with_extension("json.new");
+            let written = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&beside, text))
+                .and_then(|()| std::fs::rename(&beside, &path));
+            if let Err(e) = written {
+                warn!(app, error = %e, "couldn't save what the app keeps on this machine");
+            }
+        }
+    }
+}
+
+/// Saves what changed this frame.
+pub(crate) fn save(mut store: ResMut<LocalStore>) {
+    if !store.unsaved.is_empty() {
+        store.flush();
     }
 }
 
