@@ -75,10 +75,14 @@ app hangs everything it draws on its own value:
   logic (in `build`) is not gated, so its state stays current while another app is shown and coming back needs no
   reload.
 - **Views are a sub-state.** An app with more than one view makes them a sub-state of `ActiveApp`, so leaving the app
-  leaves the view, which tears its page down with no code of the app's own:
+  leaves the view, which tears its page down with no code of the app's own. Added with `add_remembered_view`, the app
+  comes back to the view it was on, after a switch to another app and after a restart:
 
   ```rust
-  #[derive(SubStates, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+  use serde::{Deserialize, Serialize};
+  use trailhead_shell::RememberView;
+
+  #[derive(SubStates, Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
   #[source(ActiveApp = ActiveApp(MY_APP))]
   pub enum View {
       #[default]
@@ -86,14 +90,22 @@ app hangs everything it draws on its own value:
       Detail,
   }
 
+  // In build, so it holds headless too:
+  app.add_remembered_view::<View>(MY_APP);
   // In build_ui:
-  app.add_sub_state::<View>()
-      .add_systems(OnEnter(View::List), spawn_list)
-      .add_systems(OnExit(View::List), despawn_list);
+  app.add_systems(OnEnter(View::List), spawn_list).add_systems(OnExit(View::List), despawn_list);
   ```
 
-  This is how Lookout's `View` works (`clients/trailhead-lookout/src/board/mod.rs`). Coming back to the app starts on
-  the sub-state's default view; to come back where it was, keep the view in the `LocalStore` and set it on entering.
+  `add_remembered_view::<V>(app_id)` adds the sub-state (do not also call `add_sub_state`), keeps the view in the
+  `LocalStore` under `trailhead_shell::view::VIEW` whenever it changes, and sets the kept one just before the
+  transition that shows the app is applied, so it is the first view whose `OnEnter` runs: the default is never drawn
+  on the way. One such sub-state an app. A view that needs more than its variant to draw (which project a project page
+  shows) keeps that part in the `LocalStore` itself and reads it back in `build`.
+
+  Do not restore a view by hand. Set from `OnEnter(ActiveApp(..))`, the default view has already been entered (Bevy
+  creates the sub-state in the same transition, before that schedule runs) and is drawn for a frame; a `NextState`
+  set before the sub-state exists is taken and dropped. Lookout's `View` (`clients/trailhead-lookout/src/board/mod.rs`)
+  is a plain sub-state that starts on the board each time.
 - **Observers are not gated.** A system takes `run_if`; an observer does not, and one added in `build` or `build_ui`
   hears every event of its type while another app is shown. Each observer checks that the entity is its own, by a
   marker only the app spawns:

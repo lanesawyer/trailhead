@@ -8,6 +8,7 @@
 //!   switched away from is torn down, and built again when it is switched back to.
 //! - Its systems run under `in_state(ActiveApp(ID))`.
 //! - Its own views are a sub-state of [`ActiveApp`], so leaving the app leaves the view, which tears that down too.
+//!   Added with [`RememberView::add_remembered_view`], the app comes back to the view it was on.
 //! - What must outlive a switch or a restart (the view it was on, an unsent draft) goes in the [`LocalStore`].
 //!
 //! An app draws beside the shell's rail of apps: it fills `trailhead_ui::beside_rail`, or has a
@@ -45,10 +46,12 @@ mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
 pub mod testing;
+pub mod view;
 mod window;
 
 pub use rail::{OpenApp, Rail};
 pub use store::LocalStore;
+pub use view::RememberView;
 pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
 
 /// An app's name in code: what its state, its local store and its files are keyed by. Lowercase, and never changed

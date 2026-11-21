@@ -59,7 +59,7 @@ Every app is written against it, so a change to it later is a change to every ap
 
 What the spike found that the shell still has to take on:
 
-- **Coming back to an app starts on its first view.** Lookout should keep its view in the `LocalStore`.
+- **Coming back to an app starts on its first view.** Built (TRAIL-1596): `add_remembered_view` keeps an app's view sub-state in the `LocalStore` and enters the kept view first. Lookout's board view does not use it yet.
 - **An observer is not gated by the state.** A system takes `run_if(in_state(..))`; an observer added in `build` hears events while another app is shown, so each one checks that the entity is its own. The shell should offer a way to say it once.
 - **Apps need the shell's test helpers** (a windowed test app, a stand-in second app). Built (TRAIL-1596): `trailhead_shell::testing` behind `test-support`, which no longer brings the server; that is `test-server`.
 
