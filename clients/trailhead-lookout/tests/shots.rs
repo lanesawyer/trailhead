@@ -19,13 +19,13 @@ use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot};
 use trailhead_shell::testing::{fill, set_connection, settle};
 use trailhead_shell::{ActiveApp, ShellPlugin};
-use trailhead_ui::ModalRoot;
+use trailhead_ui::{ModalRoot, TextSize};
 use trailhead_wire::ui::RepoSnapshot;
 
 /// Saves the view as it is now, and fails on a frame with nothing drawn in it.
 fn save(shot: &mut ShotApp, view: &str) {
     let picture = shot.picture();
-    let name = format!("lookout-{view}-{}", shot.options().theme.word());
+    let name = shot.options().name("lookout", view);
     assert_eq!(picture.size(), shot.options().pixels(), "{name} is the size asked for");
     assert!(picture.colors() > 16, "{name} has only {} colors: nothing was drawn", picture.colors());
     println!("{}", picture.save(&name).display());
@@ -151,11 +151,17 @@ fn shots() {
     save(&mut shot, "board");
     shot.set_theme(ShotTheme::Light);
     save(&mut shot, "board");
+    // At 150%, as Ctrl and = leave it, in the same window: fewer columns fit, and the board scrolls across to them.
+    shot.set_options(ShotOptions { text_size: TextSize::nearest(150), ..board });
+    save(&mut shot, "board");
     shot.set_options(ShotOptions::default());
 
     shot.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t3")));
     settle(&mut shot);
     save(&mut shot, "inspector");
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "inspector");
+    shot.set_text_size(TextSize::DEFAULT);
     shot.world_mut().resource_mut::<Selection>().0 = None;
     settle(&mut shot);
 
@@ -178,5 +184,7 @@ fn shots() {
     // Wide enough for the camps and both columns of waypoints.
     shot.set_size((1440, 800));
     go(&mut shot, View::Map);
+    save(&mut shot, "map");
+    shot.set_text_size(TextSize::nearest(150));
     save(&mut shot, "map");
 }

@@ -10,8 +10,8 @@
 //!
 //! It needs a render adapter. Any GPU will do; with none, Mesa's lavapipe renders in software, picked with
 //! `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`. A picture is the same byte for byte from run to run on the
-//! same renderer: time is stepped by a fixed amount a frame, the desktop is never asked for its theme, and the size and
-//! scale are fixed. Different renderers differ by a level or two a channel, so a before and an after to compare must
+//! same renderer: time is stepped by a fixed amount a frame, the desktop is never asked for its theme, and the size,
+//! scale and text size are fixed. Different renderers differ by a level or two a channel, so a before and an after to compare must
 //! come from the same one.
 
 use std::collections::HashSet;
@@ -33,7 +33,7 @@ use bevy::time::TimeUpdateStrategy;
 use bevy::ui::IsDefaultUiCamera;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
-use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
+use trailhead_ui::{Appearance, TextSize, ThemeChoice, ThemePlugin, UiPlugin};
 
 use super::TestConnection;
 use crate::ShellPlugin;
@@ -81,18 +81,32 @@ impl ShotTheme {
 pub struct ShotOptions {
     /// The window's size in logical pixels: what the views lay out in.
     pub size: (u32, u32),
-    /// Physical pixels to a logical one; the picture is `size` times this.
+    /// Physical pixels to a logical one, as a screen's scale is; the picture is `size` times this.
     pub scale: f32,
     pub theme: ShotTheme,
+    /// How big the UI is drawn, as a person sets it with Ctrl and `=`: the views lay out in `size` divided by it, and
+    /// the picture stays `size` times `scale`.
+    pub text_size: TextSize,
 }
 
 impl Default for ShotOptions {
     fn default() -> Self {
-        ShotOptions { size: (1280, 800), scale: 1.0, theme: ShotTheme::Dark }
+        ShotOptions { size: (1280, 800), scale: 1.0, theme: ShotTheme::Dark, text_size: TextSize::DEFAULT }
     }
 }
 
 impl ShotOptions {
+    /// A shot's name: `<app>-<view>-<theme>`, with the text size after the view when it isn't 100%
+    /// (`lookout-board-150-dark`), so a view's pictures at each size sort together.
+    pub fn name(&self, app: &str, view: &str) -> String {
+        let theme = self.theme.word();
+        if self.text_size.is_default() {
+            format!("{app}-{view}-{theme}")
+        } else {
+            format!("{app}-{view}-{}-{theme}", self.text_size.percent())
+        }
+    }
+
     /// The picture's size in pixels.
     pub fn pixels(&self) -> (u32, u32) {
         let scaled = |n: u32| (n as f32 * self.scale).round() as u32;
@@ -212,6 +226,7 @@ pub fn shot_with<M>(shell: ShellPlugin, options: ShotOptions, plugins: impl Plug
     // The shell spawns its camera at startup, aimed at the window there isn't.
     step(&mut app);
     let target = target_image(&mut app, &options);
+    app.insert_resource(options.text_size);
     let mut shot = ShotApp { app, target, options };
     shot.aim();
     super::settle(&mut shot.app);
@@ -238,10 +253,13 @@ impl ShotApp {
         self.options
     }
 
-    /// Draws as `options` say from the next picture on: another theme, size or scale.
+    /// Draws as `options` say from the next picture on: another theme, size, scale or text size.
     pub fn set_options(&mut self, options: ShotOptions) {
         if options.theme != self.options.theme {
             self.app.world_mut().resource_mut::<Appearance>().choice = options.theme.choice();
+        }
+        if options.text_size != self.options.text_size {
+            self.app.insert_resource(options.text_size);
         }
         if (options.size, options.scale) != (self.options.size, self.options.scale) {
             let old = std::mem::replace(&mut self.target, target_image(&mut self.app, &options));
@@ -260,6 +278,11 @@ impl ShotApp {
     /// Lays out in `size` from the next picture on.
     pub fn set_size(&mut self, size: (u32, u32)) {
         self.set_options(ShotOptions { size, ..self.options });
+    }
+
+    /// Draws the UI at `text_size` from the next picture on.
+    pub fn set_text_size(&mut self, text_size: TextSize) {
+        self.set_options(ShotOptions { text_size, ..self.options });
     }
 
     fn render_target(&self) -> RenderTarget {

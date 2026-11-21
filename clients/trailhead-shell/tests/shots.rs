@@ -14,7 +14,7 @@ use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle};
 use trailhead_shell::update::{Newer, UpdateReady};
 use trailhead_shell::{ActiveApp, AppId, AskButton, Manifest, ShellApp, ShellPlugin, UpdateButton};
-use trailhead_ui::{BesideRail, Icon, Surface, beside_rail, size, space, text, text_dim};
+use trailhead_ui::{BesideRail, Icon, Surface, TextSize, beside_rail, size, space, text, text_dim};
 
 const NOTES: AppId = AppId("notes");
 
@@ -55,7 +55,7 @@ fn shell() -> ShellPlugin {
 /// Saves the view as it is now, and fails on a frame with nothing drawn in it.
 fn save(shot: &mut ShotApp, view: &str) {
     let picture = shot.picture();
-    let name = format!("shell-{view}-{}", shot.options().theme.word());
+    let name = shot.options().name("shell", view);
     assert_eq!(picture.size(), shot.options().pixels(), "{name} is the size asked for");
     assert!(picture.colors() > 16, "{name} has only {} colors: nothing was drawn", picture.colors());
     println!("{}", picture.save(&name).display());
@@ -110,6 +110,16 @@ fn shots() {
     save(&mut shot, "ask");
     close_modals(&mut shot);
 
+    press::<UpdateButton>(&mut shot);
+    save(&mut shot, "update");
+    close_modals(&mut shot);
+
+    // The same at 150%, as Ctrl and = leave it.
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "rail");
+    press::<AskButton>(&mut shot);
+    save(&mut shot, "ask");
+    close_modals(&mut shot);
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
     drop(shot);

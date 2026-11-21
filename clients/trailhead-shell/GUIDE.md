@@ -434,10 +434,15 @@ else); the example app's `tests/shots.rs` is the one to copy.
    it. Nothing comes from a server or the machine.
 4. Take `shot.picture()`, assert it is the size asked for (`picture.size() == shot.options().pixels()`) and holds more
    than a handful of colors (`picture.colors() > 16`, so a blank frame fails), and `picture.save(name)`. The name is
-   `<app>-<view>-<theme>` (`example-page-dark`, `lookout-board-light`), with `shot.options().theme.word()` for the
-   theme. It is written to `SHOTS_DIR`, or `shots` in the target directory.
-5. Change the view, or `set_theme(ShotTheme::Light)`, `set_size((w, h))` or `set_options(..)`, and take the next. Pick
-   a size per view that shows all of it: a board wide enough for its columns, a page tall enough for its form.
+   `<app>-<view>-<theme>` (`example-page-dark`, `lookout-board-light`), with the text size after the view when it isn't
+   100% (`lookout-board-150-dark`): `shot.options().name("lookout", "board")` makes it. It is written to `SHOTS_DIR`,
+   or `shots` in the target directory.
+5. Change the view, or `set_theme(ShotTheme::Light)`, `set_size((w, h))`, `set_text_size(TextSize::nearest(150))` or
+   `set_options(..)`, and take the next. Pick a size per view that shows all of it: a board wide enough for its
+   columns, a page tall enough for its form. `ShotOptions::text_size` is how big the UI is drawn, as a person sets it
+   with Ctrl and `=`; `scale` is the screen's own, which makes the picture larger instead. Take an app's busiest views
+   at 150% too, and look at each beside its 100% twin: everything larger, nothing cut off, overlapping or left at the
+   old size.
 
 Each view is named, and set up from fixtures, so the same name shows the same thing before and after a change. A
 picture is the same byte for byte from run to run on one renderer (time steps by a fixed amount a frame, and the
