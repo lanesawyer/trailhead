@@ -1,7 +1,9 @@
-//! Lookout drawn to PNGs, named `lookout-<view>-<theme>`: its main views, each set up from fixtures. `#[ignore]`d,
+//! Lookout drawn to PNGs, named `lookout-<view>-<theme>`: its main views, each set up from fixtures, and a task's
+//! pictures in the inspector and the large view (`pictures`), from PNGs drawn in memory. `#[ignore]`d,
 //! since it needs a render adapter: `mise run shots` runs every app's, and says where the pictures went.
 
 use bevy::prelude::*;
+use bevy::ui_widgets::Activate;
 use serde_json::{Value, json};
 use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
@@ -17,6 +19,7 @@ use trailhead_lookout::peak::MapMode;
 use trailhead_lookout::peak::orbit::Orbit;
 use trailhead_lookout::peak::place;
 use trailhead_lookout::peak::terrain::{Peak, SEED, Trail};
+use trailhead_lookout::pictures::{OpenFolds, PictureBytes, WantsPicture};
 use trailhead_lookout::settings::{FACTORY_SETTINGS, LOGS_SETTINGS};
 use trailhead_shell::connection::Connection;
 use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json, user_json};
@@ -25,7 +28,7 @@ use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot};
 use trailhead_shell::testing::{fill, set_connection, settle};
 use trailhead_shell::{ActiveApp, ShellPlugin};
-use trailhead_ui::{ModalRoot, TextSize};
+use trailhead_ui::{ButtonGroup, ModalRoot, TextSize};
 use trailhead_wire::ui::RepoSnapshot;
 
 /// Saves the view as it is now, and fails on a frame with nothing drawn in it.
@@ -348,4 +351,142 @@ fn clicking_a_hiker_opens_its_task_and_dragging_turns_the_camera() {
     settle(&mut shot);
     press_and_release(&mut shot, other, Vec2::ZERO);
     assert_eq!(shot.world().resource::<Selection>().0, Some(Subject::Task(sid("t7"))), "with the modal shut it opens");
+}
+
+/// A small window's screenshot, drawn in memory: a header bar, a sidebar and rows, and in the after a new row in the
+/// accent and a wider sidebar, so the two differ where a person would look.
+fn screen(after: bool, tint: [u8; 3]) -> Vec<u8> {
+    let (w, h) = (480u32, 300u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    let sidebar = if after { 140 } else { 110 };
+    for y in 0..h {
+        for x in 0..w {
+            let px = if y < 36 {
+                tint
+            } else if x < sidebar {
+                [44, 48, 56]
+            } else if (60..280).contains(&y) && (y - 60) % 44 < 30 && x > sidebar + 20 && x < w - 20 {
+                let row = (y - 60) / 44;
+                if after && row == 2 { [232, 140, 60] } else { [70, 76, 88] }
+            } else {
+                [30, 32, 38]
+            };
+            rgba.extend([px[0], px[1], px[2], 255]);
+        }
+    }
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header().and_then(|mut wr| wr.write_image_data(&rgba)).expect("encoding into memory");
+    bytes
+}
+
+fn picture_json(id: &str, name: &str, role: Option<&str>, set: &str, sha: &str, at_n: u8) -> Value {
+    trailhead_shell::fixture::attachment_json(json!({
+        "id": id, "task_id": "t4", "name": name, "role": role, "set": set, "sha256": sha,
+        "width": 480, "height": 300, "created_at": at(at_n),
+    }))
+}
+
+/// What the server answers for a picture's hash.
+type Served = (&'static str, Result<Vec<u8>, String>);
+
+/// TRAIL-4's pictures: a run with a changed view, a new one, a removed one and an unchanged one, and an older run whose
+/// two pictures are one still loading and one that failed (the kit's other two states).
+fn with_pictures(mut snapshot: Snapshot) -> (Snapshot, Vec<Served>) {
+    let set = "run-0193";
+    snapshot.tasks[3]["attachments"] = json!([
+        picture_json("f1", "board", Some("before"), set, "board-before", 10),
+        picture_json("f2", "board", Some("after"), set, "board-after", 11),
+        picture_json("f3", "inbox", Some("after"), set, "inbox-after", 11),
+        picture_json("f4", "ask", Some("before"), set, "ask-before", 10),
+        picture_json("f5", "map", Some("before"), set, "map", 10),
+        picture_json("f6", "map", Some("after"), set, "map", 11),
+        picture_json("f7", "board", Some("after"), "run-0188", "old-loading", 2),
+        picture_json("f8", "inbox", Some("after"), "run-0188", "old-failed", 2),
+    ]);
+    let bytes = vec![
+        ("board-before", Ok(screen(false, [60, 90, 160]))),
+        ("board-after", Ok(screen(true, [60, 90, 160]))),
+        ("inbox-after", Ok(screen(true, [40, 130, 90]))),
+        ("ask-before", Ok(screen(false, [150, 70, 120]))),
+        ("map", Ok(screen(false, [120, 110, 60]))),
+        ("old-failed", Err("404 not_found".into())),
+    ];
+    (snapshot, bytes)
+}
+
+/// Answers every read of a picture the shot has asked for, as the server would, until none is left but the one kept
+/// loading.
+fn answer_pictures(shot: &mut ShotApp, bytes: &[Served]) {
+    for _ in 0..6 {
+        for (sha, result) in bytes {
+            let reply = PictureBytes { sha256: sha.to_string(), result: result.clone() };
+            shot.world_mut().write_message(reply);
+        }
+        settle(shot);
+    }
+}
+
+/// The thumbnail showing the picture with this hash.
+fn thumbnail(shot: &mut ShotApp, sha: &str) -> Entity {
+    let world = shot.world_mut();
+    let frame = world
+        .query::<(Entity, &WantsPicture)>()
+        .iter(world)
+        .find(|(_, w)| w.0.sha256 == sha)
+        .map(|(e, _)| e)
+        .expect("a thumbnail for it");
+    world.get::<ChildOf>(frame).expect("a thumbnail's frame is in it").parent()
+}
+
+#[test]
+#[ignore = "needs a render adapter: run with `mise run shots`"]
+fn pictures() {
+    // Tall enough for the older run under the newer one.
+    let tall = ShotOptions { size: (1280, 1300), ..ShotOptions::default() };
+    let mut shot = shot(ShellPlugin::new().with(Lookout::new()), tall);
+    set_connection(&mut shot, Connection::Live);
+    let (snapshot, bytes) = with_pictures(snapshot());
+    fill(&mut shot, snapshot);
+    // TRAIL-4's card says it has pictures.
+    save(&mut shot, "pictures-card");
+    shot.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t4")));
+    settle(&mut shot);
+    answer_pictures(&mut shot, &bytes);
+    save(&mut shot, "pictures");
+    shot.set_theme(ShotTheme::Light);
+    save(&mut shot, "pictures");
+    shot.set_theme(ShotTheme::Dark);
+
+    shot.world_mut().resource_mut::<OpenFolds>().0.insert("run-0193".into());
+    settle(&mut shot);
+    answer_pictures(&mut shot, &bytes);
+    save(&mut shot, "pictures-unchanged");
+
+    // The large view of the changed pair: side by side, then each alone in the same place.
+    let board = thumbnail(&mut shot, "board-after");
+    shot.world_mut().trigger(Activate { entity: board });
+    settle(&mut shot);
+    save(&mut shot, "picture-view");
+    let world = shot.world_mut();
+    let groups: Vec<(Entity, usize)> =
+        world.query::<(Entity, &ButtonGroup, &Children)>().iter(world).map(|(e, _, c)| (e, c.len())).collect();
+    let (shown, _) = *groups.iter().find(|(_, n)| *n == 3).expect("the pair's group: both, before, after");
+    for (index, view) in [(1, "picture-view-before"), (2, "picture-view-after")] {
+        // Pressed as a person presses it, so the group shows the choice too.
+        let option = shot.world().get::<Children>(shown).expect("the group's options")[index];
+        shot.world_mut().trigger(Activate { entity: option });
+        settle(&mut shot);
+        save(&mut shot, view);
+    }
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "picture-view-after");
+    shot.set_text_size(TextSize::DEFAULT);
+    let (fit, _) = *groups.iter().find(|(_, n)| *n == 2).expect("the group of Fit and Actual size");
+    let actual = shot.world().get::<Children>(fit).expect("the group's options")[1];
+    shot.world_mut().trigger(Activate { entity: actual });
+    settle(&mut shot);
+    save(&mut shot, "picture-view-actual");
 }
