@@ -86,6 +86,7 @@ impl Factory {
             allowed_hosts: self.allowed_hosts(),
             env: self.config.stack.env.clone(),
             credential,
+            shots: self.config.shots(),
         };
         let prior = shown.run.spend.unwrap_or_default();
         self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));

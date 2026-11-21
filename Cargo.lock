@@ -8245,6 +8245,7 @@ dependencies = [
  "trailhead-core",
  "trailhead-factory",
  "trailhead-log",
+ "trailhead-model",
  "trailhead-plugins",
  "trailhead-server",
  "trailhead-testkit",

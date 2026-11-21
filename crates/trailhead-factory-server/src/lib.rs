@@ -214,8 +214,20 @@ fn changed_without_restart(
 ) -> Vec<&'static str> {
     let now = FactoryConfig { merge: Default::default(), ..now };
     // Destructured so that a new section can't be left out of the comparison.
-    let FactoryConfig { repo, stack, checks, profiles, gates, grades, egress, compute, targets, daemon, merge: _ } =
-        started;
+    let FactoryConfig {
+        repo,
+        stack,
+        checks,
+        profiles,
+        gates,
+        grades,
+        egress,
+        compute,
+        targets,
+        daemon,
+        merge: _,
+        shots,
+    } = started;
     let changed: Vec<&'static str> = [
         ("repo", *repo != now.repo),
         ("stack", *stack != now.stack),
@@ -227,6 +239,7 @@ fn changed_without_restart(
         ("compute", *compute != now.compute),
         ("targets", *targets != now.targets),
         ("daemon", *daemon != now.daemon),
+        ("shots", *shots != now.shots),
     ]
     .into_iter()
     .filter_map(|(name, differs)| differs.then_some(name))

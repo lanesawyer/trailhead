@@ -35,8 +35,8 @@ pub use config::{
 };
 pub use daemon::{
     Check, CheckResult, Daemon, DaemonSecrets, DaemonVersion, FromDaemon, InstallHost, MISE_INSTALLER_HOSTS,
-    MISE_VERSION_HOSTS, PrepareRequest, RunReport, RunRequest, RunResult, SPRITES_GATEWAY_LIST, ToDaemon, hosts_for,
-    install_host_allowed,
+    MISE_VERSION_HOSTS, PrepareRequest, RunReport, RunRequest, RunResult, SPRITES_GATEWAY_LIST, Shots, ToDaemon,
+    hosts_for, install_host_allowed,
 };
 pub use gateway::{
     AuthScheme, GatewayConnection, GatewayConnectionInfo, GatewayRequest, GatewayResponse, GatewaySandbox,
@@ -44,7 +44,7 @@ pub use gateway::{
 };
 pub use grade::{ChangedFile, FileStatus, Grader, PrGrade, compile_glob, glob_match};
 pub use harness::{
-    EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, TaskSpec, Verdict,
+    EventSink, Feedback, FollowUp, Harness, RaiseGrade, RunContext, RunEvent, RunOutcome, ShotFiles, TaskSpec, Verdict,
     VerdictKind, conventional_title, is_conventional,
 };
 pub use host::HostConfig;
@@ -58,10 +58,10 @@ pub use status::{
 };
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
-    Answered, CI_REVIEWER, ChangesRequested, Credential, FollowUpTask, Grade, HISTORY_LIMIT, HumanContext,
-    METADATA_KEY, MergeDecision, Merged, MergedBy, Patch, Priority, ProjectRepo, RequestKind, ReviewBreach, RunPatch,
-    RunRecord, Said, Scope, SetAside, Status, Task, TaskKey, TaskNote, Tracker, WorkerBreach, in_ready_order,
-    is_factory_agent, is_raised_by, key_number, raised_by,
+    Answered, AttachmentRole, CI_REVIEWER, ChangesRequested, Credential, FollowUpTask, Grade, HISTORY_LIMIT,
+    HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy, Patch, Picture, Priority, ProjectRepo, RequestKind,
+    ReviewBreach, RunPatch, RunRecord, Said, Scope, SetAside, Status, Task, TaskKey, TaskNote, Tracker, WorkerBreach,
+    in_ready_order, is_factory_agent, is_raised_by, key_number, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

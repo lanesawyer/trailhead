@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-pub use trailhead_model::{Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
+pub use trailhead_model::{AttachmentRole, Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = trailhead_model::TASK_FACTORY_KEY;
@@ -574,6 +574,21 @@ impl std::fmt::Debug for Credential {
     }
 }
 
+/// A picture of one view on one side of a change: how it looked before, or how it looks after.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Picture {
+    /// What the before and the after of a view share (`lookout-board-dark`).
+    pub name: String,
+    pub role: AttachmentRole,
+    pub png: Vec<u8>,
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Picture({} {}, {} bytes)", self.name, self.role, self.png.len())
+    }
+}
+
 /// A task tracker, bound to one identity. The control plane holds one for its
 /// own agent and reaches its sandboxes' sub-agents through [`Tracker::sub_agent`];
 /// a daemon holds one for its sub-agent's token.
@@ -641,6 +656,10 @@ pub trait Tracker: Send + Sync {
     /// A note on the task, such as why an attempt failed, without changing it.
     async fn note(&self, task: &TaskKey, body: &str) -> Result<()>;
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()>;
+    /// Attaches a picture to the task, in `set` with the others taken with it.
+    async fn attach(&self, task: &TaskKey, set: &str, picture: Picture) -> Result<()>;
+    /// The task's pictures in `set`, with their bytes, oldest first.
+    async fn pictures(&self, task: &TaskKey, set: &str) -> Result<Vec<Picture>>;
     /// Files a new task in `project`, not under the factory's queue, and returns its key.
     async fn create_task(
         &self,

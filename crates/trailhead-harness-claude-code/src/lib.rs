@@ -19,7 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
     CheckResult, Commit, Error, EventSink, Feedback, FileChange, FileMode, FollowUp, Harness, ModelId, Priority,
-    RaiseGrade, Result, Role, RunContext, RunEvent, RunOutcome, Usage, VerdictKind, conventional_title,
+    RaiseGrade, Result, Role, RunContext, RunEvent, RunOutcome, ShotFiles, Usage, VerdictKind, conventional_title,
 };
 
 /// The `adapter` name profiles use for this harness.
@@ -439,6 +439,29 @@ fn capped_diff(diff: &str, cap: usize, base: Option<&str>) -> String {
     )
 }
 
+/// What a reviewer is told about the pictures the worker took: the views the change alters, as files to open.
+/// Empty when there are none, which also covers a repo that takes no pictures.
+fn shots_section(shots: &[ShotFiles]) -> String {
+    if shots.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nThe change alters how these views are drawn. The worker's sandbox drew each before the change and \
+         after it; open the PNG files and look at them, since a wrong layout, clipped text or a missing control shows \
+         there and not in the diff. Say in your summary what you saw. Views not listed draw the same as before.\n",
+    );
+    let shown = |p: &Option<std::path::PathBuf>| p.as_ref().map(|p| p.display().to_string());
+    for shot in shots {
+        out.push_str(&match (shown(&shot.before), shown(&shot.after)) {
+            (Some(before), Some(after)) => format!("- {}: before `{before}`, after `{after}`\n", shot.name),
+            (None, Some(after)) => format!("- {} (new): `{after}`\n", shot.name),
+            (Some(before), None) => format!("- {} (no longer drawn): before `{before}`\n", shot.name),
+            (None, None) => String::new(),
+        });
+    }
+    out
+}
+
 /// What a reviewer is told about the PR's title, which a squash merge makes the commit subject on main.
 fn pr_title_section(title: Option<&str>, key: &str) -> String {
     let shown = match title {
@@ -458,7 +481,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
              Task:\n{desc}{human}{follow_ups}{path}\n\n\
-             The change under review:\n```diff\n{diff}\n```{checks}\n\n\
+             The change under review:\n```diff\n{diff}\n```{checks}{shots}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
              they belong. Your summary is posted on the PR as the review. When you approve, put anything worth doing \
@@ -478,6 +501,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
                 ctx.base_branch.as_deref()
             )),
             checks = checks_section(&ctx.checks),
+            shots = shots_section(&ctx.shots),
             pr_title = pr_title_section(ctx.title.as_deref(), &task.key.0),
         ),
         _ => format!(

@@ -76,6 +76,7 @@ fn request(key: TaskKey) -> RunRequest {
         allowed_hosts: Vec::new(),
         env: Default::default(),
         credential: Credential { agent: "factory".into(), token: String::new() },
+        shots: None,
     }
 }
 

@@ -7,6 +7,7 @@
 
 mod mise;
 mod runner;
+mod shots;
 #[cfg(feature = "rust")]
 pub mod trim;
 mod workspace;
@@ -20,4 +21,5 @@ pub mod net;
 
 pub use mise::{Mise, install_hosts_for};
 pub use runner::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
+pub use shots::{MAX_SHOTS, Shot, Taken};
 pub use workspace::{FindRemote, GitWorkspace};

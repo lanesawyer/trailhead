@@ -12,9 +12,9 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, ProjectRepo,
-    Result, RunPatch, RunRecord, Scope, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order,
-    is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Picture, Priority,
+    ProjectRepo, Result, RunPatch, RunRecord, Scope, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind,
+    in_ready_order, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -533,6 +533,27 @@ impl Tracker for CoreTracker {
 
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.set_status(task, trailhead_core::Status::Done, Some(handoff)).await
+    }
+
+    async fn attach(&self, task: &TaskKey, set: &str, picture: Picture) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let new = trailhead_core::NewAttachment {
+            role: Some(picture.role),
+            set: Some(set.to_string()),
+            ..trailhead_core::NewAttachment::png(picture.name, picture.png)
+        };
+        self.store.add_attachment(&ctx, &task.0, new).await.map(drop).map_err(map_err)
+    }
+
+    async fn pictures(&self, task: &TaskKey, set: &str) -> Result<Vec<Picture>> {
+        let ctx = self.ctx().await?;
+        let mut pictures = Vec::new();
+        for a in self.store.list_attachments(&ctx, &task.0).await.map_err(map_err)? {
+            let (Some(role), true) = (a.role, a.set.as_deref() == Some(set)) else { continue };
+            let (_, png) = self.store.attachment_bytes(&ctx, a.id).await.map_err(map_err)?;
+            pictures.push(Picture { name: a.name, role, png });
+        }
+        Ok(pictures)
     }
 
     async fn create_task(
