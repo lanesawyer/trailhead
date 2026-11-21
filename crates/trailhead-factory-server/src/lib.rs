@@ -644,6 +644,21 @@ fn print_secret_sources(opts: &Opts, fnox: &fnox::Fnox, paths: &Paths) {
     }
 }
 
+/// What `check` says when the sandboxes would have no model access: a subscription token the harness can't use, or
+/// no credential at all for Docker targets. `None` when nothing is wrong.
+fn harness_credential_line(adapter: &str, has_token: bool, docker: bool) -> Option<String> {
+    match (has_token, adapter == CLAUDE_CODE) {
+        (true, true) => None,
+        (true, false) => Some(format!(
+            "harness: {adapter} can't use CLAUDE_CODE_OAUTH_TOKEN; the token is ignored and sandboxes get no model credential from it"
+        )),
+        (false, _) if docker => Some(format!(
+            "harness: no credential for {adapter}: Docker sandboxes have no model access until the gateway holds one (set CLAUDE_CODE_OAUTH_TOKEN with the claude-code harness)"
+        )),
+        (false, _) => None,
+    }
+}
+
 /// Reports what the setup for `run`'s repos can see, without running anything. It asks the server's API for tasks
 /// (only the server opens the database) and lists the computes itself; it binds no iroh endpoint, so it runs beside
 /// the server.
@@ -696,6 +711,10 @@ pub async fn check(run: &RunOpts) -> Result<()> {
             failed += 1;
             println!("compute: {e}");
         }
+    }
+    let docker = specs.iter().any(|t| matches!(t.compute, ComputeConfig::Docker { .. }));
+    if let Some(line) = harness_credential_line(&plan.adapter, opts.claude_oauth_token.is_some(), docker) {
+        println!("{line}");
     }
     match saved_endpoint_id(&paths.creds()) {
         Some(id) => println!("endpoint: {id}"),
@@ -1403,6 +1422,20 @@ mod tests {
         assert!(!server.contains("inside a repo") && !server.contains("the factory's own"), "{server}");
         assert!(factory.contains("inside a repo") && factory.contains("the factory's own"), "{factory}");
         assert!(!factory.contains("outside any repo"), "{factory}");
+    }
+
+    #[test]
+    fn check_says_when_the_harness_has_no_usable_model_credential() {
+        assert_eq!(super::harness_credential_line(trailhead_plugins::CLAUDE_CODE, true, true), None);
+        assert_eq!(super::harness_credential_line(trailhead_plugins::CLAUDE_CODE, false, false), None);
+        assert!(
+            super::harness_credential_line("codex", true, false).unwrap().contains("can't use CLAUDE_CODE_OAUTH_TOKEN")
+        );
+        assert!(
+            super::harness_credential_line(trailhead_plugins::CLAUDE_CODE, false, true)
+                .unwrap()
+                .contains("no model access")
+        );
     }
 
     #[test]
