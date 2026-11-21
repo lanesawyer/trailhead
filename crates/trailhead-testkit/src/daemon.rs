@@ -244,6 +244,8 @@ pub struct LocalDaemon {
     run_errors: Mutex<VecDeque<trailhead_factory::Error>>,
     /// Errors the next runs fail with once the agent has reported usage, like a daemon lost partway through.
     late_run_errors: Mutex<VecDeque<String>>,
+    /// How many late errors came out of the drain after the run finished, not out of the event stream.
+    late_errors_after_finish: AtomicUsize,
     /// Runs that are going in a sandbox from before this control plane: their events so far, and how they end.
     ongoing: Mutex<HashMap<String, Ongoing>>,
     attached: Mutex<Vec<String>>,
@@ -295,6 +297,7 @@ impl LocalDaemon {
             requests: Mutex::default(),
             run_errors: Mutex::default(),
             late_run_errors: Mutex::default(),
+            late_errors_after_finish: AtomicUsize::new(0),
             ongoing: Mutex::default(),
             attached: Mutex::default(),
             forgotten: Mutex::default(),
@@ -407,6 +410,11 @@ impl LocalDaemon {
         for _ in 0..times {
             errors.push_back(trailhead_factory::Error::Unavailable(error.to_string()));
         }
+    }
+
+    /// How many late errors (see `fail_runs_midway`) were raised from the drain after the run had already finished.
+    pub fn late_errors_after_finish(&self) -> usize {
+        self.late_errors_after_finish.load(Ordering::SeqCst)
     }
 
     /// Makes the next `times` runs fail with this error right after the agent's first usage is reported, as a daemon
@@ -575,6 +583,7 @@ impl Daemon for LocalDaemon {
                         let spent = matches!(event, RunEvent::Usage { .. });
                         let _ = events.send(event);
                         if spent {
+                            self.late_errors_after_finish.fetch_add(1, Ordering::SeqCst);
                             return Err(Error::Other(error));
                         }
                     }
@@ -649,21 +658,10 @@ mod tests {
         ws.prepare(&req).await.unwrap();
     }
 
-    #[tokio::test]
-    async fn queued_run_errors_of_mixed_kinds_come_out_in_the_order_they_were_queued() {
+    fn run_request() -> RunRequest {
         use trailhead_factory::{Credential, Endpoint, ModelId, Role, TaskKey, TaskSpec};
 
-        use crate::{FakeCodeHost, ScriptedHarness};
-
-        let daemon = LocalDaemon::new(
-            Arc::new(ScriptedHarness::new()),
-            Arc::new(FakeCodeHost::new()),
-            FakeTracker::new("factory"),
-        );
-        daemon.reject_runs("no");
-        daemon.cancel_runs(1);
-        let sandbox = SandboxId("s1".into());
-        let request = || RunRequest {
+        RunRequest {
             grade: None,
             run: "r1".into(),
             role: Role::Worker,
@@ -690,12 +688,67 @@ mod tests {
             env: Default::default(),
             credential: Credential { agent: "factory".into(), token: String::new() },
             shots: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_run_errors_of_mixed_kinds_come_out_in_the_order_they_were_queued() {
+        use crate::{FakeCodeHost, ScriptedHarness};
+
+        let daemon = LocalDaemon::new(
+            Arc::new(ScriptedHarness::new()),
+            Arc::new(FakeCodeHost::new()),
+            FakeTracker::new("factory"),
+        );
+        daemon.reject_runs("no");
+        daemon.cancel_runs(1);
+        let sandbox = SandboxId("s1".into());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let first = daemon.run(&sandbox, request(), tx.clone()).await.unwrap_err();
+        let first = daemon.run(&sandbox, run_request(), tx.clone()).await.unwrap_err();
         assert!(matches!(first, Error::Rejected(ref m) if m == "no"), "{first:?}");
-        let second = daemon.run(&sandbox, request(), tx).await.unwrap_err();
+        let second = daemon.run(&sandbox, run_request(), tx).await.unwrap_err();
         assert!(matches!(second, Error::Cancelled), "{second:?}");
+    }
+
+    #[tokio::test]
+    async fn a_late_error_after_a_run_that_finished_at_once_comes_out_of_the_drain() {
+        use trailhead_factory::{Role, RunOutcome, TaskSpec};
+
+        use crate::{FakeCodeHost, Script, ScriptedHarness};
+
+        let harness = Arc::new(ScriptedHarness::new());
+        harness.push(
+            Role::Worker,
+            Script::new(RunOutcome::Changes { commits: Vec::new(), summary: "done".into() })
+                .steps(1, 100_000)
+                .no_yield(),
+        );
+        let tracker = FakeTracker::new("factory");
+        let key = tracker.add_task("TRAIL", "Add a greeting", "");
+        let credential = tracker.create_sub_agent("w1", "TRAIL", Duration::from_secs(60)).await.unwrap();
+        let daemon = LocalDaemon::new(harness, Arc::new(FakeCodeHost::new()), tracker);
+        daemon.fail_runs_midway(1, "connection lost");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let err = daemon
+            .run(
+                &SandboxId("s1".into()),
+                RunRequest { credential, task: TaskSpec { key, ..run_request().task }, ..run_request() },
+                tx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("connection lost"), "{err}");
+        let mut usage = false;
+        while let Ok(event) = rx.try_recv() {
+            usage |= matches!(event, RunEvent::Usage { .. });
+        }
+        assert!(usage, "the usage was forwarded before the error");
+        assert_eq!(
+            daemon.late_errors_after_finish(),
+            1,
+            "the error must come from the drain after the run finished; if the runner now awaits after the harness, \
+             that path is no longer reached and the lifecycle test no longer covers it"
+        );
     }
 }
