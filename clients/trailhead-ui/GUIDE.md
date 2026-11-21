@@ -132,7 +132,7 @@ should all show at once are a `button_group`. A list floating under a text field
 
 | Item | Signature | What it is for | Updated by |
 | --- | --- | --- | --- |
-| `text_input` | `text_input(lines: f32, own: impl Scene) -> impl Scene` | A text input `lines` high (more than one allows newlines and wraps at words), filling the width of what holds it. `own` lands on the text entity, where your marker goes. Enter in a one-line input triggers `TextEntered` on the text entity. | Read and write `EditableText` on the text entity. |
+| `text_input` | `text_input(lines: f32, own: impl Scene) -> impl Scene` | A text input `lines` high (more than one allows newlines and wraps at words), filling the width of what holds it. One line is `extent::CONTROL_HEIGHT` tall, as a button and a select are, so it lines up beside them; more lines grow past it. `own` lands on the text entity, where your marker goes. Enter in a one-line input triggers `TextEntered` on the text entity. | Read and write `EditableText` on the text entity. |
 | `text_input_sized` | `text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Scene` | The same, typing at another size, so an input can stand in for a text of that size. | |
 | `TextEntered` | `TextEntered { entity: Entity, value: String }` (entity event) | Enter was pressed in a one-line input (not held, not mid-composition), with what it holds: how a field submits from the keyboard (recipe 5). Several lines take Enter as a new line and never trigger it. The kit's `inline_text` saves on it too. | |
 | `InitialText` | `InitialText(pub String)` (component) | Text an input holds when it appears, with the cursor at its end: a form opened on something that exists. Put it in `own`. | |
@@ -462,6 +462,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `SIDEBAR_WIDTH` | 220 | An app's sidebar until its edge is dragged |
 | `SIDEBAR_MIN_WIDTH`, `SIDEBAR_MAX_WIDTH` | 200, 500 | How far the sidebar is dragged |
 | `DRAG_EDGE` | 6 | The strip along a sidebar's edge that drags it |
+| `CONTROL_HEIGHT` | 24 | A control one line high: a button, a select, a one-line text input (feathers' row height) |
 | `PROGRESS_HEIGHT` | 6 | A progress bar |
 | `SIDE_PANEL_WIDTH` | 360 | A panel down the right of the window (an inspector) |
 | `MODAL_WIDTH` | 640 | A modal, unless its kind says otherwise |

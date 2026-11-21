@@ -78,6 +78,9 @@ pub mod extent {
     pub const SIDEBAR_MIN_WIDTH: f32 = 200.0;
     /// The widest a sidebar is dragged to, so it never crowds out the page beside it.
     pub const SIDEBAR_MAX_WIDTH: f32 = 500.0;
+    /// How tall a control one line high is: a button, a select, a one-line text input. Feathers' own row height,
+    /// which its buttons and selects are drawn at; the kit's text input takes it too, so it lines up beside them.
+    pub const CONTROL_HEIGHT: f32 = 24.0;
     /// How tall a progress bar is.
     pub const PROGRESS_HEIGHT: f32 = 6.0;
     /// How wide the strip along a sidebar's edge that drags it is, half over the sidebar and half over the page.
@@ -107,7 +110,7 @@ pub mod stroke {
 
 #[cfg(test)]
 mod tests {
-    use super::step;
+    use super::{extent, step};
 
     const STEPS: [f32; 4] = [step::XXS, step::XS, step::S, step::M];
 
@@ -122,6 +125,11 @@ mod tests {
             let (name, value) = space.split_once(": f32 = ").unwrap();
             assert!(name == "SEAM" || value.starts_with("step::"), "{name} is off the scale: {value}");
         }
+    }
+
+    #[test]
+    fn a_control_is_as_tall_as_feathers_draws_its_buttons() {
+        assert_eq!(bevy::feathers::constants::size::ROW_HEIGHT, bevy::ui::Val::Px(extent::CONTROL_HEIGHT));
     }
 
     #[test]

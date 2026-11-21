@@ -1,7 +1,9 @@
 //! A text input over feathers' `FeathersTextInput`, one line or several.
 //!
 //! Feathers' container is one row high, so it is let grow to hold the lines asked for, and it fills the width of
-//! whatever holds it (a [`super::field`]). More than one line allows newlines and breaks at word boundaries.
+//! whatever holds it (a [`super::field`]). It never grows shorter than [`extent::CONTROL_HEIGHT`], so a one-line
+//! input is as tall as the button or select beside it: grown to its text alone, it was a thin strip beside them
+//! (TRAIL-1610). More than one line allows newlines and breaks at word boundaries.
 //! [`text_input_sized`] types at another of [`super::size`]'s sizes, so an input can stand in for a text of that size.
 //! Enter in a one-line input triggers [`TextEntered`] on its text entity, which is how a form submits from the
 //! keyboard; the kit's own inline text saves on it too.
@@ -14,6 +16,7 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::{EditableText, FontSize, LineBreak, TextCursorStyle, TextFont, TextLayout};
 
+use crate::spacing::extent;
 use crate::text::{Size, size};
 
 /// An input `lines` high. `own` is a scene applied to the text entity itself, where the caller puts the markers it
@@ -24,9 +27,16 @@ pub fn text_input(lines: f32, own: impl Scene) -> impl Scene {
 
 /// A [`text_input`] that types at `font_size`.
 pub fn text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Scene {
+    // One line sits in the middle of the control's height; more start at its top and grow it.
+    let align = if lines > 1.0 { AlignItems::FlexStart } else { AlignItems::Center };
     bsn! {
         @FeathersTextInputContainer
-        Node { height: Val::Auto, width: percent(100), align_items: AlignItems::FlexStart }
+        Node {
+            height: Val::Auto,
+            min_height: { px(extent::CONTROL_HEIGHT) },
+            width: percent(100),
+            align_items: { align },
+        }
         Children [
             @FeathersTextInput
             on(enter_pressed)
@@ -121,6 +131,31 @@ mod tests {
         let field = app.world_mut().query_filtered::<Entity, With<FeathersTextInput>>().single(app.world()).unwrap();
         app.world_mut().get_mut::<EditableText>(field).unwrap().editor_mut().set_text(typed);
         (app, field)
+    }
+
+    /// The node of the container a scene spawns, or of the scene's root.
+    fn root_node(scene: impl Scene) -> Node {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let root = app.world_mut().commands().spawn_scene(scene).id();
+        app.world_mut().flush();
+        app.update();
+        app.world().get::<Node>(root).unwrap().clone()
+    }
+
+    #[test]
+    fn a_one_line_input_is_as_tall_as_a_button_and_more_lines_grow_past_it() {
+        let button = root_node(crate::button("Add", None, crate::ButtonKind::Primary));
+        let one = root_node(text_input(1.0, bsn! {}));
+        assert_eq!(button.height, px(extent::CONTROL_HEIGHT));
+        assert_eq!((one.height, one.min_height), (Val::Auto, button.height));
+        assert_eq!(one.align_items, AlignItems::Center, "its line in the middle, as a button's caption");
+        let three = root_node(text_input(3.0, bsn! {}));
+        assert_eq!((three.height, three.min_height), (Val::Auto, button.height), "grows by its lines");
+        assert_eq!(three.align_items, AlignItems::FlexStart);
     }
 
     #[test]
