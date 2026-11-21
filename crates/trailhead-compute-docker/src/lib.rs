@@ -486,9 +486,9 @@ impl DockerCompute {
     }
 
     /// The size in bytes and the name of the checkpoint image that sets the sandbox's disk need: the largest of its own
-    /// (a stale image of another sandbox must not hold its runs back), or, while it has none, the largest
-    /// `trailhead-checkpoint` image on the host. `Ok(None)` if there is none; `Err` if they can't be listed (the check
-    /// then falls back to the container's own size).
+    /// (a stale image of another sandbox must not hold its runs back), or, while it has none, the largest checkpoint
+    /// image of a sandbox whose container still exists (images of sandboxes that are gone do not count). `Ok(None)` if
+    /// there is none; `Err` if they can't be listed (the check then falls back to the container's own size).
     async fn largest_checkpoint(&self, id: &SandboxId) -> Result<Option<(u64, String)>, bollard::errors::Error> {
         let filter = vec![CHECKPOINT_REPO.to_string()];
         let opts = ListImagesOptions {
