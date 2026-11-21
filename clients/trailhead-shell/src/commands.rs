@@ -49,18 +49,6 @@ impl std::fmt::Display for SendError {
     }
 }
 
-impl From<String> for SendError {
-    fn from(why: String) -> Self {
-        Self::Failed(why)
-    }
-}
-
-impl From<&str> for SendError {
-    fn from(why: &str) -> Self {
-        Self::Failed(why.to_owned())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CommandId(pub u64);
 
