@@ -90,7 +90,7 @@ Cargo.toml           depends on the trailhead repo, pinned to a rev
 
 One repo, not one per app, because the shell is a single binary that needs one list of apps and one `Cargo.lock`, a kit bump is one change, and the sandboxes keep one warm build cache.
 
-- **A project per app.** Asking for an app creates a Trailhead project for it, with a brief and its first tasks, scoped to `apps/<name>/`. The factory needs to know which repo and path a project builds in (near TRAIL-157).
+- **A project per app.** Asking for an app creates a Trailhead project for it, with a brief and its first tasks, scoped to `apps/<name>/`. **Built (TRAIL-1595):** a project says which repo and path it builds in through `metadata.factory` (`{"repo": "owner/name", "path": "apps/<name>"}`, set by a person), and that repo's factory works its graded tasks from the next poll, telling the agents to stay inside the path ([operating.md](factory/operating.md), "Pointing a project at a repo"). Creating the project when an app is asked for is not built.
 - **GitHub, with the code host that exists.** Changes are pull requests that merge themselves when they stay inside one app's directory and pass checks and agent review. Nobody has to open them. A code host over a plain local repo is a later option.
 - **Review is trying it.** The person's gate on an app change is using the new build and keeping or rejecting it, not reading a diff. Rejecting is a revert and a rebuild.
 - **The builder.** After a merge, a builder on the server's machine pulls the apps repo and builds the shell, the event stream tells the running shell, and the launcher keeps the previous binary to fall back to.
@@ -168,6 +168,8 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 | 2 | `apps/*/src/**` |
 | 3 | `shell/**`, the app template, an app's manifest (its collections), `**/Cargo.toml`, a diff touching more than one app |
 | 4 | `Cargo.lock` (a new package, the `trailhead` pin), `.trailhead.toml`, CI, `connectors/**`, agent instructions |
+
+**Built (TRAIL-1595):** "a diff touching more than one app" is the grader's floor for a file outside the task's project path (grade 3), not a path rule; and a `Cargo.lock` that only adds or changes workspace members (no `source`), as adding an app does, is not counted as a new package, so adding an app is graded by its `Cargo.toml` (3) rather than the lockfile (4).
 
 **Apps that need more care. Leaning.** A grade means the same approvals everywhere in a repo; apps do not get gates of their own, or nobody could say what "grade 2" means. An app differs by where it starts: a path rule gives it a floor (`3 = ["apps/<name>/**"]` for an app holding work or money data), which path rules can already do.
 

@@ -486,8 +486,9 @@ async fn run_repo(
 ) -> bool {
     let wake = Arc::new(Notify::new());
     let project = entry.factory.config.repo.project.clone();
-    let watcher =
-        tokio::spawn(wake::wake_on_changes(store, ctx, project, wake.clone()).instrument(tracing::Span::current()));
+    let slug = entry.factory.config.repo.repo().slug();
+    let watched = wake::wake_on_changes(store, ctx, project, slug, wake.clone());
+    let watcher = tokio::spawn(watched.instrument(tracing::Span::current()));
     let ran = entry.factory.clone().run_draining(wake, poll, fired(drain), fired(cancel)).await;
     watcher.abort();
     match ran {
@@ -642,17 +643,13 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     print_secret_sources(&plan.opts, &fnox, &paths);
     for spec in &plan.specs {
         let slug = spec.slug();
-        let project = &spec.config.repo.project;
-        let queue: Vec<_> = spec.config.repo.queue.iter().cloned().map(trailhead_factory::TaskKey).collect();
-        match trailhead_factory::Tracker::ready(&tracker, project, &queue, 10).await {
-            Ok(ready) => {
-                let scope = if queue.is_empty() {
-                    project.clone()
-                } else {
-                    let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
-                    format!("{project}, under {}", keys.join(", "))
-                };
-                println!("{slug}: tracker: the server's API; {} ready task(s) in {scope}", ready.len());
+        let listed = match ops::scopes(&tracker, &spec.config).await {
+            Ok(scopes) => trailhead_factory::Tracker::ready(&tracker, &scopes, 10).await.map(|ready| (scopes, ready)),
+            Err(e) => Err(e),
+        };
+        match listed {
+            Ok((scopes, ready)) => {
+                println!("{slug}: tracker: the server's API; {} ready task(s) in {}", ready.len(), describe(&scopes));
                 for t in &ready {
                     println!("  {} {}", t.key.0, t.title);
                 }
@@ -693,6 +690,20 @@ pub async fn check(run: &RunOpts) -> Result<()> {
     }
     println!("tunnel: the server's control plane forwards to {}", opts.server);
     check_result(failed)
+}
+
+/// `TRAIL, under TRAIL-102; TICK (graded, in apps/ticklist)`: the projects a repo works and how.
+fn describe(scopes: &[trailhead_factory::Scope]) -> String {
+    let each = scopes.iter().map(|s| match (s.pointed, s.queue.as_slice(), &s.path) {
+        (false, [], _) => s.project.clone(),
+        (false, queue, _) => {
+            let keys: Vec<_> = queue.iter().map(|q| q.0.as_str()).collect();
+            format!("{}, under {}", s.project, keys.join(", "))
+        }
+        (true, _, Some(path)) => format!("{} (graded, in {path})", s.project),
+        (true, _, None) => format!("{} (graded)", s.project),
+    });
+    each.collect::<Vec<_>>().join("; ")
 }
 
 /// Logs a repo loop that panicked and marks it stopped on its status board and in the feed, since the loop never got

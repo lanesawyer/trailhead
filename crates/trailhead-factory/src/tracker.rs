@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-pub use trailhead_model::{Grade, Priority, Status, TaskKey, key_number};
+pub use trailhead_model::{Grade, Priority, ProjectRepo, Status, TaskKey, key_number};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = "factory";
@@ -509,6 +509,54 @@ pub fn in_ready_order(mut tasks: Vec<Task>, limit: usize) -> Vec<Task> {
     tasks
 }
 
+/// One project a repo's factory works, and which of its tasks are the factory's work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    pub project: String,
+    /// Tasks whose direct subtasks are the work; empty for every task in the project.
+    pub queue: Vec<TaskKey>,
+    /// A project whose metadata points at the repo ([`ProjectRepo`]), not the repo file's own: only its graded tasks
+    /// are the work, an ungraded one is left alone without a word (a person's own tasks live there too), and nothing
+    /// in it can stray from a queue.
+    pub pointed: bool,
+    /// The directory the project's changes stay inside; `None` is the whole repo.
+    pub path: Option<String>,
+}
+
+impl Scope {
+    /// The repo file's own project, under `queue` (empty for the whole project).
+    pub fn file(project: &str, queue: Vec<TaskKey>) -> Scope {
+        Scope { project: project.to_string(), queue, pointed: false, path: None }
+    }
+
+    /// A project pointed at the repo, building in `path`.
+    pub fn pointed(project: &str, path: Option<String>) -> Scope {
+        Scope { project: project.to_string(), queue: Vec::new(), pointed: true, path }
+    }
+
+    /// The scope among `scopes` that `task` belongs to, by its project.
+    pub fn of<'a>(scopes: &'a [Scope], task: &TaskKey) -> Option<&'a Scope> {
+        scopes.iter().find(|s| s.project == task.project())
+    }
+
+    /// Whether only graded tasks here are the factory's: under a queue, grading a task is what queues it, and in a
+    /// pointed project it is what hands a task over. A file project worked whole is the factory's by configuration.
+    pub fn needs_grade(&self) -> bool {
+        self.pointed || !self.queue.is_empty()
+    }
+
+    /// The scopes a repo works: its file's own `project` under `queue`, then each of `listed` (from
+    /// [`Tracker::project_repos`]) that points at the repo `slug` (`owner/name`), other than the file's own project.
+    pub fn for_repo(project: &str, queue: &[String], slug: &str, listed: Vec<(String, ProjectRepo)>) -> Vec<Scope> {
+        let file = Scope::file(project, queue.iter().cloned().map(TaskKey).collect());
+        let pointed = listed
+            .into_iter()
+            .filter(|(key, to)| to.is(slug) && key != project)
+            .map(|(key, to)| Scope::pointed(&key, to.path));
+        std::iter::once(file).chain(pointed).collect()
+    }
+}
+
 /// A Trailhead sub-agent and its bearer token, handed to a sandbox at start. `Debug` leaves the token out, since a
 /// credential rides in a [`RunRequest`](crate::RunRequest) that gets logged.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -537,10 +585,11 @@ pub trait Tracker: Send + Sync {
     /// A handle acting as one of this agent's sub-agents, by the part after the parent's name.
     fn sub_agent(&self, name: &str) -> Arc<dyn Tracker>;
 
-    /// Ready tasks in `project`: open and unheld, and in-review ones waiting on a rework ([`Task::changes_requested`]),
-    /// those first. With `queue`, only the direct subtasks of any of those tasks, best first across all of
-    /// them and each once, which is how work is handed to the factory.
-    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>>;
+    /// Ready tasks in the `scopes`' projects: open and unheld, and in-review ones waiting on a rework
+    /// ([`Task::changes_requested`]), those first. In a scope with a queue, only the direct subtasks of any of its queue
+    /// tasks. Best first across every scope, each once ([`in_ready_order`]), which is how work is handed to the factory.
+    /// Grades are the caller's business: ungraded tasks are listed too.
+    async fn ready(&self, scopes: &[Scope], limit: usize) -> Result<Vec<Task>>;
     async fn show(&self, task: &TaskKey) -> Result<Task>;
     /// The task's resolved questions with their answers, and its `decision` and `note` comments, oldest first,
     /// without the factory's own bookkeeping.
@@ -550,15 +599,20 @@ pub trait Tracker: Send + Sync {
     /// The task's latest `review` comment that this agent didn't leave: for the control plane, the newest verdict a
     /// reviewer or a person gave, past its own requests for a rework (a conflict, failed CI), which judge nothing.
     async fn last_review_by_others(&self, task: &TaskKey) -> Result<Option<Verdict>>;
-    /// Open, in-progress, parked or in-review tasks that carry factory metadata, limited to the queues' subtasks when
-    /// there are any, so repos sharing a project through different queues never see each other's runs.
-    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>>;
+    /// Open, in-progress, parked or in-review tasks in the `scopes`' projects that carry factory metadata, limited in a
+    /// scope with a queue to its queue's subtasks, so repos sharing a project through different queues never see each
+    /// other's runs.
+    async fn in_flight(&self, scopes: &[Scope]) -> Result<Vec<Task>>;
     /// Open, in-progress, parked or in-review tasks in `project` that carry factory metadata but aren't direct subtasks
     /// of any of `queues`: runs re-parented out of their queue, which [`Tracker::in_flight`] no longer sees (TRAIL-531).
     /// A tracker that can't tell says there are none.
     async fn strays(&self, _project: &str, _queues: &[TaskKey]) -> Result<Vec<Task>> {
         Ok(Vec::new())
     }
+
+    /// Every active project this handle can see whose metadata says where it is built ([`ProjectRepo`]), by key.
+    /// One whose `factory` value doesn't read is left out.
+    async fn project_repos(&self) -> Result<Vec<(String, ProjectRepo)>>;
 
     async fn claim(&self, task: &TaskKey) -> Result<()>;
     async fn renew(&self, task: &TaskKey) -> Result<()>;

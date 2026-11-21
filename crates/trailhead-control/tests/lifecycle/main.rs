@@ -7,6 +7,7 @@ mod lifecycle;
 #[path = "../support/logs.rs"]
 mod logs;
 mod merger;
+mod pointed;
 mod pool;
 mod reconcile;
 mod review;

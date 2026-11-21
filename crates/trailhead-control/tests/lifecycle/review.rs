@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use trailhead_control::Outcome;
-use trailhead_factory::{CiState, FollowUp, PrRef, Role, RunOutcome, Status, TaskKey, Tracker, VerdictKind, run_name};
+use trailhead_factory::{
+    CiState, FollowUp, PrRef, Role, RunOutcome, Scope, Status, TaskKey, Tracker, VerdictKind, run_name,
+};
 use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
@@ -144,7 +146,12 @@ async fn an_approval_files_its_follow_ups_as_unqueued_tasks_linked_to_the_source
         assert_eq!(t.status, Status::Open);
         assert!(t.description.contains(&key.0) && t.description.contains(&pr.url), "{}", t.description);
         assert!(
-            r.tracker.ready("TRAIL", &[TaskKey("TRAIL-102".into())], 10).await.unwrap().iter().all(|q| q.key != t.key)
+            r.tracker
+                .ready(&[Scope::file("TRAIL", vec![TaskKey("TRAIL-102".into())])], 10)
+                .await
+                .unwrap()
+                .iter()
+                .all(|q| q.key != t.key)
         );
     }
     let comment = r.codehost.prs()[0].comments.last().unwrap().clone();

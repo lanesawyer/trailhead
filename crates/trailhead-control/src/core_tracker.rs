@@ -12,8 +12,9 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, Result, RunPatch,
-    RunRecord, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Priority, ProjectRepo,
+    Result, RunPatch, RunRecord, Scope, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, in_ready_order,
+    is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -171,6 +172,30 @@ impl CoreTracker {
         Ok(self.list_all(ctx, filter).await?.into_iter().map(|t| t.id).collect())
     }
 
+    /// [`Tracker::ready`] for one project (under `queue`, when there is one), before the raise and the cut.
+    async fn ready_in(&self, ctx: &Ctx, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        // Unlimited: a blocker's raised priority can move it up the list, and a cap would hide queued tasks behind
+        // other ready ones, so the cut waits until after the raise.
+        let ready = self.store.ready(ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
+        let tasks: Vec<_> = if queue.is_empty() {
+            ready
+        } else {
+            // The store orders ready tasks by priority, so filtering its one list orders across every queue and
+            // lists a task once even if it is under two of them.
+            let mut queued = std::collections::HashSet::new();
+            for q in queue {
+                let filter =
+                    TaskFilter { project: Some(project.to_string()), parent: Some(q.clone()), ..TaskFilter::default() };
+                queued.extend(self.list_all(ctx, filter).await?.into_iter().map(|t| t.id));
+            }
+            ready.into_iter().filter(|t| queued.contains(&t.id)).collect()
+        };
+        let mut tasks = self.tasks(ctx, tasks).await?;
+        // Reworks wait in review with changes requested.
+        tasks.extend(self.reworks(ctx, project, queue).await?);
+        Ok(tasks)
+    }
+
     /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
     /// rework, in priority order.
     async fn reworks(&self, ctx: &Ctx, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
@@ -314,31 +339,15 @@ impl Tracker for CoreTracker {
         Arc::new(sub)
     }
 
-    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, scopes: &[Scope], limit: usize) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let tasks = match queue {
-            // Unlimited: a blocker's raised priority can move it up the list, so the cut waits until after the raise.
-            [] => self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?,
-            queue => {
-                // The store orders ready tasks by priority, so filtering its one list orders across every queue and
-                // lists a task once even if it is under two of them.
-                let mut queued = std::collections::HashSet::new();
-                for q in queue {
-                    let filter = TaskFilter {
-                        project: Some(project.to_string()),
-                        parent: Some(q.clone()),
-                        ..TaskFilter::default()
-                    };
-                    queued.extend(self.list_all(&ctx, filter).await?.into_iter().map(|t| t.id));
-                }
-                // Unlimited: a cap here would hide queued tasks behind other ready ones.
-                let ready = self.store.ready(&ctx, Some(project), Some(-1), GradeFilter::Any).await.map_err(map_err)?;
-                ready.into_iter().filter(|t| queued.contains(&t.id)).collect()
-            }
-        };
-        let mut tasks = self.tasks(&ctx, tasks).await?;
-        // Reworks wait in review with changes requested. They and the raise go in before the cut ([`in_ready_order`]).
-        tasks.extend(self.reworks(&ctx, project, queue).await?);
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for scope in scopes {
+            let found = self.ready_in(&ctx, &scope.project, &scope.queue).await?;
+            tasks.extend(found.into_iter().filter(|t| seen.insert(t.key.clone())));
+        }
+        // The raise goes in before the cut ([`in_ready_order`]).
         self.raise_to_blocked_priority(&ctx, &mut tasks).await;
         Ok(in_ready_order(tasks, limit))
     }
@@ -397,22 +406,30 @@ impl Tracker for CoreTracker {
         self.newest_review(task, true).await
     }
 
-    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+    async fn in_flight(&self, scopes: &[Scope]) -> Result<Vec<Task>> {
         let ctx = self.ctx().await?;
-        let parents: Vec<Option<TaskKey>> =
-            if queue.is_empty() { vec![None] } else { queue.iter().map(|q| Some(q.clone())).collect() };
         let mut tasks = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for parent in parents {
-            let filter = TaskFilter {
-                project: Some(project.to_string()),
-                parent,
-                metadata_exists: vec![METADATA_KEY.to_string()],
-                ..TaskFilter::default()
-            };
-            tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
+        for scope in scopes {
+            let parents: Vec<Option<TaskKey>> =
+                if scope.queue.is_empty() { vec![None] } else { scope.queue.iter().map(|q| Some(q.clone())).collect() };
+            for parent in parents {
+                let filter = TaskFilter {
+                    project: Some(scope.project.clone()),
+                    parent,
+                    metadata_exists: vec![METADATA_KEY.to_string()],
+                    ..TaskFilter::default()
+                };
+                tasks.extend(self.list_all(&ctx, filter).await?.into_iter().filter(|t| seen.insert(t.id)));
+            }
         }
         self.tasks(&ctx, tasks).await
+    }
+
+    async fn project_repos(&self) -> Result<Vec<(String, ProjectRepo)>> {
+        let ctx = self.ctx().await?;
+        let projects = self.store.list_projects(&ctx, false).await.map_err(map_err)?;
+        Ok(projects.into_iter().filter_map(|p| Some((p.key.clone(), p.repo()?))).collect())
     }
 
     async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {

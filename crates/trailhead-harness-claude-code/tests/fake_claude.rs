@@ -130,6 +130,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
             description: "hi()".into(),
             previous_failure: None,
             context: Default::default(),
+            path: None,
         },
         workdir: r.repo.clone(),
         model: ModelId("claude-sonnet-x".into()),
@@ -439,6 +440,20 @@ fn worker_prompt_forbids_nested_repositories() {
     let p = prompt(&ctx(&r, Role::Worker, 0), None);
     assert!(p.contains("nested git repositories"));
     assert!(p.contains("clone it into a temporary directory outside the checkout"));
+}
+
+#[test]
+fn a_prompt_keeps_the_change_inside_the_projects_path() {
+    let r = rig();
+    for role in [Role::Worker, Role::Reviewer] {
+        assert!(!prompt(&ctx(&r, role, 0), None).contains("builds in"));
+        let mut c = ctx(&r, role, 0);
+        c.task.path = Some("apps/ticklist".into());
+        let p = prompt(&c, None);
+        assert!(p.contains("This task's project builds in `apps/ticklist/`."), "{p}");
+        let rule = if role == Role::Worker { "Keep the change inside it" } else { "request changes" };
+        assert!(p.contains(rule), "{p}");
+    }
 }
 
 #[test]

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, Priority, Result, RunPatch, Task, TaskKey, Tracker, Verdict,
+    Credential, Error, FollowUpTask, Grade, HumanContext, Priority, ProjectRepo, Result, RunPatch, Scope, Task,
+    TaskKey, Tracker, Verdict,
 };
 
 /// An armed failure, shared by every handle on the tracker: the control plane's own, its sub-agents' and the
@@ -68,9 +69,9 @@ impl Tracker for Flaky {
         Arc::new(Flaky { inner: self.inner.sub_agent(name), outage: self.outage.clone() })
     }
 
-    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, scopes: &[Scope], limit: usize) -> Result<Vec<Task>> {
         self.read()?;
-        self.inner.ready(project, queue, limit).await
+        self.inner.ready(scopes, limit).await
     }
 
     async fn show(&self, task: &TaskKey) -> Result<Task> {
@@ -93,9 +94,14 @@ impl Tracker for Flaky {
         self.inner.last_review_by_others(task).await
     }
 
-    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+    async fn in_flight(&self, scopes: &[Scope]) -> Result<Vec<Task>> {
         self.read()?;
-        self.inner.in_flight(project, queue).await
+        self.inner.in_flight(scopes).await
+    }
+
+    async fn project_repos(&self) -> Result<Vec<(String, ProjectRepo)>> {
+        self.read()?;
+        self.inner.project_repos().await
     }
 
     async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {

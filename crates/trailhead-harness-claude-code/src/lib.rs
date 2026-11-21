@@ -308,6 +308,19 @@ const HUMAN_CONTEXT_CAP: usize = 6000;
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
 
+/// Where the task's project builds, when it builds in one directory of the repo: the change stays inside it. Empty for
+/// a project that builds in the whole repo.
+fn path_section(task: &trailhead_factory::TaskSpec, role: Role) -> String {
+    let Some(path) = &task.path else { return String::new() };
+    let rule = match role {
+        Role::Reviewer => {
+            "A change to any file outside it needs the task to ask for it; if the task doesn't, request changes."
+        }
+        _ => "Keep the change inside it unless the task says otherwise.",
+    };
+    format!("\n\nThis task's project builds in `{path}/`. {rule}")
+}
+
 /// The answers and the task's decisions and notes, for after the description. Empty when there are none. Past
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
@@ -444,7 +457,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
     let mut p = match ctx.role {
         Role::Reviewer => format!(
             "You are reviewing a pull request for task {key}: {title}.\n\n\
-             Task:\n{desc}{human}{follow_ups}\n\n\
+             Task:\n{desc}{human}{follow_ups}{path}\n\n\
              The change under review:\n```diff\n{diff}\n```{checks}\n\n\
              Check it against the task and the repo's conventions (AGENTS.md). Read code in the checkout as needed, \
              but don't edit anything. Approve only if it does what the task asks, correctly and with tests where \
@@ -458,6 +471,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             desc = task.description,
             human = human_section(task),
             follow_ups = follow_ups_section(task),
+            path = path_section(task, ctx.role),
             diff = ctx.diff.as_deref().map_or("(no diff)".into(), |d| capped_diff(
                 d,
                 DIFF_CAP,
@@ -468,7 +482,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
         ),
         _ => format!(
             "Implement task {key}: {title}.\n\n\
-             Task:\n{desc}{human}\n\n\
+             Task:\n{desc}{human}{path}\n\n\
              Work in this checkout and follow the repo's conventions (AGENTS.md). Make the change, add or update \
              tests, and run the repo's formatter, linter and tests. You don't need to commit or push; everything \
              you change in the checkout is published as one commit and a PR. Don't create nested git repositories in \
@@ -489,6 +503,7 @@ pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
             title = task.title,
             desc = task.description,
             human = human_section(task),
+            path = path_section(task, ctx.role),
         ),
     };
     if let Some(failure) = &task.previous_failure {

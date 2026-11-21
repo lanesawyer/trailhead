@@ -414,7 +414,8 @@ impl Factory {
         // A task still at the grade an earlier review raised it to keeps the grade it started at, and that reasons.
         let recorded = task.run.grade.as_ref().filter(|r| task.grade == Some(r.grade));
         let started = recorded.map_or(task.grade, |r| r.task);
-        let mut grade = self.config.grades.grader().grade(started, &files);
+        let path = self.path_of(&task.key);
+        let mut grade = self.config.grades.grader().within(path.as_deref()).grade(started, &files);
         if let Some(r) = recorded.filter(|r| r.grade >= grade.grade) {
             grade = r.clone();
         }

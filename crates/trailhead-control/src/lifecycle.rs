@@ -75,7 +75,7 @@ impl Factory {
         // undone, so a retry's name carries the count of those to stay unique.
         let retries = task.run.retries.unwrap_or(0);
         let name = worker_name(&task.key, attempt, retries);
-        let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+        let credential = match self.tracker.create_sub_agent(&name, task.key.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
             // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
             Err(e @ Error::Forbidden(_)) => {
@@ -175,7 +175,7 @@ impl Factory {
         let req = RunRequest {
             run: name.clone(),
             role: Role::Worker,
-            task: spec(task, context),
+            task: spec(task, context, self.path_of(&task.key)),
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),
@@ -905,13 +905,16 @@ pub(crate) fn token_ttl(profile: &Profile) -> Duration {
     Duration::from_secs((u64::from(profile.budget.minutes) + 30) * 60)
 }
 
-pub(crate) fn spec(task: &Task, context: HumanContext) -> TaskSpec {
+/// What a sandbox is told of the task. `path` is the directory its project builds in, when it points at the repo
+/// with one.
+pub(crate) fn spec(task: &Task, context: HumanContext, path: Option<String>) -> TaskSpec {
     TaskSpec {
         key: task.key.clone(),
         title: task.title.clone(),
         description: task.description.clone(),
         previous_failure: task.run.failure.clone(),
         context,
+        path,
     }
 }
 

@@ -998,6 +998,31 @@ async fn delegated_reviewers_can_approve() {
 }
 
 #[tokio::test]
+async fn only_a_human_says_where_a_project_is_built() {
+    let env = Env::new().await;
+    let agent = env.agent("planner").await;
+    let meta = |m: serde_json::Value| ProjectPatch { metadata: Some(m), ..Default::default() };
+    let pointed = json!({"factory": {"repo": "o/apps", "path": "apps/a"}});
+    let forbidden = |r: Result<_, Error>| matches!(r, Err(Error::Forbidden(_)));
+    assert!(forbidden(env.store.update_project(&agent, "AUTH", meta(pointed.clone()), None).await));
+    let new =
+        NewProject { key: "APP".into(), name: "App".into(), metadata: Some(pointed.clone()), ..Default::default() };
+    assert!(forbidden(env.store.create_project(&agent, new).await));
+
+    env.store.update_project(&env.human, "AUTH", meta(pointed), None).await.unwrap();
+    // Other keys stay open to agents.
+    let other = env.store.update_project(&agent, "AUTH", meta(json!({"color": "green"})), None).await.unwrap();
+    assert_eq!(other.repo().unwrap().path.as_deref(), Some("apps/a"));
+    for change in
+        [json!({"factory": {"repo": "o/other"}}), json!({"factory": {"path": "apps/b"}}), json!({"factory": null})]
+    {
+        assert!(forbidden(env.store.update_project(&agent, "AUTH", meta(change.clone()), None).await), "{change}");
+    }
+    let cleared = env.store.update_project(&env.human, "AUTH", meta(json!({"factory": null})), None).await.unwrap();
+    assert_eq!(cleared.repo(), None);
+}
+
+#[tokio::test]
 async fn approved_sits_between_review_and_done() {
     let env = Env::new().await;
     let worker = env.agent("worker").await;

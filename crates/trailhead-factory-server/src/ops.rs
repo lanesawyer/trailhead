@@ -10,7 +10,8 @@ use trailhead_control::FACTORY_LABEL;
 use trailhead_factory::compute::label;
 use trailhead_factory::status::control_label;
 use trailhead_factory::{
-    Credential, FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Status, Task, TaskKey, Tracker,
+    Credential, FactoryConfig, FactorySnapshot, Labels, Sandbox, SandboxState, SandboxStatus, Scope, Status, Task,
+    TaskKey, Tracker,
 };
 use trailhead_tracker_rest::RestTracker;
 
@@ -77,16 +78,11 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
             (sandboxes.iter().map(Row::from_sandbox).collect(), None)
         }
     };
-    let tasks = tracker
-        .in_flight(&config.repo.project, &config.repo.queue.iter().cloned().map(TaskKey).collect::<Vec<_>>())
-        .await
-        .map_err(reach)?;
-    let queue: Vec<TaskKey> = config.repo.queue.iter().cloned().map(TaskKey).collect();
-    let mut waiting = tracker.ready(&config.repo.project, &queue, usize::MAX).await.map_err(reach)?;
-    // Under a queue only graded tasks are the factory's to start.
-    if !queue.is_empty() {
-        waiting.retain(|t| t.grade.is_some());
-    }
+    let scopes = scopes(&tracker, &config).await.map_err(reach)?;
+    let tasks = tracker.in_flight(&scopes).await.map_err(reach)?;
+    let mut waiting = tracker.ready(&scopes, usize::MAX).await.map_err(reach)?;
+    // Under a queue, and in a pointed project, only graded tasks are the factory's to start.
+    waiting.retain(|t| t.grade.is_some() || Scope::of(&scopes, &t.key).is_some_and(|s| !s.needs_grade()));
     if let Some(why) = runs.and_then(|live| live.stopped.as_ref()) {
         println!(
             "WARNING: this repo's loop has stopped and takes no new runs: {}\nRestart the server to start it again.\n",
@@ -103,6 +99,12 @@ pub async fn status(status: &StatusOpts) -> Result<()> {
         None => println!("\nUI endpoint id: none yet (the control plane makes it on its first run)"),
     }
     Ok(())
+}
+
+/// The projects the repo's factory works, as the server lists them: the file's own and each one pointed at the repo.
+pub(crate) async fn scopes(tracker: &RestTracker, config: &FactoryConfig) -> trailhead_factory::Result<Vec<Scope>> {
+    let listed = tracker.project_repos().await?;
+    Ok(Scope::for_repo(&config.repo.project, &config.repo.queue, &config.repo.repo().slug(), listed))
 }
 
 pub async fn logs(logs: &LogsOpts) -> Result<()> {

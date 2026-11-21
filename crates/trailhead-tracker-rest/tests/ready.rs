@@ -6,7 +6,7 @@ use trailhead_control::CoreTracker;
 use trailhead_core::{
     CommentKind, Ctx, NewComment, NewProject, NewTask, Principal, Priority, Status, Store, TaskPatch, Verdict,
 };
-use trailhead_factory::{Credential, TaskKey, Tracker};
+use trailhead_factory::{Credential, Scope, TaskKey, Tracker};
 use trailhead_tracker_rest::RestTracker;
 
 async fn add(s: &Store, h: &Ctx, title: &str, priority: u8) -> TaskKey {
@@ -61,7 +61,7 @@ async fn ready_lists_reworks_ahead_of_new_work() {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let tracker = RestTracker::new(format!("http://{addr}"), Credential { agent: "factory".into(), token });
 
-    let ready = tracker.ready("TRAIL", &[], 10).await.unwrap();
+    let ready = tracker.ready(&[Scope::file("TRAIL", vec![])], 10).await.unwrap();
     let listed: Vec<_> = ready.iter().map(|t| (t.key.0.as_str(), t.priority.get(), t.changes_requested)).collect();
     // The rework blocks an urgent task, so it is raised to that priority and leads, and the blocker is raised to what it
     // blocks; the blocked and held reworks and
@@ -72,7 +72,7 @@ async fn ready_lists_reworks_ahead_of_new_work() {
         "{listed:?}"
     );
 
-    let cut = tracker.ready("TRAIL", &[], 1).await.unwrap();
+    let cut = tracker.ready(&[Scope::file("TRAIL", vec![])], 1).await.unwrap();
     assert_eq!(cut.len(), 1);
     assert_eq!(cut[0].key, waiting);
 }
@@ -118,11 +118,11 @@ async fn the_rest_tracker_and_the_core_tracker_list_the_same_ready_tasks_in_the_
     };
     for queue in [vec![], vec![queue.clone()]] {
         for limit in [10, 2, 1] {
-            let from_core = listed(core.ready("TRAIL", &queue, limit).await.unwrap());
-            let from_rest = listed(rest.ready("TRAIL", &queue, limit).await.unwrap());
+            let from_core = listed(core.ready(&[Scope::file("TRAIL", queue.clone())], limit).await.unwrap());
+            let from_rest = listed(rest.ready(&[Scope::file("TRAIL", queue.clone())], limit).await.unwrap());
             assert_eq!(from_rest, from_core, "queue {queue:?}, limit {limit}");
         }
     }
-    let first = core.ready("TRAIL", &[queue], 1).await.unwrap();
+    let first = core.ready(&[Scope::file("TRAIL", vec![queue])], 1).await.unwrap();
     assert_eq!(first[0].key, queued[3], "the blocker of urgent work leads, raised to its priority");
 }

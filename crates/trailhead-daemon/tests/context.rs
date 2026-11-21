@@ -81,6 +81,7 @@ fn request(key: TaskKey, repo: Repo, role: Role, pr: Option<trailhead_factory::P
             description: String::new(),
             previous_failure: None,
             context: Default::default(),
+            path: None,
         },
         repo,
         base_branch: "develop".into(),

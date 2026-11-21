@@ -20,6 +20,10 @@ pub struct TaskSpec {
     /// A person's answers to the agent's earlier questions, and the task's decisions and notes.
     #[serde(default, skip_serializing_if = "HumanContext::is_empty")]
     pub context: HumanContext,
+    /// The directory the task's project builds in, which the change stays inside unless the task says otherwise;
+    /// `None` is the whole repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

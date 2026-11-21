@@ -164,20 +164,13 @@ pub fn is_comment_only(path: &str, patch: &str) -> bool {
     language::is_comment_only(path, patch)
 }
 
-/// Whether a lockfile's patch only edits dependency lists: no package added or removed, no version, source or
-/// checksum changed. That is a workspace member gaining or losing a dependency that is already locked, which brings in
-/// nothing new to fetch. Anything else (a lockfile no built-in language reads, or a line it can't read) is not safe.
-pub fn is_dependency_list_only(path: &str, patch: &str) -> bool {
-    let Some(line_ok) = language::lockfile(path.rsplit('/').next().unwrap_or(path)) else { return false };
-    let mut changed = 0;
-    for line in patch.lines() {
-        let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
-        changed += 1;
-        if !line_ok(rest.trim()) {
-            return false;
-        }
-    }
-    changed > 0
+/// Whether a lockfile's patch brings in nothing new to fetch: it only edits dependency lists (a workspace member
+/// gaining or losing a dependency that is already locked), or, where the language can tell (`Cargo.lock`), adds,
+/// removes or changes entries for the workspace's own packages, which have no source. A package from a registry or git
+/// added, removed or changed still counts. Anything else (a lockfile no built-in language reads, or a line it can't
+/// read) is not safe.
+pub fn brings_nothing_new(path: &str, patch: &str) -> bool {
+    language::lock_patch_safe(path.rsplit('/').next().unwrap_or(path), patch)
 }
 
 /// Floor of a deleted or renamed test, or an edited check's definition: never grade 1.
@@ -185,6 +178,9 @@ const TEST_OR_CHECK_GRADE: Grade = Grade::new(2).unwrap();
 
 /// Floor of a diff over the line limit.
 const OVER_LINES_GRADE: Grade = Grade::new(3).unwrap();
+
+/// Floor of a diff with a file outside the project's path: it reaches past the one app or module the project is.
+const OUTSIDE_PATH_GRADE: Grade = Grade::new(3).unwrap();
 
 /// Reasons shown in full before the rest are counted.
 const SHOWN_REASONS: usize = 3;
@@ -195,17 +191,26 @@ pub struct Grader<'a> {
     /// (grade, globs), any order.
     pub rules: Vec<(Grade, &'a [String])>,
     pub max_lines: u32,
+    /// The directory the task's project builds in, when it is one directory of the repo: a file outside it raises the
+    /// PR to grade 3.
+    pub within: Option<&'a str>,
 }
 
-impl Grader<'_> {
-    /// The PR's grade: the highest of the task's, any rule a changed file matches, the line limit and the floor for
-    /// touching tests and checks. `reasons` name what put it above the task's, if anything did.
+impl<'a> Grader<'a> {
+    /// This grader for a task whose project builds in `path` (`None` for the whole repo).
+    pub fn within(self, path: Option<&'a str>) -> Grader<'a> {
+        Grader { within: path, ..self }
+    }
+
+    /// The PR's grade: the highest of the task's, any rule a changed file matches, the line limit, the floor for
+    /// touching tests and checks, and the floor for a file outside the project's path. `reasons` name what put it
+    /// above the task's, if anything did.
     pub fn grade(&self, task: Option<Grade>, files: &[ChangedFile]) -> PrGrade {
         // (grade, reason) per finding.
         let mut found: Vec<(Grade, String)> = Vec::new();
         // Compiled once for all files, not per file and glob.
-        // Each rule twice: all its globs, and without the ones naming a lockfile read below, for a lock that only edits
-        // dependency lists. A broader glob that happens to cover it (`crates/**`) still counts.
+        // Each rule twice: all its globs, and without the ones naming a lockfile read below, for a lock edit that brings
+        // in nothing new. A broader glob that happens to cover it (`crates/**`) still counts.
         let rules: Vec<(Grade, globset::GlobSet, globset::GlobSet)> = self
             .rules
             .iter()
@@ -222,8 +227,8 @@ impl Grader<'_> {
             .collect();
         for f in files {
             // Only in place, like a comment edit: a renamed lockfile now pins a different project.
-            let lock_edit = f.status == FileStatus::Modified
-                && f.patch.as_deref().is_some_and(|p| is_dependency_list_only(&f.path, p));
+            let lock_edit =
+                f.status == FileStatus::Modified && f.patch.as_deref().is_some_and(|p| brings_nothing_new(&f.path, p));
             let rule = rules
                 .iter()
                 .filter(|(_, all, rest)| if lock_edit { rest } else { all }.is_match(&f.path))
@@ -248,6 +253,12 @@ impl Grader<'_> {
             }
             if is_check_definition(&f.path) || f.previous_path.as_deref().is_some_and(is_check_definition) {
                 found.push((TEST_OR_CHECK_GRADE, format!("{} (a check's definition) changed", f.path)));
+            }
+            if let Some(dir) = self.within {
+                let outside = [Some(f.path.as_str()), f.previous_path.as_deref()];
+                if let Some(p) = outside.into_iter().flatten().find(|p| !trailhead_model::within(Some(dir), p)) {
+                    found.push((OUTSIDE_PATH_GRADE, format!("{p} is outside {dir}/")));
+                }
             }
         }
         let lines: u64 = files.iter().map(ChangedFile::lines).sum();
@@ -306,7 +317,7 @@ mod tests {
     }
 
     fn grader(r: &Rules) -> Grader<'_> {
-        Grader { rules: vec![(gr(2), &r.two), (gr(3), &r.three), (gr(4), &r.four)], max_lines: 600 }
+        Grader { rules: vec![(gr(2), &r.two), (gr(3), &r.three), (gr(4), &r.four)], max_lines: 600, within: None }
     }
 
     #[test]
@@ -418,6 +429,57 @@ mod tests {
         assert_eq!(g.describe(), "Grade 2 (task was 1; Cargo.lock changed)");
         // No patch (too large for the host to show): treated as risky.
         assert_eq!(grader(&r).grade(Some(gr(1)), &[modified("Cargo.lock")]).grade, gr(3));
+    }
+
+    #[test]
+    #[cfg(feature = "rust")]
+    fn a_lock_that_only_adds_or_changes_workspace_packages_is_not_raised() {
+        let r = rules();
+        let member = "@@ -50,6 +50,14 @@ dependencies = [\n  \"serde\",\n ]\n \n+[[package]]\n+name = \"ticklist\"\n\
+                      +version = \"0.1.0\"\n+dependencies = [\n+ \"trailhead-ui\",\n+]\n+\n [[package]]\n name = \"tokio\"\n\
+                      version = \"1.0.0\"";
+        assert_eq!(grader(&r).grade(Some(gr(2)), &[lock(member)]).grade, gr(2));
+        let bump = "@@ -1,6 +1,6 @@\n [[package]]\n name = \"ticklist\"\n-version = \"0.1.0\"\n+version = \"0.2.0\"\n dependencies = [";
+        assert_eq!(grader(&r).grade(Some(gr(2)), &[lock(bump)]).grade, gr(2));
+        let dropped = "@@ -1,7 +1,0 @@\n-[[package]]\n-name = \"old-app\"\n-version = \"0.1.0\"\n-\n [[package]]";
+        assert_eq!(grader(&r).grade(Some(gr(2)), &[lock(dropped)]).grade, gr(2));
+        for bad in [
+            // A registry package, new or upgraded, has a source.
+            "@@ -1,2 +1,8 @@\n+[[package]]\n+name = \"evil\"\n+version = \"1.0.0\"\n+source = \"registry+https://x\"\n+checksum = \"aa\"\n+",
+            "@@ -1,5 +1,5 @@\n [[package]]\n name = \"serde\"\n-version = \"1.0.0\"\n+version = \"1.0.1\"\n source = \"registry+https://x\"",
+            "@@ -1,5 +1,5 @@\n [[package]]\n name = \"x\"\n-version = \"1.0.0\"\n+version = \"1.0.1\"\n source = \"git+https://x#abc\"",
+            // Where the entry's start or the line after its version is out of sight, a source may be there.
+            "@@ -1,3 +1,3 @@\n name = \"x\"\n-version = \"1.0.0\"\n+version = \"1.0.1\"\n dependencies = [",
+            "@@ -1,3 +1,3 @@\n [[package]]\n name = \"x\"\n-version = \"1.0.0\"\n+version = \"1.0.1\"",
+            // The lockfile's own format version, outside any entry.
+            "@@ -1,3 +1,3 @@\n-version = 3\n+version = 4\n \n [[package]]",
+            "@@ -1,3 +1,3 @@\n [[patch.unused]]\n+name = \"x\"\n+version = \"1.0.0\"\n \n",
+        ] {
+            assert_eq!(grader(&r).grade(Some(gr(2)), &[lock(bad)]).grade, gr(3), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_file_outside_the_projects_path_is_grade_3() {
+        let r = rules();
+        let inside = [modified("apps/ticklist/src/lib.rs"), modified("apps/ticklist/tests/a.rs")];
+        let g = grader(&r).within(Some("apps/ticklist"));
+        assert_eq!(g.grade(Some(gr(2)), &inside).grade, gr(2));
+        let other = modified("apps/notes/src/lib.rs");
+        let crossed = g.grade(Some(gr(2)), &[inside[0].clone(), other.clone()]);
+        assert_eq!(crossed.describe(), "Grade 3 (task was 2; apps/notes/src/lib.rs is outside apps/ticklist/)");
+        let moved_out = ChangedFile {
+            previous_path: Some("apps/ticklist/src/a.rs".into()),
+            ..file("shell/src/a.rs", FileStatus::Renamed, 1)
+        };
+        assert_eq!(g.grade(Some(gr(1)), &[moved_out]).grade, gr(3));
+        let moved_in = ChangedFile {
+            previous_path: Some("shell/src/a.rs".into()),
+            ..file("apps/ticklist/src/a.rs", FileStatus::Renamed, 1)
+        };
+        assert_eq!(g.grade(Some(gr(1)), &[moved_in]).grade, gr(3));
+        // Without a path the whole repo is the project's.
+        assert_eq!(grader(&r).grade(Some(gr(2)), &[other]).grade, gr(2));
     }
 
     #[cfg(feature = "rust")]

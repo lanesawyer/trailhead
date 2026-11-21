@@ -35,6 +35,26 @@ fn edit_sets_and_removes_metadata() {
 }
 
 #[test]
+fn project_edit_points_a_project_at_a_repo_and_back() {
+    let th = Instance::new();
+    th.stdout(&["project", "add", "QA", "Queue"]);
+    th.stdout(&["project", "edit", "QA", "--factory-repo", "o/apps", "--factory-path", "apps/qa/"]);
+    let shown = th.stdout(&["project", "show", "QA"]);
+    assert!(shown.contains("built by the factory of o/apps, in apps/qa/"), "{shown}");
+    th.stdout(&["project", "edit", "QA", "--factory-repo", "o/apps"]);
+    let shown = th.stdout(&["project", "show", "QA"]);
+    assert!(shown.contains("built by the factory of o/apps\n"), "a path left out is cleared: {shown}");
+    th.stdout(&["project", "edit", "QA", "--no-factory"]);
+    assert!(!th.stdout(&["project", "show", "QA"]).contains("built by"));
+    for bad in
+        [&["--factory-repo", "apps"][..], &["--factory-path", "apps/qa"], &["--factory-repo", "o/a", "--no-factory"]]
+    {
+        let args: Vec<&str> = ["project", "edit", "QA"].iter().chain(bad).copied().collect();
+        assert!(!th.run(&args).status.success(), "{bad:?}");
+    }
+}
+
+#[test]
 fn edit_rejects_a_parent_that_would_make_a_cycle() {
     let th = Instance::new();
     th.stdout(&["project", "add", "QA", "Queue"]);

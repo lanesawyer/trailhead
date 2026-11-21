@@ -143,7 +143,7 @@ impl GradesConfig {
     pub fn grader(&self) -> Grader<'_> {
         let rules =
             self.rules.iter().filter_map(|(k, globs)| Some((k.parse::<Grade>().ok()?, globs.as_slice()))).collect();
-        Grader { rules, max_lines: self.max_lines }
+        Grader { rules, max_lines: self.max_lines, within: None }
     }
 }
 

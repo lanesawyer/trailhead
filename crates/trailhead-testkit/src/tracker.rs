@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, Result, RunPatch, RunRecord, Status,
-    Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Priority, ProjectRepo, Result, RunPatch, RunRecord,
+    Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +53,8 @@ struct State {
     reports: HashMap<TaskKey, usize>,
     /// How many times each task has had a review requested, failed or not.
     review_requests: HashMap<TaskKey, usize>,
+    /// Projects whose metadata says where they are built, by key.
+    repos: BTreeMap<String, ProjectRepo>,
     /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
@@ -122,6 +124,21 @@ impl FakeTracker {
         let key = self.add_task(&project, title, description);
         self.state.lock().unwrap().parents.insert(key.clone(), parent.clone());
         key
+    }
+
+    /// Points `project` at a repo (`owner/name`) and a path in it, or with `None` stops it pointing, as a person
+    /// editing the project's `metadata.factory` does.
+    pub fn point(&self, project: &str, repo: Option<(&str, Option<&str>)>) {
+        let mut s = self.state.lock().unwrap();
+        match repo {
+            Some((repo, path)) => {
+                let to = ProjectRepo { repo: repo.to_string(), path: path.map(str::to_string) };
+                s.repos.insert(project.to_string(), to);
+            }
+            None => {
+                s.repos.remove(project);
+            }
+        }
     }
 
     /// Takes a task off its queue, as `edit --parent none` does.
@@ -429,6 +446,12 @@ fn flagged(s: &State, t: &Task) -> Task {
     Task { changes_requested: t.status == Status::InReview && review_asks_changes(s, &t.key), ..t.clone() }
 }
 
+/// Whether the task is in one of the scopes: in its project, and under its queue when it has one.
+fn in_scope(s: &State, scopes: &[Scope], task: &TaskKey) -> bool {
+    Scope::of(scopes, task)
+        .is_some_and(|scope| scope.queue.is_empty() || s.parents.get(task).is_some_and(|p| scope.queue.contains(p)))
+}
+
 fn revoked(s: &State, agent: &str) -> bool {
     let mut name = agent;
     loop {
@@ -485,14 +508,14 @@ impl Tracker for FakeTracker {
         Arc::new(FakeTracker { state: self.state.clone(), agent: format!("{}/{name}", self.agent) })
     }
 
-    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
+    async fn ready(&self, scopes: &[Scope], limit: usize) -> Result<Vec<Task>> {
         self.check_live()?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
             .map(|t| flagged(&s, t))
-            .filter(|t| t.project == project && t.holder.is_none() && (t.status == Status::Open || t.changes_requested))
-            .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
+            .filter(|t| t.holder.is_none() && (t.status == Status::Open || t.changes_requested))
+            .filter(|t| in_scope(&s, scopes, &t.key))
             .take(limit)
             .collect())
     }
@@ -545,18 +568,21 @@ impl Tracker for FakeTracker {
         self.newest_review(task, true)
     }
 
-    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+    async fn in_flight(&self, scopes: &[Scope]) -> Result<Vec<Task>> {
         self.check_live()?;
         self.inject(TrackerOp::InFlight)?;
         let s = self.state.lock().unwrap();
         Ok(s.tasks
             .values()
-            .filter(|t| {
-                t.project == project && !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled)
-            })
-            .filter(|t| queue.is_empty() || s.parents.get(&t.key).is_some_and(|p| queue.contains(p)))
+            .filter(|t| !t.run.is_empty() && !matches!(t.status, Status::Done | Status::Cancelled))
+            .filter(|t| in_scope(&s, scopes, &t.key))
             .map(|t| flagged(&s, t))
             .collect())
+    }
+
+    async fn project_repos(&self) -> Result<Vec<(String, ProjectRepo)>> {
+        self.check_live()?;
+        Ok(self.state.lock().unwrap().repos.iter().map(|(k, r)| (k.clone(), r.clone())).collect())
     }
 
     async fn strays(&self, project: &str, queues: &[TaskKey]) -> Result<Vec<Task>> {

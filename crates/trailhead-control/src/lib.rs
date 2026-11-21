@@ -22,6 +22,7 @@ mod pool;
 mod reconcile;
 mod review;
 mod run_loop;
+mod scope;
 mod spend;
 mod status;
 mod timing;
@@ -37,7 +38,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 use trailhead_factory::{
     ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels,
-    MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Target, Task, TaskKey, Tracker, Verdict, label,
+    MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::pool::Trouble;
@@ -109,6 +110,12 @@ impl Host {
         if new && other.lock().unwrap().contains(project) {
             tracing::info!(project, "stray check is off: another repo works this project without a queue");
         }
+    }
+
+    /// Whether some repo on this host has `project` as its file's own project.
+    fn is_file_project(&self, project: &str) -> bool {
+        self.queued_projects.lock().unwrap().contains(project)
+            || self.queueless_projects.lock().unwrap().contains(project)
     }
 
     /// The shared state for the host settings in the user config's `[factory]`.
@@ -203,6 +210,10 @@ pub struct Factory {
     starved: Mutex<Option<Vec<(TaskKey, bool)>>>,
     /// Tasks already reported as ungraded, so a poll doesn't say it again.
     ungraded: Mutex<HashSet<TaskKey>>,
+    /// The projects pointed at this repo as last listed, for the paths their tasks build in.
+    pointed: Mutex<Vec<Scope>>,
+    /// The pointed projects skipped as another repo's own, already warned about.
+    misdirected: Mutex<HashSet<String>>,
     placing: Placing,
     /// What this control plane shows of itself to `factory status` and the UI.
     status: Arc<StatusBoard>,
@@ -394,6 +405,8 @@ impl Factory {
             host,
             starved: Mutex::default(),
             ungraded: Mutex::default(),
+            pointed: Mutex::default(),
+            misdirected: Mutex::default(),
             placing: Placing::default(),
             status,
         }

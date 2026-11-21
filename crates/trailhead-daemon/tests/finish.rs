@@ -60,6 +60,7 @@ fn request(key: TaskKey) -> RunRequest {
             description: String::new(),
             previous_failure: None,
             context: Default::default(),
+            path: None,
         },
         repo: Repo { owner: "o".into(), name: "r".into() },
         base_branch: "main".into(),

@@ -316,6 +316,9 @@ pub struct ProjectUpdate {
     /// Names or ids of the agents that may approve review work here, replacing the list; empty clears it. Humans only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewers: Option<Vec<String>>,
+    /// An RFC 7386 merge patch to the project's metadata: `null` removes a key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// `POST /v1/tasks/{task}/comments`.

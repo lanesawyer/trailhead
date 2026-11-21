@@ -71,7 +71,9 @@ pub fn load_all(dirs: &[PathBuf], file: Option<&Path>) -> Result<Vec<RepoSpec>> 
 /// every ready task in the project), which would have both claim the same tasks. It also refuses repos that differ
 /// from the first in `[factory.compute]`, `[factory.targets]` or `[factory.daemon]`, or that use different profile
 /// adapters, because repos in one process share the sandbox providers and the daemon launch (which builds one
-/// harness). Names both repos.
+/// harness). Names both repos. Projects pointed at a repo through their metadata can't collide here, since each names
+/// one repo; one that is also another repo's file project is a mistake only the running control plane sees, and it
+/// skips that project with a warning.
 pub fn validate(specs: &[RepoSpec]) -> Result<()> {
     let mut slugs: HashMap<String, &RepoSpec> = HashMap::new();
     let mut names: HashMap<String, &RepoSpec> = HashMap::new();

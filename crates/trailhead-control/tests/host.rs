@@ -8,7 +8,7 @@ mod logs;
 use trailhead_control::{Factory, Host};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    Compute, FactoryConfig, Labels, Patch, Role, RunOutcome, RunPatch, SandboxSpec, TaskKey, VerdictKind, label,
+    Compute, FactoryConfig, Labels, Patch, Role, RunOutcome, RunPatch, SandboxSpec, Scope, TaskKey, VerdictKind, label,
 };
 use trailhead_testkit::{
     FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
@@ -253,10 +253,10 @@ async fn repos_sharing_a_project_through_different_queues_leave_each_others_in_f
     assert!(done.requeued.is_empty() && done.reviewed.is_empty(), "alpha touched beta's task: {done:?}");
     assert_eq!(tracker.task(&task).status, Status::InProgress);
     assert!(
-        tracker.in_flight("TRAIL", std::slice::from_ref(&q1)).await.unwrap().is_empty(),
+        tracker.in_flight(&[Scope::file("TRAIL", vec![q1.clone()])]).await.unwrap().is_empty(),
         "alpha's in-flight set holds only its own queue's tasks"
     );
-    assert_eq!(tracker.in_flight("TRAIL", std::slice::from_ref(&q2)).await.unwrap().len(), 1);
+    assert_eq!(tracker.in_flight(&[Scope::file("TRAIL", vec![q2.clone()])]).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -276,7 +276,7 @@ async fn a_run_re_parented_out_of_every_queue_is_a_stray_not_an_in_flight_task()
     }
     let queues = std::slice::from_ref(&queue);
     let keys = |tasks: Vec<trailhead_factory::Task>| tasks.into_iter().map(|t| t.key).collect::<Vec<_>>();
-    assert_eq!(keys(tracker.in_flight("TRAIL", queues).await.unwrap()), vec![inside]);
+    assert_eq!(keys(tracker.in_flight(&[Scope::file("TRAIL", queues.to_vec())]).await.unwrap()), vec![inside]);
     assert_eq!(keys(tracker.strays("TRAIL", queues).await.unwrap()), vec![outside]);
 }
 

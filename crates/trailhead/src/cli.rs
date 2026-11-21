@@ -359,6 +359,15 @@ pub(crate) enum ProjectCmd {
         archive: bool,
         #[arg(long)]
         unarchive: bool,
+        /// The repo (`owner/name`) whose factory works this project's graded tasks. Humans only.
+        #[arg(long, value_name = "OWNER/NAME")]
+        factory_repo: Option<String>,
+        /// The directory in that repo the project's changes stay inside; without it, the whole repo.
+        #[arg(long, value_name = "PATH", requires = "factory_repo")]
+        factory_path: Option<String>,
+        /// Stop the project pointing at a repo, so no factory works it.
+        #[arg(long, conflicts_with = "factory_repo")]
+        no_factory: bool,
     },
 }
 

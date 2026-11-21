@@ -19,8 +19,8 @@ fn pr(n: u8) -> Priority {
 }
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Status, TaskKey,
-    Tracker, Usd, Verdict, VerdictKind, label,
+    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Scope, Status,
+    TaskKey, Tracker, Usd, Verdict, VerdictKind, label,
 };
 use trailhead_testkit::{
     Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
@@ -306,15 +306,15 @@ async fn a_task_with_malformed_factory_metadata_is_skipped_not_fatal() {
     };
     r.store.update_task(&r.human, &bad.0, patch, None).await.unwrap();
 
-    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![])], 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
-    assert!(r.tracker.in_flight("TRAIL", &[]).await.unwrap().is_empty());
+    assert!(r.tracker.in_flight(&[Scope::file("TRAIL", vec![])]).await.unwrap().is_empty());
     r.factory.reconcile().await.unwrap();
     assert!(r.tracker.show(&bad).await.is_err());
 
     // The task says why it was skipped, once however many passes see it.
-    r.tracker.ready("TRAIL", &[], 10).await.unwrap();
-    r.tracker.in_flight("TRAIL", &[]).await.unwrap();
+    r.tracker.ready(&[Scope::file("TRAIL", vec![])], 10).await.unwrap();
+    r.tracker.in_flight(&[Scope::file("TRAIL", vec![])]).await.unwrap();
     let notes: Vec<_> = r.store.list_comments(&r.human, &bad.0).await.unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].body.contains("attempt_base"), "{}", notes[0].body);
@@ -334,7 +334,7 @@ async fn a_task_with_non_object_factory_metadata_is_skipped_without_naming_a_fie
         bad.push(task);
     }
 
-    let ready = r.tracker.ready("TRAIL", &[], 10).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![])], 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&good]);
 
     for task in &bad {
@@ -368,7 +368,7 @@ async fn with_a_queue_only_its_subtasks_run() {
     r.factory.config.repo.queue = vec![queue.0.clone()];
     r.factory.config.repo.max_sandboxes = 2;
 
-    let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![queue.clone()])], 10).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&handed]);
 
     r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
@@ -399,7 +399,7 @@ async fn a_queue_list_reads_each_parents_direct_children_ordered_by_priority_and
     let _grandchild = r.store.create_task(&r.human, mk("grandchild", &deep, 1, Some(1))).await.unwrap();
     r.factory.config.repo.queue = vec![q1.0.clone(), q2.0.clone(), q2.0.clone()];
 
-    let ready = r.tracker.ready("TRAIL", &[q1.clone(), q2.clone(), q2.clone()], 10).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![q1.clone(), q2.clone(), q2.clone()])], 10).await.unwrap();
     let keys: Vec<_> = ready.iter().map(|t| &t.key).collect();
     assert_eq!(keys.iter().filter(|k| ***k == high).count(), 1, "a task listed twice is read once");
     assert!(!keys.contains(&&deep), "a queue reaches direct children only");
@@ -545,7 +545,7 @@ async fn reworks_under_a_queue_skip_other_tasks_and_blocked_ones_and_list_a_twic
 
     // `reworks` is private, so read through `ready`, which lists them with new work.
     async fn reworks(r: &Rig, queue: &[TaskKey]) -> Vec<TaskKey> {
-        let ready = r.tracker.ready("TRAIL", queue, 50).await.unwrap();
+        let ready = r.tracker.ready(&[Scope::file("TRAIL", queue.to_vec())], 50).await.unwrap();
         ready.into_iter().filter(|t| t.changes_requested).map(|t| t.key).collect()
     }
     let all = reworks(&r, &[]).await;
@@ -1678,14 +1678,14 @@ async fn a_task_that_blocks_urgent_work_is_listed_as_urgent_too() {
     r.store.add_dependency(&r.human, &blocker.0, &middle.0).await.unwrap();
     r.store.add_dependency(&r.human, &middle.0, &urgent.0).await.unwrap();
 
-    let ready = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 10).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![queue.clone()])], 10).await.unwrap();
     let priority = |k: &TaskKey| ready.iter().find(|t| &t.key == k).unwrap().priority;
     assert_eq!(priority(&blocker), pr(2), "through a chain, a p3 blocker of a p2 task runs as p2");
     assert_eq!(priority(&older), pr(3));
 
-    let first = r.tracker.ready("TRAIL", std::slice::from_ref(&queue), 1).await.unwrap();
+    let first = r.tracker.ready(&[Scope::file("TRAIL", vec![queue.clone()])], 1).await.unwrap();
     assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "the raise applies before the limit");
-    let first = r.tracker.ready("TRAIL", &[], 1).await.unwrap();
+    let first = r.tracker.ready(&[Scope::file("TRAIL", vec![])], 1).await.unwrap();
     assert_eq!(first.iter().map(|t| &t.key).collect::<Vec<_>>(), [&blocker], "with no queue too");
 
     r.factory.config.repo.max_sandboxes = 1;
@@ -1857,9 +1857,9 @@ async fn ready_lists_reworks_ahead_of_new_work_only_within_a_priority() {
     let same = r.task("Same priority as the rework").await;
 
     // The cut to `limit` comes after the merge: the urgent task isn't pushed out by the rework.
-    let ready = r.tracker.ready("TRAIL", &[], 1).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![])], 1).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent]);
-    let ready = r.tracker.ready("TRAIL", &[], 3).await.unwrap();
+    let ready = r.tracker.ready(&[Scope::file("TRAIL", vec![])], 3).await.unwrap();
     assert_eq!(ready.iter().map(|t| &t.key).collect::<Vec<_>>(), [&urgent, &rework, &same]);
 }
 
