@@ -267,7 +267,8 @@ Every write is a command: one REST request, with `If-Match` and an `Idempotency-
   HTTP client, whose method type `Call::method` returns.
 - **Read** `CommandDone { source, id, outcome }` messages and take those whose `source` is yours. `Outcome` is
   `Ok { version }`, `Conflict { current_version, message }` (the version the control saw is stale), `Forbidden(..)`,
-  `RateLimited { retry_after, message }` or `Failed(..)`.
+  `RateLimited { retry_after, message }` or `Failed(..)` (anything else, with the server's words: a `409` such as
+  `invalid_transition` is a refusal, not a stale version, so it is `Failed`).
 - **Do not apply a write locally.** A successful write comes back through the event stream into the mirror, and the
   view follows the mirror. On `Ok`, close the form or confirm the inline edit; on anything else, show why beside the
   control and keep what the person typed.

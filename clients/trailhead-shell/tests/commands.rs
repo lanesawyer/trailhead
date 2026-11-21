@@ -348,6 +348,16 @@ async fn a_stale_version_is_a_conflict_with_the_current_one() {
 }
 
 #[tokio::test]
+async fn a_refused_move_is_a_failure_in_the_servers_words_not_a_stale_version() {
+    let rig = Rig::new().await;
+    let before = rig.title().await["version"].as_i64().unwrap();
+    let update = TaskUpdate { status: Some(trailhead_model::Status::Approved), ..Default::default() };
+    let call = Call::UpdateTask { key: TaskKey("TRAIL-1".into()), update };
+    let out = rig.run(&rig.token, &Request::new(call, Some(before))).await.unwrap();
+    assert_eq!(out, Outcome::Failed("cannot move from open to approved".into()));
+}
+
+#[tokio::test]
 async fn a_retry_the_server_already_applied_gets_the_same_answer_and_applies_nothing_twice() {
     let rig = Rig::new().await;
     let before = rig.title().await["version"].as_i64().unwrap();
