@@ -185,7 +185,10 @@ pub(crate) async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()>
         return Ok(());
     }
     let project = load_project(&tx.conn, tx.ctx.workspace_id, &task.project_id.to_string(), true).await?;
-    let in_review = matches!(task.status, Status::InReview | Status::Approved);
+    // Sent for review and not settled since counts as in review whatever status the task was moved through: an
+    // agent that reopens a task in review and claims it is taking the work over, not excusing it from review
+    // (TRAIL-1573).
+    let in_review = matches!(task.status, Status::InReview | Status::Approved) || awaits_review(tx, task).await?;
     let gated = to == Status::Approved || in_review || project.require_review;
     // A delegated reviewer approves like a human would, but not work it did: the
     // claim is released on the way to review, so the event log says who did it.
@@ -209,6 +212,26 @@ pub(crate) async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()>
         ));
     }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
+}
+
+/// Whether the task was sent for review and nothing has settled that since: no approval, no finish, no cancel. A
+/// move back to open or into progress doesn't settle it, whoever made it.
+async fn awaits_review(tx: &Tx, task: &Task) -> Result<bool> {
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT 1 FROM events sent
+             WHERE sent.task_id = ?1 AND sent.entity = 'task' AND json_extract(sent.after, '$.status') = 'in_review'
+               AND NOT EXISTS (
+                   SELECT 1 FROM events settled
+                   WHERE settled.task_id = ?1 AND settled.entity = 'task' AND settled.id > sent.id
+                     AND json_extract(settled.after, '$.status') IN ('approved', 'done', 'cancelled')
+               )
+             LIMIT 1",
+            libsql::params![task.id.to_string()],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Whether the acting agent did the work now in review: it made the latest move into review,

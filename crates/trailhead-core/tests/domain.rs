@@ -236,6 +236,44 @@ async fn review_requires_a_human() {
 }
 
 #[tokio::test]
+async fn work_sent_for_review_keeps_needing_it_whatever_an_agent_moves_it_through() {
+    let env = Env::new().await;
+    let t = env.task("sent for review").await;
+    let (a, b) = (env.agent("a").await, env.agent("b").await);
+    env.store.claim(&a, &t.key, None).await.unwrap();
+    env.store.update_task(&a, &t.key, status(Status::InReview), None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&a, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "in review, as before"
+    );
+
+    // Reopening and claiming takes the work over; it doesn't excuse it from review, for the agent or another.
+    env.store.update_task(&a, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&a, &t.key, None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&a, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "reopened and claimed by the agent that sent it"
+    );
+    env.store.release(&a, &t.key).await.unwrap();
+    env.store.claim(&b, &t.key, None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&b, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "or taken over by another"
+    );
+    env.store.update_task(&b, &t.key, status(Status::InReview), None).await.unwrap();
+
+    // A person finishing it settles the review; work on it after that is new work.
+    env.store.update_task(&env.human, &t.key, status(Status::Done), None).await.unwrap();
+    env.store.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&b, &t.key, None).await.unwrap();
+    assert_eq!(
+        env.store.update_task(&b, &t.key, status(Status::Done), None).await.unwrap().status,
+        Status::Done,
+        "this project doesn't require review of new work"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_cannot_undo_its_way_past_review() {
     let env = Env::new().await;
     env.store
