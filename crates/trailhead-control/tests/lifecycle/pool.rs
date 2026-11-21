@@ -828,3 +828,46 @@ async fn a_stuck_breached_sandboxs_warm_cost_is_forgotten_when_reconcile_destroy
     assert!(r.compute.get("trailhead-w1").is_none());
     assert_eq!(r.factory.sandbox_entries(), 0, "the cost went with the sandbox");
 }
+
+#[tokio::test]
+async fn a_stuck_breached_sandbox_shows_as_broken_on_the_board_after_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The cut-off and the destroy after it both fail, leaving the breach stuck; the destroy keeps failing.
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail("trailhead-w1", "destroy");
+    let _ = r.factory.run_task(&r.tracker.task(&key)).await;
+
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+    let board = r.factory.status().snapshot().sandboxes;
+    let state = board.iter().find(|s| s.name == "trailhead-w1").map(|s| s.state);
+    assert_eq!(state, Some(SandboxState::Broken), "{board:?}");
+}
+
+#[tokio::test]
+async fn a_sandbox_labelled_for_another_task_isnt_shown_as_held_by_a_stuck_breach_that_names_it() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail("trailhead-w1", "destroy");
+    let _ = r.factory.run_task(&r.tracker.task(&key)).await;
+    let task = r.tracker.task(&key);
+    assert_eq!(task.run.host.as_deref(), Some("trailhead-w1"), "the record still names the host");
+
+    // The host is another task's now, though the breached task's record goes on naming it.
+    r.compute.heal("trailhead-w1");
+    let id = trailhead_factory::SandboxId("trailhead-w1".into());
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::TASK.into(), "TRAIL-999".into());
+    r.compute.set_labels(&id, &labels).await.unwrap();
+    // Releasing it for reuse fails, so the board keeps what the sync before it showed.
+    r.compute.fail("trailhead-w1", "set_labels");
+
+    let _ = r.factory.reconcile().await;
+    let board = r.factory.status().snapshot().sandboxes;
+    let state = board.iter().find(|s| s.name == "trailhead-w1").map(|s| s.state);
+    assert_ne!(state, Some(SandboxState::Broken), "{board:?}");
+}
