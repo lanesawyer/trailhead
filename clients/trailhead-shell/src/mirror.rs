@@ -1,16 +1,15 @@
-//! The ECS mirror of Trailhead (`docs/factory/ui.md#architecture`): tasks, projects, comments, claims, agents and
-//! users
-//! as entities keyed by their Trailhead id. The sync ([`crate::sync`]) is the only thing that changes them: a
+//! The ECS mirror of Trailhead (`docs/factory/ui.md#architecture`): tasks, projects, comments, claims, pictures,
+//! agents and users as entities keyed by their Trailhead id. The sync ([`crate::sync`]) is the only thing that changes them: a
 //! [`SyncItem::Snapshot`] replaces the lot, and a [`SyncItem::Event`] replaces one entity only if it is newer, so
 //! replays and duplicates are harmless.
 //!
 //! What "newer" means depends on what the entity has:
 //! - tasks and projects carry a `version`;
-//! - a comment and a claim have no version, so the id of the event that last set it is its revision (the stream is
+//! - a comment, a claim and a picture (an attachment's metadata, never its bytes) have no version, so the id of the event that last set it is its revision (the stream is
 //!   ordered, and an undo puts a comment back to an earlier state, so its state can't rank it), and a snapshot's
 //!   copy, which has no event, gives way to any event for it;
 //! - a deleted entity is despawned, as a snapshot leaves it out, so the stream and a snapshot agree; an undo of the
-//!   delete brings it back. A deleted task takes its claim, comments and the edges into it with it, which the stream
+//!   delete brings it back. A deleted task takes its claim, comments, pictures and the edges into it with it, which the stream
 //!   sends no events for; an undo restores the task, and those come back with the next snapshot or event for them;
 //! - a dependency (a blocker edge, keyed by both ids) has no version either, so the id of its event ranks it;
 //! - agents and users have no events yet, so they change only with a snapshot.
@@ -23,7 +22,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Claim, Comment, Dependency, Project, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, Dependency, Project, Task, User};
 use uuid::Uuid;
 
 use crate::sync::{Snapshot, SyncItem};
@@ -38,6 +37,8 @@ pub enum Kind {
     User,
     /// A blocker edge, keyed `blocker_id:blocked_id`.
     Dependency,
+    /// A picture on a task: its metadata.
+    Attachment,
 }
 
 /// The Trailhead id: a UUID, except for a claim, which is keyed by its task's.
@@ -48,8 +49,8 @@ pub struct TrailheadId(pub String);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rev(pub i64);
 
-/// The entity as the API sent it, read into its model type: a [`Task`], [`Project`], [`Comment`], [`Claim`] or
-/// [`Agent`]. A task's `claim`, `open_questions`, `last_handoff` and `last_review` are entities of their own.
+/// The entity as the API sent it, read into its model type: a [`Task`], [`Project`], [`Comment`], [`Claim`],
+/// [`Attachment`] or [`Agent`]. A task's `claim`, `open_questions`, `last_handoff` and `last_review` are entities of their own.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct Mirrored<T: Send + Sync + 'static>(pub T);
 
@@ -67,6 +68,7 @@ enum Record {
     Agent(Agent),
     User(User),
     Dependency(Dependency),
+    Attachment(Attachment),
 }
 
 impl Record {
@@ -82,6 +84,7 @@ impl Record {
             Kind::Agent => Record::Agent(of(data)?),
             Kind::User => Record::User(of(data)?),
             Kind::Dependency => Record::Dependency(of(data)?),
+            Kind::Attachment => Record::Attachment(of(data)?),
         })
     }
 
@@ -94,6 +97,7 @@ impl Record {
             Record::Agent(a) => entity.insert(Mirrored(a)),
             Record::User(u) => entity.insert(Mirrored(u)),
             Record::Dependency(d) => entity.insert(Mirrored(d)),
+            Record::Attachment(a) => entity.insert(Mirrored(a)),
         };
     }
 }
@@ -144,6 +148,7 @@ impl Mirror {
             Record::Comment(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
             Record::Claim(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
             Record::Dependency(d) => self.owner.insert(key.clone(), d.blocked_id.to_string()),
+            Record::Attachment(a) => self.owner.insert(key.clone(), a.task_id.to_string()),
             _ => None,
         };
         match self.index.get(&key) {
@@ -194,13 +199,24 @@ impl Mirror {
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");
             let extras = task.as_object_mut().map(|o| {
-                ["claim", "open_questions", "last_handoff", "last_review", "blocked_by", "blocked_by_hidden"]
-                    .map(|k| o.remove(k).unwrap_or(Value::Null))
+                [
+                    "claim",
+                    "open_questions",
+                    "last_handoff",
+                    "last_review",
+                    "blocked_by",
+                    "blocked_by_hidden",
+                    "attachments",
+                ]
+                .map(|k| o.remove(k).unwrap_or(Value::Null))
             });
             let (workspace, created) = (task["workspace_id"].clone(), task["created_at"].clone());
             let rev = version(&task);
             self.put(commands, Kind::Task, &id, rev, task, true);
-            let Some([claim, questions, handoff, review, blockers, hidden]) = extras else { continue };
+            let Some([claim, questions, handoff, review, blockers, hidden, pictures]) = extras else { continue };
+            for picture in pictures.as_array().into_iter().flatten() {
+                self.put(commands, Kind::Attachment, &str_of(picture, "id"), Rev(0), picture.clone(), true);
+            }
             // The list carries no edge records, so each is made from its task: a task created at the same time as the
             // edge is as good a stamp as any, and an event for the edge replaces it.
             for blocker in blockers.as_array().into_iter().flatten().filter_map(Value::as_str) {
@@ -254,7 +270,7 @@ impl Mirror {
             trailhead_model::Entity::Claim => Kind::Claim,
             trailhead_model::Entity::Agent => Kind::Agent,
             trailhead_model::Entity::Dependency => Kind::Dependency,
-            trailhead_model::Entity::Attachment => return,
+            trailhead_model::Entity::Attachment => Kind::Attachment,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
             return self.remove(commands, kind, &id);
@@ -295,7 +311,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::fixture::{claim_json, comment_json, sid, task_json};
+    use crate::fixture::{attachment_json, claim_json, comment_json, sid, task_json};
 
     fn app() -> App {
         let mut app = App::new();
@@ -504,5 +520,45 @@ mod tests {
         // A resync forgets edges the new snapshot lacks.
         send(&mut app, [snapshot(20, 1, "a")]);
         assert!(edges(&mut app).is_empty());
+    }
+
+    fn picture_event(id: i64, name: &str, deleted: bool) -> SyncItem {
+        let at = if deleted { json!("2026-01-01T00:00:00Z") } else { Value::Null };
+        let after = attachment_json(json!({"id": name, "task_id": "t1", "name": name, "deleted_at": at}));
+        let kind = if deleted { "attachment.deleted" } else { "attachment.created" };
+        crate::fixture::sync_event(
+            json!({"id": id, "entity": "attachment", "entity_id": sid(name), "kind": kind, "after": after}),
+        )
+    }
+
+    fn names(app: &mut App) -> Vec<String> {
+        let mut names: Vec<_> = data_of::<Attachment>(app).into_iter().map(|a| a.name).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn pictures_come_with_the_snapshot_and_follow_the_stream() {
+        let mut app = app();
+        let mut task = task_json(json!({"id": "t1"}));
+        task["attachments"] = json!([attachment_json(json!({"id": "f1", "task_id": "t1", "name": "f1"}))]);
+        send(&mut app, [SyncItem::Snapshot(Snapshot { at: 10, tasks: vec![task], ..Default::default() })]);
+        assert_eq!(names(&mut app), ["f1"]);
+        assert!(data_of::<Task>(&mut app)[0].id == crate::fixture::id("t1"));
+
+        send(&mut app, [picture_event(11, "f2", false)]);
+        assert_eq!(names(&mut app), ["f1", "f2"]);
+        send(&mut app, [picture_event(12, "f1", true)]);
+        assert_eq!(names(&mut app), ["f2"]);
+
+        // A deleted task takes its pictures with it.
+        let deleted = task_json(json!({"id": "t1", "version": 2, "deleted_at": "2026-01-01T00:00:00Z"}));
+        send(
+            &mut app,
+            [crate::fixture::sync_event(
+                json!({"id": 13, "entity": "task", "entity_id": sid("t1"), "kind": "task.deleted", "after": deleted}),
+            )],
+        );
+        assert!(names(&mut app).is_empty());
     }
 }

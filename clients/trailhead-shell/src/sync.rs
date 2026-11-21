@@ -1,7 +1,8 @@
 //! The three-step sync (`docs/factory/ui.md#sync`) and the event stream, run on the net thread.
 //!
 //! 1. Note the newest event id.
-//! 2. Load the snapshot: projects, agents, users, and tasks with their claims, open questions and last handoff, paged.
+//! 2. Load the snapshot: projects, agents, users, and tasks with their claims, open questions, last handoff and
+//!    pictures, paged.
 //! 3. Open `/v1/events/stream` with `Last-Event-ID` set to the id from step 1. Whatever was written during step 2
 //!    arrives again, and the mirror ignores it by version.
 //!
@@ -25,14 +26,14 @@ pub enum SyncItem {
     Event(Event),
 }
 
-/// The id of the task an event is about: the task itself, or the one its comment or claim is on.
+/// The id of the task an event is about: the task itself, or the one its comment, claim or picture is on.
 pub fn task_of(event: &Event) -> Option<&str> {
     fn on(side: &Option<Value>) -> Option<&str> {
         side.as_ref().and_then(|v| v["task_id"].as_str())
     }
     match event.entity {
         Entity::Task => Some(&event.entity_id),
-        Entity::Comment | Entity::Claim => on(&event.after).or_else(|| on(&event.before)),
+        Entity::Comment | Entity::Claim | Entity::Attachment => on(&event.after).or_else(|| on(&event.before)),
         _ => None,
     }
 }
@@ -45,7 +46,7 @@ pub struct Snapshot {
     pub projects: Vec<Value>,
     pub agents: Vec<Value>,
     pub users: Vec<Value>,
-    /// Tasks with `claim`, `open_questions`, `last_handoff`, `last_review` and `blocked_by` on each.
+    /// Tasks with `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `attachments` on each.
     pub tasks: Vec<Value>,
 }
 
@@ -156,7 +157,7 @@ impl Remote {
         loop {
             let page = self
                 .list(&format!(
-                    "{}?include=claim,open_questions,last_handoff,last_review,blocked_by&status={all_statuses}\
+                    "{}?include=claim,open_questions,last_handoff,last_review,blocked_by,attachments&status={all_statuses}\
                      &sort=created_at&limit={PAGE}&offset={}",
                     routes::LIST_TASKS.path,
                     tasks.len()

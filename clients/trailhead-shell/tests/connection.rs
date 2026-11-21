@@ -10,7 +10,7 @@ use iroh::address_lookup::MemoryLookup;
 use iroh::protocol::Router;
 use iroh::{EndpointAddr, SecretKey};
 use trailhead_shell::connection::{Api, Connection, ConnectionPlugin, Dialed, LocalEndpoint};
-use trailhead_shell::net::{NetCommand, NetConfig, Reason};
+use trailhead_shell::net::{Fetch, NetCommand, NetConfig, Reason};
 use trailhead_shell::testing::server::{Server as Rig, allowed_and_live, endpoint};
 use trailhead_shell::testing::{reason, send, state, until};
 use trailhead_wire::ui::{UI_ALPN, UiProtocol};
@@ -216,4 +216,57 @@ async fn a_refused_shell_is_offline_not_redirected() {
     let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
     until(&mut app, "refused", |a| reason(a) == Some(Reason::NotAllowed)).await;
     assert_eq!(state(&app), Connection::Offline);
+}
+
+#[derive(Message)]
+struct Bytes(Result<Vec<u8>, String>);
+
+#[derive(Resource, Default)]
+struct Got(Option<Result<Vec<u8>, String>>);
+
+/// A picture of a couple of MiB comes back through the tunnel byte for byte, read with a `Fetch`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_reads_a_pictures_bytes_through_the_tunnel_intact() {
+    let rig = Rig::new().await;
+    let lookup = Arc::new(MemoryLookup::new());
+    let (_router, addr) = control_plane(SecretKey::generate(), &lookup, &rig).await;
+    let mut app = app(rig.config(&lookup), Some(addr.id.to_string()));
+    app.add_message::<Bytes>().init_resource::<Got>().add_systems(
+        Update,
+        |mut read: MessageReader<Bytes>, mut got: ResMut<Got>| {
+            for b in read.read() {
+                got.0 = Some(b.0.clone());
+            }
+        },
+    );
+    allowed_and_live(&mut app, &rig).await;
+
+    let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13];
+    png.extend(b"IHDR");
+    png.extend([0, 0, 4, 0, 0, 0, 3, 0, 8, 6, 0, 0, 0]);
+    png.extend((0..trailhead_core::MAX_ATTACHMENT_BYTES - png.len()).map(|i| (i * 31 % 251) as u8));
+    let store = &rig.state.store;
+    let task = store
+        .create_task(
+            &rig.human,
+            trailhead_core::NewTask { project: "TRAIL".into(), title: "t".into(), ..Default::default() },
+        )
+        .await
+        .unwrap();
+    let picture = trailhead_core::NewAttachment::png("big", png.clone());
+    let id = store.add_attachment(&rig.human, task.key.as_str(), picture).await.unwrap().id;
+
+    send(
+        &mut app,
+        NetCommand::Fetch(Fetch::new(move |api| async move {
+            match api {
+                Some(api) => Bytes(api.attachment_bytes(id).await.map_err(|e| e.chain())),
+                None => Bytes(Err("not live".into())),
+            }
+        })),
+    );
+    until(&mut app, "the bytes", |a| a.world().resource::<Got>().0.is_some()).await;
+    let got = app.world_mut().resource_mut::<Got>().0.take().unwrap().unwrap();
+    assert_eq!(got.len(), png.len());
+    assert!(got == png, "the bytes changed on the way");
 }

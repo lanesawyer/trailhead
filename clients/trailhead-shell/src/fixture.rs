@@ -3,7 +3,7 @@
 //! ([`id`]), so a test can write `"parent_id": "t7"` and find the task by `id("t7")`.
 
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Claim, Comment, Project, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, Project, Task, User};
 
 use crate::sync::SyncItem;
 use uuid::Uuid;
@@ -109,6 +109,20 @@ pub fn comment_json(fields: Value) -> Value {
 
 pub fn comment(fields: Value) -> Comment {
     serde_json::from_value(comment_json(fields)).expect("a whole comment")
+}
+
+/// A picture's metadata as the API sends it. Give `sha256` to say two pictures are the same bytes.
+pub fn attachment_json(fields: Value) -> Value {
+    let defaults = json!({
+        "id": "f0", "workspace_id": "w", "task_id": "t0", "name": "view", "content_type": "image/png", "size": 100,
+        "sha256": "0".repeat(64), "width": 320, "height": 200, "created_by": "u", "on_behalf_of": "u",
+        "created_at": AT, "deleted_at": null,
+    });
+    whole(defaults, fields)
+}
+
+pub fn attachment(fields: Value) -> Attachment {
+    serde_json::from_value(attachment_json(fields)).expect("a whole attachment")
 }
 
 pub fn claim_json(fields: Value) -> Value {
