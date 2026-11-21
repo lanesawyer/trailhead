@@ -34,7 +34,6 @@ trailhead-model.workspace = true
 trailhead-wire.workspace = true
 iroh.workspace = true
 tokio = { workspace = true, features = ["time"] }
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
@@ -44,4 +43,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 trailhead-ui = { workspace = true, features = ["test-support"] }
-trailhead-shell = { workspace = true, features = ["test-support"] }
+# The fixtures, and `testing::server` for the factory link's tests.
+trailhead-shell = { workspace = true, features = ["test-server"] }

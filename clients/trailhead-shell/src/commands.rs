@@ -79,6 +79,36 @@ impl Request {
     pub fn new(call: Call, if_match: Option<i64>) -> Request {
         Request { call, if_match, key: new_key() }
     }
+
+    /// The method it goes out with.
+    pub fn method(&self) -> Method {
+        Method::of(&self.call)
+    }
+}
+
+/// The HTTP method a call goes out with, named by the shell so that an app's tests can check it without naming the
+/// HTTP client, which an app may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    /// The method `call` goes out with.
+    pub fn of(call: &Call) -> Method {
+        match call.method().as_str() {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            "PUT" => Method::Put,
+            "PATCH" => Method::Patch,
+            "DELETE" => Method::Delete,
+            other => unreachable!("no call goes out with {other}"),
+        }
+    }
 }
 
 fn new_key() -> String {

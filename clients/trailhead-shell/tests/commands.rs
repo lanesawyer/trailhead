@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
-use reqwest::Method;
 use serde_json::Value;
 use tokio::net::TcpListener;
 use trailhead_client::http::{Call, Client, TaskUpdate};
@@ -80,7 +79,7 @@ fn the_answer_goes_back_to_the_control_that_sent_it() {
     let (sent, _) = step(&mut app);
     assert_eq!(sent.len(), 2);
     let request = &sent[0].2;
-    assert_eq!((request.if_match, request.call.method()), (Some(3), Method::PATCH));
+    assert_eq!((request.if_match, request.method()), (Some(3), Method::Patch));
     assert_ne!(sent[0].2.key, sent[1].2.key);
 
     reply(&mut app, sent[1].0, 1, Ok(Outcome::Conflict { current_version: Some(4), message: "stale".into() }));

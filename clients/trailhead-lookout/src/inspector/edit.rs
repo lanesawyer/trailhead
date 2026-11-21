@@ -205,8 +205,8 @@ mod tests {
         let r = |field, change| edit_request("TRAIL-7", 4, field, &change, &st).unwrap();
         let title = r(Field::Title, Change::Text("  New title ".into()));
         assert_eq!(
-            (title.call.method(), title.call.path().as_str(), title.if_match),
-            (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
+            (title.method(), title.call.path().as_str(), title.if_match),
+            (Method::Patch, "/v1/tasks/TRAIL-7", Some(4))
         );
         assert_eq!(title.call.body(), Some(json!({"title": "New title"})));
         assert_eq!(r(Field::Description, Change::Text("why".into())).call.body(), Some(json!({"description": "why"})));

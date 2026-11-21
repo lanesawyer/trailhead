@@ -28,8 +28,6 @@ use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation, RequestClose};
 #[cfg(test)]
-use reqwest::Method;
-#[cfg(test)]
 use serde_json::json;
 use trailhead_client::http::{Call, NewComment, Revert, TaskUpdate, Undo};
 use trailhead_client::text::Text as Wording;
@@ -37,6 +35,8 @@ use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
     Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
 };
+#[cfg(test)]
+use trailhead_shell::commands::Method;
 use trailhead_shell::commands::{CommandDone, Outcome, Request, Submit};
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus};
 use trailhead_shell::mirror::{Mirror, Mirrored, Rev, rows};

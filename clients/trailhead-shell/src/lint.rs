@@ -60,7 +60,7 @@ pub const NO_FS: Rule = Rule {
 
 /// An app reaches the network only through the shell: reads through its `Fetch`, writes through its commands, so there
 /// is one connection to audit. Looks in tests too: a test that opens a socket is as suspicious as code that does (the
-/// shell's `test-support` server is what a test goes live against). Looks in `Cargo.toml` for the crates that speak
+/// shell's `test-server` feature is what a test goes live against). Looks in `Cargo.toml` for the crates that speak
 /// the network and for `tokio`'s `net` feature.
 pub const NO_NET: Rule = Rule {
     name: "no-net",

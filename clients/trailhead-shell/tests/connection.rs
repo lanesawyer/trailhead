@@ -11,7 +11,8 @@ use iroh::protocol::Router;
 use iroh::{EndpointAddr, SecretKey};
 use trailhead_shell::connection::{Api, Connection, ConnectionPlugin, Dialed, LocalEndpoint};
 use trailhead_shell::net::{NetCommand, NetConfig, Reason};
-use trailhead_shell::testing::{Server as Rig, allowed_and_live, endpoint, reason, send, state, until};
+use trailhead_shell::testing::server::{Server as Rig, allowed_and_live, endpoint};
+use trailhead_shell::testing::{reason, send, state, until};
 use trailhead_wire::ui::{UI_ALPN, UiProtocol};
 
 /// A control plane that forwards the API and serves nothing else.

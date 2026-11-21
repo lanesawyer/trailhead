@@ -452,8 +452,8 @@ fn fill_form(
 #[cfg(test)]
 mod tests {
     use bevy::state::app::StatesPlugin;
-    use reqwest::Method;
     use serde_json::json;
+    use trailhead_shell::commands::Method;
 
     use super::*;
     use trailhead_shell::commands::{CommandId, CommandsPlugin, Outbox};
@@ -485,10 +485,7 @@ mod tests {
         open.draft.name = "Trailhead engine ".into();
         open.draft.require_review = true;
         let r = request(&open).unwrap();
-        assert_eq!(
-            (r.call.method(), r.call.path().as_str(), r.if_match),
-            (Method::PATCH, "/v1/projects/TRAIL", Some(7))
-        );
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Patch, "/v1/projects/TRAIL", Some(7)));
         assert_eq!(r.call.body(), Some(json!({"name": "Trailhead engine", "require_review": true})));
     }
 
@@ -496,10 +493,7 @@ mod tests {
     fn archive_flips_the_status_with_the_version_it_saw() {
         assert!(archive_request(&ProjectOpen::create()).is_none(), "a new project has nothing to archive");
         let r = archive_request(&ProjectOpen::edit(&trail())).unwrap();
-        assert_eq!(
-            (r.call.method(), r.call.path().as_str(), r.if_match),
-            (Method::PATCH, "/v1/projects/TRAIL", Some(7))
-        );
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Patch, "/v1/projects/TRAIL", Some(7)));
         assert_eq!(r.call.body(), Some(json!({"status": "archived"})));
         let mut shelved = trail();
         shelved.status = ProjectStatus::Archived;
@@ -532,7 +526,7 @@ mod tests {
     #[test]
     fn create_sends_the_key_in_capitals_and_the_rest_as_typed() {
         let r = create_request(&draft(" trail ")).unwrap();
-        assert_eq!((r.call.method(), r.call.path().as_str(), r.if_match), (Method::POST, "/v1/projects", None));
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Post, "/v1/projects", None));
         assert_eq!(
             r.call.body(),
             Some(json!({"key": "TRAIL", "name": "Trailhead", "brief": "the task engine", "require_review": false}))

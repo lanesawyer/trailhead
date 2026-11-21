@@ -8262,7 +8262,6 @@ dependencies = [
  "bevy",
  "iroh",
  "jiff",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",

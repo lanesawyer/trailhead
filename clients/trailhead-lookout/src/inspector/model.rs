@@ -776,15 +776,9 @@ mod tests {
         let t = Subject::Task(sid("t7"));
         let p = |a: &Action| plan(a, f.input(), &latest(), &t, 1_700_000_000).unwrap();
         let r = p(&Action::Release);
-        assert_eq!(
-            (r.call.method(), r.call.path().as_str(), r.if_match),
-            (Method::POST, "/v1/tasks/TRAIL-7/release", None)
-        );
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Post, "/v1/tasks/TRAIL-7/release", None));
         let r = p(&Action::Cancel);
-        assert_eq!(
-            (r.call.method(), r.call.path().as_str(), r.if_match),
-            (Method::PATCH, "/v1/tasks/TRAIL-7", Some(4))
-        );
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Patch, "/v1/tasks/TRAIL-7", Some(4)));
         assert_eq!(r.call.body(), Some(json!({"status": "cancelled"})));
         assert_eq!(p(&Action::Status(Status::Open)).call.body(), Some(json!({"status": "open"})));
         let r = p(&Action::Resolve(sid("c1")));

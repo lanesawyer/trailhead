@@ -12,9 +12,11 @@ repository.workspace = true
 workspace = true
 
 [features]
-# What tests of apps built on the shell need: the fixtures for mirrored records, hooks to set up state a test
-# checks, and `testing`'s in-process server to go live against.
-test-support = ["dep:trailhead-core", "dep:trailhead-server", "dep:axum", "dep:tempfile", "tokio/net"]
+# What tests of apps built on the shell need: `testing`'s test apps with the connection's pieces and no net thread,
+# the fixtures for mirrored records, and hooks to set up state a test checks. Pulls in nothing the shell doesn't.
+test-support = []
+# `testing::server`: an in-process Trailhead server to go live against, which brings the task engine and the server.
+test-server = ["test-support", "dep:trailhead-core", "dep:trailhead-server", "dep:axum", "dep:tempfile", "tokio/net"]
 
 [dependencies]
 # Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a window of UI needs.
@@ -53,5 +55,5 @@ axum = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The shell's own tests use `test-support` too.
-trailhead-shell = { workspace = true, features = ["test-support"] }
+# The shell's own tests use the test support and the server too.
+trailhead-shell = { workspace = true, features = ["test-server"] }

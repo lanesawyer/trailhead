@@ -20,7 +20,8 @@ use trailhead_lookout::{Lookout, sidebar};
 use trailhead_shell::ShellPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus};
 use trailhead_shell::net::{NetConfig, Reason};
-use trailhead_shell::testing::{Server, allowed_and_live, endpoint, reason, state, until};
+use trailhead_shell::testing::server::{Server, allowed_and_live, endpoint};
+use trailhead_shell::testing::{reason, state, until};
 use trailhead_wire::ui::{LogFeed, RepoFeed, StatusFeed, StatusFrame, UI_ALPN, UiProtocol, Unsupported};
 use trailhead_wire::{read_frame, write_frame};
 

@@ -608,10 +608,7 @@ mod tests {
         let sent: Vec<Submit> = app.world_mut().resource_mut::<Messages<Submit>>().drain().collect();
         assert_eq!(sent.len(), 1);
         let r = &sent[0].request;
-        assert_eq!(
-            (r.call.method(), r.call.path().as_str(), r.if_match),
-            (Method::PATCH, "/v1/tasks/TRAIL-8", Some(1))
-        );
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Patch, "/v1/tasks/TRAIL-8", Some(1)));
         assert_eq!(r.call.body(), Some(json!({"grade": 3})));
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Busy));
 

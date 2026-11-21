@@ -248,6 +248,9 @@ Every write is a command: one REST request, with `If-Match` and an `Idempotency-
   (the button, the inline field). `Request::new(call, if_match)` takes a `trailhead_client::http::Call` (the endpoint
   and its typed body, such as `Call::UpdateTask { key, update }`) and the version the control saw, and makes a fresh
   idempotency key that every retry of this command carries.
+- **Check** what a test sent with `request.method()`, the shell's `trailhead_shell::commands::Method` (`Get`, `Post`,
+  `Put`, `Patch`, `Delete`; `Method::of(&call)` for a bare `Call`), and `request.call.path()`: an app may not name the
+  HTTP client, whose method type `Call::method` returns.
 - **Read** `CommandDone { source, id, outcome }` messages and take those whose `source` is yours. `Outcome` is
   `Ok { version }`, `Conflict { current_version, message }` (the version the control saw is stale), `Forbidden(..)`,
   `RateLimited { retry_after, message }` or `Failed(..)`.
@@ -323,33 +326,55 @@ only jobs today. An app that only reads the API uses `Fetch`, not a job.
 
 ## 7. Testing an app
 
-An app carries three kinds of test, and the example app has one of each.
+An app carries three kinds of test, and the example app has one of each. The helpers are the shell's, in
+`trailhead_shell::testing`, behind its `test-support` feature: turn it on for `trailhead-shell` in
+`[dev-dependencies]`. It pulls in nothing the shell does not already.
 
-- **Logic, headless.** Build a Bevy app with `MinimalPlugins` and `StatesPlugin` (the test adds what
-  `MinimalPlugins` lacks; the app's plugins never add it for the test's sake), add
-  `ShellPlugin::new().with(MyApp)` (and `.store_in(dir)` with a temporary directory to test what outlives a restart),
-  update once, and drive it by triggering the app's events and setting `NextState<ActiveApp>`. No window, no kit
-  plugins: `build` only.
-- **Drawing, in a windowed test app.** The same with `.windowed()`, which also runs `build_ui` and the rail; it needs
-  `AssetPlugin`, `ScenePlugin`, and the `Font` and `Image` assets initialised, and a few updates for scenes to settle.
-  The kit's `UiPlugin` and `ThemePlugin` are not added, so this checks what is spawned and kept, not how it looks. A
-  second app that does nothing stands in for "another app is shown". The shell does not ship these helpers yet, so the
-  example app writes its own (`headless`, `windowed`, `settle`, `show` and `Other` in its `tests` module); copy them.
-- **The lint**, over `src`, `tests` and `Cargo.toml` (section 1).
+- **Logic, headless.** `testing::headless(ShellPlugin::new().with(MyApp).with(Other))` builds a Bevy app with
+  `MinimalPlugins`, `StatesPlugin` and the shell (add `.store_in(dir)` with a temporary directory to test what
+  outlives a restart), and settles it. It runs `build` only: no window, no kit plugins. Drive it by triggering the
+  app's events and with `show(&mut app, id)`, which switches apps; `Other` (id `OTHER`) is an app that does nothing,
+  standing in for "another app is shown".
+- **Drawing, in a windowed test app.** `testing::windowed(shell)` is the same with the shell windowed, which also runs
+  `build_ui` and the rail, with the assets scenes need. The kit's `UiPlugin` and `ThemePlugin` are not added, so this
+  checks what is spawned and kept, not how it looks. `settle(&mut app)` runs the few frames a change takes to land.
+- **The lint**, over `src`, `tests` and `Cargo.toml` (section 1), and the kit's `redraws` scan over `src`.
 
-For an app that uses the connection, the shell's `test-support` feature (turn it on for `trailhead-shell` in
-`[dev-dependencies]`) adds:
+Both test apps carry the shell's connection without its net thread (`TestConnection`): the `Connection` state
+(`Offline` until a test sets it with `set_connection(&mut app, Connection::Live)`), `ConnectionStatus`, the mirror and
+the outbox. So a test of an app that uses the connection needs no server:
 
-- `trailhead_shell::fixture`: whole model values and their JSON from the few fields a test cares about (`task`,
+- `trailhead_shell::fixture` makes whole model values and their JSON from the few fields a test cares about (`task`,
   `task_json`, `project`, `comment`, `claim`, `agent`, `user`, `sync_event`, `at`). Short names stand in for ids
-  (`"t7"`), each turned into a stable UUID by `id`/`sid`. Write them into the app as `SyncItem` messages to fill the
-  mirror without a server.
-- `trailhead_shell::testing`: an in-process Trailhead server behind a local iroh endpoint (`Server::new().await`,
-  `Server::config` for the shell's `NetConfig`), and helpers to drive the app until it gets somewhere (`until`,
-  `allowed_and_live`, `send`, `state`, `reason`). Lookout's `tests/factory_link.rs` uses it.
+  (`"t7"`), each turned into a stable UUID by `id`/`sid`.
+- `fill(&mut app, Snapshot { at: 1, projects, tasks, ..default() })` replaces the mirror with those records, as a sync
+  would; `feed(&mut app, sync_event(json!({..})))` hands it one event off the stream.
+- `sent(&mut app) -> Vec<Submit>` takes what the app sent since the last look, and
+  `answer(&mut app, source, Outcome::..)` is the server's answer to the command sent from `source`.
 
-A headless test of logic that reads `State<Connection>` without a connection adds `init_state::<Connection>()` and
-sets it, as Lookout's `detail.rs` tests do.
+```rust
+use trailhead_shell::commands::{Method, Outcome};
+use trailhead_shell::connection::Connection;
+use trailhead_shell::fixture::{project_json, task_json};
+use trailhead_shell::sync::Snapshot;
+use trailhead_shell::testing::{Other, answer, fill, sent, set_connection, windowed};
+
+let mut app = windowed(ShellPlugin::new().with(MyApp).with(Other));
+set_connection(&mut app, Connection::Live);
+let projects = vec![project_json(json!({"id": "p1", "key": "HOME"}))];
+fill(&mut app, Snapshot { at: 1, projects, tasks: vec![task_json(json!({"id": "t1", "key": "HOME-1"}))], ..default() });
+// ... press something that sends a command ...
+let out = sent(&mut app);
+assert_eq!((out[0].request.method(), out[0].request.call.path().as_str()), (Method::Patch, "/v1/tasks/HOME-1"));
+answer(&mut app, out[0].source, Outcome::Failed("try later".into()));
+```
+
+The shell's `test-server` feature (which turns on `test-support`) adds `trailhead_shell::testing::server`: an
+in-process Trailhead server behind a local iroh endpoint (`Server::new().await`, `Server::config` for the shell's
+`NetConfig`, `endpoint`, `allowed_and_live`), to go live against with a shell told to connect, driven with
+`testing::until`, `send`, `state` and `reason`. It brings the task engine, the server and axum into the lockfile, so
+only a test of work over the real connection wants it: Lookout's `tests/factory_link.rs` and the shell's own
+`tests/connection.rs`.
 
 What the example app's tests cover, and why each matters:
 
@@ -359,7 +384,7 @@ What the example app's tests cover, and why each matters:
   shown, and the app's logic keeps running while it is not (a press while another app is shown still counts).
 - `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`: a change is made in place. The count
   line keeps its entity and the set of entities is the same before and after, which is the kit's rule that a surface
-  is spawned once and updated in place.
+  is spawned once and updated in place. `tests/design_system.rs` runs the kit's `redraws` scan for the same rule.
 
 What no test here can check is how the app looks: see the kit's guide, section 6.
 
@@ -369,9 +394,9 @@ What no test here can check is how the app looks: see the kit's guide, section 6
 parts below.
 
 - **`Cargo.toml`.** Depends on `bevy` 0.20 with only the features it uses (`std`, `bevy_state`, `bevy_ui_widgets`,
-  `bevy_scene`), on `trailhead-shell` and on `trailhead-ui`; `tempfile` for tests. An app that reads the mirror adds
-  `trailhead-model`; one that writes adds `trailhead-client` with `http`; its tests add `trailhead-shell` with
-  `test-support`. No feathers, and nothing that reaches the file system, the network or other processes.
+  `bevy_scene`), on `trailhead-shell` and on `trailhead-ui`; for tests, `trailhead-shell` with `test-support` and
+  `tempfile`. An app that reads the mirror adds `trailhead-model`; one that writes adds `trailhead-client` with
+  `http`. No feathers, and nothing that reaches the file system, the network or other processes.
 - **`src/lib.rs`**, in order:
   - The id, `EXAMPLE: AppId = AppId("example")`, and the `LocalStore` key `PRESSES`.
   - `Example`, the type given to the shell.
@@ -384,8 +409,9 @@ parts below.
   - `spawn_page` builds one page: a root filling `beside_rail()` with `BesideRail` and `Surface::Window`, a title, a
     dim line, the count line and a button, each a kit scene spawned under it with `ChildOf`.
   - `show_count` sets the count line's text in place with `set_text` when `Presses` changes.
-  - The tests (section 7).
-- **`tests/design_system.rs`**: the lint over the app's sources, with an empty allowlist.
+  - The tests (section 7), on the shell's `testing` helpers.
+- **`tests/design_system.rs`**: the lint over the app's sources, with an empty allowlist, and the kit's `redraws`
+  scan with an empty one.
 
 ## 9. Adding an app to a shell
 

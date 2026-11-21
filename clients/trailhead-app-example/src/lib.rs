@@ -119,50 +119,10 @@ fn show_count(presses: Res<Presses>, mut lines: Query<&mut Text, With<CountLine>
 
 #[cfg(test)]
 mod tests {
-    use bevy::state::app::StatesPlugin;
     use trailhead_shell::ShellPlugin;
+    use trailhead_shell::testing::{OTHER, Other, headless, settle, show, windowed};
 
     use super::*;
-
-    const OTHER: AppId = AppId("other");
-
-    struct Other;
-
-    impl ShellApp for Other {
-        fn manifest(&self) -> Manifest {
-            Manifest { id: OTHER, name: "Other", icon: Icon::Board }
-        }
-
-        fn build(&self, _: &mut App) {}
-    }
-
-    fn headless(shell: ShellPlugin) -> App {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin)).add_plugins(shell);
-        app.update();
-        app
-    }
-
-    fn windowed(shell: ShellPlugin) -> App {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
-            .init_asset::<bevy::text::Font>()
-            .init_asset::<Image>()
-            .add_plugins(shell.windowed());
-        settle(&mut app);
-        app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
-    }
-
-    fn show(app: &mut App, id: AppId) {
-        app.world_mut().resource_mut::<NextState<ActiveApp>>().set(ActiveApp(id));
-        settle(app);
-    }
 
     fn count(app: &App) -> u32 {
         app.world().resource::<Presses>().0

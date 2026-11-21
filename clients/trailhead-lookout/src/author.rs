@@ -860,8 +860,8 @@ mod tests {
     use trailhead_shell::mirror::MirrorPlugin;
 
     use super::*;
-    use reqwest::Method;
     use serde_json::{Value, json};
+    use trailhead_shell::commands::Method;
     use trailhead_shell::commands::{CommandId, CommandsPlugin, Outbox};
 
     fn task() -> Value {
@@ -881,7 +881,7 @@ mod tests {
         open.draft.description = "line 1\nline 2".into();
         open.draft.priority = Priority::ALL[0];
         let r = request(&open).unwrap();
-        assert_eq!((r.call.method(), r.call.path().as_str(), r.if_match), (Method::POST, "/v1/tasks", None));
+        assert_eq!((r.method(), r.call.path().as_str(), r.if_match), (Method::Post, "/v1/tasks", None));
         assert_eq!(
             body(&r),
             json!({"project": "TRAIL", "title": "Do it", "description": "line 1\nline 2", "priority": 1})
@@ -960,7 +960,7 @@ mod tests {
 
         let question = ("c9".to_string(), "which db?".to_string());
         let r = compose_request("TRAIL-7", CommentKind::Note, Some(&question), "sqlite");
-        assert_eq!((r.call.method(), r.call.path().as_str()), (Method::POST, "/v1/comments/c9/resolve"));
+        assert_eq!((r.method(), r.call.path().as_str()), (Method::Post, "/v1/comments/c9/resolve"));
         assert_eq!(body(&r), json!({"answer": "sqlite"}));
     }
 

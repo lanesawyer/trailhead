@@ -17,4 +17,6 @@ trailhead-shell.workspace = true
 trailhead-ui.workspace = true
 
 [dev-dependencies]
+# The shell's test apps and the stand-in second app.
+trailhead-shell = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
