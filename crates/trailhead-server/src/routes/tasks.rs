@@ -371,3 +371,33 @@ pub(crate) async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQ
 fn parse_grade_filter(s: Option<&str>) -> ApiResult<GradeFilter> {
     Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
 }
+
+#[derive(Deserialize, Default, ToSchema)]
+pub(crate) struct SetAsideBody {
+    /// Why, kept as the second line of the note the task gets.
+    note: Option<String>,
+}
+
+/// Sets a task aside, as a person (`docs/factory/operating.md`): in one write its open questions are resolved with a
+/// note saying who set it aside, its grade is cleared, it goes back to `open` (dropping any claim) and the factory's
+/// record of it says so. The factory takes only graded tasks, so it leaves it until it is graded again.
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/set-aside", tag = "tasks", params(TaskParam),
+    request_body(content = Option<SetAsideBody>, description = "Optional"),
+    responses(
+        (status = 200, description = "Set aside: open and ungraded", body = Task),
+        (status = 400, description = "`invalid`: the task is in progress, or finished", body = ErrorBody),
+        (status = 403, description = "`forbidden`: only a person can set a task aside", body = ErrorBody),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
+pub(crate) async fn set_aside(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(t): Path<String>,
+    b: axum::body::Bytes,
+) -> ApiResult<Response> {
+    let body: SetAsideBody = super::optional_body(&b)?;
+    let task = s.store.set_aside(&ctx, &t, body.note).await?;
+    Ok(with_etag(task.version, task))
+}

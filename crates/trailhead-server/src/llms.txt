@@ -30,7 +30,7 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 
 - `handoff`: what was done, what's left, gotchas. The latest one comes back with the next claim.
 - `progress`: short status updates.
-- `question`: needs an answer, from a human or another agent (`addressed_to` takes a user or agent id). Moves the task to `needs_input`, out of the ready queue. `POST /v1/comments/{id}/resolve` with optional `{"answer"}` resolves it; the answer is posted as a `note` to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, else `open`.
+- `question`: needs an answer, from a human or another agent (`addressed_to` takes a user or agent id). Moves the task to `needs_input`, out of the ready queue. `POST /v1/comments/{id}/resolve` with optional `{"answer"}` resolves it; the answer is posted as a `note` to the asker. When the last open question resolves, the task returns to `in_progress` if still claimed, else `open`. A person can instead set a parked task aside: `POST /v1/tasks/KEY-1/set-aside` with optional `{"note"}` resolves its open questions with a note saying so, clears its grade and moves it to `open` (dropping any claim), in one write; the factory leaves an ungraded task alone until a person grades it again. Agents get 403, and a task `in_progress` (a run may be going) is refused.
 - `decision`: a choice and why, so later agents don't relitigate it.
 - `review`: a verdict on a change. Needs `verdict` (`approve` or `request_changes`) and may name the reviewing `model`. It records the verdict only; moving the task is a separate step.
 - `note`: anything else. The default.

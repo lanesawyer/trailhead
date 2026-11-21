@@ -45,6 +45,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/claim", post(claims::claim))
         .route("/tasks/{task}/renew", post(claims::renew))
         .route("/tasks/{task}/release", post(claims::release))
+        .route("/tasks/{task}/set-aside", post(tasks::set_aside))
         .route("/tasks/{task}/comments", get(comments::list_comments).post(comments::add_comment))
         .route("/tasks/{task}/blockers", get(dependencies::list_blockers).post(dependencies::add_blocker))
         .route("/tasks/{task}/blockers/{blocker}", delete(dependencies::remove_blocker))

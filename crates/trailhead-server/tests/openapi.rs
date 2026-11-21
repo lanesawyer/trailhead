@@ -29,6 +29,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("post", "/v1/tasks/{task}/claim"),
     ("post", "/v1/tasks/{task}/renew"),
     ("post", "/v1/tasks/{task}/release"),
+    ("post", "/v1/tasks/{task}/set-aside"),
     ("get", "/v1/tasks/{task}/comments"),
     ("post", "/v1/tasks/{task}/comments"),
     ("get", "/v1/tasks/{task}/blockers"),
