@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use trailhead_factory::{Compute, Role, RunOutcome, SandboxState, Status, TaskKey, label};
+use trailhead_factory::{Compute, Role, RunOutcome, SandboxSpec, SandboxState, Status, TaskKey, label};
 use trailhead_testkit::{Script, TrackerOp};
 
 use crate::common::*;
@@ -262,6 +262,76 @@ async fn a_sandbox_that_recovers_is_released_as_usual() {
     let done = r.factory.reconcile().await.unwrap();
     assert_eq!(done.released, ["trailhead-w1"]);
     assert!(done.abandoned.is_empty());
+}
+
+/// Fails release at `trailhead-w1` twice, ten minutes apart, so its failure record is old and has a backoff.
+async fn trouble_w1(r: &Rig) {
+    wedged_pool(r, &["set_egress"]).await;
+    for _ in 0..2 {
+        assert!(r.factory.reconcile().await.unwrap().released.is_empty());
+        tokio::time::advance(std::time::Duration::from_secs(5 * 60)).await;
+    }
+}
+
+/// Runs a task, so acquiring a worker releases the stale busy `trailhead-w1` outside reconcile.
+async fn run_a_task(r: &Rig) {
+    let key = r.tracker.add_task("TRAIL", "Next", "");
+    // The wedged sandbox is labelled for this task, as an earlier attempt's would be, and another one is picked first.
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    let w1 = trailhead_factory::SandboxId("trailhead-w1".into());
+    labels.insert(label::TASK.into(), key.0.clone());
+    r.compute.set_labels(&w1, &labels).await.unwrap();
+    labels.remove(label::WARM);
+    let spec = SandboxSpec { name: "trailhead-w0".into(), labels, egress: Default::default() };
+    r.compute.create(&spec).await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+}
+
+/// Makes `trailhead-w1` busy and failing to release again, and reconciles once.
+async fn wedge_again(r: &Rig) -> trailhead_control::Reconciled {
+    let mut labels = r.compute.get("trailhead-w1").unwrap().labels;
+    labels.insert(label::STATE.into(), label::BUSY.into());
+    labels.insert(label::TASK.into(), "TRAIL-9".into());
+    labels.insert(label::ROLE.into(), "worker".into());
+    r.compute.set_labels(&trailhead_factory::SandboxId("trailhead-w1".into()), &labels).await.unwrap();
+    r.compute.fail("trailhead-w1", "set_egress");
+    r.factory.reconcile().await.unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_release_outside_reconcile_clears_the_sandboxs_failure_count() {
+    let r = two_places();
+    trouble_w1(&r).await;
+    r.compute.heal("trailhead-w1");
+    run_a_task(&r).await;
+    assert!(
+        r.compute
+            .get("trailhead-w1")
+            .is_some_and(|s| s.labels.get(label::STATE).map(String::as_str) == Some(label::IDLE)),
+        "released as stale"
+    );
+
+    let done = wedge_again(&r).await;
+    assert!(done.abandoned.is_empty(), "its first failure since it was healthy isn't the last straw");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_sandbox_leaves_no_failure_count_for_the_next_one_of_its_name() {
+    let r = two_places();
+    trouble_w1(&r).await;
+    r.compute.heal("trailhead-w1");
+    let labels = r.compute.get("trailhead-w1").unwrap().labels;
+    r.factory.refresh_pool().await.unwrap();
+    run_a_task(&r).await;
+    assert!(r.compute.get("trailhead-w1").is_none(), "destroyed as stale");
+    // The next sandbox built takes the first free name.
+    let spec = SandboxSpec { name: "trailhead-w1".into(), labels, egress: Default::default() };
+    r.compute.create(&spec).await.unwrap();
+
+    let done = wedge_again(&r).await;
+    assert!(done.abandoned.is_empty(), "the old one's patience isn't the new one's");
 }
 
 #[tokio::test]
@@ -827,4 +897,8 @@ async fn a_stuck_breached_sandboxs_warm_cost_is_forgotten_when_reconcile_destroy
     assert!(done.destroyed.contains(&"trailhead-w1".to_string()), "{done:?}");
     assert!(r.compute.get("trailhead-w1").is_none());
     assert_eq!(r.factory.sandbox_entries(), 0, "the cost went with the sandbox");
+}
+
+fn two_places() -> Rig {
+    rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_sandboxes = 2"))
 }
