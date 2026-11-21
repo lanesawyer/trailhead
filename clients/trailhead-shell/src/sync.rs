@@ -81,6 +81,10 @@ impl Default for SyncTimings {
     }
 }
 
+/// What the snapshot asks each task to carry.
+const TASK_INCLUDES: &str = "claim,open_questions,last_handoff,last_review,blocked_by";
+/// The same with its pictures, which a server older than they are refuses.
+const TASK_INCLUDES_PICTURES: &str = "claim,open_questions,last_handoff,last_review,blocked_by,attachments";
 const PAGE: usize = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -151,14 +155,22 @@ impl Remote {
     }
 
     async fn load_tasks(&self) -> Result<Vec<Value>, String> {
+        // A server from before tasks carried pictures refuses the include it doesn't know. The rest of the snapshot
+        // is still wanted from it, so the first page is asked for again without them (TRAIL-1630).
+        match self.load_tasks_with(TASK_INCLUDES_PICTURES).await {
+            Ok(tasks) => Ok(tasks),
+            Err(why) => self.load_tasks_with(TASK_INCLUDES).await.map_err(|_| why),
+        }
+    }
+
+    async fn load_tasks_with(&self, include: &str) -> Result<Vec<Value>, String> {
         // Every status, so a task finishing while the pages load can't shift the next page's first task out of view.
         let all_statuses = Status::ALL.map(Status::as_str).join(",");
         let mut tasks = Vec::new();
         loop {
             let page = self
                 .list(&format!(
-                    "{}?include=claim,open_questions,last_handoff,last_review,blocked_by,attachments&status={all_statuses}\
-                     &sort=created_at&limit={PAGE}&offset={}",
+                    "{}?include={include}&status={all_statuses}&sort=created_at&limit={PAGE}&offset={}",
                     routes::LIST_TASKS.path,
                     tasks.len()
                 ))
