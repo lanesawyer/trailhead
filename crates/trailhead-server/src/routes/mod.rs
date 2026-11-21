@@ -25,6 +25,7 @@ use crate::error::{ApiResult, Json, invalid};
 use crate::openapi::Health;
 use crate::params::split_list;
 use trailhead_core::Me;
+use trailhead_core::shell::ShellBuild;
 
 type S = State<Arc<AppState>>;
 
@@ -33,6 +34,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/health", get(health))
         .route("/openapi.json", get(crate::openapi::serve))
         .route("/me", get(me))
+        .route("/shell/build", get(shell_build))
         .route("/projects", get(projects::list_projects).post(projects::create_project))
         .route("/projects/{project}", get(projects::get_project).patch(projects::update_project))
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))
@@ -160,4 +162,12 @@ async fn me(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<Me>> {
         None => None,
     };
     Ok(Json(Me { workspace_id: ctx.workspace_id, user, agent_id: ctx.agent_id, agent }))
+}
+
+#[utoipa::path(
+    get, path = "/v1/shell/build", tag = "meta",
+    responses((status = 200, description = "The shells the server's builder keeps: `configured` is false, and the rest empty, when the user config has no `[shell] repo`", body = ShellBuild))
+)]
+async fn shell_build(State(s): S, Auth(_): Auth) -> Json<ShellBuild> {
+    Json(s.shell.get().map(trailhead_builder::Layout::read).unwrap_or_default())
 }

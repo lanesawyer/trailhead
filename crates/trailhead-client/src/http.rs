@@ -71,6 +71,7 @@ pub mod routes {
     pub const LIST_PROJECTS: Route = Route::new(Method::GET, "/v1/projects");
     pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
     pub const ME: Route = Route::new(Method::GET, "/v1/me");
+    pub const SHELL_BUILD: Route = Route::new(Method::GET, "/v1/shell/build");
     pub const LIST_AGENTS: Route = Route::new(Method::GET, "/v1/agents");
     pub const CREATE_AGENT: Route = Route::new(Method::POST, "/v1/agents");
     pub const REVOKE_AGENT: Route = Route::new(Method::POST, "/v1/agents/{agent}/revoke");
@@ -89,7 +90,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 36] {
+    pub fn all() -> [Route; 37] {
         [
             READY,
             LIST_TASKS,
@@ -113,6 +114,7 @@ pub mod routes {
             LIST_PROJECTS,
             SHOW_PROJECT,
             ME,
+            SHELL_BUILD,
             LIST_AGENTS,
             CREATE_AGENT,
             REVOKE_AGENT,
@@ -782,6 +784,11 @@ impl Client {
     /// `GET /v1/me`: who the token acts as.
     pub async fn me(&self) -> Result<Me> {
         self.send(self.request(routes::ME, None)).await
+    }
+
+    /// `GET /v1/shell/build`: the shells the server's builder keeps.
+    pub async fn shell_build(&self) -> Result<trailhead_model::shell::ShellBuild> {
+        self.send(self.request(routes::SHELL_BUILD, None)).await
     }
 
     /// `GET /v1/agents`.

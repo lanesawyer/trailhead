@@ -14,6 +14,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/health"),
     ("get", "/v1/openapi.json"),
     ("get", "/v1/me"),
+    ("get", "/v1/shell/build"),
     ("get", "/v1/projects"),
     ("post", "/v1/projects"),
     ("get", "/v1/projects/{project}"),

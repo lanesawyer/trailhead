@@ -804,3 +804,34 @@ async fn health_reports_a_store_another_connection_has_locked() {
     let health = api.call(None, "GET", "/v1/health", None, &[]).await;
     assert_eq!(health.body["ok"], true);
 }
+
+#[tokio::test]
+async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
+    let api = Api::new().await;
+    let r = api.as_human("GET", "/v1/shell/build", None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.body["configured"], false);
+    assert!(r.body["current"].is_null() && r.body["error"].is_null(), "{}", r.body);
+    assert_eq!(api.call(None, "GET", "/v1/shell/build", None, &[]).await.status, StatusCode::UNAUTHORIZED);
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = common::local_config(dir.path());
+    let (store, _) = open_local(&cfg).await.unwrap();
+    let state = AppState::new(store);
+    let layout = trailhead_builder::Layout::new(dir.path());
+    let at = jiff::Timestamp::UNIX_EPOCH;
+    let built = |rev: &str| Some(trailhead_builder::Built { rev: rev.into(), at });
+    let saved =
+        trailhead_builder::State { current: built("b"), previous: built("a"), building: Some("c".into()), error: None };
+    layout.save(&saved).unwrap();
+    layout.mark_bad("x").unwrap();
+    state.shell.set(layout).unwrap();
+    let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
+    let api = Api { app: router(Arc::new(state)), human, _dir: dir };
+    let r = api.as_human("GET", "/v1/shell/build", None).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(
+        r.body,
+        json!({"configured": true, "current": "b", "previous": "a", "building": "c", "error": null, "bad": ["x"]})
+    );
+}
