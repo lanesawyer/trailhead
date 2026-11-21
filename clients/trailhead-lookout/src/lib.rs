@@ -19,6 +19,7 @@ pub mod form;
 pub mod inspector;
 pub mod logs;
 pub mod map;
+pub mod peak;
 pub mod project;
 pub mod project_form;
 pub mod projects_page;
