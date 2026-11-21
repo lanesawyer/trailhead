@@ -26,6 +26,9 @@ bevy = { version = "0.20", default-features = false, features = [
     "default_font",
     "custom_cursor",
     "x11",
+    # The trail map's peak: lit meshes, a 3D camera, and clicks on its meshes (TRAIL-1163). The kit leaves these out.
+    "bevy_pbr",
+    "mesh_picking",
 ] }
 trailhead-ui.workspace = true
 trailhead-shell.workspace = true
