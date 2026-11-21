@@ -246,6 +246,16 @@ pub(crate) enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// Start the Trailhead window: the newest shell the server built from the apps repo named by `[shell] repo` in
+    /// the user config.toml, falling back to the one before when it fails to start. Arguments after it go to the
+    /// shell.
+    #[command(args_conflicts_with_subcommands = true)]
+    App {
+        #[command(subcommand)]
+        cmd: Option<AppCmd>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// Manage the local background server.
     #[command(subcommand)]
     Server(ServerCmd),
@@ -387,6 +397,12 @@ pub(crate) enum FactoryCmd {
     /// Turn the server's control plane off, even when a broken factory configuration keeps the server from starting.
     /// Needs no server; takes effect when the server restarts.
     Disable,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AppCmd {
+    /// What the server's builder has built: the current and previous builds, one building, the last failure.
+    Status,
 }
 
 #[derive(Subcommand)]

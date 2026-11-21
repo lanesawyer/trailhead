@@ -12,7 +12,7 @@ use trailhead_core::{CommentKind, Status};
 
 use cli::{Cli, Cmd};
 use client::{ApiError, Client, Identity};
-use cmd::{Ctx, access, claims, comments, events, projects, server, tasks, webhooks};
+use cmd::{Ctx, access, app, claims, comments, events, projects, server, tasks, webhooks};
 
 /// Rust ignores SIGPIPE, so `println!` panics once a reader like `head` closes
 /// the pipe. By then the command has done its work; exit like a Unix tool killed
@@ -73,6 +73,7 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
     match &cli.cmd {
         Cmd::Server(cmd) => return server::server(&url, cmd, cli.json).await,
         Cmd::Login => return access::login(&paths, &url, cli.json).await,
+        Cmd::App { cmd, args } => return app::app(&paths, &url, cmd.as_ref(), args, cli.json).await,
         _ => {}
     }
     let repo = repo::find(&std::env::current_dir()?)?.unwrap_or_default();
@@ -91,7 +92,7 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
         Cmd::Factory(_) => unreachable!(),
         #[cfg(not(feature = "factory"))]
         Cmd::Factory { .. } => unreachable!(),
-        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login | Cmd::App { .. } => unreachable!(),
         Cmd::Ready { project, grade, limit } => tasks::ready(&cx, project, grade, limit).await,
         Cmd::Ls { project, status, parent, all, today, grade, title, limit } => {
             tasks::ls(&cx, project, status, parent, all, today, grade, title, limit).await

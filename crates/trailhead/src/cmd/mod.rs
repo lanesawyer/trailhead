@@ -1,6 +1,7 @@
 //! One module per group of commands, like the server's routes.
 
 pub(crate) mod access;
+pub(crate) mod app;
 pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod events;
