@@ -23,7 +23,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
         ServerCmd::Status => match health().await {
             Some(info) if json => {
                 let unit = local_scope(&paths, local, &info);
-                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref()))
+                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref(), client::can_start_scoped()))
             }
             Some(info) => {
                 let mut parts = vec!["running".to_string()];
@@ -128,11 +128,13 @@ fn local_scope(paths: &trailhead_server::Paths, local: bool, info: &client::Heal
     if local && client::is_ours(paths, info) { info.pid.and_then(client::server_unit) } else { None }
 }
 
-/// The health document for `status --json`, plus `scope` and `shared_scope` when the scope is known.
-fn status_json(mut health: serde_json::Value, unit: Option<&str>) -> serde_json::Value {
+/// The health document for `status --json`, plus `scope`, `shared_scope` and `can_scope` (whether `server restart`
+/// could start the server in its own scope) when the scope is known.
+fn status_json(mut health: serde_json::Value, unit: Option<&str>, can_scope: bool) -> serde_json::Value {
     if let (Some(unit), Some(obj)) = (unit, health.as_object_mut()) {
         obj.insert("scope".into(), json!(unit));
         obj.insert("shared_scope".into(), json!(client::is_shared_scope(unit)));
+        obj.insert("can_scope".into(), json!(can_scope));
     }
     health
 }
@@ -187,13 +189,15 @@ mod tests {
 
     #[test]
     fn status_json_adds_scope_and_shared_scope_flag() {
-        let v = status_json(json!({ "pid": 1 }), Some("app-gnome-code-1.scope"));
+        let v = status_json(json!({ "pid": 1 }), Some("app-gnome-code-1.scope"), true);
+        assert_eq!(v["can_scope"], true);
         assert_eq!(v["scope"], "app-gnome-code-1.scope");
         assert_eq!(v["shared_scope"], true);
-        let v = status_json(json!({ "pid": 1 }), Some("vte-spawn-0a1b.scope"));
+        let v = status_json(json!({ "pid": 1 }), Some("vte-spawn-0a1b.scope"), false);
+        assert_eq!(v["can_scope"], false);
         assert_eq!(v["shared_scope"], true);
-        let v = status_json(json!({ "pid": 1 }), Some("trailhead-server-1.scope"));
+        let v = status_json(json!({ "pid": 1 }), Some("trailhead-server-1.scope"), true);
         assert_eq!(v["shared_scope"], false);
-        assert_eq!(status_json(json!({ "pid": 1 }), None), json!({ "pid": 1 }));
+        assert_eq!(status_json(json!({ "pid": 1 }), None, true), json!({ "pid": 1 }));
     }
 }
