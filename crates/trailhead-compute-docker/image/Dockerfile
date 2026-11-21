@@ -5,8 +5,13 @@ FROM ubuntu:26.04
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config \
+      mesa-vulkan-drivers libvulkan1 \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home --shell /bin/bash trailhead
+
+# Mesa's software Vulkan (lavapipe), so a UI can be drawn to a picture with no GPU or display: an app's shots test
+# (`trailhead_shell::testing::shot`) needs a render adapter, and this is the only one a sandbox has.
+ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
 
 USER trailhead
 WORKDIR /home/trailhead

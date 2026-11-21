@@ -34,7 +34,7 @@ new one.
 
 ## Check it
 
-No headless test builds what the binary builds, and a factory sandbox can't open a window.
+No headless test builds what the binary builds, and a factory sandbox can't open a window. It can draw one to a picture, though: an app's shots test (`tests/shots.rs`, built on `trailhead_shell::testing::shot`; the shell guide's testing section) saves a PNG of each view with no window, and you can read those files and look at them.
 
 - `cargo clippy -p trailhead-ui --all-targets -- -D warnings` and `cargo test -p trailhead-ui`, plus the same for each
   crate that uses the change (`trailhead-shell`, `trailhead-app-example`, `trailhead-lookout`, `trailhead-desktop`).
@@ -43,6 +43,7 @@ No headless test builds what the binary builds, and a factory sandbox can't open
   `clients/trailhead-lookout/tests/design_system.rs`, over the shell from `clients/trailhead-shell/tests/design_system.rs`
   and over the example app from `clients/trailhead-app-example/tests/design_system.rs`. A rule change is checked
   against all four.
+- **After changing what a view shows, take its shots and look at them:** `cargo test -p <app> --test shots -- --ignored` (`mise run shots` for every app here), then read the PNGs it names. Check what a person would: nothing squashed together or cut off, text readable, the right thing open. A view with no shot yet gets one in the same change. With no render adapter the test says so (a sandbox made from an image older than TRAIL-1614's): say that in your summary; never skip the look silently.
 - With a display, run the Trailhead shell's window: `timeout 15 cargo run -p trailhead-desktop`, and look for panics
   and `bevy_feathers::theme: Theme color ... not found` in the log.
 - When layout or input misbehaves, measure rather than guess (the kit's guide, section 4, "Look before you fix"). Never
