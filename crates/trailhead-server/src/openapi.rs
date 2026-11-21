@@ -261,6 +261,8 @@ impl Modify for Common {
         routes::health,
         crate::openapi::serve,
         routes::me,
+        routes::config::show,
+        routes::config::change,
         routes::shell_build,
         routes::shell::ask_targets,
         routes::shell::ask,

@@ -3,6 +3,7 @@
 pub(crate) mod access;
 pub(crate) mod claims;
 pub(crate) mod comments;
+pub(crate) mod config;
 pub(crate) mod dependencies;
 pub(crate) mod events;
 pub(crate) mod projects;
@@ -36,6 +37,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/health", get(health))
         .route("/openapi.json", get(crate::openapi::serve))
         .route("/me", get(me))
+        .route("/config", get(config::show).patch(config::change))
         .route("/shell/build", get(shell_build))
         .route("/shell/ask", get(shell::ask_targets).post(shell::ask))
         .route("/projects", get(projects::list_projects).post(projects::create_project))

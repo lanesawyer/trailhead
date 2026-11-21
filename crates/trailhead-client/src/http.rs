@@ -72,6 +72,8 @@ pub mod routes {
     pub const LIST_PROJECTS: Route = Route::new(Method::GET, "/v1/projects");
     pub const SHOW_PROJECT: Route = Route::new(Method::GET, "/v1/projects/{project}");
     pub const ME: Route = Route::new(Method::GET, "/v1/me");
+    pub const CONFIG: Route = Route::new(Method::GET, "/v1/config");
+    pub const UPDATE_CONFIG: Route = Route::new(Method::PATCH, "/v1/config");
     pub const SHELL_BUILD: Route = Route::new(Method::GET, "/v1/shell/build");
     pub const SHELL_ASK_TARGETS: Route = Route::new(Method::GET, "/v1/shell/ask");
     pub const SHELL_ASK: Route = Route::new(Method::POST, "/v1/shell/ask");
@@ -93,7 +95,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 40] {
+    pub fn all() -> [Route; 42] {
         [
             READY,
             LIST_TASKS,
@@ -118,6 +120,8 @@ pub mod routes {
             LIST_PROJECTS,
             SHOW_PROJECT,
             ME,
+            CONFIG,
+            UPDATE_CONFIG,
             SHELL_BUILD,
             SHELL_ASK_TARGETS,
             SHELL_ASK,
@@ -802,6 +806,21 @@ impl Client {
     /// `GET /v1/me`: who the token acts as.
     pub async fn me(&self) -> Result<Me> {
         self.send(self.request(routes::ME, None)).await
+    }
+
+    /// `GET /v1/config`: the server's settings in its user config, and which wait for a restart. Only a person's
+    /// token reads them.
+    pub async fn config(&self) -> Result<trailhead_model::config::ServerConfig> {
+        self.send(self.request(routes::CONFIG, None)).await
+    }
+
+    /// `PATCH /v1/config`: changes the settings in the server's user config, refused (`412`) when the file has
+    /// changed since `change.version` was read and (`400`) when the server would refuse the file it leaves.
+    pub async fn update_config(
+        &self,
+        change: &trailhead_model::config::ConfigChange,
+    ) -> Result<trailhead_model::config::ServerConfig> {
+        self.send(self.request(routes::UPDATE_CONFIG, None).json(change)).await
     }
 
     /// `GET /v1/shell/build`: the shells the server's builder keeps, and with `since` (the build a shell runs) the

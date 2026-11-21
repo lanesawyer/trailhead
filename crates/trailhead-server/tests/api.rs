@@ -907,3 +907,179 @@ async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
     let project = api.as_human("GET", "/v1/projects/TN", None).await;
     assert_eq!(project.body["metadata"]["factory"], json!({"repo": "lane/trailhead-apps", "path": "apps/trail-notes"}));
 }
+
+/// A server whose user config is `text`, in a directory of its own, read as what the server started with.
+async fn with_config(text: &str) -> (Api, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = common::local_config(dir.path());
+    let (store, _) = open_local(&cfg).await.unwrap();
+    let path = dir.path().join("config").join("config.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, text).unwrap();
+    let state = AppState::new(store);
+    state.config.set(trailhead_server::user_config::ConfigFile::open(path.clone())).ok().unwrap();
+    let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
+    (Api { app: router(Arc::new(state)), human, _dir: dir }, path)
+}
+
+/// A directory with a `.git` in it, as the builder wants `[shell] repo` to be.
+fn checkout(dir: &std::path::Path, name: &str) -> String {
+    let repo = dir.join(name);
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    repo.display().to_string()
+}
+
+#[tokio::test]
+async fn the_config_is_a_persons_and_shows_typed_settings_never_the_file() {
+    let api = Api::new().await;
+    assert_eq!(api.as_human("GET", "/v1/config", None).await.status, StatusCode::NOT_FOUND, "no user config");
+
+    let (api, path) = with_config("url = \"http://127.0.0.1:7241\"\ntoken = \"th_fake_secret_value\"\n").await;
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "claude"}))).await;
+    let secret = agent.body["secret"].as_str().unwrap().to_string();
+    for (method, body) in [("GET", None), ("PATCH", Some(json!({"version": "x", "shell": {"jobs": 2}})))] {
+        let r = api.call(Some(&secret), method, "/v1/config", body, &[]).await;
+        assert_eq!((r.status, &r.body["error"]["code"]), (StatusCode::FORBIDDEN, &json!("forbidden")), "{method}");
+    }
+    let r = api.as_human("GET", "/v1/config", None).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let text = r.body.to_string();
+    assert!(!text.contains("th_fake_secret_value") && !text.contains("7241"), "only typed settings: {text}");
+    assert!(r.body["problem"].as_str().unwrap().contains("unknown field `token`"), "{}", r.body);
+    assert_eq!(r.body["path"], path.display().to_string());
+    assert_eq!(
+        r.body["shell"],
+        json!({"repo": null, "package": null, "profile": "release", "jobs": 3, "poll_secs": 60,
+               "defaults": ["repo", "package", "profile", "jobs", "poll_secs"]})
+    );
+    assert_eq!((&r.body["restart_needed"], &r.body["waiting"]), (&json!(false), &json!([])));
+}
+
+#[tokio::test]
+async fn a_change_keeps_the_rest_of_the_file_and_its_backup_and_waits_for_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = checkout(dir.path(), "apps");
+    let before = format!(
+        "# this machine\nurl = \"http://127.0.0.1:7241\" # the usual port\n\n[shell]\n# the apps\nrepo = {repo:?} # mine\njobs = 2 # leave room\n"
+    );
+    let (api, path) = with_config(&before).await;
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
+    let read = api.as_human("GET", "/v1/config", None).await;
+    assert_eq!(read.body["problem"], json!(null), "{}", read.body);
+    assert_eq!(read.body["shell"]["defaults"], json!(["package", "profile", "poll_secs"]));
+    let version = read.body["version"].clone();
+
+    let change = json!({"version": version, "shell": {"jobs": 4, "poll_secs": 30}});
+    let r = api.as_human("PATCH", "/v1/config", Some(change)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, before.replace("jobs = 2 # leave room\n", "jobs = 4 # leave room\npoll_secs = 30\n"));
+    let backup = path.with_file_name("config.toml.bak");
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+    for kept in [&path, &backup] {
+        let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(kept).unwrap().permissions());
+        assert_eq!(mode & 0o777, 0o640, "{}", kept.display());
+    }
+    assert_eq!((&r.body["shell"]["jobs"], &r.body["restart_needed"]), (&json!(4), &json!(true)));
+    assert_eq!(r.body["waiting"], json!(["shell.jobs", "shell.poll_secs"]));
+    assert_eq!(r.body["running"]["shell"]["jobs"], 2, "what the server started with");
+    assert!(r.body["running"].get("factory").is_none());
+    assert_ne!(r.body["version"], version);
+
+    let back = json!({"version": r.body["version"], "shell": {"jobs": 2, "poll_secs": null}});
+    let r = api.as_human("PATCH", "/v1/config", Some(back)).await;
+    assert_eq!((r.status, &r.body["restart_needed"]), (StatusCode::OK, &json!(false)), "{}", r.body);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "back as it was, byte for byte");
+}
+
+#[tokio::test]
+async fn a_change_the_server_would_refuse_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = checkout(dir.path(), "apps");
+    let before = format!("[shell]\nrepo = {repo:?}\n");
+    let (api, path) = with_config(&before).await;
+    let version = api.as_human("GET", "/v1/config", None).await.body["version"].clone();
+    let missing = dir.path().join("no-such-repo").display().to_string();
+    let plain = dir.path().display().to_string();
+    let mut bad = vec![
+        (json!({"shell": {"jobs": 0}}), "[shell] jobs must be at least 1".to_string()),
+        (json!({"shell": {"repo": missing}}), format!("[shell] repo {missing} isn't a directory")),
+        (json!({"shell": {"repo": plain}}), format!("[shell] repo {plain} isn't a git checkout")),
+    ];
+    if cfg!(feature = "factory") {
+        bad.push((json!({"factory": {"repos": [missing]}}), "no-such-repo/.trailhead.toml".into()));
+        bad.push((json!({"factory": {"pause_at": {"five_hour": 101}}}), "it's a percent, 0 to 100".into()));
+        bad.push((json!({"factory": {"pause_at": {"five_hours": 80}}}), "unknown window `five_hours`".into()));
+    }
+    for (change, words) in bad {
+        let mut change = change;
+        change["version"] = version.clone();
+        let r = api.as_human("PATCH", "/v1/config", Some(change.clone())).await;
+        assert_eq!((r.status, &r.body["error"]["code"]), (StatusCode::BAD_REQUEST, &json!("invalid")), "{change}");
+        let message = r.body["error"]["message"].as_str().unwrap();
+        assert!(message.contains(&words), "{change}: {message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "{change}");
+        assert!(!path.with_file_name("config.toml.bak").exists(), "{change}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_changed_on_disk_since_it_was_read_is_not_overwritten() {
+    let (api, path) = with_config("[shell]\njobs = 2\n").await;
+    let version = api.as_human("GET", "/v1/config", None).await.body["version"].clone();
+    std::fs::write(&path, "[shell]\njobs = 5 # by hand\n").unwrap();
+    let r = api.as_human("PATCH", "/v1/config", Some(json!({"version": version, "shell": {"jobs": 3}}))).await;
+    assert_eq!((r.status, &r.body["error"]["code"]), (StatusCode::PRECONDITION_FAILED, &json!("version_conflict")));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[shell]\njobs = 5 # by hand\n");
+    let r = api.as_human("GET", "/v1/config", None).await;
+    assert_eq!((&r.body["shell"]["jobs"], &r.body["waiting"]), (&json!(5), &json!(["shell.jobs"])));
+}
+
+#[tokio::test]
+async fn a_config_that_is_a_link_stays_one() {
+    let (api, path) = with_config("").await;
+    let target = path.with_file_name("dotfiles.toml");
+    std::fs::write(&target, "url = \"http://127.0.0.1:7241\"\n").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let version = api.as_human("GET", "/v1/config", None).await.body["version"].clone();
+    let r = api.as_human("PATCH", "/v1/config", Some(json!({"version": version, "shell": {"jobs": 2}}))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "url = \"http://127.0.0.1:7241\"\n\n[shell]\njobs = 2\n");
+}
+
+#[cfg(feature = "factory")]
+#[tokio::test]
+async fn the_factory_can_be_turned_off_and_its_repos_listed_while_it_is() {
+    let (api, path) = with_config("[factory] # the machine's factory\nmax_sandboxes = 2\n").await;
+    let read = api.as_human("GET", "/v1/config", None).await;
+    assert_eq!(read.body["factory"]["defaults"], json!(["repos", "disabled", "pause_at"]), "{}", read.body);
+    let off = json!({"version": read.body["version"], "factory": {"disabled": true, "pause_at": {"five_hour": 80}}});
+    let r = api.as_human("PATCH", "/v1/config", Some(off)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    let missing = "/no/such/repo";
+    let repos = json!({"version": r.body["version"], "factory": {"repos": [missing]}});
+    let r = api.as_human("PATCH", "/v1/config", Some(repos)).await;
+    assert_eq!(r.status, StatusCode::OK, "a disabled factory reads no repo, at start or here: {}", r.body);
+    assert_eq!(r.body["waiting"], json!(["factory.repos", "factory.disabled", "factory.pause_at"]));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[factory] # the machine's factory\nmax_sandboxes = 2\ndisabled = true\npause_at = { five_hour = 80 }\nrepos = [\"/no/such/repo\"]\n"
+    );
+    let on = json!({"version": r.body["version"], "factory": {"disabled": false}});
+    let r = api.as_human("PATCH", "/v1/config", Some(on)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "turning it on reads the repo: {}", r.body);
+}
+
+#[cfg(not(feature = "factory"))]
+#[tokio::test]
+async fn without_the_factory_its_table_is_neither_shown_nor_changed() {
+    let (api, path) = with_config("[factory]\nrepos = []\n").await;
+    let read = api.as_human("GET", "/v1/config", None).await;
+    assert_eq!((&read.body["factory"], &read.body["factory_built"]), (&json!(null), &json!(false)));
+    let change = json!({"version": read.body["version"], "factory": {"disabled": true}});
+    let r = api.as_human("PATCH", "/v1/config", Some(change)).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "[factory]\nrepos = []\n");
+}
