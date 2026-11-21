@@ -9,7 +9,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde_json::{Value, json};
 use trailhead_client::creds::Cred;
-use trailhead_core::{NewProject, NewTask, Principal, TokenOptions};
+use trailhead_core::{AttachmentRole, NewAttachment, NewProject, NewTask, Principal, TokenOptions};
 use trailhead_server::{AppState, open_local, router};
 
 struct Server {
@@ -39,6 +39,11 @@ async fn start() -> Server {
             .await
             .unwrap();
     }
+    let mut png = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n', 0, 0, 0, 13];
+    png.extend(b"IHDR");
+    png.extend([0, 0, 5, 0, 0, 0, 3, 32, 8, 6, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let picture = NewAttachment { role: Some(AttachmentRole::After), ..NewAttachment::png("board-dark", png) };
+    store.add_attachment(&ctx, "AUTH-2", picture).await.unwrap();
     let agent = store.create_agent(&ctx, "claude").await.unwrap();
     let (_, agent) = store.create_token(&ctx, Principal::Agent(agent.id), "claude").await.unwrap();
     let bot = store.create_agent(&ctx, "scoped").await.unwrap();
@@ -77,7 +82,14 @@ async fn agent_works_a_task_over_mcp() {
         let a = t.annotations.as_ref().unwrap_or_else(|| panic!("{} has no annotations", t.name));
         let expect = matches!(
             t.name.as_ref(),
-            "ready" | "list_tasks" | "show" | "search" | "my_claims" | "list_projects" | "show_project"
+            "ready"
+                | "list_tasks"
+                | "show"
+                | "list_attachments"
+                | "search"
+                | "my_claims"
+                | "list_projects"
+                | "show_project"
         );
         assert_eq!(a.read_only_hint, Some(expect), "{}", t.name);
     }
@@ -401,4 +413,17 @@ async fn agents_find_tasks_by_title_over_mcp() {
     let (_, out) = call(&client, "list_tasks", json!({"title": "fix the"})).await;
     assert_eq!(out, "no tasks");
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_agent_sees_a_tasks_pictures_but_not_their_bytes() {
+    let s = start().await;
+    let client = connect(&s.url, &s.agent).await;
+    let (err, out) = call(&client, "list_attachments", json!({"task": "AUTH-2"})).await;
+    assert!(!err, "{out}");
+    assert!(out.contains("  board-dark  after  1280x800  "), "{out}");
+    let (_, out) = call(&client, "list_attachments", json!({"task": "AUTH-1"})).await;
+    assert_eq!(out, "AUTH-1 has no pictures");
+    let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
+    assert!(out.contains("\n1 picture"), "{out}");
 }

@@ -153,6 +153,24 @@ pub(crate) enum Cmd {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Attach a picture (a PNG of at most 2 MiB) to a task.
+    Attach {
+        task: String,
+        file: std::path::PathBuf,
+        /// A short label, such as ticklist-today-dark. Defaults to the file's name without its extension.
+        #[arg(long)]
+        name: Option<String>,
+        /// before or after.
+        #[arg(long)]
+        role: Option<trailhead_core::AttachmentRole>,
+        /// Groups pictures taken together, such as a run id or a commit.
+        #[arg(long)]
+        set: Option<String>,
+    },
+    /// List a task's pictures.
+    Attachments {
+        task: String,
+    },
     /// Record a review verdict on a task: approve or request-changes. Doesn't move the task.
     Verdict {
         task: String,

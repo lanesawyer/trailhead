@@ -8,7 +8,7 @@
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use trailhead_model::{Claim, Comment, CommentKind, Event, Project, ProjectStatus, Task, TaskDetail};
+use trailhead_model::{Attachment, Claim, Comment, CommentKind, Event, Project, ProjectStatus, Task, TaskDetail};
 use uuid::Uuid;
 
 /// How a [`Text`] lays things out; see the module docs.
@@ -207,6 +207,11 @@ impl Text {
         if t.metadata.as_object().is_some_and(|m| !m.is_empty()) {
             out.push(format!("metadata {}", t.metadata));
         }
+        match d.attachments.len() {
+            0 => {}
+            1 => out.push("1 picture".into()),
+            n => out.push(format!("{n} pictures")),
+        }
         if !t.description.is_empty() {
             out.push(String::new());
             out.push(t.description.clone());
@@ -216,6 +221,16 @@ impl Text {
             out.extend(d.comments.iter().map(|c| self.comment_line(c, names)));
         }
         out.join("\n")
+    }
+
+    /// `0193…  board-dark  after  run-7  1280x800  412 KiB`: a picture's metadata, with its id for reading or removing it.
+    pub fn attachment_line(&self, a: &Attachment) -> String {
+        let mut parts = vec![a.id.to_string(), a.name.clone()];
+        parts.extend(a.role.map(|r| r.to_string()));
+        parts.extend(a.set.clone());
+        parts.push(format!("{}x{}", a.width, a.height));
+        parts.push(if a.size < 1024 { format!("{} B", a.size) } else { format!("{} KiB", (a.size + 1023) / 1024) });
+        parts.join("  ")
     }
 
     /// `#41    2026-10-17 13:00 PDT  task.updated         AUTH-3 (undoes #40)`.

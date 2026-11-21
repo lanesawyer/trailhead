@@ -566,6 +566,24 @@ impl TrailheadMcp {
     }
 
     #[tool(
+        description = "A task's pictures, such as screenshots before and after a change: one line each with its id, name, role (before or after), set, size in pixels and bytes. The bytes themselves are at GET /v1/attachments/{id}.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_attachments(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<TaskArg>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let list = attempt!(self.state.store.list_attachments(&ctx, &a.task).await);
+        if list.is_empty() {
+            return text(format!("{} has no pictures", a.task));
+        }
+        let text_of = Text::agent();
+        text(list.iter().map(|p| text_of.attachment_line(p)).collect::<Vec<_>>().join("\n"))
+    }
+
+    #[tool(
         description = "Create a task. Use blocks to make a subtask that blocks your own task. Lists possible duplicates among open tasks, if any: check them and cancel with duplicate_of if yours is one.",
         annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
     )]
