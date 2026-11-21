@@ -33,6 +33,11 @@ test = "cargo test"
 ui-lint = { run = "cargo clippy -p trailhead-ui -p trailhead-lookout --all-targets -- -D warnings", paths = ["clients/**"] }
 ui-test = { run = "cargo test -p trailhead-ui -p trailhead-lookout", paths = ["clients/**"] }
 
+# Pictures of what a UI change draws, before and after, for the task and the reviewer (docs/factory/sandbox.md#pictures).
+[factory.shots]
+run = "TZ=UTC CARGO_TARGET_DIR=\"$TRAILHEAD_CHECKOUT/target\" cargo test -p trailhead-shell -p trailhead-app-example -p trailhead-lookout --test shots -- --ignored"
+paths = ["clients/**"]
+
 [factory.egress]
 # crates.io stays open while the agent works, so it can add dependencies; a person approves any Cargo.lock change.
 always = ["crates.io", "index.crates.io", "static.crates.io"]
