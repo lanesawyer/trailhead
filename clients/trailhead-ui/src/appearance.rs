@@ -183,7 +183,9 @@ fn follow_window(mut changed: MessageReader<WindowThemeChanged>, mut appearance:
 /// Put the theme on: feathers repaints everything carrying a token when [`UiTheme`] changes, and the window clears
 /// to its background, which shows wherever no node is drawn.
 fn wear(appearance: Res<Appearance>, painted: Res<Painted>, mut theme: ResMut<UiTheme>, mut clear: ResMut<ClearColor>) {
-    if appearance.is_changed() && !appearance.is_added() {
+    // A change in the very first frame counts too: the desktop can answer before that frame's update runs, and
+    // nothing changes the appearance again after it (TRAIL-1615).
+    if appearance.is_changed() {
         let worn = appearance.wear(&painted.0);
         clear.0 = worn.color(&token::SURFACE_WINDOW);
         *theme = worn.resource();
@@ -194,6 +196,32 @@ fn wear(appearance: Res<Appearance>, painted: Res<Painted>, mut theme: ResMut<Ui
 mod tests {
     use super::*;
     use crate::token;
+
+    #[test]
+    fn an_answer_that_lands_in_the_first_frame_is_worn() {
+        let painted = Theme::default();
+        let appearance = Appearance::new(ThemeChoice::Desktop);
+        let before = appearance.wear(&painted);
+        let accent = Color::srgb(0.57, 0.25, 0.67);
+        let mut app = App::new();
+        app.insert_resource(ClearColor(before.color(&token::SURFACE_WINDOW)))
+            .insert_resource(before.clone().resource())
+            .insert_resource(appearance)
+            .insert_resource(Painted(painted.clone()))
+            .add_systems(Update, (take_the_answer, wear).chain());
+        let answered = IoTaskPool::get_or_init(Default::default)
+            .spawn(async move { Desktop { accent: Some(accent), theme: None } });
+        while !answered.is_finished() {
+            std::thread::yield_now();
+        }
+        app.insert_resource(Asking(answered));
+        app.update();
+        let mut wanted = Appearance::new(ThemeChoice::Desktop);
+        wanted.accent = Some(accent);
+        let wanted = wanted.wear(&painted);
+        assert_ne!(wanted.color(&token::FILL_ACCENT), before.color(&token::FILL_ACCENT));
+        assert_eq!(app.world().resource::<UiTheme>().color(&token::FILL_ACCENT.0), wanted.color(&token::FILL_ACCENT));
+    }
 
     fn lightness(color: Color) -> f32 {
         Oklcha::from(color).lightness
