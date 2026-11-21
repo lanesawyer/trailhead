@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use jiff::Timestamp;
-use trailhead_model::{Agent, Claim, Comment, CommentKind, Dependency, Project, Status, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, CommentKind, Dependency, Project, Status, Task, User};
 use trailhead_shell::ActiveApp;
 use trailhead_shell::connection::Connection;
 use trailhead_shell::mirror::{Mirror, Mirrored, Rev, rows};

@@ -61,6 +61,10 @@ pub(super) enum Block {
     AddSubtask { key: String, live: bool },
     /// A page in the browser (a PR), with its icon. Its key holds both, so a change is a new link.
     Link { caption: String, url: String },
+    /// A picture's before and after (or one alone), whose thumbnails open the large view. Its key holds what it shows.
+    Pictures(PicturePair),
+    /// The fold over a set's unchanged pictures. Its key holds whether it is open, so opening it is a new button.
+    Unchanged { set: String, count: usize, open: bool },
 }
 
 /// One of a PR's gates: its key holds the state, so a gate that changes state is a new badge.
@@ -277,6 +281,9 @@ pub(super) fn layout_task(
         .collect();
     rows.push(("m/sub/add".into(), Block::AddSubtask { key: key.clone(), live }));
     add(&mut main, "m/subtasks", "Sub-tasks", rows);
+    if !facts.pictures.is_empty() {
+        add(&mut main, "m/pictures", "Pictures", picture_items(&facts.pictures));
+    }
     if view.pr.is_some() || view.merge_note.is_some() {
         let mut items = Vec::new();
         if let Some(pr) = &view.pr {
@@ -544,6 +551,8 @@ pub(super) fn spawn_block(
         Block::Priority(p) => commands.spawn_scene(badge(format!("P{p}"), None, Some(priority_tone(*p)))).id(),
         Block::GradeBadge(g) => commands.spawn_scene(badge(format!("G{g}"), None, Some(grade_tone(*g)))).id(),
         Block::Gates => commands.spawn_scene(bsn! { @row() Node { flex_wrap: FlexWrap::Wrap } }).id(),
+        Block::Pictures(pair) => spawn_pair(commands, pair),
+        Block::Unchanged { set, count, open } => spawn_fold(commands, set, *count, *open),
         Block::Question { key, id, body, live, note } => {
             let item = commands
                 .spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() })
@@ -924,6 +933,8 @@ pub(super) fn dress(
             | Block::Project(_)
             | Block::Logs(_)
             | Block::Link { .. }
+            | Block::Pictures(_)
+            | Block::Unchanged { .. }
             | Block::Parent(_)
             | Block::Inline { .. }
             | Block::Choice { .. }

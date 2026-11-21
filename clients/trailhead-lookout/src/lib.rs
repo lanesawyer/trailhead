@@ -20,6 +20,7 @@ pub mod inspector;
 pub mod logs;
 pub mod map;
 pub mod peak;
+pub mod pictures;
 pub mod project;
 pub mod project_form;
 pub mod projects_page;
@@ -78,6 +79,7 @@ impl ShellApp for Lookout {
             search::SearchPlugin,
             detail::DetailPlugin,
             logs::LogsPlugin,
+            pictures::PicturesPlugin,
         ));
     }
 

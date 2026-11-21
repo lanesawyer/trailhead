@@ -33,7 +33,7 @@ use trailhead_client::http::{Call, NewComment, Revert, TaskUpdate, Undo};
 use trailhead_client::text::Text as Wording;
 use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
-    Agent, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
+    Agent, Attachment, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
 };
 #[cfg(test)]
 use trailhead_shell::commands::Method;
@@ -49,6 +49,7 @@ use crate::author::{
 use crate::board::Input;
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
+use crate::pictures::{OpenFolds, PictureChange, PicturePair, PictureSet, WantsPicture};
 use crate::project::OpenProject;
 use crate::settings::OpenLogs;
 use crate::widgets::{
@@ -66,6 +67,7 @@ mod layout;
 mod modal;
 mod model;
 mod panel;
+mod pictures;
 #[cfg(test)]
 mod testing;
 
@@ -75,6 +77,7 @@ use layout::*;
 pub use modal::*;
 pub use model::*;
 use panel::*;
+use pictures::*;
 
 /// What the inspector is looking at: a task (and its run, if it has one), or an agent. Ids, not keys.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -155,14 +158,14 @@ fn rebuild(
     projects: Query<&Mirrored<Project>>,
     tasks: Query<&Mirrored<Task>>,
     claims: Query<&Mirrored<Claim>>,
-    comments: Query<&Mirrored<Comment>>,
+    (comments, attachments): (Query<&Mirrored<Comment>>, Query<&Mirrored<Attachment>>),
     (agents, users): (Query<&Mirrored<Agent>>, Query<&Mirrored<User>>),
-    detail: Option<Res<Detail>>,
+    (detail, folds): (Option<Res<Detail>>, Res<OpenFolds>),
     api: Option<Res<Api>>,
     mut state: ResMut<InspectorState>,
 ) {
     let gone = removed.read().count() > 0;
-    let fetched = detail.as_ref().is_some_and(|d| d.is_changed());
+    let fetched = detail.as_ref().is_some_and(|d| d.is_changed()) || folds.is_changed();
     if !(selection.is_changed() || latest.is_changed() || mirror.is_changed() || fetched || gone || !changed.is_empty())
     {
         return;
@@ -170,11 +173,13 @@ fn rebuild(
     let next = selection.0.as_ref().and_then(|subject| {
         let (projects, tasks, claims, comments, agents, users) =
             (rows(&projects), rows(&tasks), rows(&claims), rows(&comments), rows(&agents), rows(&users));
+        let attachments = rows(&attachments);
         let input = Input {
             projects: &projects,
             tasks: &tasks,
             claims: &claims,
             comments: &comments,
+            attachments: &attachments,
             agents: &agents,
             users: &users,
             now: jiff::Timestamp::now(),
@@ -185,7 +190,11 @@ fn rebuild(
             Some(d) => Fetched { detail: d.data.as_ref(), error: d.error.as_deref(), me },
             None => Fetched { me, ..Fetched::default() },
         };
-        build(input, &latest.0, subject, fetched)
+        let mut view = build(input, &latest.0, subject, fetched)?;
+        if let Some(facts) = view.task.as_mut() {
+            folds.apply(&mut facts.pictures);
+        }
+        Some(view)
     });
     if state.0 != next {
         state.0 = next;
@@ -279,6 +288,7 @@ impl Plugin for InspectorPlugin {
             .init_resource::<Latest>()
             .init_resource::<Settled>()
             .init_resource::<InspectorState>()
+            .init_resource::<OpenFolds>()
             // Registering a message twice is a no-op, so these are safe beside the mirror's and commands' own.
             .add_message::<SyncItem>()
             .add_message::<CommandDone>()
@@ -313,9 +323,10 @@ impl Plugin for InspectorUiPlugin {
             .add_observer(on_menu_item)
             .add_observer(on_inline_edited)
             .add_observer(on_inline_chosen)
+            .add_observer(on_picture_press)
             .add_systems(Startup, spawn_panel)
             .add_systems(OnExit(trailhead_shell::ActiveApp(crate::LOOKOUT)), deselect)
-            .add_systems(Update, (answer_edits, tidy_controls.after(settle).before(sync_panel)))
+            .add_systems(Update, (answer_edits, want_viewed, tidy_controls.after(settle).before(sync_panel)))
             // After the view is rebuilt: a modal closed from inside must not be reopened from the view it just left.
             .add_systems(
                 Update,

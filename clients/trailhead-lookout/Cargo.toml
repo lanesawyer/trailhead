@@ -48,3 +48,5 @@ tracing.workspace = true
 trailhead-ui = { workspace = true, features = ["test-support"] }
 # The fixtures, `testing::server` for the factory link's tests, and `testing::shot` for `tests/shots.rs`.
 trailhead-shell = { workspace = true, features = ["test-server", "shots"] }
+# Pictures for the tests and the shots, made in memory rather than committed.
+png = "0.18"

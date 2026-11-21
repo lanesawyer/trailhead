@@ -125,6 +125,7 @@ impl Rig {
             claims: &claims,
             dependencies: &[],
             comments: &detail.comments,
+            attachments: &detail.attachments,
             agents: &agents,
             users: &[],
             queues: &[],

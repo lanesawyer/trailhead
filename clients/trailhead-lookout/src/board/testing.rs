@@ -70,6 +70,7 @@ pub(super) fn run(filter: &Filter) -> BoardView {
             claims: &claims,
             dependencies: &[],
             comments: &comments,
+            attachments: &[],
             agents: &agents,
             users: &[],
             queues: &["TRAIL-102".to_string()],

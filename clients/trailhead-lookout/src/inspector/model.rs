@@ -127,6 +127,8 @@ pub struct TaskFacts {
     /// Every comment, oldest first: all of them once the task is fetched, until then what the mirror holds (open
     /// questions and the last handoff).
     pub activity: Vec<Entry>,
+    /// The task's pictures, by set, newest first ([`crate::pictures::group`]).
+    pub pictures: Vec<crate::pictures::PictureSet>,
 }
 
 /// One comment in the task modal's activity.
@@ -526,6 +528,9 @@ pub(super) fn facts(
         fetch_error: fetch_error.map(str::to_string),
         activity,
         version: task.version,
+        pictures: crate::pictures::group(
+            &input.attachments.iter().filter(|a| a.task_id == task.id).cloned().collect::<Vec<_>>(),
+        ),
     }
 }
 

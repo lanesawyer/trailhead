@@ -8336,6 +8336,7 @@ dependencies = [
  "bevy",
  "iroh",
  "jiff",
+ "png",
  "serde",
  "serde_json",
  "tokio",

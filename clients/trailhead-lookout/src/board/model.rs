@@ -112,6 +112,8 @@ pub enum BadgeKind {
     ChangesRequested,
     /// An open task with unfinished blockers, with their count; the hint names them.
     Blocked,
+    /// Pictures attached to the task (screenshots before and after a change), with their count.
+    Pictures,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +161,8 @@ pub struct Card {
     pub parent: Option<String>,
     /// 0 for a top-level card, 1 for a subtask shown under its parent in the same column.
     pub depth: usize,
-    /// Priority, factory, grade, holder and open questions, in that order, leaving out what the task doesn't have.
+    /// Priority, factory, grade, holder, changes requested, blockers, open questions and pictures, in that order,
+    /// leaving out what the task doesn't have.
     pub badges: Vec<Badge>,
     /// Edit and comment, and answer when a question is open.
     pub actions: Vec<CardAction>,
@@ -199,6 +202,8 @@ pub struct Input<'a> {
     /// The blocker edges.
     pub dependencies: &'a [Dependency],
     pub comments: &'a [Comment],
+    /// The tasks' pictures (their metadata).
+    pub attachments: &'a [Attachment],
     pub agents: &'a [Agent],
     pub users: &'a [User],
     /// The keys of the factory's queue tasks, whose subtasks the factory works.
@@ -289,6 +294,10 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
     let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
 
+    let mut pictures: HashMap<Uuid, usize> = HashMap::new();
+    for a in input.attachments.iter().filter(|a| a.deleted_at.is_none()) {
+        *pictures.entry(a.task_id).or_default() += 1;
+    }
     let card = |t: &Task, depth: usize, with_parent: bool| {
         let mut open: Vec<&Comment> = questions.get(&t.id).cloned().unwrap_or_default();
         open.sort_by_key(|c| c.created_at);
@@ -357,6 +366,9 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                 tone: Some(token::STATUS_WARN),
                 hint: None,
             });
+        }
+        if let Some(&n) = pictures.get(&t.id) {
+            badges.push(Badge { kind: BadgeKind::Pictures, label: format!("pictures · {n}"), tone: None, hint: None });
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
         if let Some(q) = open.first() {
@@ -585,6 +597,33 @@ mod tests {
         let flagged = |key: &str| card(&view, key).badges.iter().any(|b| b.kind == BadgeKind::ChangesRequested);
         assert_eq!(keys(&view, Status::InReview), [("TRAIL-1".into(), 0), ("TRAIL-2".into(), 0)]);
         assert!(flagged("TRAIL-1") && !flagged("TRAIL-2") && !flagged("TRAIL-3"));
+    }
+
+    #[test]
+    fn a_card_counts_its_live_pictures() {
+        let tasks = [
+            trailhead_shell::fixture::task(json!({"id": "t1", "key": "TRAIL-1"})),
+            trailhead_shell::fixture::task(json!({"id": "t2", "key": "TRAIL-2"})),
+        ];
+        let picture = |id: &str, deleted: bool| {
+            let at = if deleted { json!("2026-10-02T00:00:00Z") } else { json!(null) };
+            trailhead_shell::fixture::attachment(json!({"id": id, "task_id": "t1", "deleted_at": at}))
+        };
+        let attachments = [picture("f1", false), picture("f2", false), picture("f3", true)];
+        let projects = [trailhead_shell::fixture::project(json!({"id": "p1", "key": "TRAIL"}))];
+        let view = build(
+            Input {
+                projects: &projects,
+                tasks: &tasks,
+                attachments: &attachments,
+                now: at_now(),
+                ..Default::default()
+            },
+            &Filter::default(),
+        );
+        let pictures = |key: &str| card(&view, key).badges.iter().find(|b| b.kind == BadgeKind::Pictures).cloned();
+        assert_eq!(pictures("TRAIL-1").map(|b| b.label), Some("pictures · 2".into()));
+        assert_eq!(pictures("TRAIL-2"), None);
     }
     #[test]
     fn badges_show_priority_grade_holder_and_the_open_question_count() {
