@@ -420,7 +420,7 @@ pub fn already_done_question(evidence: &str) -> String {
     format!(
         "The worker found nothing to do: the task looks already done on the base branch, or obsolete. \
          Its evidence: {evidence}\n\nIf that holds, close the task (mark it done or cancel it). Otherwise say what \
-         is missing, then reopen the task."
+         is missing by answering this question."
     )
 }
 
@@ -655,6 +655,18 @@ mod tests {
             "factory/merger can't approve TRAIL-7: it isn't a delegated reviewer, so a person has to list it as a reviewer of project TRAIL"
         );
         assert_eq!(finishing_failed(&"boom"), "finishing the run failed: boom");
+    }
+
+    #[test]
+    fn already_done_question_trims_the_evidence_and_falls_back_when_there_is_none() {
+        let q = already_done_question("  merged in abc123 \n");
+        assert!(q.contains("Its evidence: merged in abc123\n\n"), "{q}");
+        for blank in ["", "  \n\t "] {
+            let q = already_done_question(blank);
+            assert!(q.contains("Its evidence: (the worker gave no evidence)\n\n"), "{q}");
+        }
+        assert!(q.ends_with("by answering this question."), "{q}");
+        assert!(!q.contains("reopen"), "{q}");
     }
 
     #[test]
