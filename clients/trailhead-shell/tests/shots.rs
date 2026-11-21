@@ -1,6 +1,7 @@
 //! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its Ask and
 //! update buttons, the Ask form, the update panel listing what a newer build brings, the settings on each of the
-//! shell's pages and an app's (Appearance with its previews of switching apps caught partway), the panel that says why
+//! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
+//! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
 //! (`transition-<kind>-reveal`), and the rail of four apps with one dragged partway down it (`rail-drag`, at 100% and
 //! 150%) and after it is let go (`rail-reordered`). What moves is caught at a fixed frame, with time stepped by hand and held still while
@@ -22,7 +23,8 @@ use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
 use trailhead_shell::cover::SwitchCover;
 use trailhead_shell::net::{ApiAccess, Reason};
-use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SettingsPage, ShellDir};
+use trailhead_shell::server_settings::{SectionState, ServerSettings};
+use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SERVER, SettingsPage, ShellDir};
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle, show};
 use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
@@ -377,6 +379,78 @@ fn live_with_news(shot: &mut ShotApp) {
     settle(shot);
 }
 
+/// What a server with an apps repo and a factory says of its user config.
+fn server_config() -> trailhead_model::config::ServerConfig {
+    serde_json::from_value(serde_json::json!({
+        "path": "/home/someone/.config/trailhead/config.toml",
+        "version": "v1",
+        "factory": {"repos": ["~/Dev/trailhead", "~/Dev/trailhead-apps"], "disabled": false,
+                    "pause_at": {"five_hour": 80}, "max_sandboxes": null, "defaults": ["disabled", "max_sandboxes"]},
+        "factory_built": true,
+        "shell": {"repo": "~/Dev/trailhead-apps", "package": null, "profile": "release", "jobs": 3, "poll_secs": 60,
+                  "defaults": ["package", "profile", "jobs", "poll_secs"]},
+        "problem": null,
+        "running": {},
+        "restart_needed": false,
+        "waiting": [],
+        "foreground": false
+    }))
+    .unwrap()
+}
+
+/// The Server page as read, with an edit pending, with the server's refusal shown, and after a save that waits for
+/// a restart.
+fn server(shot: &mut ShotApp) {
+    set_connection(shot, Connection::Live);
+    let build = trailhead_model::shell::ShellBuild {
+        configured: true,
+        current: Some("4567def0123".into()),
+        ..Default::default()
+    };
+    shot.world_mut().resource_mut::<ServerSettings>().answered(server_config(), Some(build));
+    open_settings(shot, SERVER);
+    save(shot, "settings-server");
+
+    let edit = |shot: &mut ShotApp, edit: &dyn Fn(&mut ServerSettings)| {
+        edit(&mut shot.world_mut().resource_mut::<ServerSettings>());
+        settle(shot);
+    };
+    edit(shot, &|s| {
+        s.builds.jobs = "4".into();
+        s.factory.repos.push("~/Dev/bevy-data-explorer".into());
+    });
+    save(shot, "settings-server-edited");
+
+    edit(shot, &|s| {
+        s.factory.five_hour = "101".into();
+        s.factory_save = SectionState {
+            refusal: Some(
+                "/home/someone/.config/trailhead/config.toml: [factory] pause_at for five_hour is 101; it's a percent, \
+                 0 to 100"
+                    .into(),
+            ),
+            ..Default::default()
+        };
+    });
+    save(shot, "settings-server-refused");
+
+    let mut saved = server_config();
+    saved.version = "v2".into();
+    saved.shell.as_mut().unwrap().jobs = 4;
+    saved.shell.as_mut().unwrap().defaults.retain(|d| d != "jobs");
+    saved.restart_needed = true;
+    saved.waiting = vec!["shell.jobs".into()];
+    edit(shot, &|s| {
+        s.builds_save = SectionState { saved: true, ..Default::default() };
+        s.factory_save = SectionState::default();
+        s.factory.five_hour = "80".into();
+        s.factory.repos.pop();
+        s.answered(saved.clone(), s.build.clone());
+    });
+    save(shot, "settings-server-saved");
+    close_modals(shot);
+}
+
 #[test]
 #[ignore = "needs a render adapter: run with `mise run shots`"]
 fn shots() {
@@ -414,6 +488,12 @@ fn shots() {
     world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
     settle(&mut shot);
     save(&mut shot, "connect");
+    drop(shot);
+
+    // Tall enough to show the whole Server page.
+    let mut shot =
+        trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1500), ..ShotOptions::default() });
+    server(&mut shot);
     drop(shot);
 
     let mut shot = trailhead_shell::testing::shot::shot(
