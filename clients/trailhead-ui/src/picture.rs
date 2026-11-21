@@ -27,7 +27,7 @@ use crate::hover::HoverTone;
 use crate::modal::{Modal, ModalSlots, open_modal};
 use crate::scroll::ScrollBoth;
 use crate::spacing::{extent, radius, space, stroke};
-use crate::text::{size, text, text_dim, text_truncated};
+use crate::text::{size, text, text_dim};
 use crate::theme::{BackgroundTone, BorderTone, TextTone, token};
 use crate::{Picked, button_group, patch_node, set_display, set_text};
 
@@ -123,11 +123,7 @@ pub fn spawn_picture(commands: &mut Commands, caption: impl Into<String>, pictur
     };
     let frame = spawn_frame(commands, picture, frame_node);
     commands.entity(frame).insert(ChildOf(root));
-    commands.spawn_scene(text_truncated(caption, size::SMALL)).insert((
-        PictureCaption,
-        TextTone(token::TEXT_DIM),
-        ChildOf(root),
-    ));
+    commands.spawn_scene(text_dim(caption, size::SMALL)).insert((PictureCaption, ChildOf(root)));
     PictureParts { root, frame }
 }
 
@@ -233,7 +229,7 @@ pub(crate) fn fill_picture_views(
         let fit = commands.spawn_scene(button_group(fit, Some(0))).insert(FitGroup).id();
         let mut tools = vec![fit];
         if view.pictures.len() == 2 {
-            let mut options = vec![("Side by side".to_string(), None)];
+            let mut options = vec![("Both".to_string(), None)];
             options.extend(view.pictures.iter().map(|p| (p.caption.clone(), None)));
             tools.insert(0, commands.spawn_scene(button_group(options, Some(0))).insert(ShownGroup).id());
         }
