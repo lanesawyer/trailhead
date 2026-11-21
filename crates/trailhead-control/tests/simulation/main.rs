@@ -49,7 +49,7 @@ fn events(seed: u64) -> (Vec<u8>, Vec<Event>) {
 
 fn event(rng: &mut Rng) -> Event {
     let task = rng.below(2) as usize;
-    match rng.below(100) {
+    match rng.below(104) {
         0..22 => Event::Tick(rng.next()),
         22..44 => Event::Reconcile(rng.next()),
         44..48 => Event::Restart,
@@ -66,9 +66,11 @@ fn event(rng: &mut Rng) -> Event {
         89..91 => Event::PersonReopens(task),
         91..92 => Event::PersonFinishes(task),
         92..93 => Event::PersonCancels(task),
+        93..95 => Event::PersonSetsAside(task),
+        95..97 => Event::PersonGrades(task),
         // A pass makes a few dozen tracker calls, most of them early reads, so writes get their own, shorter count.
-        93..97 => Event::Fault(Fault::TrackerFailsWrite(1 + rng.below(10) as u32)),
-        97..98 => Event::Fault(Fault::TrackerFailsCall(1 + rng.below(40) as u32)),
+        97..101 => Event::Fault(Fault::TrackerFailsWrite(1 + rng.below(10) as u32)),
+        101..102 => Event::Fault(Fault::TrackerFailsCall(1 + rng.below(40) as u32)),
         _ => Event::Fault(
             [
                 Fault::RunFails,
@@ -157,6 +159,8 @@ async fn check(world: &World) -> Result<(), (String, String)> {
             Status::Done | Status::Cancelled => {}
             Status::NeedsInput if world.asked(key).await => {}
             Status::NeedsInput => return stuck("it is parked without an open question"),
+            // Set aside: the factory leaves it until a person grades it again.
+            Status::Open if task.grade.is_none() && task.run.set_aside.is_some() => {}
             Status::Open if task.run.sandbox.is_none() => return stuck("the factory never started it"),
             Status::Open => return stuck("it is back in the queue and the factory doesn't start it"),
             Status::InProgress => return stuck("it is in progress with no run going"),

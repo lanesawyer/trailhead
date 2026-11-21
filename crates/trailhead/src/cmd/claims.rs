@@ -48,3 +48,9 @@ pub(crate) async fn release(cx: &Ctx, task: &str) -> Result<()> {
     cx.emit(&task, |t| text().task_line(t));
     Ok(())
 }
+
+pub(crate) async fn set_aside(cx: &Ctx, task: &str, message: Option<&str>) -> Result<()> {
+    let task = cx.c.api().set_aside(&TaskKey(task.into()), message).await.map_err(api_err)?;
+    cx.emit(&task, |t| format!("{}\nset aside: the factory leaves it until it is graded again", text().task_line(t)));
+    Ok(())
+}

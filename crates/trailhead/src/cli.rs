@@ -101,6 +101,15 @@ pub(crate) enum Cmd {
     Release {
         task: String,
     },
+    /// Set a task aside, as a person: its open questions are answered with a note saying so, its grade is cleared and
+    /// it goes back to open, so the factory leaves it until it is graded again.
+    #[command(name = "set-aside")]
+    SetAside {
+        task: String,
+        /// Why, kept on the note's second line.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
     /// Mark done, optionally leaving a handoff first.
     Done {
         task: String,

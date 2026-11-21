@@ -11,7 +11,7 @@ use trailhead_lookout::LOOKOUT;
 use trailhead_lookout::Lookout;
 use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
-use trailhead_lookout::inspector::{Selection, Subject};
+use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
 use trailhead_lookout::settings::{SettingsButton, SettingsModal};
 use trailhead_shell::connection::Connection;
 use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json, user_json};
@@ -59,6 +59,7 @@ fn snapshot() -> Snapshot {
     tasks[5]["parent_id"] = json!(sid("t1"));
     tasks[6]["parent_id"] = json!(sid("t1"));
     tasks[7]["project_id"] = json!(sid("p2"));
+    tasks[7]["metadata"] = json!({"factory": {"attempt": 1, "sandbox": "ops-1-a1"}});
     tasks[1]["claim"] = claim_json(json!({"task_id": "t2", "holder_id": "u1"}));
     tasks[2]["claim"] = claim_json(json!({"task_id": "t3", "holder_id": "a1"}));
     tasks[6]["claim"] = claim_json(json!({"task_id": "t7", "holder_id": "a2"}));
@@ -155,6 +156,15 @@ fn shots() {
     shot.world_mut().resource_mut::<Selection>().0 = Some(Subject::Task(sid("t3")));
     settle(&mut shot);
     save(&mut shot, "inspector");
+    shot.world_mut().resource_mut::<Selection>().0 = None;
+    settle(&mut shot);
+
+    // The answer form on a question the factory parked on: Send, and Set aside beside it.
+    let question = Some((sid("c1"), "Which keys rotate first?".to_string()));
+    shot.world_mut().trigger(OpenComposer { key: "OPS-1".into(), answer: question });
+    settle(&mut shot);
+    save(&mut shot, "answer");
+    close_modals(&mut shot);
     shot.world_mut().resource_mut::<Selection>().0 = None;
     settle(&mut shot);
 

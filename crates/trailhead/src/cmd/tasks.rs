@@ -285,8 +285,8 @@ fn field_kind(field: &str) -> Option<Kind> {
     FACTORY_FIELDS.iter().chain(FACTORY_NESTED).find(|(f, _)| *f == field).map(|(_, k)| *k)
 }
 
-/// The structured fields (`pr`, `merged`, `grade`, `merge`, `changes_requested`, `review_breach`, `worker_breach`)
-/// and their leaves, by dotted path. A test checks this table against what the factory's types serialize.
+/// The structured fields (`pr`, `merged`, `grade`, `merge`, `changes_requested`, `review_breach`, `worker_breach`,
+/// `set_aside`) and their leaves, by dotted path. A test checks this table against what the factory's types serialize.
 const FACTORY_NESTED: &[(&str, Kind)] = &[
     ("pr", Kind::Object),
     ("pr.repo", Kind::Object),
@@ -337,6 +337,11 @@ const FACTORY_NESTED: &[(&str, Kind)] = &[
     ("worker_breach.reason", Kind::String),
     ("worker_breach.parked", Kind::Bool),
     ("worker_breach.stuck", Kind::Bool),
+    ("set_aside", Kind::Object),
+    ("set_aside.by", Kind::String),
+    ("set_aside.at", Kind::Integer),
+    ("set_aside.question", Kind::String),
+    ("set_aside.note", Kind::String),
 ];
 
 /// Rejects a value for a known `factory.<field>` key (or nested path, like `factory.pr.number`) of the wrong kind,
@@ -475,7 +480,7 @@ mod tests {
 
     /// Fields of `RunRecord` that hold objects, which `FACTORY_FIELDS` leaves to the factory to read.
     const STRUCTURED: &[&str] =
-        &["pr", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach"];
+        &["pr", "changes_requested", "merged", "grade", "merge", "review_breach", "worker_breach", "set_aside"];
 
     /// A new scalar field on `RunRecord` must be added to `FACTORY_FIELDS`, or to `STRUCTURED` if it isn't a scalar.
     /// The struct literal has no `..`, so a new field also fails to compile here until it is populated.
@@ -531,6 +536,7 @@ mod tests {
             stale_head: Some("x".into()),
             released: Some(1),
             unapproved_merge: Some(true),
+            set_aside: Some(trailhead_factory::SetAside { by: "x".into(), at: 1, question: None, note: None }),
         };
         let Value::Object(map) = serde_json::to_value(&full).unwrap() else { panic!("RunRecord isn't an object") };
         for key in map.keys() {
@@ -559,6 +565,7 @@ mod tests {
         });
         let review_breach = json!({ "round": 1, "attempt": 1, "reason": "x", "parked": false });
         let worker_breach = json!({ "run": "x", "reason": "x", "parked": false, "stuck": true });
+        let set_aside = json!({ "by": "Lane", "at": 1, "question": "q", "note": "n" });
         // Each value round-trips through its type unchanged, so the leaves below are what the factory writes.
         fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(v: &Value) -> Value {
             serde_json::to_value(serde_json::from_value::<T>(v.clone()).unwrap()).unwrap()
@@ -570,9 +577,10 @@ mod tests {
         assert_eq!(round_trip::<trailhead_factory::ChangesRequested>(&requested), requested);
         assert_eq!(round_trip::<trailhead_factory::ReviewBreach>(&review_breach), review_breach);
         assert_eq!(round_trip::<trailhead_factory::WorkerBreach>(&worker_breach), worker_breach);
+        assert_eq!(round_trip::<trailhead_factory::SetAside>(&set_aside), set_aside);
         let root = json!({
             "pr": pr, "merged": merged, "grade": grade, "merge": merge, "changes_requested": requested,
-            "review_breach": review_breach, "worker_breach": worker_breach,
+            "review_breach": review_breach, "worker_breach": worker_breach, "set_aside": set_aside,
         });
         for (path, kind) in FACTORY_NESTED {
             let leaf = path.split('.').fold(&root, |v, k| &v[k]);

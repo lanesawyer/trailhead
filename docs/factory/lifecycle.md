@@ -17,6 +17,9 @@ flowchart TD
     sandbox --> worker["Worker run"]
     worker -->|"asks a question"| parked["Parked<br/>needs_input"]
     parked -->|"a person answers"| queued
+    parked -->|"a person sets it aside"| aside["Set aside<br/>open, ungraded"]
+    pr -->|"a person sets it aside"| aside
+    aside -->|"a person grades it again: a fresh start"| queued
     worker -->|"budget breached"| parked
     worker -->|"agent fails"| retry{"Attempts left?<br/>max_attempts"}
     retry -->|"yes"| queued
@@ -40,6 +43,8 @@ flowchart TD
     pr -->|"PR conflicts: reconcile requests changes"| reworks
     pr -->|"PR closed unmerged"| parked
 ```
+
+**Set aside (TRAIL-1617).** A person can take a parked task, or one in review or approved, away from the factory without losing it: `POST /v1/tasks/{key}/set-aside` resolves its open questions with a note, clears its grade and reopens it in one write, and marks `set_aside` in its `factory` metadata. Ungraded, it isn't the factory's work (in a project worked whole too, for a task so marked), so the run loop releases its sandbox and leaves it; reconcile treats it as `Requeued` (a PR merged or closed meanwhile is still settled), and the merger never approves or merges it. Graded again, its first run starts on fresh counts and is told why. A task in progress can't be set aside: its run may be going. [Operating](operating.md#what-happens-to-a-task) has the detail.
 
 The loops back to `queued` start a fresh sandbox from the PR branch. The task never goes back to `open` for them: it stays `in_review` with changes requested (below), so it stays out of the backlog while its PR is open. A conflict rework doesn't use a review round (it has `max_conflict_reworks`). The [merger](review.md#the-merger) page has the detail of the gates and the merge.
 

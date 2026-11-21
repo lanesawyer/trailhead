@@ -2041,3 +2041,203 @@ async fn a_record_written_over_an_older_one_keeps_none_of_its_fields() {
     assert_eq!(run.grade, Some(PrGrade { grade: gr(1), task: None, reasons: vec![] }));
     assert_eq!(run.merged, Some(Merged { by: MergedBy::Human, pr, commit: None }));
 }
+
+/// A rig whose factory works the graded subtasks of a queue task, and one such task at `grade`.
+async fn queued(config: &str, grade: u8) -> (Rig, TaskKey) {
+    let mut r = rig_with(config).await;
+    let queue = r.task("Factory queue").await;
+    r.factory.config.repo.queue = vec![queue.0.clone()];
+    let new = NewTask {
+        project: "TRAIL".into(),
+        title: "Add a greeting".into(),
+        parent: Some(queue),
+        grade: Some(gr(grade)),
+        ..Default::default()
+    };
+    let key = r.store.create_task(&r.human, new).await.unwrap().key;
+    (r, key)
+}
+
+fn notes_on(comments: &[trailhead_core::Comment]) -> Vec<String> {
+    comments.iter().filter(|c| c.kind == CommentKind::Note).map(|c| c.body.clone()).collect()
+}
+
+async fn grade_again(r: &Rig, key: &TaskKey, grade: u8) {
+    let graded = TaskPatch { grade: Some(Some(gr(grade))), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_parked_task_set_aside_gives_up_its_sandbox_and_waits_quietly_until_it_is_graded_again() {
+    let (r, key) = queued(CONFIG, 2).await;
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which greeting?".into() }));
+    r.factory.tick().await.unwrap();
+    let parked = r.show(&key).await;
+    assert_eq!((parked.status, parked.holder.as_deref()), (Status::NeedsInput, Some("factory/trail-2-a1")));
+    let held = |r: &Rig| {
+        r.compute.sandboxes().iter().any(|s| s.labels.get(label::STATE).map(String::as_str) == Some(label::BUSY))
+    };
+    assert!(held(&r), "the parked task keeps its pooled sandbox");
+
+    // The sub-agent still holds the claim; a person sets the task aside all the same.
+    r.store.set_aside(&r.human, &key.0, Some("too big for now".into())).await.unwrap();
+    let aside = r.show(&key).await;
+    assert_eq!((aside.status, aside.grade, aside.holder.as_deref()), (Status::Open, None, None));
+
+    // The next pass gives the sandbox back and starts nothing, and passes after it say nothing.
+    for _ in 0..3 {
+        assert!(r.factory.tick().await.unwrap().is_empty(), "nothing runs");
+        r.factory.reconcile().await.unwrap();
+    }
+    assert!(!held(&r), "the sandbox went back to the pool");
+    assert!(r.revoked("factory/trail-2-a1").await, "the run's sub-agent is revoked");
+    let after = r.show(&key).await;
+    assert_eq!((after.status, after.run.attempt, after.run.failure.as_deref()), (Status::Open, Some(1), None));
+    assert_eq!(after.run.ungraded, None, "no 'no grade' note for a task a person set aside");
+    let comments = r.store.list_comments(&r.human, &key.0).await.unwrap();
+    assert!(comments.iter().filter(|c| c.kind == CommentKind::Question).all(|c| c.resolved_at.is_some()));
+    assert_eq!(
+        notes_on(&comments),
+        ["Set aside by Lane: the factory leaves it until it is graded again.\ntoo big for now"]
+    );
+
+    // Graded again, it starts afresh, and the worker is told why and what was asked.
+    grade_again(&r, &key, 2).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Reviewed { .. }), "{:?}", ran[0].1);
+    let feedback = r.harness.feedbacks().last().cloned().expect("the worker was told").body;
+    assert!(feedback.contains("Lane set this task aside"), "{feedback}");
+    assert!(feedback.contains("Which greeting?") && feedback.contains("too big for now"), "{feedback}");
+    let worker = r.harness.contexts().into_iter().rev().find(|c| c.role == Role::Worker).unwrap();
+    assert_eq!(worker.task.context.answers.len(), 1, "the question and the note that settled it");
+    let fresh = r.show(&key).await;
+    assert_eq!((fresh.run.attempt, fresh.run.set_aside.as_ref()), (Some(2), None));
+    assert_eq!(notes_on(&r.store.list_comments(&r.human, &key.0).await.unwrap()).len(), 1, "still no 'no grade' note");
+}
+
+#[tokio::test]
+async fn a_task_set_aside_and_graded_again_starts_its_counts_afresh() {
+    let (r, key) = queued(CONFIG, 2).await;
+    // Three failed attempts and infrastructure trouble behind it: by the old counts the next failure parks it.
+    let before = RunPatch {
+        attempt: Patch::Set(3),
+        sandbox: Patch::Set("trail-2-a3".into()),
+        infra_failures: Patch::Set(9),
+        review_rounds: Patch::Set(2),
+        failure: Patch::Set("it broke".into()),
+        ..RunPatch::default()
+    };
+    r.tracker.report(&key, before).await.unwrap();
+    r.store.set_aside(&r.human, &key.0, None).await.unwrap();
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    grade_again(&r, &key, 2).await;
+
+    r.harness.push(Role::Worker, Script::new(RunOutcome::Failed { reason: "still broken".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert!(matches!(ran[0].1, Outcome::Failed { .. }), "one failure on a fresh start doesn't park it: {:?}", ran[0].1);
+    let task = r.show(&key).await;
+    assert_eq!(task.status, Status::Open, "back in the queue for another try");
+    assert_eq!((task.run.attempt, task.run.attempt_base), (Some(4), Some(3)));
+    assert_eq!((task.run.infra_failures, task.run.review_rounds), (None, Some(0)));
+}
+
+#[tokio::test]
+async fn a_task_set_aside_in_review_keeps_its_pr_open_and_untouched_and_is_reworked_once_graded() {
+    let (r, key, pr) = approved_auto_mergeable().await;
+    let comments = r.codehost.prs()[0].comments.len();
+    r.store.set_aside(&r.human, &key.0, Some("rethink it".into())).await.unwrap();
+    for _ in 0..2 {
+        r.factory.reconcile().await.unwrap();
+        assert!(r.factory.tick().await.unwrap().is_empty(), "no rework starts");
+    }
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.grade), (Status::Open, None));
+    let prs = r.codehost.prs();
+    assert!(!prs[0].merged && !prs[0].closed, "the PR is left open");
+    assert_eq!(prs[0].comments.len(), comments, "and nothing is said on it");
+
+    grade_again(&r, &key, 1).await;
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let feedback = r.harness.feedbacks().last().cloned().expect("the rework was told").body;
+    assert!(feedback.contains("set this task aside") && feedback.contains("rethink it"), "{feedback}");
+    assert_eq!(r.show(&key).await.run.pr, Some(pr), "the rework is on the same PR");
+}
+
+#[tokio::test]
+async fn the_merger_neither_approves_nor_merges_a_queued_task_a_person_took_the_grade_off() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"on\"\n"
+    );
+    let (r, key) = queued(&config, 1).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+    let pr = r.show(&key).await.run.pr.unwrap();
+    let ungraded = TaskPatch { grade: Some(None), ..TaskPatch::default() };
+    r.store.update_task(&r.human, &key.0, ungraded, None).await.unwrap();
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.evaluate_gates(&key).await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::InReview, "not approved");
+    assert!(!r.codehost.prs()[0].merged, "not merged, though it would be as grade 1");
+
+    grade_again(&r, &key, 1).await;
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged, "graded again, it merges");
+}
+
+#[tokio::test]
+async fn a_task_with_a_run_going_cant_be_set_aside_and_its_run_carries_on() {
+    let (r, key) = queued(CONFIG, 2).await;
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    let person = async {
+        while r.show(&key).await.status != Status::InProgress {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let refused = r.store.set_aside(&r.human, &key.0, None).await.unwrap_err();
+        gate.notify_one();
+        refused
+    };
+    let (ran, refused) = tokio::join!(r.factory.tick(), person);
+    assert!(matches!(&refused, trailhead_core::Error::Invalid(why) if why.contains("in progress")), "{refused:?}");
+    assert!(matches!(ran.unwrap()[0].1, Outcome::Reviewed { .. }));
+    let task = r.show(&key).await;
+    assert_eq!((task.status, task.grade), (Status::InReview, Some(gr(2))), "the run went on as if nothing happened");
+}
+
+#[tokio::test]
+async fn a_run_that_ends_on_a_task_a_person_took_the_grade_off_is_not_merged() {
+    let config = format!(
+        "{CONFIG}\n[gates.1]\nrequire = [\"checks\", \"ci\", \"agent_review\"]\nauto_merge = true\n\n[merge]\nmode = \"on\"\n"
+    );
+    let (r, key) = queued(&config, 1).await;
+    let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+    r.store.update_project(&r.human, "TRAIL", reviewers, None).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    r.harness.push(Role::Worker, Script::new(changes()).wait_for(gate.clone()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    // Not through set-aside, which refuses a task in progress: a plain edit, as before it existed.
+    let person = async {
+        while r.show(&key).await.status != Status::InProgress {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let ungraded = TaskPatch { grade: Some(None), ..TaskPatch::default() };
+        r.store.update_task(&r.human, &key.0, ungraded, None).await.unwrap();
+        gate.notify_one();
+    };
+    let (ran, ()) = tokio::join!(r.factory.tick(), person);
+    ran.unwrap();
+    let pr = r.show(&key).await.run.pr.expect("the run published");
+    r.codehost.set_ci(&pr, trailhead_factory::CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.show(&key).await.status, Status::InReview);
+    assert!(!r.codehost.prs()[0].merged, "an ungraded task under a queue isn't the merger's to merge");
+}

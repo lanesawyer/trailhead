@@ -57,6 +57,10 @@ pub(super) enum ComposePart {
     Send,
     Answering,
     StopAnswering,
+    /// Sets the task aside instead of answering, with what is typed as the note's second line.
+    SetAside,
+    /// Why the task can't be set aside now.
+    AsideWhy,
 }
 
 /// A different task starts the comment box over.
@@ -105,7 +109,7 @@ pub(super) fn focus_composer(
     }
 }
 
-/// The comment box's buttons: send, and stop answering.
+/// The comment box's buttons: send, set aside, and stop answering.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn on_compose_press(
     activate: On<Activate>,
@@ -120,7 +124,7 @@ pub(super) fn on_compose_press(
     let Ok(part) = parts.get(activate.entity) else { return };
     match part {
         ComposePart::StopAnswering => compose.answering = None,
-        ComposePart::Send => {
+        ComposePart::Send | ComposePart::SetAside => {
             let Some(view) = &state.0 else { return };
             let Some(source) = controls.0.get(&(view.subject.clone(), Action::Comment)).copied() else { return };
             let body = inputs
@@ -128,10 +132,16 @@ pub(super) fn on_compose_press(
                 .find(|(p, _)| **p == ComposePart::Input)
                 .map(|(_, t)| t.value().to_string())
                 .unwrap_or_default();
-            if body.trim().is_empty() {
+            let request = if *part == ComposePart::SetAside {
+                if !matches!(view.aside, Some(Ok(()))) || compose.answering.is_none() {
+                    return;
+                }
+                set_aside_request(&key_of(view), &body)
+            } else if body.trim().is_empty() {
                 return;
-            }
-            let request = compose_request(&key_of(view), compose.kind, compose.answering.as_ref(), &body);
+            } else {
+                compose_request(&key_of(view), compose.kind, compose.answering.as_ref(), &body)
+            };
             submit.write(Submit { source, request });
             if let Ok(mut c) = sources.get_mut(source) {
                 *c = Control::Busy;
@@ -148,6 +158,13 @@ pub fn compose_request(key: &str, kind: CommentKind, answering: Option<&(String,
         Some((id, _)) => Request::new(Call::ResolveComment { id: id.clone(), answer: Some(body.into()) }, None),
         None => Request::new(Call::AddComment { key: TaskKey(key.into()), comment: NewComment::new(kind, body) }, None),
     }
+}
+
+/// The request that sets the task aside, from the answer form: what is typed, if anything, goes on the note's second
+/// line.
+pub fn set_aside_request(key: &str, typed: &str) -> Request {
+    let note = Some(typed.trim()).filter(|t| !t.is_empty()).map(str::to_string);
+    Request::new(Call::SetAside { key: TaskKey(key.into()), note }, None)
 }
 
 /// Send is pressable only with something in the box and the connection live.
@@ -172,7 +189,7 @@ pub(super) fn gate_send(
     }
 }
 
-/// A comment the box sent went through: empty the box and stop answering.
+/// A comment the box sent went through, or the task it answered was set aside: empty the box and stop answering.
 pub(super) fn clear_sent(
     controls: Res<Controls>,
     state: Res<InspectorState>,
@@ -260,6 +277,58 @@ mod tests {
         app.world_mut().write_message(task_event(201, 6));
         settle(&mut app);
         assert_eq!(app.world().get::<Control>(source), Some(&Control::Idle));
+    }
+
+    /// TRAIL-7 parked on its question, held by the factory's run.
+    fn park_as_factory(app: &mut App) {
+        let after = task_json(json!({"id": "t7", "key": "TRAIL-7", "title": "do it", "status": "needs_input",
+            "priority": 1, "version": 5, "metadata": {"factory": {"sandbox": "trail-7-a1", "attempt": 1}}}));
+        app.world_mut().write_message(trailhead_shell::fixture::sync_event(json!({
+            "id": 200, "entity": "task", "entity_id": sid("t7"), "kind": "task.updated", "after": after,
+        })));
+        settle(app);
+    }
+
+    fn shown(app: &App, part: Entity) -> bool {
+        app.world().get::<Node>(part).is_some_and(|n| n.display != Display::None)
+    }
+
+    #[test]
+    fn the_answer_form_sets_a_parked_factory_task_aside_with_what_is_typed() {
+        let mut app = app();
+        let aside = compose_button(&mut app, ComposePart::SetAside);
+        assert!(!shown(&app, aside), "not on a task the factory hasn't run");
+        park_as_factory(&mut app);
+        assert!(!shown(&app, aside), "nor while the box isn't answering");
+        app.world_mut().trigger(OpenComposer { key: "TRAIL-7".into(), answer: Some((sid("c1"), "which db?".into())) });
+        settle(&mut app);
+        let aside = compose_button(&mut app, ComposePart::SetAside);
+        assert!(shown(&app, aside), "beside Send while answering");
+        assert!(app.world().get::<InteractionDisabled>(aside).is_none(), "live and parked, so it can be pressed");
+        let why = compose_button(&mut app, ComposePart::AsideWhy);
+        assert!(!shown(&app, why), "nothing to explain");
+
+        let input = composer_input(&mut app);
+        app.world_mut().get_mut::<EditableText>(input).unwrap().editor_mut().set_text(" too big for now ");
+        app.world_mut().trigger(Activate { entity: aside });
+        let sent = sent(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            (sent[0].request.method(), sent[0].request.call.path().as_str()),
+            (Method::Post, "/v1/tasks/TRAIL-7/set-aside")
+        );
+        assert_eq!(sent[0].request.call.body(), Some(json!({"note": "too big for now"})));
+        // The server took it: the form closes; the card moves through the mirror, not from here.
+        *app.world_mut().get_mut::<Control>(sent[0].source).unwrap() = Control::Done;
+        settle(&mut app);
+        assert_eq!(app.world().resource::<Compose>().answering, None);
+        assert_eq!(app.world().get::<EditableText>(input).unwrap().value().to_string(), "");
+    }
+
+    #[test]
+    fn nothing_typed_sets_the_task_aside_with_the_note_alone() {
+        let r = set_aside_request("TRAIL-7", "   ");
+        assert_eq!(r.call.body(), Some(json!({"note": null})));
     }
 
     #[test]
