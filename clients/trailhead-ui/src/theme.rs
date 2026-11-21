@@ -193,6 +193,8 @@ pub struct Theme {
     accent: HashSet<SemanticToken>,
     /// The tokens painted a color of their own: an app's categorical colors.
     painted: Vec<Token>,
+    /// Painted tokens given a color of their own for the light theme, instead of the dark one turned over.
+    painted_light: Vec<(Token, Color)>,
 }
 
 /// How saturated a color may be and still count as neutral chrome, which turns over in the light theme.
@@ -231,7 +233,7 @@ impl Theme {
         for (token, slot) in ON_FEATHERS {
             props.token_assignments.insert(token.0, slot);
         }
-        let mut theme = Self { props, accent, painted: Vec::new() };
+        let mut theme = Self { props, accent, painted: Vec::new(), painted_light: Vec::new() };
 
         // One border, the same gray everywhere, where feathers' is warm.
         theme.set(&token::BORDER, palette::GRAY_3);
@@ -291,6 +293,14 @@ impl Theme {
         self.accent.remove(&own);
         self.painted.retain(|t| t != token);
         self.painted.push(token.clone());
+    }
+
+    /// [`Theme::paint`] `token` `dark` in the dark theme and `light` in the light one, rather than the dark color turned
+    /// over: for a painted color that must read as something else by day, such as the trail map's sky and snow.
+    pub fn paint_both(&mut self, token: &Token, dark: Color, light: Color) {
+        self.paint(token, dark);
+        self.painted_light.retain(|(t, _)| t != token);
+        self.painted_light.push((token.clone(), light));
     }
 
     /// Set the color of the slot `token` is on, giving it one named after it if it has none. A color set this way
@@ -367,6 +377,9 @@ impl Theme {
             if !kept.contains(slot) && !accent.contains(slot) {
                 *color = to_light(*color);
             }
+        }
+        for (token, color) in theme.painted_light.clone() {
+            theme.own_slot(&token.0, color);
         }
         theme
     }
@@ -560,6 +573,17 @@ mod tests {
         assert!(theme.repeated_colors().is_empty(), "{:?}", theme.repeated_colors());
         theme.paint(&OTHER, palette::GRAY_2);
         assert!(theme.repeated_colors().contains(&"app.other = ui.surface.raised".to_string()));
+    }
+
+    #[test]
+    fn a_color_painted_for_both_themes_wears_its_own_light_one() {
+        const SKY: Token = Token::new("app.sky");
+        let (night, day) = (Color::oklch(0.2, 0.05, 260.0), Color::oklch(0.9, 0.04, 230.0));
+        let mut theme = Theme::new();
+        theme.paint_both(&SKY, night, day);
+        assert_eq!(theme.color(&SKY), night);
+        assert_eq!(theme.light().color(&SKY), day);
+        assert_eq!(theme.light().with_accent(Color::oklch(0.6, 0.2, 30.0)).color(&SKY), day);
     }
 
     #[test]

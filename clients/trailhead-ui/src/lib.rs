@@ -144,7 +144,7 @@ pub use accordion::{
     ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, Fold, SectionLevel, spawn_accordion,
     spawn_header_button,
 };
-pub use appearance::{Appearance, ThemeChoice, ThemePlugin};
+pub use appearance::{Appearance, ThemeChoice, ThemeColors, ThemePlugin};
 pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
 pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};

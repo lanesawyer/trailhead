@@ -399,10 +399,11 @@ pulse; the shell's: the cover drawn while it switches apps.
 | `token` | module of `Token` constants; `token::ALL` | The kit's semantic tokens (section 3). |
 | `BackgroundTone`, `BorderTone`, `TextTone` | `BackgroundTone(pub Token)` and so on (immutable components) | A node's background, border (all four sides) or text in a token's color, repainted when the theme changes. Insert a new one to change the token. |
 | `Surface` | `Window` (default), `Panel`, `Raised`, `Floating` (immutable component); `token(self) -> Token` | A surface: its background in its level's token, and the level passed down so a control on it takes the color that shows there. |
-| `Theme` | `new()`, `set(&Token, Color)`, `set_accent(&Token, Color)`, `alias(&Token, &Token)`, `paint(&Token, Color)`, `color(&Token) -> Color`, `color_on(&Token, Surface) -> Color`, `has(&Token) -> bool`, `repeated_colors() -> Vec<String>`, `light() -> Theme`, `with_accent(Color) -> Theme` | Every token and its color (section 3). |
+| `Theme` | `new()`, `set(&Token, Color)`, `set_accent(&Token, Color)`, `alias(&Token, &Token)`, `paint(&Token, Color)`, `paint_both(&Token, dark: Color, light: Color)`, `color(&Token) -> Color`, `color_on(&Token, Surface) -> Color`, `has(&Token) -> bool`, `repeated_colors() -> Vec<String>`, `light() -> Theme`, `with_accent(Color) -> Theme` | Every token and its color (section 3). |
 | `palette` | `GRAY_0` .. `GRAY_3`, `WHITE`, `ACCENT` | The raw colors the theme is painted from, named only where a theme is built. |
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
 | `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
+| `ThemeColors` | system param: `color(&Token) -> Color`, `is_changed() -> bool` | The worn theme's colors for what no tone component reaches, such as a 3D scene's materials and lights (Lookout's trail map), so they follow the light theme and the accent too. A node's colors stay `BackgroundTone`, `TextTone` and `BorderTone`. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
 | `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
@@ -490,7 +491,8 @@ The rules, with their reasons:
   meaning everywhere, and every alias follows; `set_accent` sets a shade of `palette::ACCENT`, which then follows the
   desktop's accent. `Theme::alias` points a token at a meaning (Lookout's `PRIORITY_1` is `STATUS_DANGER`).
   `Theme::paint` is only for an app's categorical colors, which encode data (Lookout's statuses, priorities and
-  grades), each on a slot of its own so repainting it changes nothing else. `palette` and color literals appear only
+  grades), each on a slot of its own so repainting it changes nothing else. `Theme::paint_both` paints one with its
+  own light color too, where the dark one turned over would read wrong (the trail map's night sky is not a day sky). `palette` and color literals appear only
   where the theme is built.
 - **Paint once; check for repeats.** `Theme::repeated_colors` lists a painted color that another painted token or a
   meaning already has, which should be an alias instead. An app's test asserts it is empty.

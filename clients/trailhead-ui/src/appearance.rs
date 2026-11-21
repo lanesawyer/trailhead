@@ -10,6 +10,7 @@
 //!
 //! Ported from bevy-data-explorer's `app/theme.rs`.
 
+use bevy::ecs::system::SystemParam;
 use bevy::feathers::FeathersPlugins;
 use bevy::feathers::theme::UiTheme;
 use bevy::prelude::*;
@@ -18,7 +19,7 @@ use bevy::window::{WindowTheme, WindowThemeChanged};
 
 use crate::desktop::{self, Desktop};
 use crate::icons::Icon;
-use crate::theme::{Theme, token};
+use crate::theme::{Theme, Token, token};
 
 /// Where the theme's light or dark comes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -97,6 +98,25 @@ impl Appearance {
         if self.desktop != Some(desktop) {
             self.desktop = Some(desktop);
         }
+    }
+}
+
+/// The worn theme's colors, for what no tone component reaches: a 3D scene's materials and lights, which take their
+/// colors from tokens too, so the light theme and the desktop's accent hold there.
+#[derive(SystemParam)]
+pub struct ThemeColors<'w> {
+    theme: Res<'w, UiTheme>,
+}
+
+impl ThemeColors<'_> {
+    /// The color `token` is worn in now, fuchsia when it isn't in the theme.
+    pub fn color(&self, token: &Token) -> Color {
+        self.theme.color(&token.0)
+    }
+
+    /// Whether the theme worn changed since the system last ran: time to repaint what took its colors.
+    pub fn is_changed(&self) -> bool {
+        self.theme.is_changed()
     }
 }
 
