@@ -477,6 +477,7 @@ async fn wire(
         repos.push(Entry { factory: Arc::new(factory), slug });
     }
     feed.set_boards(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
+    feed.set_factories(repos.iter().map(|e| (e.slug.clone(), e.factory.clone())).collect());
     feed.set_state(FactoryState::Running);
     Ok(Setup { repos, store, ctx })
 }
@@ -930,7 +931,7 @@ pub struct InServer {
     pub running: Option<Running>,
 }
 
-/// The server's `/v1/factory/status` and `/v1/factory/events`, for it to mount behind its own bearer token.
+/// The server's `/v1/factory/status`, `/v1/factory/events` and `/v1/factory/refresh`, for it to mount behind its own bearer token.
 pub fn api(feed: &Feed) -> axum::Router {
     surface::routes(feed.clone())
 }
@@ -1018,6 +1019,8 @@ pub enum Command {
     Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
+    /// Empty the worker pool so its sandboxes are made again from the image: idle ones are destroyed now with their warm checkpoints, busy ones when their run ends. For a rebuilt sandbox image, or to free the disk warm checkpoints have grown into. The next task on each sandbox pays a cold build.
+    Refresh(ops::RefreshOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
     Allow { endpoint_id: String },
     /// Stop allowing a UI endpoint.
@@ -1041,6 +1044,7 @@ pub async fn command(cmd: Command) -> Result<()> {
         Command::Check(opts) => check(&opts).await,
         Command::Status(opts) => ops::status(&opts).await,
         Command::Logs(logs) => ops::logs(&logs).await,
+        Command::Refresh(opts) => ops::refresh(&opts).await,
         Command::Allow { endpoint_id } => allow(&endpoint_id, true),
         Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
         Command::Allowed => allowed(),

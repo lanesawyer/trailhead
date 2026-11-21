@@ -10,8 +10,25 @@ use trailhead_factory::{
 use crate::timing::backoff;
 use crate::{Factory, Placed, RELEASE_ATTEMPTS, RELEASE_PATIENCE, Reconciled};
 
+/// What [`Factory::refresh_pool`] did with each pooled sandbox, by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Refreshed {
+    pub destroyed: Vec<String>,
+    /// Busy now: destroyed when its run releases it.
+    pub on_release: Vec<String>,
+    /// Couldn't be destroyed, with why; left for reconcile.
+    pub failed: Vec<(String, String)>,
+    /// Targets that didn't answer, whose sandboxes weren't touched.
+    pub unreachable: Vec<String>,
+}
+
 /// How many prepares in a row may fail on a pooled sandbox before it is destroyed rather than released.
 const PREPARE_FAILURES_BEFORE_DESTROY: u32 = 2;
+
+/// How many runs in a row may find no room on a warm pooled sandbox's host before the sandbox is destroyed. A wait
+/// or two is another sandbox's checkpoint passing through; more is the warm checkpoints themselves filling the disk,
+/// which only grow, and no wait frees (TRAIL-1633). Well under the waits a task is given before it parks.
+const SHORT_PREFLIGHTS_BEFORE_DESTROY: u32 = 3;
 
 impl Factory {
     /// Prepares `sandbox`'s checkout under install egress. The control plane can't see the checkout, so the daemon
@@ -191,7 +208,9 @@ impl Factory {
         self.status.phase(&task.key, RunPhase::Preparing { cold: warm.is_none() }, Some(&sandbox.name));
         self.status.sandbox(&Sandbox { labels: busy.clone(), ..sandbox.clone() });
         drop(pick);
+        let mine = held.iter().any(|s| s.name == sandbox.name);
         let began = Instant::now();
+        let mut short = false;
         let started = async {
             p.compute.set_egress(&sandbox.id, &self.install_egress()).await?;
             if let Some(cp) = &warm {
@@ -199,13 +218,31 @@ impl Factory {
                 p.daemon.restored(&sandbox.id).await;
             }
             let restored = began.elapsed();
-            p.compute.preflight(&sandbox.id).await?;
+            if let Err(e) = p.compute.preflight(&sandbox.id).await {
+                short = matches!(e, Error::Unavailable(_));
+                return Err(e);
+            }
             Ok::<_, Error>(restored)
         }
         .await;
         let restored = match started {
-            Ok(restored) => restored,
+            Ok(restored) => {
+                self.pool.short_preflights.lock().unwrap().remove(&sandbox.id);
+                restored
+            }
             Err(e) => {
+                // A warm sandbox is a cache, and its checkpoints are what fills its host. One the task was parked
+                // in may hold work nobody has pushed, so that one always waits.
+                if short && warm.is_some() && !mine && self.short_too_often(&sandbox.id) {
+                    tracing::warn!(sandbox = %sandbox.name, error = %e, "no room for a run after repeated waits; destroying the warm sandbox so the next run builds a fresh one");
+                    p.daemon.forget(&sandbox.id).await;
+                    match self.destroy_pooled(p, &sandbox).await {
+                        Ok(()) => return Err(e),
+                        Err(d) => {
+                            tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy it; returning it to the pool");
+                        }
+                    }
+                }
                 // Labelled busy but never handed out: without this it holds its disk until reconcile.
                 self.give_back(&sandbox, &busy).await;
                 return Err(e);
@@ -342,6 +379,11 @@ impl Factory {
         let Some(warm) = sandbox.labels.get(label::WARM).cloned() else {
             return self.destroy_pooled(p, sandbox).await;
         };
+        if self.pool.refresh.lock().unwrap().contains(&sandbox.name) {
+            tracing::info!(sandbox = %sandbox.name, "refresh: destroying the pooled sandbox on release");
+            p.daemon.forget(&sandbox.id).await;
+            return self.destroy_pooled(p, sandbox).await;
+        }
         if let Err(e) = p.compute.restore(&sandbox.id, &CheckpointId(warm.clone())).await {
             tracing::warn!(sandbox = %sandbox.name, error = %e, "couldn't restore the warm checkpoint; destroying");
             p.daemon.forget(&sandbox.id).await;
@@ -360,16 +402,59 @@ impl Factory {
         Ok(())
     }
 
+    /// Empties the worker pool so its sandboxes are made again from the compute's image, for a new image or warm
+    /// checkpoints grown too big: idle ones are destroyed now, with their checkpoints, and busy ones when they are
+    /// released, instead of being restored. The next run on each pays a cold prepare.
+    pub async fn refresh_pool(&self) -> Result<Refreshed> {
+        let _pick = self.pool.pool_pick.lock().await;
+        let (pooled, down) = self.list_all(&self.pool_labels()).await?;
+        let mut done = Refreshed { unreachable: down.into_iter().collect(), ..Refreshed::default() };
+        done.unreachable.sort();
+        for s in pooled {
+            if s.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE) {
+                self.pool.refresh.lock().unwrap().insert(s.name.clone());
+                done.on_release.push(s.name);
+                continue;
+            }
+            let p = self.target_of(&s);
+            p.daemon.forget(&s.id).await;
+            match self.destroy_pooled(p, &s).await {
+                Ok(()) => {
+                    tracing::info!(sandbox = %s.name, "refresh: destroyed an idle pooled sandbox");
+                    done.destroyed.push(s.name);
+                }
+                Err(e) => {
+                    tracing::warn!(sandbox = %s.name, error = %e, "refresh: couldn't destroy a pooled sandbox; labelling it broken for reconcile");
+                    self.mark_broken(&s).await;
+                    done.failed.push((s.name, e.to_string()));
+                }
+            }
+        }
+        done.destroyed.sort();
+        done.on_release.sort();
+        Ok(done)
+    }
+
     /// Drops what the control plane keeps per sandbox, for one that no longer exists, so the maps don't grow
     /// with every sandbox a long-running server has destroyed (TRAIL-1251).
     pub(crate) fn forget_sandbox(&self, id: &SandboxId) {
         self.pool.prepare_failures.lock().unwrap().remove(id);
         self.pool.warm_cost.lock().unwrap().remove(id);
+        self.pool.short_preflights.lock().unwrap().remove(id);
+    }
+
+    /// Counts a preflight that found no room on `id`'s host, and says whether that makes too many in a row.
+    fn short_too_often(&self, id: &SandboxId) -> bool {
+        let mut counts = self.pool.short_preflights.lock().unwrap();
+        let n = counts.entry(id.clone()).or_default();
+        *n += 1;
+        *n >= SHORT_PREFLIGHTS_BEFORE_DESTROY
     }
 
     async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
         p.compute.destroy(&sandbox.id).await?;
         self.forget_sandbox(&sandbox.id);
+        self.pool.refresh.lock().unwrap().remove(&sandbox.name);
         self.status.sandbox_gone(&sandbox.name);
         Ok(())
     }
