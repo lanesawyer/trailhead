@@ -340,7 +340,7 @@ only jobs today. An app that only reads the API uses `Fetch`, not a job.
 
 ## 7. Testing an app
 
-An app carries three kinds of test, and the example app has one of each. The helpers are the shell's, in
+An app carries four kinds of test, and the example app has one of each. The helpers are the shell's, in
 `trailhead_shell::testing`, behind its `test-support` feature: turn it on for `trailhead-shell` in
 `[dev-dependencies]`. It pulls in nothing the shell does not already.
 
@@ -353,6 +353,7 @@ An app carries three kinds of test, and the example app has one of each. The hel
   `build_ui` and the rail, with the assets scenes need. The kit's `UiPlugin` and `ThemePlugin` are not added, so this
   checks what is spawned and kept, not how it looks. `settle(&mut app)` runs the few frames a change takes to land.
 - **The lint**, over `src`, `tests` and `Cargo.toml` (section 1), and the kit's `redraws` scan over `src`.
+- **Shots**, which draw the app's views to PNGs: below, under "Showing how it looks".
 
 Both test apps carry the shell's connection without its net thread (`TestConnection`): the `Connection` state
 (`Offline` until a test sets it with `set_connection(&mut app, Connection::Live)`), `ConnectionStatus`, the mirror and
@@ -414,7 +415,38 @@ What the example app's tests cover, and why each matters:
   line keeps its entity and the set of entities is the same before and after, which is the kit's rule that a surface
   is spawned once and updated in place. `tests/design_system.rs` runs the kit's `redraws` scan for the same rule.
 
-What no test here can check is how the app looks: see the kit's guide, section 6.
+### Showing how it looks: the shots test
+
+The other tests check what is spawned, not how it looks. `tests/shots.rs` draws the app's views to PNGs, with no
+window, display or GPU, so a person or a reviewing agent can see a change. The helper is
+`trailhead_shell::testing::shot`, behind the shell's `shots` feature (which turns on `test-support` and pulls in nothing
+else); the example app's `tests/shots.rs` is the one to copy.
+
+1. In `[dev-dependencies]`, turn on `shots`: `trailhead-shell = { workspace = true, features = ["test-support", "shots"] }`.
+2. Write one ``#[test] #[ignore = "needs a render adapter: run with `mise run shots`"] fn shots()``. Build the shell with
+   `shot(ShellPlugin::new().with(MyApp).with(Other), ShotOptions { size: (w, h), ..ShotOptions::default() })` (the
+   default is 1280×800 at scale 1.0, dark). It is the shell as `Shell` runs it, with Bevy's renderer drawing into an
+   image: the kit's theme worn `ThemePlugin::fixed` (the desktop is never asked), `UiPlugin`, the apps windowed and the
+   test connection. `shot_with(shell, options, plugins)` adds plugins of the test's own before it starts.
+3. Set each view up from fixtures, as in the other tests: the `ShotApp` derefs to the `App`, so `fill`, `feed`,
+   `show`, `set_connection`, `settle`, `world_mut().trigger(Activate { entity })` and setting a resource all work on
+   it. Nothing comes from a server or the machine.
+4. Take `shot.picture()`, assert it is the size asked for (`picture.size() == shot.options().pixels()`) and holds more
+   than a handful of colors (`picture.colors() > 16`, so a blank frame fails), and `picture.save(name)`. The name is
+   `<app>-<view>-<theme>` (`example-page-dark`, `lookout-board-light`), with `shot.options().theme.word()` for the
+   theme. It is written to `SHOTS_DIR`, or `shots` in the target directory.
+5. Change the view, or `set_theme(ShotTheme::Light)`, `set_size((w, h))` or `set_options(..)`, and take the next. Pick
+   a size per view that shows all of it: a board wide enough for its columns, a page tall enough for its form.
+
+Each view is named, and set up from fixtures, so the same name shows the same thing before and after a change. A
+picture is the same byte for byte from run to run on one renderer (time steps by a fixed amount a frame, and the
+theme, size and scale are fixed), but a GPU and software rendering differ by a level or two a channel, so a before and
+an after to compare must come from the same one. Text an app works out from the clock (`3d ago`) or the machine's time
+zone changes with them; `mise run shots` sets `TZ=UTC`.
+
+`mise run shots` runs every crate's shots, one cargo invocation, and says where the PNGs went. They need a render
+adapter: a GPU, or Mesa's lavapipe in software with `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json` (slower,
+and with no display, no Wayland, X11 or D-Bus, needed). CI does not run them yet: it has no adapter.
 
 ## 8. The example app, file by file
 
