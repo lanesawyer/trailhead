@@ -56,9 +56,14 @@ fn load_or_create_key(path: &Path) -> Result<SecretKey> {
     Ok(key)
 }
 
-/// What to run on the server's machine so this one may connect: the launcher's endpoint and the window's.
+/// What to run on the server's machine so this one may connect, and what each line lets in: two programs here
+/// connect at once, each as itself.
 fn allow_lines(launcher: &SecretKey, window: &SecretKey) -> String {
-    format!("  trailhead factory allow {}\n  trailhead factory allow {}", launcher.public(), window.public())
+    format!(
+        "  # this launcher, which fetches and builds each new version of the window\n  trailhead factory allow {}\n\n  # the window itself, which shows your tasks and the factory\n  trailhead factory allow {}",
+        launcher.public(),
+        window.public()
+    )
 }
 
 impl Link {
@@ -89,7 +94,7 @@ impl Link {
                             Err(e) => e.to_string(),
                         };
                         eprintln!(
-                            "trailhead app: the server at {from} doesn't answer yet ({why}).\nIf this machine hasn't been allowed there, run on the server's machine:\n\n{}\n\nTrying again every {} s; Ctrl-C to stop.",
+                            "trailhead app: the server at {from} doesn't answer yet ({why}).\nA server answers only the machines it has been told to allow. If this one hasn't been, run both of these on the server's machine (two, because two programs here connect to it):\n\n{}\n\nTrying again every {} s, so this carries on by itself once they are run; Ctrl-C to stop.",
                             allow_lines(&launcher, &window),
                             RETRY.as_secs()
                         );
@@ -351,6 +356,9 @@ mod tests {
         assert_eq!(load_or_create_key(&path).unwrap().public(), made.public(), "the same identity next time");
         let window = load_or_create_key(&dir.path().join("shell/endpoint.key")).unwrap();
         let lines = allow_lines(&made, &window);
-        assert!(lines.contains(&made.public().to_string()) && lines.contains(&window.public().to_string()), "{lines}");
+        let launcher_at = lines.find(&format!("allow {}", made.public())).expect("the launcher's line");
+        let window_at = lines.find(&format!("allow {}", window.public())).expect("the window's line");
+        assert!(lines[..launcher_at].contains("this launcher"), "each line says what it lets in: {lines}");
+        assert!(lines[launcher_at..window_at].contains("the window itself"), "{lines}");
     }
 }
