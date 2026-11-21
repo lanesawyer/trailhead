@@ -41,6 +41,7 @@ pub mod icon;
 pub mod lint;
 pub mod mirror;
 pub mod net;
+mod place;
 mod rail;
 mod store;
 pub mod sync;

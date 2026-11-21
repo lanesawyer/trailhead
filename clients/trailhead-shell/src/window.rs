@@ -12,6 +12,7 @@ use trailhead_ui::{Appearance, ThemeChoice, ThemePlugin, UiPlugin};
 
 use crate::icon::{IconUiPlugin, primary_window};
 use crate::net::NetConfig;
+use crate::place::{PlaceFile, keep_place};
 use crate::{ShellApp, ShellPlugin};
 
 /// Where the theme picked is kept for the next launch: a file holding `light`, `dark` or `desktop`.
@@ -99,8 +100,14 @@ impl Shell {
         let theme_file = ThemeFile(self.dir.join("theme"));
         let build = std::env::var(BUILD_ENV).ok().filter(|b| !b.is_empty());
         let apps = self.apps.built_as(build).store_in(self.dir.join("apps")).windowed();
+        let place = PlaceFile::load(self.dir.join("window"));
+        let mut window = primary_window();
+        if let Some(kept) = place.kept() {
+            kept.apply(&mut window);
+        }
         let exit = App::new()
-            .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(primary_window()), ..default() }))
+            .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
+            .insert_resource(place)
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
             .insert_resource(WinitSettings {
@@ -112,7 +119,7 @@ impl Shell {
             .add_plugins(UiPlugin)
             .add_plugins(IconUiPlugin)
             .add_plugins(apps)
-            .add_systems(Update, keep_theme)
+            .add_systems(Update, (keep_theme, keep_place))
             .run();
         if let AppExit::Error(code) = exit {
             std::process::exit(code.get().into());
