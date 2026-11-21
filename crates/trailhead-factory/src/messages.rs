@@ -568,6 +568,22 @@ pub fn review_feedback(reviewer: &str, body: &str) -> String {
     format!("Review by {reviewer}:\n\n{body}")
 }
 
+/// What the first worker on a task a person set aside and later graded again is told: that this is a fresh start,
+/// why the last run stopped, and what the person wrote. `question` is the question the task was parked on, if any.
+pub fn set_aside_feedback(by: &str, question: Option<&str>, note: Option<&str>) -> String {
+    let mut out = format!(
+        "{by} set this task aside, which stopped the factory's work on it, and has since graded it again: this is a \
+         fresh start, so read the task as it stands now."
+    );
+    if let Some(q) = question {
+        out.push_str(&format!("\n\nThe last run had asked:\n\n{q}"));
+    }
+    if let Some(n) = note {
+        out.push_str(&format!("\n\n{by} wrote when setting it aside:\n\n{n}"));
+    }
+    out
+}
+
 /// What a worker is told when the repo's `setup` failed on its checkout of the PR branch, so it can fix what broke.
 pub fn setup_failed_feedback(output: &str) -> String {
     format!(

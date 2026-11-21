@@ -1,6 +1,6 @@
 use trailhead_factory::{
     BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, Patch,
-    PrGrade, PrRef, PrState, Result, RunPatch, Said, Status, Task, TaskKey, VerdictKind,
+    PrGrade, PrRef, PrState, Result, RunPatch, Said, Scope, Status, Task, TaskKey, VerdictKind,
 };
 
 use tokio::time::Instant;
@@ -73,12 +73,13 @@ impl Factory {
         let Some(codehost) = &self.codehost else { return Ok(()) };
         let task = self.tracker.show(key).await?;
         let Some(pr) = &task.run.pr else { return Ok(()) };
-        // A task waiting on a rework is neither approved nor merged, whatever the gates say.
-        let act = act && !task.changes_requested;
         if !matches!(task.status, Status::InReview | Status::Approved) {
             self.forget_merge_path(key);
             return Ok(());
         }
+        // A task waiting on a rework is neither approved nor merged, whatever the gates say; nor is one a person took
+        // the grade off where grading is what hands a task to the factory (TRAIL-1617).
+        let act = act && !task.changes_requested && !self.lost_its_grade(&task).await;
         // The head comes first and is shared with grading, which lists the files again only when it has moved.
         let ci = codehost.ci(pr).await?;
         let head = ci.head.clone();
@@ -335,6 +336,13 @@ impl Factory {
             return Ok(());
         }
         self.merger.updating.lock().unwrap().remove(&task.key);
+        // A person may have set the task aside, or taken its grade off, since the gates were read: look once more
+        // before merging what is no longer the factory's (TRAIL-1617).
+        let current = self.tracker.show(&task.key).await?;
+        if current.status != Status::Approved || self.lost_its_grade(&current).await {
+            tracing::info!(task = %task.key, status = ?current.status, "the task changed under the merge; not merging");
+            return Ok(());
+        }
         // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
         self.tracker
             .report(&task.key, RunPatch { merging: Patch::Set(decision.head.clone()), ..RunPatch::default() })
@@ -387,6 +395,22 @@ impl Factory {
                 self.tracker.note(&task.key, &note).await?;
                 let decision = MergeDecision { refused: Some(why), ..decision.clone() };
                 self.tracker.report(&task.key, RunPatch { merge: Patch::Set(decision), ..RunPatch::default() }).await
+            }
+        }
+    }
+
+    /// Whether `task` has no grade where only graded tasks are the factory's (under a queue, or in a pointed project):
+    /// a person took it off, so the task isn't the factory's to approve or merge. Unsure (the projects can't be
+    /// listed) counts as lost.
+    async fn lost_its_grade(&self, task: &Task) -> bool {
+        if task.grade.is_some() {
+            return false;
+        }
+        match self.scopes().await {
+            Ok(scopes) => Scope::of(&scopes, &task.key).is_none_or(Scope::needs_grade),
+            Err(e) => {
+                tracing::warn!(task = %task.key, error = %e, "couldn't list the projects to see whether an ungraded task is the factory's");
+                true
             }
         }
     }

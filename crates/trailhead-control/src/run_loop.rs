@@ -478,13 +478,17 @@ impl Factory {
     /// skipped and reported once, in the log and on the task, rather than on every poll
     /// (`docs/factory/review.md#grades`). With no queue the whole file project is the factory's by configuration, so a
     /// grade is not what releases a task there. In a project pointed at the repo only graded tasks are the factory's,
-    /// and an ungraded one is left alone without a word: a person keeps their own tasks there too.
+    /// and an ungraded one is left alone without a word: a person keeps their own tasks there too. A task a person
+    /// set aside is left alone, without a word, until it is graded again, wherever it is.
     async fn ready_graded(&self) -> Result<Vec<Task>> {
         let scopes = self.scopes().await?;
         let ready = self.tracker.ready(&scopes, usize::MAX).await?;
         let mut work = Vec::new();
         for task in ready {
             match Scope::of(&scopes, &task.key) {
+                // A task a person set aside waits for them to grade it again, in a project worked whole too, and
+                // without a note: they know (TRAIL-1617).
+                Some(_) if task.run.set_aside.is_some() && task.grade.is_none() => {}
                 Some(scope) if !scope.needs_grade() => work.push(task),
                 Some(_) if task.grade.is_some() => {
                     self.clear_ungraded(&task).await;

@@ -87,6 +87,10 @@ pub enum Event {
     PersonReopens(usize),
     PersonFinishes(usize),
     PersonCancels(usize),
+    /// A person sets a task aside: its questions answered with a note, its grade cleared, reopened (TRAIL-1617).
+    PersonSetsAside(usize),
+    /// A person grades an ungraded task again, at the grade it started with.
+    PersonGrades(usize),
     Fault(Fault),
 }
 
@@ -191,6 +195,8 @@ pub struct World {
     pub codehost: FakeCodeHost,
     pub daemon: Arc<LocalDaemon>,
     pub tasks: Vec<TaskKey>,
+    /// Each task's grade at the start, which a person grades it at again.
+    grades: Vec<u8>,
     /// The factory's own agent, to tell its comments from a reviewer's.
     factory_agent: uuid::Uuid,
     outage: Outage,
@@ -263,6 +269,7 @@ impl World {
             codehost,
             daemon,
             tasks,
+            grades: grades.to_vec(),
             factory_agent,
             outage,
             mood,
@@ -399,7 +406,9 @@ impl World {
             | Event::PersonAnswers(i)
             | Event::PersonReopens(i)
             | Event::PersonFinishes(i)
-            | Event::PersonCancels(i) => {
+            | Event::PersonCancels(i)
+            | Event::PersonSetsAside(i)
+            | Event::PersonGrades(i) => {
                 let key = self.tasks[*i % self.tasks.len()].clone();
                 self.on_task(event, &key).await
             }
@@ -419,10 +428,11 @@ impl World {
                 .as_ref()
                 .map(|c| format!("{:?}@a{}{}", c.kind, c.attempt, if c.settled { " settled" } else { "" }));
             out.push(format!(
-                "{} {:?}{} attempt {:?} reviewed {:?} rounds {:?} conflicts {:?} request {request:?} holder {:?}",
+                "{} {:?}{}{} attempt {:?} reviewed {:?} rounds {:?} conflicts {:?} request {request:?} holder {:?}",
                 key.0,
                 t.status,
                 if t.changes_requested { " (changes requested)" } else { "" },
+                if t.grade.is_none() { " (ungraded)" } else { "" },
                 t.run.attempt,
                 t.run.reviewed,
                 t.run.review_rounds,
@@ -475,6 +485,16 @@ impl World {
             Event::PersonReopens(_) if status == Status::InReview => self.set_status(key, To::Open).await,
             Event::PersonFinishes(_) if open => self.set_status(key, To::Done).await,
             Event::PersonCancels(_) if open => self.set_status(key, To::Cancelled).await,
+            // Refused for a task in progress, whose run may be going, and for a finished one.
+            Event::PersonSetsAside(_) => {
+                let aside = self.store.set_aside(&self.human, &key.0, Some("Later.".into())).await;
+                aside.map(|_| ()).map_err(|e| e.to_string())
+            }
+            Event::PersonGrades(i) if open && self.show(key).await.grade.is_none() => {
+                let grade = Grade::new(self.grades[*i % self.grades.len()]).unwrap();
+                let patch = TaskPatch { grade: Some(Some(grade)), ..Default::default() };
+                self.store.update_task(&self.human, &key.0, patch, None).await.map(|_| ()).map_err(|e| e.to_string())
+            }
             _ => return "nothing to do".into(),
         };
         done.err().unwrap_or_default()

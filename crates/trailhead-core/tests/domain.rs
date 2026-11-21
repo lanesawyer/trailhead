@@ -1775,3 +1775,70 @@ async fn parent_cycles_lists_each_existing_cycle() {
     let cycles = env.store.parent_cycles(&env.human).await.unwrap();
     assert_eq!(cycles, vec![keys(&[&a, &b, &c]), keys(&[&e, &f])]);
 }
+
+#[tokio::test]
+async fn a_person_sets_a_parked_task_aside_in_one_undoable_write() {
+    let env = Env::new().await;
+    let t = env.task_with(NewTask { title: "t".into(), grade: Some(gr(2)), ..Default::default() }).await;
+    let agent = env.agent("factory").await;
+    env.store.claim(&agent, &t.key, None).await.unwrap();
+    env.store
+        .update_task(
+            &agent,
+            &t.key,
+            TaskPatch { metadata: Some(json!({"factory": {"attempt": 3}})), ..Default::default() },
+            None,
+        )
+        .await
+        .unwrap();
+    env.store.add_comment(&agent, &t.key, comment(CommentKind::Question, "Which first?")).await.unwrap();
+    env.store.add_comment(&agent, &t.key, comment(CommentKind::Question, "And then?")).await.unwrap();
+
+    let refused = env.store.set_aside(&agent, &t.key, None).await.unwrap_err();
+    assert!(matches!(refused, Error::Forbidden(_)), "an agent can't: {refused:?}");
+
+    // The agent still holds its claim: a person sets it aside all the same, and the claim goes.
+    let ctx = env.human.next_batch();
+    let after = env.store.set_aside(&ctx, &t.key, Some("  too big for now  ".into())).await.unwrap();
+    assert_eq!((after.status, after.grade), (Status::Open, None));
+    assert_eq!(after.metadata["factory"]["attempt"], json!(3), "the factory's record is kept");
+    let marker = &after.metadata["factory"]["set_aside"];
+    assert_eq!(marker["by"], json!("Lane"));
+    assert_eq!(marker["question"], json!("And then?"));
+    assert_eq!(marker["note"], json!("too big for now"));
+    let detail = env.store.task_detail(&env.human, &t.key).await.unwrap();
+    assert!(detail.claim.is_none(), "the claim was dropped");
+
+    let comments = env.store.list_comments(&env.human, &t.key).await.unwrap();
+    assert!(comments.iter().filter(|c| c.kind == CommentKind::Question).all(|c| c.resolved_at.is_some()));
+    let note = comments.iter().find(|c| c.kind == CommentKind::Note).unwrap();
+    assert_eq!(note.body, "Set aside by Lane: the factory leaves it until it is graded again.\ntoo big for now");
+    assert_eq!(note.addressed_to, Some(agent.actor_id()), "it answers the question's author");
+
+    env.store.undo_batch(&env.human.next_batch(), ctx.batch_id).await.unwrap();
+    let back = env.store.get_task(&env.human, &t.key).await.unwrap();
+    assert_eq!((back.status, back.grade), (Status::NeedsInput, Some(gr(2))));
+    assert!(back.metadata["factory"].get("set_aside").is_none());
+}
+
+#[tokio::test]
+async fn a_task_in_progress_or_closed_cant_be_set_aside() {
+    let env = Env::new().await;
+    let t = env.task("t").await;
+    let agent = env.agent("a").await;
+    env.store.claim(&agent, &t.key, None).await.unwrap();
+    env.store.update_task(&agent, &t.key, status(Status::InProgress), None).await.unwrap();
+    let err = env.store.set_aside(&env.human, &t.key, None).await.unwrap_err();
+    assert!(matches!(&err, Error::Invalid(why) if why.contains("in progress")), "{err:?}");
+    env.store.update_task(&env.human, &t.key, status(Status::Done), None).await.unwrap();
+    assert!(matches!(env.store.set_aside(&env.human, &t.key, None).await, Err(Error::Invalid(_))));
+
+    // In review, it is set aside with no question to answer.
+    let r = env.task_with(NewTask { title: "r".into(), grade: Some(gr(1)), ..Default::default() }).await;
+    env.store.update_task(&env.human, &r.key, status(Status::InReview), None).await.unwrap();
+    let after = env.store.set_aside(&env.human, &r.key, None).await.unwrap();
+    assert_eq!((after.status, after.grade), (Status::Open, None));
+    assert_eq!(after.metadata["factory"]["set_aside"]["question"], json!(null));
+    let notes = env.store.list_comments(&env.human, &r.key).await.unwrap();
+    assert_eq!(notes.iter().filter(|c| c.kind == CommentKind::Note && c.addressed_to.is_none()).count(), 1);
+}
