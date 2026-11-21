@@ -262,6 +262,8 @@ impl Modify for Common {
         crate::openapi::serve,
         routes::me,
         routes::shell_build,
+        routes::shell::ask_targets,
+        routes::shell::ask,
         routes::projects::list_projects,
         routes::projects::create_project,
         routes::projects::get_project,

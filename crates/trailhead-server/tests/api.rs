@@ -841,3 +841,69 @@ async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
         assert_eq!((r.body["current"].as_str(), &r.body["changes"]), (Some("b"), &json!([])), "{since}");
     }
 }
+
+#[tokio::test]
+async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
+    let api = Api::new().await;
+    let r = api.as_human("GET", "/v1/shell/ask", None).await;
+    assert_eq!((r.status, &r.body), (StatusCode::OK, &json!({"configured": false, "repo": null, "targets": []})));
+    let r = api.as_human("POST", "/v1/shell/ask", Some(json!({"text": "more", "project": "TICK"}))).await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "no apps repo: {}", r.body);
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = common::local_config(dir.path());
+    let (store, _) = open_local(&cfg).await.unwrap();
+    let state = AppState::new(store);
+    let builds =
+        trailhead_builder::Builds::new(trailhead_builder::Layout::new(dir.path()), trailhead_builder::System::new());
+    state.shell.set(builds.from_origin("git@github.com:lane/trailhead-apps.git")).unwrap();
+    let human = std::fs::read_to_string(cfg.creds.file(Cred::User)).unwrap().trim().to_string();
+    let api = Api { app: router(Arc::new(state)), human, _dir: dir };
+    let factory = json!({"factory": {"repo": "lane/trailhead-apps", "path": "apps/ticklist"}});
+    let r = api
+        .as_human("POST", "/v1/projects", Some(json!({"key": "TICK", "name": "Ticklist", "metadata": factory})))
+        .await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+
+    let r = api.as_human("GET", "/v1/shell/ask", None).await;
+    assert_eq!(
+        r.body,
+        json!({"configured": true, "repo": "lane/trailhead-apps",
+               "targets": [{"project": "TICK", "name": "Ticklist", "path": "apps/ticklist"}]})
+    );
+
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "claude"}))).await;
+    let secret = agent.body["secret"].as_str().unwrap().to_string();
+    let r =
+        api.call(Some(&secret), "POST", "/v1/shell/ask", Some(json!({"text": "more", "project": "TICK"})), &[]).await;
+    assert_eq!((r.status, &r.body["error"]["code"]), (StatusCode::FORBIDDEN, &json!("forbidden")), "{}", r.body);
+
+    for bad in [
+        json!({"text": "more"}),
+        json!({"text": "more", "project": "TICK", "new_app": {"name": "Notes"}}),
+        json!({"text": " ", "project": "TICK"}),
+        json!({"project": "TICK"}),
+        json!({"text": "more", "new_app": {}}),
+    ] {
+        let r = api.as_human("POST", "/v1/shell/ask", Some(bad.clone())).await;
+        assert_eq!((r.status, &r.body["error"]["code"]), (StatusCode::BAD_REQUEST, &json!("invalid")), "{bad}");
+    }
+
+    let r = api.as_human("POST", "/v1/shell/ask", Some(json!({"text": "A Completed view", "project": "TICK"}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(
+        r.body,
+        json!({"project": {"key": "TICK", "name": "Ticklist", "created": false},
+               "task": {"key": "TICK-1", "title": "A Completed view"}, "notes": []})
+    );
+    let task = api.as_human("GET", "/v1/tasks/TICK-1", None).await;
+    assert_eq!((&task.body["task"]["grade"], &task.body["task"]["priority"]), (&json!(2), &json!(2)), "{}", task.body);
+
+    let r =
+        api.as_human("POST", "/v1/shell/ask", Some(json!({"text": "notes", "new_app": {"name": "Trail Notes"}}))).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    assert_eq!(r.body["project"], json!({"key": "TN", "name": "Trail Notes", "created": true}));
+    assert_eq!(r.body["task"]["key"], "TN-1");
+    let project = api.as_human("GET", "/v1/projects/TN", None).await;
+    assert_eq!(project.body["metadata"]["factory"], json!({"repo": "lane/trailhead-apps", "path": "apps/trail-notes"}));
+}

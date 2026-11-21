@@ -348,6 +348,10 @@ impl Project {
 /// change or clear it: an agent pointing a project at another repo would choose where its own work runs.
 pub const PROJECT_REPO_KEY: &str = "factory";
 
+/// The agent the factory's control plane acts as, which a project names as a reviewer so the factory can approve its
+/// work.
+pub const FACTORY_AGENT: &str = "factory";
+
 /// The repo a project's work is built in, and the path inside it, read from `metadata.factory`
 /// (`{"repo": "owner/name", "path": "apps/ticklist"}`). The factory of that repo works the project's graded tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

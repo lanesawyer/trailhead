@@ -1,6 +1,7 @@
 //! Trailhead's HTTP server. REST lives under `/v1`; every handler is a thin
 //! adapter over [`trailhead_core::Store`].
 
+mod ask;
 mod auth;
 mod error;
 mod idempotency;

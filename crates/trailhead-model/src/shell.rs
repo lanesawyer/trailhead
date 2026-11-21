@@ -71,9 +71,110 @@ pub struct BuildError {
     pub at: Timestamp,
 }
 
+/// The most characters an ask's text may have.
+pub const MAX_ASK_CHARS: usize = 8000;
+
+/// `GET /v1/shell/ask`: what a person can ask for work on from the window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AskTargets {
+    /// Whether `[shell] repo` is set in the server's user config. When it isn't, nothing can be asked for and the
+    /// rest is empty.
+    pub configured: bool,
+    /// The apps repo, `owner/name`, from its checkout's `origin`: `None` until the builder has read it, or when it
+    /// isn't on GitHub.
+    pub repo: Option<String>,
+    /// The active projects pointed at the apps repo (`metadata.factory.repo`), by name.
+    #[serde(default)]
+    pub targets: Vec<AskTarget>,
+}
+
+/// A project that can be asked for a change: one app in the apps repo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AskTarget {
+    /// The project's key.
+    pub project: String,
+    pub name: String,
+    /// Where in the apps repo it builds (`apps/ticklist`); `None` for the whole repo.
+    pub path: Option<String>,
+}
+
+/// `POST /v1/shell/ask`: a change to an app (`project`) or a new app (`new_app`), exactly one of the two.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Ask {
+    /// What the person wants, in their words: it becomes the task's description. At most [`MAX_ASK_CHARS`].
+    pub text: String,
+    /// The key of one of [`AskTargets::targets`], for a change to that app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// A new app, with a project of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_app: Option<NewApp>,
+}
+
+impl Ask {
+    /// A change to the app in `project`.
+    pub fn change(text: impl Into<String>, project: impl Into<String>) -> Ask {
+        Ask { text: text.into(), project: Some(project.into()), new_app: None }
+    }
+
+    /// A new app called `name`.
+    pub fn new_app(text: impl Into<String>, name: impl Into<String>) -> Ask {
+        Ask { text: text.into(), project: None, new_app: Some(NewApp { name: name.into() }) }
+    }
+}
+
+/// The app a person asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NewApp {
+    /// What it is called: its id, its project's key and the project's name come from it.
+    pub name: String,
+}
+
+/// What an ask made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Asked {
+    pub project: AskedProject,
+    /// The task made. `None` only when a new app's project was made but its first task wasn't; `notes` says why.
+    pub task: Option<AskedTask>,
+    /// What a person should know: a part that wasn't done, and how to do it by hand.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// The project an ask went to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AskedProject {
+    pub key: String,
+    pub name: String,
+    /// Whether the ask made it (a new app).
+    pub created: bool,
+}
+
+/// The task an ask made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AskedTask {
+    pub key: String,
+    pub title: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ask_says_only_what_it_is_about() {
+        let change = serde_json::to_value(Ask::change("more", "TICK")).unwrap();
+        assert_eq!(change, serde_json::json!({"text": "more", "project": "TICK"}));
+        let new = serde_json::to_value(Ask::new_app("notes", "Trail Notes")).unwrap();
+        assert_eq!(new, serde_json::json!({"text": "notes", "new_app": {"name": "Trail Notes"}}));
+    }
 
     fn build(current: Option<&str>, previous: Option<&str>, bad: &[&str]) -> ShellBuild {
         ShellBuild {

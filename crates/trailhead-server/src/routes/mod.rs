@@ -6,6 +6,7 @@ pub(crate) mod comments;
 pub(crate) mod dependencies;
 pub(crate) mod events;
 pub(crate) mod projects;
+pub(crate) mod shell;
 pub(crate) mod tasks;
 pub(crate) mod webhooks;
 
@@ -36,6 +37,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/openapi.json", get(crate::openapi::serve))
         .route("/me", get(me))
         .route("/shell/build", get(shell_build))
+        .route("/shell/ask", get(shell::ask_targets).post(shell::ask))
         .route("/projects", get(projects::list_projects).post(projects::create_project))
         .route("/projects/{project}", get(projects::get_project).patch(projects::update_project))
         .route("/tasks", get(tasks::list_tasks).post(tasks::create_task))

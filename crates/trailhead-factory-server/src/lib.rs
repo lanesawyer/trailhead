@@ -55,7 +55,7 @@ pub use surface::Feed;
 mod wake;
 
 /// The agent the control plane acts as; sandboxes get its sub-agents.
-const AGENT: &str = "factory";
+const AGENT: &str = trailhead_core::FACTORY_AGENT;
 /// Where the control plane's iroh key and daemon master key are kept.
 const KEYS: Cred<'static> = Cred::Secret("factory-keys");
 

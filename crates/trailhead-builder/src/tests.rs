@@ -24,6 +24,8 @@ struct Fake {
     /// The builder's checkout lock, and whether it was held while checking out.
     lock: Mutex<Option<Arc<RwLock<()>>>>,
     locked_in_checkout: Mutex<Option<bool>>,
+    /// The checkout's `origin` URL, when a test sets one.
+    url: Mutex<Option<String>>,
 }
 
 impl Fake {
@@ -34,7 +36,8 @@ impl Fake {
 
 impl Tools for Fake {
     fn origin<'a>(&'a self, _repo: &'a Path) -> Boxed<'a, Result<Origin, String>> {
-        Box::pin(async { Ok(Origin { url: "git@example:apps".into(), branch: "main".into() }) })
+        let url = self.url.lock().unwrap().clone().unwrap_or_else(|| "git@example:apps".into());
+        Box::pin(async { Ok(Origin { url, branch: "main".into() }) })
     }
 
     fn head<'a>(&'a self, _origin: &'a Origin) -> Boxed<'a, Result<String, String>> {
@@ -161,6 +164,32 @@ async fn a_new_head_is_built_the_slots_rotate_and_old_builds_are_pruned() {
     assert_eq!(rig.builds(), ["b", "c"]);
     assert_eq!(rig.built(), ["a", "b", "c"]);
     assert_eq!(rig.layout.read().building, None);
+}
+
+#[tokio::test]
+async fn the_repo_is_the_origin_the_builder_last_read_as_owner_and_name() {
+    let rig = rig();
+    let builds = rig.builder.builds();
+    assert_eq!(builds.repo(), None, "not before the builder's first look");
+    rig.step_at("a").await;
+    assert_eq!(builds.repo(), None, "an origin that isn't on GitHub");
+    *rig.fake.url.lock().unwrap() = Some("git@github.com:lane/trailhead-apps.git".into());
+    rig.step_at("a").await;
+    assert_eq!(builds.repo().as_deref(), Some("lane/trailhead-apps"));
+}
+
+#[test]
+fn a_github_remote_is_owner_and_name_in_its_usual_forms() {
+    for url in [
+        "https://github.com/lanesawyer/trailhead.git",
+        "https://github.com/lanesawyer/trailhead",
+        "git@github.com:lanesawyer/trailhead.git",
+        "ssh://git@github.com/lanesawyer/trailhead.git",
+    ] {
+        assert_eq!(github_slug(url).as_deref(), Some("lanesawyer/trailhead"), "{url}");
+    }
+    assert_eq!(github_slug("https://example.com/a/b.git"), None);
+    assert_eq!(github_slug("https://github.com/a"), None);
 }
 
 #[tokio::test]

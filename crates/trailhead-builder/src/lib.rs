@@ -47,21 +47,32 @@ pub struct Builder<T> {
     /// Held to write while the clone is checked out (fetched, checked out, cleaned), and to read while [`Builds`]
     /// reads its history, so the two never meet.
     checkout: Arc<RwLock<()>>,
+    /// The checkout's `origin` URL as last read, which [`Builds::repo`] answers from without asking git.
+    origin: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl<T: Tools> Builder<T> {
     pub fn new(tools: T, config: ShellConfig, repo: PathBuf, layout: Layout) -> Self {
-        Builder { tools: Arc::new(tools), config, repo, layout, checkout: Arc::default() }
+        Builder { tools: Arc::new(tools), config, repo, layout, checkout: Arc::default(), origin: Arc::default() }
     }
 
     /// What this builder has built, for the server to answer from.
     pub fn builds(&self) -> Builds {
-        Builds { layout: self.layout.clone(), tools: self.tools.clone(), checkout: self.checkout.clone() }
+        Builds {
+            layout: self.layout.clone(),
+            tools: self.tools.clone(),
+            checkout: self.checkout.clone(),
+            origin: self.origin.clone(),
+        }
     }
 
     /// Looks at the base branch once, and builds its head when it is new: not built, not failed and not bad.
     pub async fn step(&self) -> Result<Step, String> {
         let origin = self.tools.origin(&self.repo).await?;
+        let known = self.origin.read().unwrap_or_else(|e| e.into_inner()).as_deref() == Some(origin.url.as_str());
+        if !known {
+            *self.origin.write().unwrap_or_else(|e| e.into_inner()) = Some(origin.url.clone());
+        }
         let head = self.tools.head(&origin).await?;
         let mut state = self.layout.load();
         let bad = self.layout.bad();
@@ -201,13 +212,27 @@ pub struct Builds {
     layout: Layout,
     tools: Arc<dyn Tools>,
     checkout: Arc<RwLock<()>>,
+    origin: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl Builds {
     /// Builds kept in `layout`, their history read with `tools`. A builder's own is [`Builder::builds`], which
     /// never reads the history while it checks the clone out; this one has no builder to wait for.
     pub fn new(layout: Layout, tools: impl Tools) -> Builds {
-        Builds { layout, tools: Arc::new(tools), checkout: Arc::default() }
+        Builds { layout, tools: Arc::new(tools), checkout: Arc::default(), origin: Arc::default() }
+    }
+
+    /// These builds, from an apps repo whose `origin` is `url`, which a builder otherwise learns on its first look.
+    #[must_use]
+    pub fn from_origin(self, url: impl Into<String>) -> Builds {
+        *self.origin.write().unwrap_or_else(|e| e.into_inner()) = Some(url.into());
+        self
+    }
+
+    /// The apps repo as `owner/name`, from its checkout's `origin` as the builder last read it: `None` before its
+    /// first look, and for an `origin` that isn't on GitHub.
+    pub fn repo(&self) -> Option<String> {
+        self.origin.read().unwrap_or_else(|e| e.into_inner()).as_deref().and_then(github_slug)
     }
 
     /// The state and the bad builds, and with `since` the commits after it up to the newest build
@@ -239,6 +264,15 @@ impl std::fmt::Debug for Builds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Builds").field("layout", &self.layout).finish_non_exhaustive()
     }
+}
+
+/// `owner/name` of a GitHub remote URL, in any of its usual forms (`https://github.com/o/n.git`, `git@github.com:o/n`).
+pub fn github_slug(url: &str) -> Option<String> {
+    let path = url.trim().split_once("github.com").map(|(_, rest)| rest)?;
+    let path = path.trim_start_matches([':', '/']).trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = path.split_once('/')?;
+    (!owner.is_empty() && !name.is_empty() && !name.contains('/')).then(|| format!("{owner}/{name}"))
 }
 
 /// Whether `rev` is a commit hash, whole or abbreviated: 7 to 40 hex digits. Anything else never reaches git.
