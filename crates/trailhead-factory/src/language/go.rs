@@ -9,9 +9,9 @@ impl Language for Go {
         "go"
     }
 
-    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static str]> {
+    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static [&'static str]]> {
         match (backend, name) {
-            ("", "go") => Some(&["go.dev", "dl.google.com"]),
+            ("", "go") => Some(&[&["go.dev", "dl.google.com"]]),
             _ => None,
         }
     }

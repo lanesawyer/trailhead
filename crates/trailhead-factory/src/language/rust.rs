@@ -9,9 +9,9 @@ impl Language for Rust {
         "rust"
     }
 
-    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static str]> {
+    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static [&'static str]]> {
         match (backend, name) {
-            ("", "rust") => Some(&["static.rust-lang.org"]),
+            ("", "rust") => Some(&[&["static.rust-lang.org"]]),
             _ => None,
         }
     }

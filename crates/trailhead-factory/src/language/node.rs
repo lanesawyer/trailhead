@@ -9,12 +9,12 @@ impl Language for Node {
         "node"
     }
 
-    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static str]> {
+    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static [&'static str]]> {
         match (backend, name) {
-            ("npm", _) => Some(&["registry.npmjs.org"]),
-            ("", "node") => Some(&["nodejs.org"]),
+            ("npm", _) => Some(&[&["registry.npmjs.org"]]),
+            ("", "node") => Some(&[&["nodejs.org"]]),
             // aqua's registry fetches pnpm from its GitHub releases.
-            ("", "pnpm") => Some(crate::daemon::GITHUB),
+            ("", "pnpm") => Some(&[crate::daemon::GITHUB]),
             _ => None,
         }
     }

@@ -25,10 +25,10 @@ pub trait Language: Send + Sync {
     /// The language's name, as its cargo feature is.
     fn name(&self) -> &'static str;
 
-    /// The hosts installing a mise tool needs (`docs/factory/sandbox.md`): `backend` is the part before `:` in the
+    /// The hosts installing a mise tool needs (`docs/factory/sandbox.md`), as the lists to concatenate: `backend` is the part before `:` in the
     /// tool key (`npm` in `npm:prettier`, empty for a core tool), `name` the core tool's name (empty with a backend).
     /// `None` for a tool this language doesn't own.
-    fn tool_hosts(&self, _backend: &str, _name: &str) -> Option<&'static [&'static str]> {
+    fn tool_hosts(&self, _backend: &str, _name: &str) -> Option<&'static [&'static [&'static str]]> {
         None
     }
 
@@ -101,7 +101,7 @@ pub(crate) fn is_comment_only(path: &str, patch: &str) -> bool {
 }
 
 /// The hosts for a mise tool key from the languages built in.
-pub(crate) fn tool_hosts(backend: &str, name: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn tool_hosts(backend: &str, name: &str) -> Option<&'static [&'static [&'static str]]> {
     languages().iter().find_map(|l| l.tool_hosts(backend, name))
 }
 
