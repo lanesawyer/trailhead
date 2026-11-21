@@ -33,6 +33,8 @@ pub enum Icon {
     /// A row of rows: the board.
     Board,
     Bot,
+    /// A day: when something is due or planned.
+    Calendar,
     Check,
     ChevronDown,
     ChevronRight,
@@ -81,11 +83,12 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 47] = [
+    const ALL: [Icon; 48] = [
         Icon::Archive,
         Icon::ArchiveRestore,
         Icon::Board,
         Icon::Bot,
+        Icon::Calendar,
         Icon::Check,
         Icon::ChevronDown,
         Icon::ChevronRight,
@@ -138,6 +141,7 @@ impl Icon {
             Icon::ArchiveRestore => "\u{e2cd}", // archive-restore
             Icon::Board => "\u{e4dc}",          // kanban
             Icon::Bot => "\u{e1bb}",            // bot
+            Icon::Calendar => "\u{e063}",       // calendar
             Icon::Check => "\u{e06c}",          // check
             Icon::ChevronDown => "\u{e06d}",    // chevron-down
             Icon::ChevronRight => "\u{e06f}",   // chevron-right

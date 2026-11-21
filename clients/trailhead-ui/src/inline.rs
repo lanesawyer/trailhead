@@ -29,7 +29,7 @@ use bevy::ui_widgets::Activate;
 
 use crate::buttons::{ButtonKind, button};
 use crate::containers::row;
-use crate::input::text_input_sized;
+use crate::input::{TextEntered, text_input_sized};
 use crate::notice::{Notice, Tone, notice};
 use crate::patch::{display, patch_node, set_text};
 use crate::select::{Picked, SelectEdit, select_toned};
@@ -382,11 +382,10 @@ fn begin_edit(start: Entity, open: &mut Opening) {
     }
 }
 
-/// Enter saves a one-line text and Esc cancels either kind. A multi-line text takes Enter as a new line, which
-/// feathers' input does itself.
+/// Esc cancels either kind of text.
 fn on_key(
     mut key: On<FocusedInput<KeyboardInput>>,
-    inputs: Query<&EditableText, With<InlineInput>>,
+    inputs: Query<(), With<InlineInput>>,
     parents: Query<&ChildOf>,
     roots: Roots,
     mut texts: Query<&mut InlineText>,
@@ -395,12 +394,13 @@ fn on_key(
 ) {
     // The press bubbles up from the input; act once, there.
     let start = key.original_event_target();
-    if key.event_target() != start {
-        return;
-    }
-    let Ok(editable) = inputs.get(start) else { return };
     let pressed = &key.input;
-    if !pressed.state.is_pressed() || pressed.repeat {
+    if key.event_target() != start
+        || !inputs.contains(start)
+        || pressed.key_code != KeyCode::Escape
+        || !pressed.state.is_pressed()
+        || pressed.repeat
+    {
         return;
     }
     let Some(root) = root_of(start, &parents, &roots) else { return };
@@ -408,14 +408,31 @@ fn on_key(
     if text.mode != InlineMode::Editing {
         return;
     }
-    let save = match pressed.key_code {
-        KeyCode::Escape => false,
-        KeyCode::Enter | KeyCode::NumpadEnter if !text.multiline && !editable.is_composing() => true,
-        _ => return,
-    };
     // Whoever is behind this text (a modal) doesn't also get the Esc.
     key.propagate(false);
-    end_edit(root, &mut text, save.then(|| editable.value().to_string()), &mut focus, &mut commands);
+    end_edit(root, &mut text, None, &mut focus, &mut commands);
+}
+
+/// Enter in a one-line text saves it, as Save does: the input's own [`TextEntered`]. A multi-line text takes Enter
+/// as a new line, which feathers' input does itself.
+fn on_entered(
+    entered: On<TextEntered>,
+    inputs: Query<(), With<InlineInput>>,
+    parents: Query<&ChildOf>,
+    roots: Roots,
+    mut texts: Query<&mut InlineText>,
+    mut focus: ResMut<InputFocus>,
+    mut commands: Commands,
+) {
+    if !inputs.contains(entered.entity) {
+        return;
+    }
+    let Some(root) = root_of(entered.entity, &parents, &roots) else { return };
+    let Ok(mut text) = texts.get_mut(root) else { return };
+    if text.mode != InlineMode::Editing || text.multiline {
+        return;
+    }
+    end_edit(root, &mut text, Some(entered.value.clone()), &mut focus, &mut commands);
 }
 
 /// Save or Cancel under a text being edited.
@@ -609,6 +626,7 @@ impl Plugin for InlinePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<InputFocus>()
             .add_observer(on_key)
+            .add_observer(on_entered)
             .add_observer(on_action)
             .add_observer(on_picked)
             .add_systems(Update, sync_inline.in_set(crate::UiPlace));

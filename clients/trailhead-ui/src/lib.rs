@@ -17,13 +17,15 @@
 //!   stands out: [`ButtonKind`].
 //! - A button that opens a menu: [`spawn_icon_menu`], then fill its popup with [`menu_item`]s; [`close_menu_holding`] when
 //!   something else in it is done.
-//! - A small chip with an icon and a word: [`badge`].
-//! - A text input, one line or several: [`text_input`], inside a [`field`].
+//! - A small chip with an icon and a word: [`badge`], changed in place with [`BadgeEdit`].
+//! - A text input, one line or several: [`text_input`], inside a [`field`]. Enter in a one-line one triggers
+//!   [`TextEntered`].
 //! - A text edited where it is read (a title, a description): [`inline_text`]; a sidebar label and choice:
 //!   [`inline_field`]. Observe [`InlineEdited`] / [`InlineChosen`]; the caller answers `confirm` or `fail`.
 //! - A choice from a fixed set: [`select`], and observe [`Picked`]. A list floating under a field without moving what
 //!   comes after (a search's suggestions): [`dropdown_list`], of [`dropdown_item`]s.
-//! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]. A button's caption: [`button_text`].
+//! - Text: [`text`], [`text_dim`], [`text_toned`] at a [`size`]; one line cut to fit its row: [`text_truncated`]. A
+//!   button's caption: [`button_text`].
 //! - An icon in text: [`icon_text`]; as a button's caption: [`button_icon`].
 //! - A panel over the content: [`panel`], with a [`layer`]. Inside it: [`section`], [`row`], [`field`].
 //! - A panel's or modal's title row with its close X: [`panel_header`]; whoever owns the panel answers the close.
@@ -35,7 +37,7 @@
 //!   [`bubble_head`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
-//!   [`NavItem`]. Pages fill [`beside_sidebar`].
+//!   [`NavItem`], and change a [`nav_item_noted`] with [`NavEdit`]. Pages fill [`beside_sidebar`].
 //! - The apps of a window that holds several, down its left edge: [`rail`], holding a [`rail_item`] each; an app
 //!   with no sidebar fills [`beside_rail`].
 //! - Colors: a meaning from [`token`], on a node as a [`BackgroundTone`], [`BorderTone`] or [`TextTone`]. A surface (a
@@ -60,7 +62,7 @@
 //!   [`extent::DETAIL_WIDTH`] wide.
 //! - A button that opens a URL in the browser: [`link_button`], or icon-only [`link_tool_button`].
 //! - A line saying how something went, with an icon for its [`Tone`]: [`notice`], then write a [`Notice`] onto it;
-//!   an empty message hides it.
+//!   an empty message hides it. One that says something from the start: [`notice_with`].
 //! - Placeholder bars where content is on its way: [`skeleton`].
 //! - Rows of items under column headings, a row pressable as a whole: [`table_head`] and [`table_row`]s, by
 //!   [`TableColumn`].
@@ -127,7 +129,7 @@ pub use accordion::{
     spawn_header_button,
 };
 pub use appearance::{Appearance, ThemeChoice, ThemePlugin};
-pub use badge::badge;
+pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
 pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
@@ -142,7 +144,7 @@ pub use inline::{
     InlineChosen, InlineEdited, InlineField, InlineMode, InlinePlugin, InlineText, inline_field, inline_text,
     inline_text_sized,
 };
-pub use input::{InitialText, text_input, text_input_sized};
+pub use input::{InitialText, TextEntered, text_input, text_input_sized};
 pub use keyed::Keyed;
 pub use link::{ExternalLink, link_button, link_tool_button};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
@@ -151,10 +153,10 @@ pub use modal::{
     ModalSlots, open_modal,
 };
 pub use nav::{
-    BesideRail, BesideSidebar, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar, nav_heading,
-    nav_heading_action, nav_item, nav_item_noted, rail, rail_item, sidebar, sidebar_card, sidebar_footer,
+    BesideRail, BesideSidebar, NavEdit, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar,
+    nav_heading, nav_heading_action, nav_item, nav_item_noted, rail, rail_item, sidebar, sidebar_card, sidebar_footer,
 };
-pub use notice::{Notice, Tone, notice};
+pub use notice::{Notice, Tone, notice, notice_with};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use progress::{MeterPart, Progress, ProgressTone, meter, progress_bar};
@@ -169,7 +171,7 @@ pub use slider::slider;
 pub use spacing::{extent, radius, space, stroke};
 pub use table::{CellAlign, ColumnWidth, TableColumn, table_head, table_row};
 pub use tabs::{TabCaption, tab, tab_strip};
-pub use text::{Size, size, text, text_dim, text_mono, text_toned};
+pub use text::{Size, size, text, text_dim, text_mono, text_toned, text_truncated};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use toggle::toggle_switch;
 pub use truncate::{Truncated, truncate_to_width, width_of};

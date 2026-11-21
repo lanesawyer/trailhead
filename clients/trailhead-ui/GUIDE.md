@@ -86,6 +86,7 @@ is written `Into<String>` to save room.
 | `text_mono` | `text_mono(content: Into<String>, size: Size, tone: Token) -> impl Bundle` | Monospace (Bevy's built-in Fira Mono): log lines, ids, code. A bundle, not a scene: `commands.spawn(text_mono(..))`. | `set_text`; a new `TextTone`. |
 | `button_text` | `button_text(text: Into<String>) -> impl Scene` | A caption inside a hand-built button, in the button's own text color. Feathers' `label` keeps the window's text color on a primary or disabled button; this one follows the button. | `set_text`. |
 | `Size`, `size` | `size::SMALL` .. `size::DETAIL_TITLE`; `Size::px(self) -> f32` | The text scale (section 3). | |
+| `text_truncated` | `text_truncated(content: Into<String>, size: Size) -> impl Scene` | One line cut with an ellipsis to the room its row leaves it, growing to take that room: a list row's title beside its buttons. The row's width must come from outside it, as for `Truncated`. | Set its `Truncated`'s `full`. |
 | `Truncated` | `Truncated { full: String, size: Size }` (component) | A text cut with an ellipsis to the room its parent leaves beside its siblings. The parent's width must come from outside it (`flex_grow`, `min_width: px(0)`), or each cut narrows it again. | Set `full`, never the `Text`, which the kit rewrites. |
 | `truncate_to_width` | `truncate_to_width(text: &str, width: f32, font_size: Size) -> String` | Cut a string to a width by the kit's fixed glyph estimate. | |
 | `width_of` | `width_of(chars: usize, font_size: Size) -> f32` | How wide that many characters come out, by the same estimate, so a box sized by one and filled by the other agree. | |
@@ -131,8 +132,9 @@ should all show at once are a `button_group`. A list floating under a text field
 
 | Item | Signature | What it is for | Updated by |
 | --- | --- | --- | --- |
-| `text_input` | `text_input(lines: f32, own: impl Scene) -> impl Scene` | A text input `lines` high (more than one allows newlines and wraps at words), filling the width of what holds it. `own` lands on the text entity, where your marker goes. | Read and write `EditableText` on the text entity. |
+| `text_input` | `text_input(lines: f32, own: impl Scene) -> impl Scene` | A text input `lines` high (more than one allows newlines and wraps at words), filling the width of what holds it. `own` lands on the text entity, where your marker goes. Enter in a one-line input triggers `TextEntered` on the text entity. | Read and write `EditableText` on the text entity. |
 | `text_input_sized` | `text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Scene` | The same, typing at another size, so an input can stand in for a text of that size. | |
+| `TextEntered` | `TextEntered { entity: Entity, value: String }` (entity event) | Enter was pressed in a one-line input (not held, not mid-composition), with what it holds: how a field submits from the keyboard (recipe 5). Several lines take Enter as a new line and never trigger it. The kit's `inline_text` saves on it too. | |
 | `InitialText` | `InitialText(pub String)` (component) | Text an input holds when it appears, with the cursor at its end: a form opened on something that exists. Put it in `own`. | |
 | `field` | `field(label: Into<String>, control: impl SceneList) -> impl Scene` | A label above a control (an input, a select). Pass the control into the scene rather than adding it as a child afterwards: the scene's own `Children` replace any added before it spawns, which once left a select orphaned at the window's top left (TRAIL-850). | |
 | `field_well` | `field_well() -> impl Scene` | A raised box to set text fields in. Feathers fills a field with the same gray as a pane's body and a menu, so a field placed straight in either cannot be seen. | |
@@ -200,7 +202,8 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 | `nav_heading` | `nav_heading(words: Into<String>) -> impl Scene` | The dim words over a group of nav items. | |
 | `nav_heading_action` | `nav_heading_action(words: Into<String>, heading: impl Scene, icon: Icon, hint: Into<String>, action: impl Scene) -> impl Scene` | A heading whose words are themselves a place to go, with a plain tool button at its end for something done to the group (adding to it). `heading` lands on the words' button and `action` on the tool button: your markers. | The words' `NavItem`. |
 | `nav_item` | `nav_item(caption: Into<String>, icon: Option<Icon>) -> impl Scene` | A place to go in a sidebar, the sidebar's width, plain until it is the page shown. | `NavItem { current }`, with `set_if_neq`. |
-| `nav_item_noted` | `nav_item_noted(caption: Into<String>, note: Into<String>, end: Into<String>) -> impl Scene` | A nav item with a dim note after its caption and a dim value at its end (a project's name, its key, its open count). | Each text carries a `NavPart` (`Caption`, `Note`, `End`); the caption is cut to fit, so change it through its `Truncated`, not its `Text`. |
+| `nav_item_noted` | `nav_item_noted(caption: Into<String>, note: Into<String>, end: Into<String>) -> impl Scene` | A nav item with a dim note after its caption and a dim value at its end (a project's name, its key, its open count). The caption is cut to fit. | `NavEdit::set_noted(item, caption: &str, note: &str, end: &str)`, which writes only what differs. |
+| `NavEdit`, `NavPart` | system parameter; component (`Caption`, `Note`, `End`) | The noted nav item's editor and the parts it finds. | |
 | `NavItem` | `NavItem { current: bool }` (component) | Whether a nav item or rail item is the page or app shown, which gives it a background. | |
 | `beside_sidebar` | `beside_sidebar() -> Node` | The area right of a sidebar, for a page to fill: finish it with `..beside_sidebar()` and put `BesideSidebar` on the page too, so it follows the sidebar's width. | The kit moves it. |
 | `BesideSidebar` | component | On a page beside the sidebar. | |
@@ -251,11 +254,13 @@ view.
 | `progress_bar` | `progress_bar(fraction: f32) -> impl Scene` | A track filled from the left in the accent, `fraction` (0 to 1) full, filling the width it is given. | Set `Progress(f32)`; insert a new `ProgressTone(Token)` to recolor (`STATUS_WARN` for one running out of room). |
 | `meter` | `meter(label: Into<String>, value: Into<String>, note: Into<String>, fraction: f32, tone: Token) -> impl Scene` | A label and a value on a line, a bar under them and a dim note under that (a usage window, its percent, when it resets). | Each text carries a `MeterPart` (`Label`, `Value`, `Note`); the bar carries `Progress` and `ProgressTone`. |
 | `Progress`, `ProgressTone`, `MeterPart` | components | As above. | |
-| `badge` | `badge(label: Into<String>, icon: Option<Icon>, tone: Option<Token>) -> impl Scene` | A short label in a small rounded chip, after an icon when given: what a card or row says about its item. Without a tone the text is dim, so a row of badges stays quiet beside the title. | Fixed at spawn: a badge whose words change is one to respawn through `Keyed`, or a `chip`. |
+| `badge` | `badge(label: Into<String>, icon: Option<Icon>, tone: Option<Token>) -> impl Scene` | A short label in a small rounded chip, after an icon when given: what a card or row says about its item. Without a tone the text is dim, so a row of badges stays quiet beside the title. | `BadgeEdit::set(badge, label: &str, icon: Option<Icon>, tone: Option<Token>)` and `BadgeEdit::set_shown(badge, shown: bool)`, which write only what differs. A badge that comes and goes keeps its entity and is hidden. |
+| `BadgeEdit`, `BadgeIcon`, `BadgeLabel` | system parameter; components | The badge's editor and the parts it finds. | |
 | `chip` | `chip(tone: Token, words: Into<String>, hint: Into<String>) -> impl Scene` | A colored dot and a few words, with the full explanation in a hint: state that is always there and rarely needs reading (a connection). | `ChipEdit::set(chip, tone, words: &str, hint: &str)`, which writes only what differs. |
 | `dot` | `dot(tone: Token) -> impl Scene` | The chip's dot on its own. | A new `BackgroundTone`. |
 | `ChipEdit`, `ChipDot`, `ChipWords` | system parameter; components | The chip's editor and the parts it finds. | |
 | `notice` | `notice() -> impl Scene` | A boxed line saying how something went, with an icon for its kind. Hidden until written to. Every status line is one of these, so they look alike wherever they sit. | Insert or set `Notice { tone, message }` (or `Notice::new(tone, message)`); an empty message hides it. |
+| `notice_with` | `notice_with(says: Notice) -> impl Scene` | A notice that says something from the moment it is drawn (a row drawn again for a command that failed, a page opened while offline). A `Notice` inserted right after spawning a `notice()` is overwritten by the scene's own empty one. | As `notice`. |
 | `Notice`, `Tone` | `Notice { tone: Tone, message: String }`; `Tone::{Info, Success, Warning, Error}`, `token()`, `subtle()` | What a notice says and what kind of news it is. | |
 | `skeleton` | `skeleton(rows: usize, row_height: f32) -> impl Scene` | Pulsing placeholder bars where content is on its way. `SkeletonBar` marks each. | Despawn it when the content arrives. |
 | `bubble` | `bubble(side: Side) -> impl Scene` | A message in a conversation: the reader's (`Side::Mine`) against the end edge in the accent, others' (`Side::Theirs`) against the start edge. Put it in a column and spawn its lines as children. | |
@@ -341,12 +346,12 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
 - **`button` / `tool_button` / `link_button` / `nav_item` / `menu_item` / `dropdown_item` / `table_row` / `HoverTone`.**
   A button with words; one with an icon only; one that opens a URL; a place to go in a sidebar; a row of a menu; a row
   of a dropdown list; a table row; anything else pressable.
-- **`badge` / `chip` / `notice`.** Something an item says about itself (fixed at spawn); state that is always there,
-  with a dot and a hint, updated in place; a message about how something went.
+- **`badge` / `chip` / `notice`.** Something an item says about itself (a key, a priority); state that is always
+  there, with a dot and a hint; a message about how something went. All three are updated in place.
 - **`panel` / `section` / `field_well` / `sidebar_card` / `spawn_accordion`.** A surface over the content; a group of
   rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
-- **`text` / `text_dim` / `text_toned` / `button_text`.** Body text; secondary text; text in a status color; a caption
-  inside a hand-built button.
+- **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
+  status color; one line cut to fit its row; a caption inside a hand-built button.
 - **`scroll_frame` + `scroll_body` / `ScrollBoth`.** A panel's body that scrolls down; an area (a board of columns) that
   scrolls both ways, with `ScrollDown` areas inside it.
 
@@ -469,7 +474,7 @@ and they take the text color a button gives its caption, so hover and disabled r
 glyphs, so anything that is not an `Icon` shows as a box or a question mark.
 
 The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Board` (kanban), `Bot`,
-`Check`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
+`Calendar`, `Check`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
 (message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Filter`, `Flag`, `Footprints`, `Help` (circle-help),
 `Handshake`, `History`, `Info`, `Inspect` (panel-right-open), `LogIn`, `Map`, `Monitor`, `Moon`, `Pencil`, `Plus`,
 `PullRequest` (git-pull-request), `Refresh` (refresh-cw), `Release` (lock-open), `Search`, `Send`, `Settings`,
@@ -536,7 +541,8 @@ changed:
 - a text with `set_text`, a node with `patch_node` or `set_display`;
 - a select's chosen row and, only when its options changed, its rows, with `SelectEdit` (never while its popup is
   open: it returns `false` and you try again);
-- a chip's tone, words and hint with `ChipEdit`;
+- a chip's tone, words and hint with `ChipEdit`; a badge's words, icon, tone and whether it shows with `BadgeEdit`; a
+  noted nav item's caption, note and end with `NavEdit`;
 - a nav item's `NavItem { current }`, a button group's `ButtonGroup { chosen }`, a bar's `Progress`, a notice's
   `Notice`, an accordion's `Accordion { open }`, a truncated text's `Truncated { full }`;
 - a disabled state with `InteractionDisabled`;
@@ -868,6 +874,56 @@ fn show_count(presses: Res<Presses>, mut lines: Query<&mut Text, With<CountLine>
 
 A chip is updated the same way through its editor, as Lookout's sidebar does (`update_chip` in
 `clients/trailhead-lookout/src/sidebar.rs`): `edit.set(chip, tone, words, &hint)` with `mut edit: ChipEdit`.
+
+### Recipe 5: a field that adds on Enter, as its button does
+
+Modelled on Ticklist's add row (in the apps repo). A one-line `text_input` triggers `TextEntered` on its text entity
+when Enter is pressed; the button and the key end in the same event of the app's own, so neither path is special.
+
+```rust
+use bevy::prelude::*;
+use bevy::text::EditableText;
+use bevy::ui_widgets::Activate;
+use trailhead_ui::{ButtonKind, Icon, TextEntered, button, text_input};
+
+/// Add an item with this title. The field and the button trigger it; a test can trigger it with no page.
+#[derive(Event, Debug, Clone)]
+pub struct AddItem(pub String);
+
+/// The add field's text entity.
+#[derive(Component, Clone, Default)]
+struct AddField;
+
+#[derive(Component)]
+struct AddButton;
+
+// In the page's spawn system, in a row:
+// let holder = commands.spawn((Node { flex_grow: 1.0, min_width: px(0), ..default() }, ChildOf(bar))).id();
+// commands.queue_spawn_scene(text_input(1.0, bsn! { AddField })).insert(ChildOf(holder));
+// commands.queue_spawn_scene(button("Add", Some(Icon::Plus), ButtonKind::Primary)).insert((AddButton, ChildOf(bar)));
+
+fn on_enter(entered: On<TextEntered>, fields: Query<(), With<AddField>>, mut commands: Commands) {
+    if fields.contains(entered.entity) {
+        commands.trigger(AddItem(entered.value.clone()));
+    }
+}
+
+fn on_add(
+    activate: On<Activate>,
+    buttons: Query<(), With<AddButton>>,
+    fields: Query<&EditableText, With<AddField>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(activate.entity)
+        && let Some(field) = fields.iter().next()
+    {
+        commands.trigger(AddItem(field.value().to_string()));
+    }
+}
+```
+
+In a test, `trailhead_ui::test_support::press_key(world, field, KeyCode::Enter, Key::Enter)` presses Enter on the field;
+`TextEntered` is triggered from an observer, so call `world.flush()` before looking for what it caused (section 6).
 
 ## 6. Checking your work
 

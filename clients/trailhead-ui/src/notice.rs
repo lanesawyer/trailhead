@@ -88,10 +88,19 @@ const LINE_HEIGHT: f32 = 18.0;
 const TEXT_DROP: f32 = 1.5;
 /// A notice, hidden until something is written to it.
 pub fn notice() -> impl Scene {
+    notice_with(Notice::default())
+}
+
+/// A notice that says `says` from the start: a line about something that already happened when it is drawn (a row
+/// drawn again for a command that failed). Writing the [`Notice`] after spawning a [`notice`] doesn't do it, since the
+/// scene's own empty one lands after it.
+pub fn notice_with(says: Notice) -> impl Scene {
+    let Notice { tone, message } = says;
+    let shown = display(!message.is_empty());
     bsn! {
-        Notice
+        Notice { tone: { tone }, message: { message.clone() } }
         Node {
-            display: { Display::None },
+            display: { shown },
             width: { percent(100) },
             align_items: { AlignItems::FlexStart },
             column_gap: { px(space::ROWS) },
@@ -99,12 +108,12 @@ pub fn notice() -> impl Scene {
             border: { UiRect::all(px(stroke::HAIRLINE)) },
             border_radius: { BorderRadius::all(px(radius::CONTROL)) },
         }
-        BackgroundTone({ Tone::Info.subtle() })
-        BorderTone({ Tone::Info.token() })
+        BackgroundTone({ tone.subtle() })
+        BorderTone({ tone.token() })
         Children [
-            @icon_text(Icon::Info) NoticeIcon TextTone({ Tone::Info.token() }) LineHeight::Px(LINE_HEIGHT)
+            @icon_text(tone.icon()) NoticeIcon TextTone({ tone.token() }) LineHeight::Px(LINE_HEIGHT)
             --
-            @text(String::new(), size::SECONDARY)
+            @text(message, size::SECONDARY)
             NoticeText
             LineHeight::Px(LINE_HEIGHT)
             Node {
@@ -181,5 +190,23 @@ mod tests {
         let mut texts = app.world_mut().query_filtered::<&Text, With<NoticeText>>();
         assert_eq!(texts.single(app.world()).unwrap().0, "couldn't open it");
         assert_eq!(app.world().get::<BackgroundTone>(notice).unwrap().0, token::STATUS_DANGER_SUBTLE);
+    }
+
+    #[test]
+    fn a_notice_spawned_with_a_message_says_it_from_the_start() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .add_systems(Update, sync_notices);
+        let says = Notice::new(Tone::Warning, "not connected");
+        let notice = app.world_mut().commands().queue_spawn_scene(notice_with(says.clone())).id();
+        app.update();
+        assert_eq!(app.world().get::<Notice>(notice), Some(&says));
+        assert_eq!(app.world().get::<Node>(notice).unwrap().display, Display::Flex);
+        let mut texts = app.world_mut().query_filtered::<&Text, With<NoticeText>>();
+        assert_eq!(texts.single(app.world()).unwrap().0, "not connected");
+        assert_eq!(app.world().get::<BorderTone>(notice).unwrap().0, token::STATUS_WARN);
     }
 }

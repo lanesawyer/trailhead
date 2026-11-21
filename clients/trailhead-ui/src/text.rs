@@ -8,9 +8,10 @@
 use bevy::app::PropagateOver;
 use bevy::feathers::display::{label, label_dim};
 use bevy::prelude::*;
-use bevy::text::FontSource;
+use bevy::text::{FontSource, LineBreak};
 
 use crate::theme::{TextTone, Token};
+use crate::truncate::Truncated;
 
 /// A text size from the kit's scale, one of [`size`]'s.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -77,6 +78,20 @@ pub fn text_toned(content: impl Into<String>, size: Size, tone: Token) -> impl S
     }
 }
 
+/// One line of text at `size`, cut with an ellipsis to the room its row leaves it, and growing to take that room: a
+/// list row's title beside its buttons. The row's own width has to come from outside it (see [`Truncated`]). Change
+/// what it says through its [`Truncated`]'s `full`, never its `Text`, which the kit rewrites to fit.
+pub fn text_truncated(content: impl Into<String>, size: Size) -> impl Scene {
+    let content = content.into();
+    let full = content.clone();
+    bsn! {
+        @text(content, size)
+        Truncated { full: { full }, size: { size } }
+        TextLayout { linebreak: LineBreak::NoWrap }
+        Node { flex_grow: 1.0, min_width: px(0) }
+    }
+}
+
 /// A label in the monospace face at `size`, in a theme color ([`super::token::TEXT`] for the default one), for text where
 /// columns should line up and every character counts: log lines, ids, code. The face is Bevy's built-in one (Fira Mono,
 /// the `default_font` feature), not the system's monospace: finding that needs `system_font_discovery`, which links
@@ -94,6 +109,23 @@ pub fn text_mono(content: impl Into<String>, size: Size, tone: Token) -> impl Bu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_truncated_line_holds_its_whole_text_stays_on_one_line_and_takes_the_room_left() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let line = app.world_mut().commands().spawn_scene(text_truncated("Send the crux", size::BODY)).id();
+        app.world_mut().flush();
+        app.update();
+        let world = app.world();
+        assert_eq!(world.get::<Truncated>(line), Some(&Truncated { full: "Send the crux".into(), size: size::BODY }));
+        assert_eq!(world.get::<TextLayout>(line).unwrap().linebreak, LineBreak::NoWrap);
+        let node = world.get::<Node>(line).unwrap();
+        assert_eq!((node.flex_grow, node.min_width), (1.0, px(0)));
+    }
 
     #[test]
     fn mono_text_is_in_the_built_in_face_which_needs_no_font_discovery() {

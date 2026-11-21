@@ -30,7 +30,7 @@ use crate::search::Deep;
 use crate::settings::SettingsButton;
 use crate::usage::{UsageMeterEntities, spawn_usage_card, sync_usage};
 use crate::widgets::{
-    ButtonKind, ChipEdit, Icon, Keyed, NavItem, NavPart, Token, Truncated, button, chip, nav_heading_action, nav_item,
+    ButtonKind, ChipEdit, Icon, Keyed, NavEdit, NavItem, Token, button, chip, nav_heading_action, nav_item,
     nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
     spawn_search_field_filling, text, text_toned, token, tool_button,
 };
@@ -237,8 +237,7 @@ fn sync_projects(
     changed: Query<(), Or<(Changed<Mirrored<Project>>, Changed<Mirrored<Task>>)>>,
     (mut removed, mut removed_tasks): (RemovedComponents<Mirrored<Project>>, RemovedComponents<Mirrored<Task>>),
     list: Query<Entity, With<ProjectList>>,
-    children: Query<&Children>,
-    (mut texts, mut truncated, parts): (Query<&mut Text>, Query<&mut Truncated>, Query<&NavPart>),
+    mut edit: NavEdit,
     mut entries: ResMut<Entries>,
     mut commands: Commands,
     mut drawn: Local<Option<Entity>>,
@@ -274,29 +273,7 @@ fn sync_projects(
         },
         |_, entity, entry| {
             let [caption, note, end] = entry.words();
-            for e in children.iter_descendants(entity) {
-                match parts.get(e) {
-                    // Cut to fit, so it changes through its `Truncated`.
-                    Ok(NavPart::Caption) => {
-                        if let Ok(mut shown) = truncated.get_mut(e)
-                            && shown.full != caption
-                        {
-                            shown.full = caption.clone();
-                        }
-                    }
-                    Ok(NavPart::Note) => {
-                        if let Ok(text) = texts.get_mut(e) {
-                            set_text(text, &note);
-                        }
-                    }
-                    Ok(NavPart::End) => {
-                        if let Ok(text) = texts.get_mut(e) {
-                            set_text(text, &end);
-                        }
-                    }
-                    Err(_) => {}
-                }
-            }
+            edit.set_noted(entity, &caption, &note, &end);
         },
     );
 }
@@ -409,6 +386,7 @@ mod tests {
     use super::*;
     use crate::board::BoardPlugin;
     use crate::project::ProjectPlugin;
+    use crate::widgets::{NavPart, Truncated};
 
     fn app() -> App {
         let mut app = App::new();

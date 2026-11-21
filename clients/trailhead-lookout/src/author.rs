@@ -13,7 +13,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::text::{EditableText, LineBreak};
+use bevy::text::EditableText;
 use bevy::ui_widgets::{Activate, ValueChange};
 use trailhead_client::http::{Call, NewTask};
 use trailhead_model::{Grade, Priority, Project, ProjectStatus, Status, Task};
@@ -29,7 +29,7 @@ use crate::project::ProjectPage;
 use crate::widgets::{
     ButtonKind, Icon, InitialText, Keyed, Modal, ModalFocus, ModalSlots, Picked, SelectEdit, Token, Truncated, button,
     dropdown_item, dropdown_list, field, grade_tone, matches_search, open_modal, priority_tone, row, select_toned,
-    size, space, status_tone, text, text_dim, text_input, toggle_switch, token, tool_button,
+    size, space, status_tone, text_dim, text_input, text_truncated, toggle_switch, token, tool_button,
 };
 
 /// The priority the form starts a new task at.
@@ -737,14 +737,7 @@ fn fill_form(
             .insert((FormPart::Chosen, ChildOf(anchor)))
             .id();
         // Cut to the room the X leaves it, so a long title stays on the search box's one line.
-        let (picked, full) = (d.parent.clone(), d.parent.clone());
-        c.spawn_scene(bsn! {
-            @text(picked, size::BODY)
-            Truncated { full: { full }, size: { size::BODY } }
-            TextLayout { linebreak: LineBreak::NoWrap }
-            Node { flex_grow: 1.0, min_width: px(0) }
-        })
-        .insert((ChosenParent, ChildOf(chosen)));
+        c.spawn_scene(text_truncated(d.parent.clone(), size::BODY)).insert((ChosenParent, ChildOf(chosen)));
         c.spawn_scene(bsn! { @tool_button(Icon::X, "No parent", ButtonKind::Plain) Act::ClearParent })
             .insert(ChildOf(chosen));
         c.queue_spawn_scene(dropdown_list()).insert((FormPart::Suggestions, ChildOf(anchor)));

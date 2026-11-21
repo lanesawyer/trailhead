@@ -3,10 +3,14 @@
 //! Feathers' container is one row high, so it is let grow to hold the lines asked for, and it fills the width of
 //! whatever holds it (a [`super::field`]). More than one line allows newlines and breaks at word boundaries.
 //! [`text_input_sized`] types at another of [`super::size`]'s sizes, so an input can stand in for a text of that size.
+//! Enter in a one-line input triggers [`TextEntered`] on its text entity, which is how a form submits from the
+//! keyboard; the kit's own inline text saves on it too.
 
 use bevy::feathers::controls::{FeathersTextInput, FeathersTextInputContainer};
 use bevy::feathers::theme::{SurfaceLevel, ThemeContext, UiTheme};
 use bevy::feathers::tokens;
+use bevy::input::keyboard::KeyboardInput;
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::text::{EditableText, FontSize, LineBreak, TextCursorStyle, TextFont, TextLayout};
 
@@ -25,11 +29,38 @@ pub fn text_input_sized(lines: f32, font_size: Size, own: impl Scene) -> impl Sc
         Node { height: Val::Auto, width: percent(100), align_items: AlignItems::FlexStart }
         Children [
             @FeathersTextInput
+            on(enter_pressed)
             @{own}
             EditableText { visible_lines: { Some(lines) }, allow_newlines: { lines > 1.0 } }
             TextLayout { linebreak: LineBreak::WordBoundary }
             TextFont { font_size: { FontSize::from(font_size) } }
         ]
+    }
+}
+
+/// Enter was pressed in a one-line [`text_input`], triggered on its text entity (where the `own` markers are) with
+/// what it holds. Several lines take Enter as a new line and never trigger it.
+#[derive(EntityEvent, Clone, Debug, PartialEq, Eq)]
+pub struct TextEntered {
+    pub entity: Entity,
+    pub value: String,
+}
+
+/// Turns Enter in a one-line input into [`TextEntered`]: once, for the input's own press, not one held down or still
+/// being composed.
+fn enter_pressed(key: On<FocusedInput<KeyboardInput>>, inputs: Query<&EditableText>, mut commands: Commands) {
+    let pressed = &key.input;
+    if key.event_target() != key.original_event_target()
+        || !matches!(pressed.key_code, KeyCode::Enter | KeyCode::NumpadEnter)
+        || !pressed.state.is_pressed()
+        || pressed.repeat
+    {
+        return;
+    }
+    let entity = key.event_target();
+    let Ok(text) = inputs.get(entity) else { return };
+    if !text.allow_newlines && !text.is_composing() {
+        commands.trigger(TextEntered { entity, value: text.value().to_string() });
     }
 }
 
@@ -66,8 +97,49 @@ pub(crate) fn color_new_cursors(
 
 #[cfg(test)]
 mod tests {
+    use bevy::input::keyboard::Key;
+
     use super::*;
     use crate::Theme;
+    use crate::test_support::press_key;
+
+    #[derive(Resource, Default)]
+    struct Entered(Vec<TextEntered>);
+
+    /// The text entity of an input `lines` high, holding `typed`, in an app that notes what is entered.
+    fn input(lines: f32, typed: &str) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_resource::<Entered>()
+            .add_observer(|e: On<TextEntered>, mut seen: ResMut<Entered>| seen.0.push(e.clone()));
+        app.world_mut().commands().spawn_scene(text_input(lines, bsn! {}));
+        app.world_mut().flush();
+        app.update();
+        let field = app.world_mut().query_filtered::<Entity, With<FeathersTextInput>>().single(app.world()).unwrap();
+        app.world_mut().get_mut::<EditableText>(field).unwrap().editor_mut().set_text(typed);
+        (app, field)
+    }
+
+    #[test]
+    fn enter_in_a_one_line_input_triggers_text_entered_on_it_with_what_it_holds() {
+        let (mut app, field) = input(1.0, "Buy chalk");
+        press_key(app.world_mut(), field, KeyCode::KeyA, Key::Character("a".into()));
+        press_key(app.world_mut(), field, KeyCode::Enter, Key::Enter);
+        app.world_mut().flush();
+        let wanted = TextEntered { entity: field, value: "Buy chalk".into() };
+        assert_eq!(app.world().resource::<Entered>().0, [wanted]);
+    }
+
+    #[test]
+    fn enter_in_an_input_of_several_lines_is_a_new_line_not_an_entry() {
+        let (mut app, field) = input(3.0, "a spec");
+        press_key(app.world_mut(), field, KeyCode::Enter, Key::Enter);
+        app.world_mut().flush();
+        assert!(app.world().resource::<Entered>().0.is_empty());
+    }
 
     #[test]
     fn an_input_spawned_after_the_theme_gets_the_themes_cursor() {

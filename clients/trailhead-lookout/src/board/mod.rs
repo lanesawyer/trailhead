@@ -26,7 +26,7 @@ use crate::inspector::{Neighbours, Selection, Subject};
 use crate::search::{Deep, DeepHit};
 use crate::widgets;
 use crate::widgets::{
-    ButtonKind, ExternalLink, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, TextTone, Token, badge, button,
+    BadgeEdit, ButtonKind, ExternalLink, Hint, Icon, Keyed, Picked, ScrollBoth, SelectEdit, Token, badge, button,
     card as card_shell, card_found, card_row, card_title, card_under, field, grade_tone, link_tool_button,
     priority_tone, select, space, status_label, token, tool_button,
 };
@@ -104,6 +104,9 @@ impl Plugin for BoardUiPlugin {
                     .run_if(in_state(View::Board)),
             )
             // Cards are drawn wherever they are, on the board or on a project's page.
-            .add_systems(Update, (dress_cards, update_cards, sync_card_rows, tools_follow_connection).chain());
+            .add_systems(
+                Update,
+                (dress_cards, update_cards, update_card_badges, sync_card_rows, tools_follow_connection).chain(),
+            );
     }
 }

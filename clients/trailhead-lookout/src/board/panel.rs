@@ -214,20 +214,18 @@ fn set_shown(part: Entity, shown: bool, nodes: &mut Query<&mut Node>) {
     }
 }
 
-/// Keeps what each card shows in step with its view model, in place: its texts, the optional lines, the indent, and
-/// the label, tone and hint of the badges it already has. It checks every frame rather than on a change, so a change
+/// Keeps what each card shows in step with its view model, in place: its texts, the optional lines and the indent
+/// ([`update_card_badges`] keeps its badges). It checks every frame rather than on a change, so a change
 /// that lands before a part's scene has resolved still arrives.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct CardParts<'w, 's> {
     parts: Query<'w, 's, &'static CardPart>,
     kids: Query<'w, 's, &'static Children>,
-    tones: Query<'w, 's, &'static TextTone>,
-    hints: Query<'w, 's, &'static Hint>,
     texts: Query<'w, 's, &'static mut Text>,
     nodes: Query<'w, 's, &'static mut Node>,
 }
 
-pub(super) fn update_cards(cards: Query<(Entity, &BoardCard, &Children)>, mut p: CardParts, mut commands: Commands) {
+pub(super) fn update_cards(cards: Query<(Entity, &BoardCard, &Children)>, mut p: CardParts) {
     for (shell, BoardCard(card), children) in &cards {
         let margin = UiRect::left(px(space::INDENT * card.depth as f32));
         if let Ok(mut node) = p.nodes.get_mut(shell)
@@ -249,32 +247,38 @@ pub(super) fn update_cards(cards: Query<(Entity, &BoardCard, &Children)>, mut p:
                     set_text(part, card.found.as_deref().unwrap_or_default(), &p.kids, &mut p.texts);
                     set_shown(part, card.found.is_some(), &mut p.nodes);
                 }
-                CardPart::Badges => update_badges(part, card, &mut p, &mut commands),
-                CardPart::Tools => {}
+                CardPart::Badges | CardPart::Tools => {}
             }
         }
     }
 }
 
-fn update_badges(row: Entity, card: &Card, p: &mut CardParts, commands: &mut Commands) {
-    let shown: Vec<Entity> = p.kids.get(row).map(|c| c.iter().collect()).unwrap_or_default();
-    for (badge, wanted) in shown.into_iter().zip(&card.badges) {
-        set_text(badge, &wanted.label, &p.kids, &mut p.texts);
-        if let Some(label) = text_of(badge, &p.kids, &p.texts) {
-            let tone = wanted.tone.clone().unwrap_or(token::TEXT_DIM);
-            if p.tones.get(label).map(|t| &t.0) != Ok(&tone) {
-                commands.entity(label).insert(TextTone(tone));
+/// Keeps the label, tone and hint of the badges each card already has in step with its view model, in place. Like
+/// [`update_cards`], it checks every frame.
+pub(super) fn update_card_badges(
+    cards: Query<(&BoardCard, &Children)>,
+    parts: Query<(&CardPart, &Children)>,
+    hints: Query<&Hint>,
+    mut edit: BadgeEdit,
+    mut commands: Commands,
+) {
+    for (BoardCard(card), children) in &cards {
+        let Some((_, shown)) = children.iter().filter_map(|c| parts.get(c).ok()).find(|(k, _)| **k == CardPart::Badges)
+        else {
+            continue;
+        };
+        for (badge, wanted) in shown.iter().zip(&card.badges) {
+            edit.set(badge, &wanted.label, None, wanted.tone.clone());
+            match (&wanted.hint, hints.get(badge)) {
+                (Some(h), Ok(Hint(now))) if h == now => {}
+                (Some(h), _) => {
+                    commands.entity(badge).insert(Hint(h.clone()));
+                }
+                (None, Ok(_)) => {
+                    commands.entity(badge).remove::<Hint>();
+                }
+                (None, Err(_)) => {}
             }
-        }
-        match (&wanted.hint, p.hints.get(badge)) {
-            (Some(h), Ok(Hint(now))) if h == now => {}
-            (Some(h), _) => {
-                commands.entity(badge).insert(Hint(h.clone()));
-            }
-            (None, Ok(_)) => {
-                commands.entity(badge).remove::<Hint>();
-            }
-            (None, Err(_)) => {}
         }
     }
 }
@@ -483,7 +487,10 @@ mod in_place_tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
             .init_state::<Connection>()
-            .add_systems(Update, (dress_cards, update_cards, sync_card_rows, dress_slots, relabel_more).chain());
+            .add_systems(
+                Update,
+                (dress_cards, update_cards, update_card_badges, sync_card_rows, dress_slots, relabel_more).chain(),
+            );
         app
     }
 

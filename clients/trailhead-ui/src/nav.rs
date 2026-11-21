@@ -14,6 +14,7 @@
 //! fills [`beside_rail`] and carries [`BesideRail`].
 
 use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::system::SystemParam;
 use bevy::ecs::world::DeferredWorld;
 use bevy::feathers::controls::{ButtonVariant, FeathersButton};
 use bevy::picking::cursor::{EntityCursor, OverrideCursor};
@@ -23,8 +24,8 @@ use bevy::text::LineBreak;
 use bevy::window::SystemCursorIcon;
 
 use super::{
-    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, radius, size,
-    space, stroke, text_dim, token, tool_button,
+    BackgroundTone, BorderTone, ButtonKind, Icon, Surface, Truncated, button, button_text, extent, layer, radius,
+    set_text, size, space, stroke, text_dim, token, tool_button,
 };
 
 /// How far the drag edge reaches past the sidebar's border, so it straddles the line rather than sitting inside it.
@@ -337,8 +338,8 @@ pub fn nav_item(caption: impl Into<String>, icon: Option<Icon>) -> impl Scene {
 }
 
 /// A [`nav_item`] with `note` just after `caption` and `end` at the far right, both smaller and dimmer: a project's
-/// name, its key, and how many of its tasks are open. Each text carries its [`NavPart`], for updating in place. A
-/// caption too long for the sidebar is cut with an ellipsis: change it through its [`Truncated`], not its `Text`.
+/// name, its key, and how many of its tasks are open. A caption too long for the sidebar is cut with an ellipsis.
+/// Change it in place with [`NavEdit::set_noted`].
 pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>, end: impl Into<String>) -> impl Scene {
     let (caption, note, end) = (caption.into(), note.into(), end.into());
     let full = caption.clone();
@@ -375,13 +376,51 @@ pub fn nav_item_noted(caption: impl Into<String>, note: impl Into<String>, end: 
     }
 }
 
-/// Which text of a [`nav_item_noted`] this is.
+/// Which text of a [`nav_item_noted`] this is, which [`NavEdit`] finds them by.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum NavPart {
     #[default]
     Caption,
     Note,
     End,
+}
+
+/// Changes a spawned [`nav_item_noted`] in place. Writes only what differs.
+#[derive(SystemParam)]
+pub struct NavEdit<'w, 's> {
+    children: Query<'w, 's, &'static Children>,
+    parts: Query<'w, 's, &'static NavPart>,
+    texts: Query<'w, 's, &'static mut Text>,
+    truncated: Query<'w, 's, &'static mut Truncated>,
+}
+
+impl NavEdit<'_, '_> {
+    /// Gives a [`nav_item_noted`] this caption, note and end, the caption cut to fit as it was at spawn.
+    pub fn set_noted(&mut self, item: Entity, caption: &str, note: &str, end: &str) {
+        let parts: Vec<Entity> = self.children.iter_descendants(item).collect();
+        for part in parts {
+            match self.parts.get(part) {
+                Ok(NavPart::Caption) => {
+                    if let Ok(mut shown) = self.truncated.get_mut(part)
+                        && shown.full != caption
+                    {
+                        shown.full = caption.to_string();
+                    }
+                }
+                Ok(NavPart::Note) => {
+                    if let Ok(text) = self.texts.get_mut(part) {
+                        set_text(text, note);
+                    }
+                }
+                Ok(NavPart::End) => {
+                    if let Ok(text) = self.texts.get_mut(part) {
+                        set_text(text, end);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
 }
 
 /// A [`nav_item`], and whether it is the page shown, which gives it a background. Set `current` with `set_if_neq`.
@@ -445,6 +484,34 @@ mod tests {
         };
         assert_eq!(set(&mut app, true), ButtonVariant::Normal);
         assert_eq!(set(&mut app, false), ButtonVariant::Plain);
+    }
+
+    #[test]
+    fn a_noted_nav_item_is_changed_in_place() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let item = app.world_mut().commands().spawn_scene(nav_item_noted("Home", "HOME", "3")).id();
+        app.world_mut().flush();
+        app.update();
+        let before: Vec<Entity> = app.world_mut().query::<Entity>().iter(app.world()).collect();
+        app.world_mut().run_system_once(move |mut edit: NavEdit| edit.set_noted(item, "Crag", "CRAG", "4")).unwrap();
+        let world = app.world_mut();
+        let mut parts: Vec<(NavPart, String)> = world
+            .query::<(&NavPart, &Text, Option<&Truncated>)>()
+            .iter(world)
+            .map(|(part, text, cut)| (*part, cut.map_or_else(|| text.0.clone(), |t| t.full.clone())))
+            .collect();
+        parts.sort_by_key(|(part, _)| *part as u8);
+        let words = |w: &str| w.to_string();
+        assert_eq!(
+            parts,
+            [(NavPart::Caption, words("Crag")), (NavPart::Note, words("CRAG")), (NavPart::End, words("4"))]
+        );
+        assert_eq!(world.query::<Entity>().iter(world).collect::<Vec<_>>(), before, "nothing respawned");
     }
 
     #[test]
