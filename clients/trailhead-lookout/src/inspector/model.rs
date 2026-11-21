@@ -24,6 +24,8 @@ pub enum Action {
     Comment,
     /// The key of the one control the task modal's ⋯ menu shares, so the last item's answer shows beside the menu.
     Menu,
+    /// Set the task aside: the factory stops working it, and it waits open and ungraded until it is graded again.
+    SetAside,
 }
 
 impl Action {
@@ -40,6 +42,7 @@ impl Action {
             Action::Grade(None) => "clear grade".into(),
             Action::Comment => "comment".into(),
             Action::Menu => "more".into(),
+            Action::SetAside => "set aside".into(),
         }
     }
 }
@@ -86,6 +89,9 @@ pub struct InspectorView {
     /// The task's risk grade; none for an agent, or a task with none.
     pub grade: Option<Grade>,
     pub actions: Vec<Action>,
+    /// Whether the answer form offers to set the task aside, and why it can't when it can't; none for a task that
+    /// isn't the factory's, or is finished.
+    pub aside: Option<Result<(), String>>,
     /// What the task modal shows beyond the panel's lines; none for an agent.
     pub task: Option<TaskFacts>,
 }
@@ -201,6 +207,30 @@ pub(super) fn status_moves(current: Status, factory: bool) -> Vec<Action> {
         .collect()
 }
 
+/// What a button that sets a task aside says over it.
+pub const SET_ASIDE_HINT: &str = "Stop the factory working this; it stays open and ungraded until you grade it again";
+
+/// Whether a task in `status` can be set aside (`docs/factory/operating.md`): only the factory's, unfinished tasks
+/// are offered it, and one in progress may have a run going, which setting it aside can't stop, so it says so. The
+/// answer form adds whether the connection is live ([`set_aside_now`]).
+pub fn set_aside_offer(status: Status, factory: bool) -> Option<Result<(), String>> {
+    if !factory || status.is_closed() {
+        return None;
+    }
+    if status == Status::InProgress {
+        return Some(Err("A run is going: set it aside once it stops".into()));
+    }
+    Some(Ok(()))
+}
+
+/// [`set_aside_offer`] as the answer form shows it: not while offline.
+pub fn set_aside_now(offer: Option<&Result<(), String>>, live: bool) -> Option<Result<(), String>> {
+    match offer? {
+        Ok(()) if !live => Some(Err("Not connected".into())),
+        offer => Some(offer.clone()),
+    }
+}
+
 /// The panel for `subject`, or none when it isn't in the mirror (deleted, or not synced yet). `latest` maps a task
 /// id to the id of the event that last changed it.
 pub fn build(
@@ -242,6 +272,7 @@ pub fn build(
                 priority: None,
                 grade: None,
                 actions: vec![Action::Revert(1)],
+                aside: None,
                 task: None,
             })
         }
@@ -305,6 +336,10 @@ pub fn build(
             }
             actions.extend(status_moves(status, is_factory));
             actions.extend(questions.iter().map(|q| Action::Resolve(q.id.clone())));
+            // Among a parked factory task's actions; the answer form offers it too.
+            if is_factory && status == Status::NeedsInput {
+                actions.push(Action::SetAside);
+            }
             if latest.contains_key(id) {
                 actions.push(Action::Undo);
             }
@@ -322,6 +357,7 @@ pub fn build(
                 priority: Some(task.priority),
                 grade: task.grade,
                 actions,
+                aside: set_aside_offer(status, is_factory),
                 task: Some(facts(&input, task, Fetched { detail, error: fetch_error, me }, run.as_ref(), agent_name)),
             })
         }
@@ -493,6 +529,7 @@ pub fn plan(
         Action::Status(st) => Request::new(update(TaskUpdate { status: Some(*st), ..Default::default() }), version),
         Action::Grade(g) => Request::new(update(TaskUpdate { grade: Some(*g), ..Default::default() }), version),
         Action::Resolve(comment) => Request::new(Call::ResolveComment { id: comment.clone(), answer: None }, None),
+        Action::SetAside => Request::new(Call::SetAside { key, note: None }, None),
         Action::Comment | Action::Menu => return None,
         Action::Undo => {
             let Subject::Task(id) = subject else { return None };
@@ -817,5 +854,37 @@ mod tests {
         let limited = Outcome::RateLimited { retry_after: Some(Duration::from_secs(3)), message: "slow".into() };
         assert!(describe(&limited).unwrap().contains("3s"));
         assert_eq!(describe(&Outcome::Failed("no".into())).as_deref(), Some("no"));
+    }
+    #[test]
+    fn only_the_factorys_unfinished_tasks_can_be_set_aside_and_not_while_a_run_goes_or_offline() {
+        assert_eq!(set_aside_offer(Status::NeedsInput, true), Some(Ok(())));
+        assert_eq!(set_aside_offer(Status::InReview, true), Some(Ok(())));
+        assert!(matches!(set_aside_offer(Status::InProgress, true), Some(Err(why)) if why.contains("run")));
+        assert_eq!(set_aside_offer(Status::Done, true), None);
+        assert_eq!(set_aside_offer(Status::NeedsInput, false), None, "a task the factory never ran");
+        let ok = set_aside_offer(Status::NeedsInput, true);
+        assert_eq!(set_aside_now(ok.as_ref(), true), Some(Ok(())));
+        assert_eq!(set_aside_now(ok.as_ref(), false), Some(Err("Not connected".into())));
+        let running = set_aside_offer(Status::InProgress, true);
+        assert_eq!(set_aside_now(running.as_ref(), false), running, "the run is the reason, offline or not");
+        assert_eq!(set_aside_now(None, true), None);
+    }
+
+    #[test]
+    fn a_parked_factory_task_offers_set_aside_among_its_actions() {
+        let mut f = fixture();
+        f.tasks[0].status = Status::NeedsInput;
+        let t = Subject::Task(sid("t7"));
+        let view = build(f.input(), &latest(), &t, Fetched::default()).unwrap();
+        assert!(view.actions.contains(&Action::SetAside));
+        assert_eq!(view.aside, Some(Ok(())));
+        let r = plan(&Action::SetAside, f.input(), &latest(), &t, 0).unwrap();
+        assert_eq!((r.method(), r.call.path().as_str()), (Method::Post, "/v1/tasks/TRAIL-7/set-aside"));
+        assert_eq!(r.call.body(), Some(json!({"note": null})));
+
+        let in_review = build(fixture().input(), &latest(), &t, Fetched::default()).unwrap();
+        assert!(!in_review.actions.contains(&Action::SetAside), "only a parked one");
+        let plain = build(f.input(), &latest(), &Subject::Task(sid("t8")), Fetched::default()).unwrap();
+        assert_eq!(plain.aside, None, "a task the factory never ran");
     }
 }

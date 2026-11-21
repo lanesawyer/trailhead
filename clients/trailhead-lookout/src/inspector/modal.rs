@@ -53,7 +53,8 @@ pub(super) enum Step {
 pub(super) struct MenuAct(pub(super) Action);
 
 /// What the ⋯ menu can hold, in order; each shows while the task offers it.
-pub(super) const MENU_ACTIONS: [Action; 7] = [
+pub(super) const MENU_ACTIONS: [Action; 8] = [
+    Action::SetAside,
     Action::Release,
     Action::Cancel,
     Action::Undo,
@@ -66,6 +67,7 @@ pub(super) const MENU_ACTIONS: [Action; 7] = [
 /// A menu item's caption and icon, and whether it is destructive.
 pub(super) fn menu_look(action: &Action) -> (String, Icon, ButtonKind) {
     match action {
+        Action::SetAside => ("Set aside".into(), Icon::Archive, ButtonKind::Normal),
         Action::Release => ("Release the claim".into(), Icon::Release, ButtonKind::Normal),
         Action::Cancel => ("Cancel the task".into(), Icon::CircleX, ButtonKind::Danger),
         Action::Undo => ("Undo the last change".into(), Icon::Undo, ButtonKind::Normal),
@@ -472,7 +474,8 @@ mod tests {
         let mut app = claimed_app();
         for action in MENU_ACTIONS {
             let item = menu_item(&mut app, action.clone());
-            assert!(shows(&app, item), "{action:?} is offered");
+            // Only a task the factory parked is set aside, which this one isn't.
+            assert_eq!(shows(&app, item), action != Action::SetAside, "{action:?} is offered");
         }
         let press = |app: &mut App, action: Action| {
             let item = menu_item(app, action);
