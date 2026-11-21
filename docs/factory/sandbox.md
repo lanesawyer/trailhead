@@ -83,6 +83,31 @@ build     = "pnpm build"
 
 This lives in the per-repo factory file, with agent profiles ([agents.md](agents.md)) and gate policy ([review.md](review.md)).
 
+## Pictures
+
+Decided 2026-11-21 (TRAIL-1614): a worker draws what its change draws, before and after, and the views that differ go on the task and in front of the reviewer. A sandbox has no display, so the repo brings a command that draws its views to PNG files with no window (for Trailhead, the clients' shots tests, on Mesa's software Vulkan in the image).
+
+```toml
+[factory.shots]
+run = "make shots"            # writes <name>.png files into $SHOTS_DIR
+paths = ["clients/**"]        # globs as on a scoped check; leave out to run on every change
+```
+
+- **When.** Only a worker runs it, once its checks have passed and before it publishes, and only when its change touches one of `paths` (the same list of changed files the scoped checks read). A repo without the table takes no pictures and nothing else changes for it.
+- **Twice.** First in the task's checkout, as it stands with the agent's work. Then in a second checkout of the commit the change is measured against (the merge-base with `origin/<base_branch>`, or the commit being merged while a rework's merge is in progress), a `git worktree` beside the checkout in `<checkout>.shots/base` that is removed afterwards. Doing the base only when a change calls for it, instead of at every prepare, keeps tasks that don't touch the paths free of it. The daemon sets `SHOTS_DIR` (a fresh directory for each side) and `TRAILHEAD_CHECKOUT` (the task's checkout, on both runs), on top of the mise and `[factory.stack] env` environment the checks get. The second checkout has no build output of its own: a command that wants to share the first one's says so, as a cargo workspace can with `CARGO_TARGET_DIR="$TRAILHEAD_CHECKOUT/target"`, which reuses every dependency's build and recompiles only the workspace's own crates. Each run has 20 minutes.
+- **What is kept.** PNG files directly in `SHOTS_DIR`, named by file stem (`lookout-board-dark`). A view whose bytes are the same on both sides is dropped, so the command has to draw the same bytes for the same code (a fixed size, scale, theme and clock). A view only one side has is new or removed. At most 12 views are kept, by name; the rest are counted. A file with a name a picture can't have, or over 2 MiB, is left out and said so.
+- **Where they go.** The PR's body (or, on a rework, a comment) names the views that differ and says they are on the task: GitHub has no API for putting a picture on a PR, and Trailhead doesn't work around that by committing them to the repo. After publishing, the worker's daemon attaches each picture to the task as its own sub-agent (`POST /v1/tasks/{task}/attachments`, role `before` or `after`), in the set named by the PR's head commit. Lookout shows a task's sets side by side ([ui.md](ui.md)).
+- **The reviewer.** A reviewer of a repo with `[factory.shots]` reads the PR's head, takes the task's pictures in that set, and writes them beside its checkout (`<checkout>.shots/review/<name>.before.png`, `.after.png`); its prompt lists the files and tells it to open them and say what it saw. A head with no pictures (nothing differed, or the branch moved since) means none are handed over.
+- **Failure is never the task's.** A command that fails or times out on the change means no pictures and a note on the PR with the end of its output. One that fails on the base means every view counts as new, with the same note. Pictures the task refuses (its limits are 64 pictures and 32 MiB) get a comment on the PR. The run goes on to review in every case.
+- **Not built.** Older sets aren't removed when a rework attaches a new one, so a task reworked many times can reach the limits. The Sprites image has no software Vulkan, so a command that needs it works on Docker only.
+- **Turning it on for Trailhead.** Its own `.trailhead.toml` has no `[factory.shots]` yet. The server refuses a repo file with a key it doesn't know, so the table goes in only once the installed `trailhead` is a build with TRAIL-1614, and the pictures only draw once the Docker image has been rebuilt with lavapipe and the pooled sandboxes remade from it. The table then is:
+
+  ```toml
+  [factory.shots]
+  run = "TZ=UTC CARGO_TARGET_DIR=\"$TRAILHEAD_CHECKOUT/target\" cargo test -p trailhead-shell -p trailhead-app-example -p trailhead-lookout --test shots -- --ignored"
+  paths = ["clients/**"]
+  ```
+
 ## Bootstrap and checkpoints
 
 Decided 2026-10-27, replacing a fresh Sprite per task (decided 2026-10-26): workers run in a lazy per-repo pool of warm Sprites, each restored to its own checkpoint before every task. A cold build of Trailhead took about 6½ minutes in the first real run (TRAIL-103), too long to pay on every task.

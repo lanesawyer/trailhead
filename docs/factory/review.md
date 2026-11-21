@@ -5,7 +5,7 @@
 Three layers, cheapest first. Each task carries a risk **grade**, and the repo's gate policy says which layers work at that grade must pass before it can merge.
 
 1. **Mechanical checks.** The repo's standard checks ([sandbox.md](sandbox.md)), run in the author's sandbox, and the repo's own CI on the PR. A failure goes back to the author agent, not to review.
-2. **Agent review.** A separate agent in a fresh sandbox sees the task, the diff and the check results, never the author's transcript. Different prompt, and where possible a different model.
+2. **Agent review.** A separate agent in a fresh sandbox sees the task, the diff and the check results, never the author's transcript. When the change alters what the repo draws, it is also handed the worker's pictures of those views, before and after ([sandbox.md](sandbox.md#pictures)). Different prompt, and where possible a different model.
 3. **Human review.** You approve the task (`approved`), or merge the PR yourself.
 
 ## Grades
@@ -88,7 +88,7 @@ Decided: quorum reviewers must be independent. Not built (TRAIL-204).
 
 Decided (2026-11-19, TRAIL-1572), for the quorum grade 3 merges on:
 
-- **Reviewers differ by job.** An engineer, a tester, a security reviewer and, when the diff touches UI, a UX reviewer, each with its own instructions. The UX reviewer judges screenshots of the changed views, which needs headless rendering in the sandbox (TRAIL-802).
+- **Reviewers differ by job.** An engineer, a tester, a security reviewer and, when the diff touches UI, a UX reviewer, each with its own instructions. The UX reviewer judges screenshots of the changed views; the one reviewer there is today is already handed them (TRAIL-1614).
 - **A majority approves.** One reviewer cannot hold a change up alone; its objection stays on the PR.
 - **One round of rework on the feedback.** After the blind pass the worker gets every reviewer's findings at once and reworks, and the reviewers look again. The majority is counted on that second look.
 - **A person is pulled in** when there is no majority after two rounds, and when the majority overrules the security reviewer's objection. Neither merges without them.
