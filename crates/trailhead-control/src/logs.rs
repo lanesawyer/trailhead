@@ -81,8 +81,8 @@ impl LogBuffer {
     }
 }
 
-/// Records each event into a [`LogBuffer`]. Add it to the subscriber after the filter, so only what the log shows is
-/// kept.
+/// Records each event into a [`LogBuffer`]. Add it to the subscriber behind the filter, so only what the log shows is
+/// kept, and behind [`keeps`].
 pub struct LogLayer {
     buffer: LogBuffer,
 }
@@ -157,6 +157,13 @@ fn is_transport_target(target: &str) -> bool {
         .any(|t| target.strip_prefix(t).is_some_and(|rest| rest.is_empty() || rest.starts_with("::")))
 }
 
+/// Whether the buffer keeps a callsite: false for the debug and trace callsites of [`TRANSPORT_TARGETS`]. Apply it as a
+/// per-layer filter (`filter_fn(keeps)`), so tracing caches the answer per callsite and never builds those events for
+/// the buffer. A bare `Layer::enabled` would switch them off for every layer, the log file included.
+pub fn keeps(meta: &tracing::Metadata<'_>) -> bool {
+    !(*meta.level() >= Level::DEBUG && is_transport_target(meta.target()))
+}
+
 /// Whether a field is named like a credential.
 fn secret_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
@@ -226,9 +233,6 @@ where
     }
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        if *event.metadata().level() >= Level::DEBUG && is_transport_target(event.metadata().target()) {
-            return;
-        }
         let mut fields = EventFields::default();
         event.record(&mut fields);
         let (mut repo, mut task) = (None, fields.task.clone());
@@ -255,7 +259,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::{Layer as _, filter::filter_fn, layer::SubscriberExt};
 
     use super::*;
 
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn transport_events_are_not_buffered() {
         let buffer = LogBuffer::with_capacity(10);
-        let subscriber = tracing_subscriber::registry().with(buffer.layer());
+        let subscriber = tracing_subscriber::registry().with(buffer.layer().with_filter(filter_fn(keeps)));
         tracing::subscriber::with_default(subscriber, || {
             tracing::debug!(target: "quinn_proto::connection", "packet sent");
             tracing::trace!(target: "iroh", "tick");
