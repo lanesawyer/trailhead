@@ -326,7 +326,7 @@ these, or compares first, so the UI does not lay itself out when nothing on scre
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
 | `ModalPlugin`, `InlinePlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals or answers inline edits without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
 | `layer` | module of `i32` constants | Which surface is over which (section 3). |
-| `lint` | module | The design-system lint (section 6). |
+| `lint` | module | The design-system lint and the scan for wholesale redraws, `lint::redraws` (section 6). |
 
 ### Test helpers
 
@@ -548,9 +548,9 @@ changed:
 - a disabled state with `InteractionDisabled`;
 - a list that gains, loses and reorders items with `Keyed`.
 
-Each app guards this with a test: one that updates a view and checks every other entity is the same `Entity` (the
-example app's `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`), and, in Lookout, a scan of
-its sources for the shape of a wholesale redraw (`clients/trailhead-lookout/tests/in_place.rs`).
+Each app guards this with two tests: one that updates a view and checks every other entity is the same `Entity` (the
+example app's `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`), and the kit's scan of its
+sources for the shape of a wholesale redraw, `lint::redraws` (section 6).
 
 ### A node is never smaller than its content unless you say so (TRAIL-836)
 
@@ -943,6 +943,23 @@ will. An entry that finds nothing fails too, so take it off when the file is fix
 inside the rule to get a line through. An app adds rules about its own domain as more `Rule`s (Lookout's
 `status-label` in `clients/trailhead-lookout/tests/design_system.rs`).
 
+`lint::redraws(crate_root, dirs, allowed: &[AllowedRedraw]) -> Vec<String>` is the guard for in-place updates
+(section 4): it finds each function under `dirs` that despawns what it drew to draw it again (a `despawn_children` or
+`despawn_related`, a `despawn` of a loop's `child`, any `despawn` in a function named `redraw*`, a despawn in a loop
+followed by a spawn), skipping test modules. A function that opens and closes a surface (a modal's `redraw_form`) goes
+on the test's list as an `AllowedRedraw { path, function, why }`; an entry that finds nothing fails, as above. The kit
+reads the files, so an app's test needs no file access of its own:
+
+```rust
+const REDRAWS: &[AllowedRedraw] = &[];
+
+#[test]
+fn the_app_updates_in_place() {
+    let found = lint::redraws(env!("CARGO_MANIFEST_DIR"), &["src"], REDRAWS);
+    assert!(found.is_empty(), "\n{}", found.join("\n"));
+}
+```
+
 An app for the shell runs the shell's lint (`trailhead_shell::lint`), which adds to these rules the ones that keep an
 app inside its limits; `clients/trailhead-app-example/tests/design_system.rs` shows how it is run, and
 `clients/trailhead-shell/GUIDE.md` says what it holds an app to.
@@ -955,7 +972,7 @@ dark theme on one screen.
 - **Logic, headless.** The view model as a pure function of the state, and the observers under `MinimalPlugins`
   (recipe 2's `Press` is triggered straight from a test).
 - **In place.** A test that changes something and checks the entity of the changed text is the same and no other
-  entity was spawned or despawned (the example app's third test).
+  entity was spawned or despawned (the example app's third test), and `lint::redraws` over `src`.
 - **Theme.** If the app paints colors: that each of its tokens resolves (`Theme::has`) and that
   `Theme::repeated_colors` is empty.
 - **The lint**, as above.

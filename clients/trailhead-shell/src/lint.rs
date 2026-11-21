@@ -11,11 +11,13 @@
 //! assert!(found.is_empty(), "{}", found.join("\n"));
 //! ```
 //!
+//! The kit's scan for a surface redrawn wholesale, [`redraws`], is here too, so that test imports nothing else.
+//!
 //! Apps are held to [`APP`]. The shell and Lookout own the window, the files and the network, so they run the kit's
 //! rules only. Like the kit's rules these look at what a line says, not what it means: they stop a slip and a lazy
 //! shortcut, and a dependency review is what stops a determined one.
 
-pub use trailhead_ui::lint::{Allowed, Line, Rule, check};
+pub use trailhead_ui::lint::{Allowed, AllowedRedraw, Line, Rule, check, redraws};
 
 /// The kit's rules plus the four here: the one set an app's lint test passes to [`check`].
 pub const APP: &[Rule] = &APP_RULES;

@@ -15,8 +15,15 @@
 //!
 //! Rules are about what a line looks like, not what it means, so they can be fooled; they catch the slips that build
 //! cleanly and look fine in a dark theme on one screen.
+//!
+//! [`redraws`] is the other check an app runs over its sources, for the rule that a surface is spawned once and
+//! updated in place: it finds the functions that despawn what they drew to draw it again.
 
 use std::path::{Path, PathBuf};
+
+mod redraw;
+
+pub use redraw::{AllowedRedraw, redraws};
 
 /// One line of a source file, as a rule sees it.
 pub struct Line<'a> {
