@@ -3,8 +3,9 @@
 //! shots test is copied from. `#[ignore]`d, since it needs a render adapter: `mise run shots` runs every app's, and
 //! says where the pictures went.
 
-use trailhead_app_example::{Example, Press};
+use trailhead_app_example::{COUNT_SETTINGS, Example, Press};
 use trailhead_shell::ShellPlugin;
+use trailhead_shell::settings::OpenSettings;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot};
 use trailhead_shell::testing::{Other, settle};
 use trailhead_ui::TextSize;
@@ -35,4 +36,10 @@ fn shots() {
     // Ctrl and = up to 150%: everything larger, nothing cut off or out of place.
     shot.set_options(ShotOptions { theme: ShotTheme::Dark, text_size: TextSize::nearest(150), ..shot.options() });
     save(&mut shot, "page");
+
+    // The app's page in the shell's settings.
+    shot.set_options(ShotOptions { text_size: TextSize::DEFAULT, ..shot.options() });
+    shot.world_mut().trigger(OpenSettings { page: Some(COUNT_SETTINGS) });
+    settle(&mut shot);
+    save(&mut shot, "settings");
 }
