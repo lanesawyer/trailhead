@@ -254,11 +254,13 @@ mod tests {
         BTreeMap::new()
     }
 
+    #[cfg(feature = "node")]
     fn names(hosts: &[InstallHost]) -> Vec<&str> {
         hosts.iter().map(|h| h.host.as_str()).collect()
     }
 
     #[test]
+    #[cfg(feature = "node")]
     fn a_node_stack_needs_only_nodejs_and_mises_version_lists() {
         let hosts = install_hosts_for(&["node".to_string()], &none(), false).unwrap();
         assert_eq!(names(&hosts), ["mise.jdx.dev", "mise-versions.jdx.dev", "nodejs.org"]);
@@ -266,6 +268,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "node")]
     fn mises_installer_hosts_are_opened_only_when_mise_is_missing() {
         let node = ["node".to_string()];
         assert!(!names(&install_hosts_for(&node, &none(), false).unwrap()).contains(&"mise.run"));
@@ -281,11 +284,17 @@ mod tests {
 
     #[test]
     fn backends_map_to_their_registries() {
-        assert_eq!(hosts_for("npm:prettier").unwrap(), ["registry.npmjs.org"]);
-        assert_eq!(hosts_for("core:node").unwrap(), ["nodejs.org"]);
-        assert_eq!(hosts_for("pipx:black").unwrap(), ["pypi.org", "files.pythonhosted.org"]);
+        #[cfg(feature = "node")]
+        {
+            assert_eq!(hosts_for("npm:prettier").unwrap(), ["registry.npmjs.org"]);
+            assert_eq!(hosts_for("core:node").unwrap(), ["nodejs.org"]);
+        }
+        #[cfg(feature = "python")]
+        {
+            assert_eq!(hosts_for("pipx:black").unwrap(), ["pypi.org", "files.pythonhosted.org"]);
+            assert!(hosts_for("python").unwrap().contains(&"pypi.org"));
+        }
         assert!(hosts_for("aqua:BurntSushi/ripgrep").unwrap().contains(&"github.com"));
-        assert!(hosts_for("python").unwrap().contains(&"pypi.org"));
         assert!(hosts_for("zig").is_none());
         assert!(hosts_for("cargo:ripgrep").is_none());
     }
@@ -301,6 +310,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "node")]
     fn configured_hosts_override_the_table() {
         let node = ["node".to_string()];
         let configured = BTreeMap::from([("node".to_string(), vec!["mirror.example".to_string()])]);
