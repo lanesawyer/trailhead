@@ -1,6 +1,7 @@
 //! The sidebar down the left of the window, the same in every view: Lookout's name, New task, the search box, the places to go
 //! (Switchbacks, which is the board, the trail map, then each project's page), the subscription usage card
-//! ([`crate::usage`]), and a footer with the connection chip and settings. The places scroll between the search box
+//! ([`crate::usage`]), and a footer with the connection chip and, in a shell with no rail to hold it, the gear that
+//! opens the shell's settings. The places scroll between the search box
 //! and the usage card, which stays put with the footer.
 //!
 //! It is spawned when Lookout becomes the app the shell shows, torn down when another app does, and in between
@@ -15,9 +16,10 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::{Activate, ControlOrientation};
 use trailhead_factory::FactoryState;
 use trailhead_model::{Project, ProjectStatus, Task};
-use trailhead_shell::ActiveApp;
 use trailhead_shell::connection::{Connection, ConnectionStatus};
 use trailhead_shell::mirror::Mirrored;
+use trailhead_shell::settings::SettingsGear;
+use trailhead_shell::{ActiveApp, Apps};
 use uuid::Uuid;
 
 use crate::LOOKOUT;
@@ -27,7 +29,6 @@ use crate::factory::{FactoryLink, FactoryStatus};
 use crate::project::{OpenProject, ProjectPage};
 use crate::project_form::NewProject;
 use crate::search::Deep;
-use crate::settings::SettingsButton;
 use crate::usage::{UsageMeterEntities, spawn_usage_card, sync_usage};
 use crate::widgets::{
     ButtonKind, ChipEdit, Icon, Keyed, NavEdit, NavItem, Token, button, chip, nav_heading_action, nav_item,
@@ -125,7 +126,7 @@ impl Plugin for SidebarUiPlugin {
     }
 }
 
-fn spawn_sidebar(mut commands: Commands) {
+fn spawn_sidebar(mut commands: Commands, apps: Res<Apps>) {
     let root = commands.spawn_scene(sidebar()).insert((Name::new("sidebar"), Sidebar)).id();
     commands.queue_spawn_scene(text("Lookout", size::APP_TITLE)).insert(ChildOf(root));
     commands
@@ -167,9 +168,12 @@ fn spawn_sidebar(mut commands: Commands) {
     let (tone, words, hint) =
         connection_chip(Connection::default(), &ConnectionStatus::default(), &FactoryLink::Unknown);
     commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(footer)));
-    commands
-        .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonKind::Plain))
-        .insert((SettingsButton, ChildOf(footer)));
+    // With several apps the gear is at the rail's foot, the window's own place for it.
+    if !apps.has_rail() {
+        commands
+            .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonKind::Plain))
+            .insert((SettingsGear, ChildOf(footer)));
+    }
 }
 
 /// Takes the sidebar down with what was kept of its rows, so the next one starts from nothing.
@@ -383,13 +387,20 @@ mod tests {
     use trailhead_shell::mirror::MirrorPlugin;
     use trailhead_shell::sync::{Snapshot, SyncItem};
 
+    use trailhead_shell::{AppId, Manifest, ShellApp};
+
     use super::*;
     use crate::board::BoardPlugin;
     use crate::project::ProjectPlugin;
     use crate::widgets::{NavPart, Truncated};
 
     fn app() -> App {
+        app_with(Apps::new(vec![crate::Lookout::new().manifest()]))
+    }
+
+    fn app_with(apps: Apps) -> App {
         let mut app = App::new();
+        app.insert_resource(apps);
         app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
@@ -488,11 +499,20 @@ mod tests {
     }
 
     #[test]
+    fn with_several_apps_the_gear_is_the_rails_and_not_in_the_footer() {
+        let other = Manifest { id: AppId("other"), name: "Other", icon: Icon::Flag };
+        let mut app = app_with(Apps::new(vec![crate::Lookout::new().manifest(), other]));
+        one::<ConnectionChip>(&mut app);
+        let world = app.world_mut();
+        assert_eq!(world.query::<&SettingsGear>().iter(world).count(), 0);
+    }
+
+    #[test]
     fn the_sidebar_has_its_places_projects_by_key_and_footer() {
         let mut app = app();
         one::<SearchBox>(&mut app);
         one::<ConnectionChip>(&mut app);
-        one::<SettingsButton>(&mut app);
+        one::<SettingsGear>(&mut app);
         assert_eq!(
             entries(&mut app),
             [

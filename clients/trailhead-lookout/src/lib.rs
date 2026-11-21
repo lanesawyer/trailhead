@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use bevy::prelude::*;
 use trailhead_shell::net::LinkJob;
+use trailhead_shell::settings::SettingsPage;
 use trailhead_shell::{AppId, Manifest, ShellApp};
 use trailhead_ui::{Icon, Theme};
 
@@ -102,5 +103,9 @@ impl ShellApp for Lookout {
 
     fn paint(&self, theme: &mut Theme) {
         widgets::paint(theme);
+    }
+
+    fn settings_pages(&self) -> Vec<SettingsPage> {
+        settings::pages()
     }
 }

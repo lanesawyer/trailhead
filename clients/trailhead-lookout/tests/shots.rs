@@ -2,8 +2,8 @@
 //! since it needs a render adapter: `mise run shots` runs every app's, and says where the pictures went.
 
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
 use serde_json::{Value, json};
+use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
     ControlState, FactorySnapshot, RunPhase, RunStatus, SandboxState, SandboxStatus, TaskKey, Usd,
 };
@@ -12,9 +12,11 @@ use trailhead_lookout::Lookout;
 use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
 use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
-use trailhead_lookout::settings::{SettingsButton, SettingsModal};
+use trailhead_lookout::logs::{LogItem, LogUpdate};
+use trailhead_lookout::settings::{FACTORY_SETTINGS, LOGS_SETTINGS};
 use trailhead_shell::connection::Connection;
 use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json, user_json};
+use trailhead_shell::settings::{OpenSettings, PageId, SettingsModal};
 use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot};
 use trailhead_shell::testing::{fill, set_connection, settle};
@@ -117,13 +119,6 @@ fn factory() -> FactoryItem {
     FactoryItem(FactoryUpdate::Snapshot(vec![RepoSnapshot { repo: "o/r".into(), snapshot }]))
 }
 
-fn press<T: Component>(shot: &mut ShotApp) {
-    let world = shot.world_mut();
-    let found = world.query_filtered::<Entity, With<T>>().iter(world).next().expect("the button to press");
-    world.trigger(Activate { entity: found });
-    settle(shot);
-}
-
 fn close_modals(shot: &mut ShotApp) {
     let world = shot.world_mut();
     let open: Vec<Entity> = world.query_filtered::<Entity, With<ModalRoot>>().iter(world).collect();
@@ -131,6 +126,34 @@ fn close_modals(shot: &mut ShotApp) {
         world.despawn(modal);
     }
     settle(shot);
+}
+
+fn open_settings(shot: &mut ShotApp, page: PageId) {
+    shot.world_mut().trigger(OpenSettings { page: Some(page) });
+    settle(shot);
+    let world = shot.world_mut();
+    assert_eq!(world.query::<&SettingsModal>().iter(world).count(), 1, "settings is open");
+}
+
+/// A few of the control plane's lines about TRAIL-3's run, a warning and an error among them.
+fn log_lines() -> Vec<LogLine> {
+    let line = |n: i64, level, task: Option<&str>, message: &str| LogLine {
+        ts_ms: 1_767_000_000_000 + n * 7_000,
+        level,
+        target: "trailhead_control".into(),
+        repo: Some("o/r".into()),
+        task: task.map(String::from),
+        message: message.into(),
+    };
+    vec![
+        line(0, LogLevel::Info, None, "control plane up; 2 sandboxes warm"),
+        line(1, LogLevel::Info, Some("TRAIL-3"), "claimed; starting a run in trail-3-a1"),
+        line(2, LogLevel::Info, Some("TRAIL-3"), "harness started: claude-code"),
+        line(3, LogLevel::Warn, Some("OPS-1"), "paused: waiting on an answer to a question"),
+        line(4, LogLevel::Info, Some("TRAIL-3"), "checks: cargo test -p trailhead-shell"),
+        line(5, LogLevel::Error, Some("TRAIL-2"), "push refused: the branch moved; retrying after a fetch"),
+        line(6, LogLevel::Info, Some("TRAIL-3"), "checks passed; opening a pull request"),
+    ]
 }
 
 fn go(shot: &mut ShotApp, view: View) {
@@ -174,13 +197,17 @@ fn shots() {
     shot.world_mut().resource_mut::<Selection>().0 = None;
     settle(&mut shot);
 
-    press::<SettingsButton>(&mut shot);
-    let world = shot.world_mut();
-    assert_eq!(world.query::<&SettingsModal>().iter(world).count(), 1, "settings is open");
-    save(&mut shot, "settings");
+    shot.world_mut().write_message(factory());
+    settle(&mut shot);
+    // Lookout's pages in the shell's settings: the factory's state, and its log following a run.
+    open_settings(&mut shot, FACTORY_SETTINGS);
+    save(&mut shot, "settings-factory");
+    open_settings(&mut shot, LOGS_SETTINGS);
+    shot.world_mut().write_message(LogItem(LogUpdate::Backlog(log_lines())));
+    settle(&mut shot);
+    save(&mut shot, "settings-logs");
     close_modals(&mut shot);
 
-    shot.world_mut().write_message(factory());
     // Wide enough for the camps and both columns of waypoints.
     shot.set_size((1440, 800));
     go(&mut shot, View::Map);

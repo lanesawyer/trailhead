@@ -1,121 +1,46 @@
-//! The settings modal (`docs/factory/ui.md#settings`), opened from the gear at the right of the header: pages picked
-//! from tabs across the top. General holds the appearance: light, dark or the desktop's theme, kept by the shell
-//! for the next launch. Connection holds where Lookout is connected and who it acts as, with Disconnect; Factory shows
-//! what the factory status already says, read-only. A new page is a [`Page`] variant and the fields and texts
-//! for it in [`fill`] and [`refresh`].
+//! Lookout's pages in the shell's settings (`docs/factory/ui.md#settings`), listed under Lookout after the shell's
+//! own: Factory, what the factory status already says, read-only; and Logs, the control plane's log ([`crate::logs`]).
+//! The window's theme, text size and connection are the shell's pages, not Lookout's.
 //!
-//! The modal is spawned once, when it opens, and its texts are set in place as what they show changes.
+//! Each page is spawned when it is shown, and its texts are set in place as what they show changes.
 
-use bevy::clipboard::Clipboard;
 use bevy::prelude::*;
-use bevy::ui_widgets::{Activate, ControlOrientation, SelectedTab, ValueChange};
 use trailhead_model::Task;
-use trailhead_shell::connection::{Api, Connection, Dialed, LocalEndpoint, SendNet};
 use trailhead_shell::mirror::{Mirrored, rows};
-use trailhead_shell::net::NetCommand;
+use trailhead_shell::settings::{OpenSettings, PageId, SettingsPage};
 
+use crate::LOOKOUT;
 use crate::author::Authoring;
 use crate::factory::FactoryStatus;
 use crate::logs::{LogFilter, LogsUiPlugin, logs_page};
-use crate::widgets::{
-    Appearance, ButtonGroup, ButtonKind, Icon, Modal, ModalSlots, Picked, ThemeChoice, button, button_group,
-    open_modal, row, set_text, setting, settings_page, size, tab, tab_strip, text, tool_button,
-};
+use crate::widgets::{set_text, setting, size, text};
 
-/// A page of the modal, in tab order.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Page {
-    #[default]
-    General,
-    Connection,
-    Factory,
-    Logs,
+/// The Factory page.
+pub const FACTORY_SETTINGS: PageId = PageId::new(LOOKOUT, "factory");
+/// The Logs page.
+pub const LOGS_SETTINGS: PageId = PageId::new(LOOKOUT, "logs");
+
+/// Lookout's pages, in the order they are listed.
+pub fn pages() -> Vec<SettingsPage> {
+    vec![
+        SettingsPage::new(FACTORY_SETTINGS.key, "Factory", factory_page),
+        SettingsPage::new(LOGS_SETTINGS.key, "Logs", |In(page): In<Entity>, mut commands: Commands| {
+            logs_page(&mut commands, page);
+        }),
+    ]
 }
 
-impl Page {
-    pub const ALL: [Page; 4] = [Page::General, Page::Connection, Page::Factory, Page::Logs];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Page::General => "General",
-            Page::Connection => "Connection",
-            Page::Factory => "Factory",
-            Page::Logs => "Logs",
-        }
-    }
-}
-
-/// The gear in the header.
-#[derive(Component)]
-pub struct SettingsButton;
-
-/// The settings modal.
-#[derive(Component)]
-pub struct SettingsModal;
-
-impl Modal for SettingsModal {
-    fn title(&self) -> String {
-        "Settings".into()
-    }
-    // One size whichever tab is shown, so switching tabs doesn't resize the modal.
-    fn tall(&self) -> bool {
-        true
-    }
-    fn wide(&self) -> bool {
-        true
-    }
-}
-
-/// The strip of tabs in the modal.
-#[derive(Component)]
-struct SettingsStrip;
-
-/// A tab, and the page it shows.
-#[derive(Component)]
-struct SettingsTab(Page);
-
-/// A page's box, hidden unless its tab is picked.
-#[derive(Component)]
-struct SettingsPage(Page);
-
-/// A button in the modal.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsAct {
-    CopyEndpoint,
-    Disconnect,
-}
-
-/// The theme's buttons, one per [`ThemeChoice::ALL`].
+/// A text on the Factory page, and what it shows.
 #[derive(Component, Clone, Default)]
-struct ThemePick;
+pub struct Shows(pub Value);
 
-/// A text in the modal, and what it shows.
-#[derive(Component, Clone, Default)]
-struct Shows(Value);
-
-/// What a text in the modal shows.
+/// What a text on the Factory page shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Value {
+pub enum Value {
     #[default]
-    Factory,
-    Identity,
-    Endpoint,
     Status,
     Repos,
     Queue,
-}
-
-/// What the Connection page says of the control plane dialed: the id, or that there is none.
-pub fn dialed_text(dialed: &Dialed) -> String {
-    dialed.0.clone().unwrap_or_else(|| "not connected".into())
-}
-
-/// What the Connection page says of who the token acts as, which is only known while signed in.
-pub fn identity_text(connection: Connection, api: Option<&Api>) -> String {
-    match api {
-        Some(api) if connection == Connection::Live => api.0.user.clone(),
-        _ => "not signed in".into(),
-    }
 }
 
 /// The repos the factory serves, one per line with the state of its control plane.
@@ -154,198 +79,25 @@ fn value(which: Value, label: &str) -> impl Scene {
     setting(label.to_string(), "", bsn_list! { @text("", size::BODY) Shows({ which }) })
 }
 
-/// Show the settings Logs tab filtered to a task, given by key; sent from the inspector.
-#[derive(Event, Debug, Clone)]
-pub struct OpenLogs(pub String);
-
-/// The page the next settings modal opens on, when it isn't the first.
-#[derive(Resource, Default)]
-struct StartPage(Option<Page>);
-
-/// Filters the log to the task and opens the modal on its Logs tab.
-fn on_open_logs(
-    open: On<OpenLogs>,
-    modals: Query<(), With<SettingsModal>>,
-    strips: Query<Entity, With<SettingsStrip>>,
-    tabs: Query<(Entity, &SettingsTab)>,
-    mut filter: ResMut<LogFilter>,
-    mut start: ResMut<StartPage>,
-    mut commands: Commands,
-) {
-    filter.task = Some(open.0.clone());
-    if modals.is_empty() {
-        start.0 = Some(Page::Logs);
-        open_modal(&mut commands, SettingsModal);
-    } else if let Some(strip) = strips.iter().next() {
-        // Already open: pick the tab as a click would, so on_tab shows the page.
-        let logs = tabs.iter().find(|(_, t)| t.0 == Page::Logs).map(|(e, _)| e);
-        commands.trigger(ValueChange { source: strip, value: logs, is_final: true });
-    }
-}
-
-/// Opens the modal from the gear, unless one is open already.
-fn on_gear(
-    activate: On<Activate>,
-    gear: Query<(), With<SettingsButton>>,
-    open: Query<(), With<SettingsModal>>,
-    mut commands: Commands,
-) {
-    if gear.contains(activate.entity) && open.is_empty() {
-        open_modal(&mut commands, SettingsModal);
-    }
-}
-
-/// Fills a new modal: the tabs, and a box for each page, of which only the first shows.
-fn fill(
-    new: Query<&ModalSlots, (With<SettingsModal>, Added<ModalSlots>)>,
-    appearance: Res<Appearance>,
-    mut start: ResMut<StartPage>,
-    mut commands: Commands,
-) {
-    for slots in &new {
-        let first = start.0.take().unwrap_or(Page::ALL[0]);
-        let strip = commands
-            .spawn_scene(tab_strip(ControlOrientation::Horizontal))
-            .insert((SettingsStrip, ChildOf(slots.body)))
-            .id();
-        let mut picked = None;
-        for page in Page::ALL {
-            let entity = commands
-                .spawn_scene(tab(page.label(), ControlOrientation::Horizontal))
-                .insert((SettingsTab(page), ChildOf(strip)))
-                .id();
-            if page == first {
-                picked = Some(entity);
-            }
-        }
-        commands.entity(strip).insert(SelectedTab(picked));
-
-        for page in Page::ALL {
-            let shown = if page == first { Display::Flex } else { Display::None };
-            let holder = commands
-                .spawn_scene(bsn! { @settings_page() Node { display: { shown } } })
-                .insert((Name::new(page.label()), SettingsPage(page), ChildOf(slots.body)))
-                .id();
-            match page {
-                Page::General => general_page(&mut commands, holder, appearance.choice),
-                Page::Connection => connection_page(&mut commands, holder),
-                Page::Factory => factory_page(&mut commands, holder),
-                Page::Logs => logs_page(&mut commands, holder),
-            }
-        }
-    }
-}
-
-fn connection_page(commands: &mut Commands, page: Entity) {
-    commands.spawn_scene(value(Value::Factory, "Factory endpoint")).insert(ChildOf(page));
-    let line =
-        commands.spawn_scene(bsn! { @row() Node { align_items: AlignItems::FlexEnd } }).insert(ChildOf(page)).id();
-    commands.spawn_scene(value(Value::Endpoint, "This app's endpoint id")).insert(ChildOf(line));
-    commands
-        .spawn_scene(tool_button(Icon::Copy, "Copy the endpoint id", ButtonKind::Plain))
-        .insert((SettingsAct::CopyEndpoint, ChildOf(line)));
-    commands.spawn_scene(value(Value::Identity, "Signed in as")).insert(ChildOf(page));
-    commands
-        .spawn_scene(button("Disconnect", None, ButtonKind::Normal))
-        .insert((SettingsAct::Disconnect, ChildOf(page)));
-}
-
-fn general_page(commands: &mut Commands, page: Entity, choice: ThemeChoice) {
-    let options = ThemeChoice::ALL.iter().map(|c| (c.label().to_string(), Some(c.icon()))).collect();
-    let at = ThemeChoice::ALL.iter().position(|c| *c == choice);
-    let note = "Desktop follows your desktop's light or dark setting.";
-    let control = bsn_list! { @button_group(options, at) ThemePick };
-    commands.spawn_scene(setting("Appearance", note, control)).insert(ChildOf(page));
-}
-
-/// Shows a theme chosen elsewhere on the theme's buttons.
-fn show_theme(appearance: Res<Appearance>, mut groups: Query<&mut ButtonGroup, With<ThemePick>>) {
-    let at = ThemeChoice::ALL.iter().position(|c| *c == appearance.choice);
-    for mut group in &mut groups {
-        if group.chosen != at {
-            group.chosen = at;
-        }
-    }
-}
-
-/// A theme was picked: wear it.
-fn on_theme_pick(picked: On<Picked>, picks: Query<(), With<ThemePick>>, mut appearance: ResMut<Appearance>) {
-    if !picks.contains(picked.entity) {
-        return;
-    }
-    if let Some(choice) = ThemeChoice::ALL.get(picked.index) {
-        appearance.choice = *choice;
-    }
-}
-
-fn factory_page(commands: &mut Commands, page: Entity) {
+fn factory_page(In(page): In<Entity>, mut commands: Commands) {
     commands.spawn_scene(value(Value::Status, "Status")).insert(ChildOf(page));
     commands.spawn_scene(value(Value::Repos, "Repos it serves")).insert(ChildOf(page));
     commands.spawn_scene(value(Value::Queue, "Queue tasks")).insert(ChildOf(page));
 }
 
-/// A tab was picked: select it and show its page.
-fn on_tab(
-    change: On<ValueChange<Option<Entity>>>,
-    strips: Query<(), With<SettingsStrip>>,
-    tabs: Query<&SettingsTab>,
-    mut pages: Query<(&SettingsPage, &mut Node)>,
-    mut commands: Commands,
-) {
-    if !strips.contains(change.source) {
-        return;
-    }
-    commands.entity(change.source).insert(SelectedTab(change.value));
-    let Some(shown) = change.value.and_then(|t| tabs.get(t).ok()).map(|t| t.0) else { return };
-    for (SettingsPage(page), mut node) in &mut pages {
-        let display = if *page == shown { Display::Flex } else { Display::None };
-        if node.display != display {
-            node.display = display;
-        }
-    }
+/// Show the settings' Logs page filtered to a task, given by key; sent from the inspector.
+#[derive(Event, Debug, Clone)]
+pub struct OpenLogs(pub String);
+
+/// Filters the log to the task and opens the shell's settings at the Logs page, or turns to it.
+fn on_open_logs(open: On<OpenLogs>, mut filter: ResMut<LogFilter>, mut commands: Commands) {
+    filter.task = Some(open.0.clone());
+    commands.trigger(OpenSettings { page: Some(LOGS_SETTINGS) });
 }
 
-/// Disconnect: let go of the factory and close the modal, so the connect panel under it is what's left.
-fn on_disconnect(
-    activate: On<Activate>,
-    acts: Query<&SettingsAct>,
-    modals: Query<Entity, With<SettingsModal>>,
-    mut send: MessageWriter<SendNet>,
-    mut commands: Commands,
-) {
-    if acts.get(activate.entity) != Ok(&SettingsAct::Disconnect) {
-        return;
-    }
-    send.write(SendNet(NetCommand::Disconnect));
-    for modal in &modals {
-        commands.entity(modal).despawn();
-    }
-}
-
-fn copy_endpoint(
-    activate: On<Activate>,
-    acts: Query<&SettingsAct>,
-    endpoint: Res<LocalEndpoint>,
-    mut clipboard: ResMut<Clipboard>,
-) {
-    if acts.get(activate.entity) != Ok(&SettingsAct::CopyEndpoint) {
-        return;
-    }
-    if let Some(id) = &endpoint.0
-        && let Err(e) = clipboard.set_text(id.clone())
-    {
-        warn!(error = %e, "couldn't copy the endpoint id");
-    }
-}
-
-/// Keeps the texts of an open modal current, in place.
-#[allow(clippy::too_many_arguments)]
+/// Keeps the Factory page's texts current, in place, while it is shown.
 fn refresh(
     mut texts: Query<(&Shows, &mut Text)>,
-    dialed: Res<Dialed>,
-    endpoint: Res<LocalEndpoint>,
-    connection: Res<State<Connection>>,
-    api: Option<Res<Api>>,
     status: Res<FactoryStatus>,
     authoring: Res<Authoring>,
     tasks: Query<&Mirrored<Task>>,
@@ -356,9 +108,6 @@ fn refresh(
     let tasks = rows(&tasks);
     for (Shows(which), text) in &mut texts {
         let wanted = match which {
-            Value::Factory => dialed_text(&dialed),
-            Value::Identity => identity_text(*connection.get(), api.as_deref()),
-            Value::Endpoint => endpoint.0.clone().unwrap_or_else(|| "starting".into()),
             Value::Status => status.label(),
             Value::Repos => repos_text(&status),
             Value::Queue => queues_text(&authoring, &status, &tasks),
@@ -367,80 +116,37 @@ fn refresh(
     }
 }
 
-/// The settings modal's logic and drawing, without the clipboard.
-pub struct SettingsPlugin;
-
-impl Plugin for SettingsPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<StartPage>()
-            .add_observer(on_gear)
-            .add_observer(on_open_logs)
-            .add_observer(on_tab)
-            .add_observer(on_disconnect)
-            .add_observer(on_theme_pick)
-            .add_plugins(LogsUiPlugin)
-            .add_systems(Update, (fill, refresh, show_theme.run_if(resource_changed::<Appearance>)).chain());
-    }
-}
-
-/// [`SettingsPlugin`] and its copy button, which needs the window's clipboard.
+/// What Lookout's pages draw and do once the shell shows them.
 pub struct SettingsUiPlugin;
 
 impl Plugin for SettingsUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SettingsPlugin).add_observer(copy_endpoint);
+        app.add_observer(on_open_logs).add_plugins(LogsUiPlugin).add_systems(Update, refresh);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bevy::state::app::StatesPlugin;
     use serde_json::json;
+    use trailhead_shell::ShellPlugin;
     use trailhead_shell::fixture::task_json;
+    use trailhead_shell::settings::{SHELL_GROUP, SettingsPages, SettingsShown, ShownPage};
+    use trailhead_shell::testing::{Other, headless, settle, windowed};
+    use trailhead_ui::ModalPlugin;
 
     use super::*;
-    use crate::widgets::{ModalPlugin, ModalRoot};
+    use crate::Lookout;
 
     fn app() -> App {
-        let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
-            .init_asset::<bevy::text::Font>()
-            .init_asset::<Image>()
-            .init_state::<Connection>()
-            .init_resource::<Dialed>()
-            .init_resource::<LocalEndpoint>()
-            .init_resource::<FactoryStatus>()
-            .init_resource::<Authoring>()
-            .init_resource::<Appearance>()
-            .add_message::<SendNet>()
-            .add_plugins((ModalPlugin, SettingsPlugin));
+        let mut app = windowed(ShellPlugin::new().with(Lookout::new()).with(Other));
+        app.add_plugins(ModalPlugin);
+        settle(&mut app);
         app
     }
 
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
-    }
-
-    fn modals(app: &mut App) -> usize {
-        app.world_mut().query_filtered::<(), With<SettingsModal>>().iter(app.world()).count()
-    }
-
-    fn open(app: &mut App) {
-        let gear = app.world_mut().spawn(SettingsButton).id();
-        app.world_mut().trigger(Activate { entity: gear });
-        settle(app);
-    }
-
-    fn shown(app: &mut App) -> Vec<Page> {
+    fn shown(app: &mut App) -> Vec<PageId> {
         let world = app.world_mut();
-        world
-            .query::<(&SettingsPage, &Node)>()
-            .iter(world)
-            .filter(|(_, n)| n.display != Display::None)
-            .map(|(p, _)| p.0)
-            .collect()
+        world.query::<&ShownPage>().iter(world).map(|p| p.0).collect()
     }
 
     type Texts = Vec<(Entity, Value, String)>;
@@ -455,14 +161,14 @@ mod tests {
     }
 
     #[test]
-    fn the_gear_opens_one_settings_modal_on_the_first_page() {
-        let mut app = app();
-        open(&mut app);
-        assert_eq!(modals(&mut app), 1);
-        assert_eq!(shown(&mut app), [Page::General]);
-        // Pressing the gear again doesn't stack another.
-        open(&mut app);
-        assert_eq!(modals(&mut app), 1);
+    fn lookouts_pages_are_listed_under_lookout_through_the_contract_alone() {
+        let app = headless(ShellPlugin::new().with(Lookout::new()));
+        let pages = app.world().resource::<SettingsPages>();
+        let listed: Vec<(&str, PageId)> = pages.iter().map(|p| (p.group, p.id)).collect();
+        let lookouts: Vec<_> = listed.iter().filter(|(_, id)| id.app == LOOKOUT).collect();
+        assert_eq!(lookouts, [&("Lookout", FACTORY_SETTINGS), &("Lookout", LOGS_SETTINGS)]);
+        assert!(listed.iter().all(|(group, id)| id.app == LOOKOUT || *group == SHELL_GROUP), "{listed:?}");
+        assert!(listed.iter().position(|(_, id)| id.app == LOOKOUT) > Some(0), "after the shell's own");
     }
 
     #[test]
@@ -470,115 +176,41 @@ mod tests {
         let mut app = app();
         app.world_mut().trigger(OpenLogs("TRAIL-7".into()));
         settle(&mut app);
-        assert_eq!(modals(&mut app), 1);
-        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(shown(&mut app), [LOGS_SETTINGS]);
         assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-7"));
         let world = app.world_mut();
-        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
-        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
-        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+        assert_eq!(world.query::<&crate::logs::LogsPage>().iter(world).count(), 1);
     }
+
     #[test]
-    fn opening_the_logs_while_settings_is_open_switches_to_the_logs_tab() {
+    fn opening_the_logs_while_settings_is_open_turns_to_the_logs_page() {
         let mut app = app();
-        open(&mut app);
-        assert_eq!(shown(&mut app), [Page::General]);
+        app.world_mut().trigger(OpenSettings { page: Some(FACTORY_SETTINGS) });
+        settle(&mut app);
+        assert_eq!(shown(&mut app), [FACTORY_SETTINGS]);
         app.world_mut().trigger(OpenLogs("TRAIL-9".into()));
         settle(&mut app);
-        assert_eq!(modals(&mut app), 1);
-        assert_eq!(shown(&mut app), [Page::Logs]);
+        assert_eq!(shown(&mut app), [LOGS_SETTINGS]);
         assert_eq!(app.world().resource::<LogFilter>().task.as_deref(), Some("TRAIL-9"));
-        let world = app.world_mut();
-        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
-        let picked = world.get::<SelectedTab>(strip).unwrap().0.unwrap();
-        assert_eq!(world.get::<SettingsTab>(picked).map(|t| t.0), Some(Page::Logs));
+        assert!(app.world().resource::<SettingsShown>().page().is_some());
     }
 
     #[test]
-    fn escape_closes_it() {
+    fn the_factory_page_says_what_lookout_knows_and_updates_in_place() {
         let mut app = app();
-        open(&mut app);
-        // With nothing focused, the press goes to the window.
-        let window = app.world_mut().spawn_empty().id();
-        trailhead_ui::test_support::press_escape(app.world_mut(), window);
+        app.world_mut().trigger(OpenSettings { page: Some(FACTORY_SETTINGS) });
         settle(&mut app);
-        assert_eq!(modals(&mut app), 0);
-    }
-
-    #[test]
-    fn each_tab_shows_its_page_and_only_it() {
-        let mut app = app();
-        open(&mut app);
-        let world = app.world_mut();
-        let strip = world.query_filtered::<Entity, With<SettingsStrip>>().single(world).unwrap();
-        let tabs: Vec<(Entity, Page)> =
-            world.query::<(Entity, &SettingsTab)>().iter(world).map(|(e, t)| (e, t.0)).collect();
-        assert_eq!(tabs.len(), Page::ALL.len());
-        for page in [Page::Factory, Page::Connection] {
-            let tab = tabs.iter().find(|(_, p)| *p == page).unwrap().0;
-            app.world_mut().trigger(ValueChange { source: strip, value: Some(tab), is_final: true });
-            settle(&mut app);
-            assert_eq!(shown(&mut app), [page]);
-            assert_eq!(app.world().get::<SelectedTab>(strip), Some(&SelectedTab(Some(tab))));
-        }
-    }
-
-    #[test]
-    fn the_pages_say_what_the_app_knows_and_update_in_place() {
-        let mut app = app();
-        open(&mut app);
         let before = texts(&mut app);
-        assert_eq!(of(&before, Value::Factory), "not connected");
-        assert_eq!(of(&before, Value::Identity), "not signed in");
         assert_eq!(of(&before, Value::Status), "factory: connecting");
         assert_eq!(of(&before, Value::Repos), "none heard of yet");
         assert_eq!(of(&before, Value::Queue), "TRAIL-102 (not loaded)");
 
-        app.world_mut().resource_mut::<Dialed>().0 = Some("abc123".into());
-        app.world_mut().resource_mut::<LocalEndpoint>().0 = Some("me456".into());
+        app.world_mut().resource_mut::<Authoring>().queue = "TRAIL-685".into();
         settle(&mut app);
         let after = texts(&mut app);
-        assert_eq!(of(&after, Value::Factory), "abc123");
-        assert_eq!(of(&after, Value::Endpoint), "me456");
+        assert_eq!(of(&after, Value::Queue), "TRAIL-685 (not loaded)");
         let entities = |list: &Texts| list.iter().map(|(e, ..)| *e).collect::<Vec<_>>();
         assert_eq!(entities(&before), entities(&after));
-    }
-
-    #[test]
-    fn disconnect_sends_it_and_closes_the_modal() {
-        let mut app = app();
-        open(&mut app);
-        let world = app.world_mut();
-        let button = world
-            .query::<(Entity, &SettingsAct)>()
-            .iter(world)
-            .find(|(_, a)| **a == SettingsAct::Disconnect)
-            .unwrap()
-            .0;
-        app.world_mut().trigger(Activate { entity: button });
-        // Drain before settling: messages live two updates, and settle runs more than that.
-        let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
-        settle(&mut app);
-        assert_eq!(modals(&mut app), 0);
-        assert!(matches!(sent.as_slice(), [SendNet(NetCommand::Disconnect)]));
-    }
-
-    #[test]
-    fn disconnect_leaves_other_modals_alone() {
-        let mut app = app();
-        open(&mut app);
-        let other = app.world_mut().spawn(ModalRoot).id();
-        let world = app.world_mut();
-        let button = world
-            .query::<(Entity, &SettingsAct)>()
-            .iter(world)
-            .find(|(_, a)| **a == SettingsAct::Disconnect)
-            .unwrap()
-            .0;
-        app.world_mut().trigger(Activate { entity: button });
-        settle(&mut app);
-        assert_eq!(modals(&mut app), 0);
-        assert!(app.world().get_entity(other).is_ok());
     }
 
     #[test]
@@ -621,16 +253,5 @@ mod tests {
         );
         let pinned = Authoring { queue: "TRAIL-7".into(), pinned: true, ..Authoring::default() };
         assert!(queues_text(&pinned, &status, &tasks).starts_with("TRAIL-7 (not loaded)\nTRAIL-102"));
-    }
-
-    #[test]
-    fn picking_a_theme_wears_it() {
-        let mut app = app();
-        open(&mut app);
-        let pick = app.world_mut().query_filtered::<Entity, With<ThemePick>>().single(app.world()).unwrap();
-        let light = ThemeChoice::ALL.iter().position(|c| *c == ThemeChoice::Light).unwrap();
-        app.world_mut().trigger(Picked { entity: pick, index: light });
-        settle(&mut app);
-        assert_eq!(app.world().resource::<Appearance>().choice, ThemeChoice::Light);
     }
 }
