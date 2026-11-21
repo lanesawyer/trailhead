@@ -72,6 +72,8 @@
 //! - How far along something is: [`progress_bar`]; set its [`Progress`], and its [`ProgressTone`] to recolor it. With
 //!   a label, a value and a note: [`meter`], updated through its [`MeterPart`]s.
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
+//! - A list of short values a person adds to and takes from (directories): [`value_list`]; observe [`ValuesEdited`]
+//!   on it and set its [`ValueList`].
 //! - A pick among things a person should see (small previews), a row of pictures with captions: [`spawn_choice_tile`]s,
 //!   the one chosen marked with [`ChoiceTile`].
 //! - Something that moves: [`ease_in`] and [`ease_out`] over real time, and a background faded with
@@ -139,6 +141,7 @@ mod text_size;
 mod theme;
 mod toggle;
 mod truncate;
+mod value_list;
 
 pub use accordion::{
     ACCORDION_INDENT, Accordion, AccordionCaret, AccordionParts, AccordionTitle, Fold, SectionLevel, spawn_accordion,
@@ -201,6 +204,9 @@ pub use text_size::{ChangeTextSize, TextSize, TextSizePlugin};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use toggle::toggle_switch;
 pub use truncate::{Truncated, truncate_to_width, width_of};
+pub use value_list::{
+    AddValue, RemoveValue, ValueField, ValueLine, ValueLines, ValueList, ValueListEmpty, ValuesEdited, value_list,
+};
 
 /// Where the kit's per-frame systems run in `Update`: opening and closing accordions, cutting titles and captions to
 /// fit, painting tabs. An app's systems that spawn or change widgets go before it.
@@ -248,7 +254,7 @@ impl Plugin for UiPlugin {
                     nav::paint_nav_items,
                     nav::fit_to_sidebar,
                     nav::show_edge_lines,
-                    truncate::fit_truncated,
+                    (value_list::sync_value_lists, value_list::paint_value_lines, truncate::fit_truncated).chain(),
                     button_group::paint_groups,
                     (hover::paint_hover_tones, check_circle::paint_check_circles, choice_tile::paint_choice_tiles),
                     buttons::dim_disabled_captions,

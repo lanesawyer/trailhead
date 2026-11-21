@@ -211,6 +211,18 @@ reorders the children. Your own data stays the one source of the order, and your
 to another list, or dropping it onto a target, is not in the kit yet. The list does not scroll itself while an item is
 dragged near its edge.
 
+### A list of values a person adds to and takes from
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `value_list` | `value_list(values: Vec<String>, empty: Into<String>) -> impl Scene` | Short values a person adds to and takes from (directories, names), as a setting's control: each on a line of its own, cut to its room, with an X that removes it, and under them a field and Add (Enter in the field adds too). `empty` is said, dim, while there are none. It fills the width it is given. Put your marker on it. | Set its `ValueList` with `set_if_neq`; the kit keeps the lines in step in place. |
+| `ValueList` | `ValueList { values: Vec<String> }` (component, on the root) | The values the list shows. | |
+| `ValuesEdited` | `ValuesEdited { entity: Entity, values: Vec<String> }` (entity event, on the root) | An add or a remove asked for, with the values as they would be after it. The list doesn't change itself: set `ValueList` to what you keep. | |
+| `ValueLines`, `ValueLine`, `ValueListEmpty`, `ValueField`, `RemoveValue`, `AddValue` | components | The box of lines, each line (`ValueLine { index, value }`), the empty line, the field's text entity, and the buttons, which the kit keeps; for a test to find. | |
+
+An add trims what is typed and clears the field; an empty value, or one already listed, adds nothing and stays in the
+field. The Trailhead shell's Server settings list the factory's repos with it.
+
 ### A panel, a page or a column
 
 | Item | Signature | What it is for |
