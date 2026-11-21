@@ -6,7 +6,7 @@ use crate::db::{collect, first, fmt_ts, get_enum, get_json, get_opt_ts, get_ts, 
 use crate::error::{Error, Result};
 use crate::metadata::merge_patch;
 use crate::store::{Ctx, Store, Tx};
-use trailhead_model::{Entity, Project, ProjectStatus};
+use trailhead_model::{Entity, PROJECT_REPO_KEY, Project, ProjectStatus};
 
 pub(crate) const PROJECT_COLS: &str = "id, workspace_id, key, name, brief, status, metadata, claim_ttl, require_review, version, created_at, updated_at, deleted_at, reviewers";
 
@@ -100,7 +100,8 @@ pub(crate) fn check_project_write(ctx: &Ctx, project: &Project) -> Result<()> {
 
 /// Who approves work is a human's call: agents can turn review on but not off,
 /// and can't archive or unarchive projects or change their reviewers, whether
-/// by an update or by undoing someone else's.
+/// by an update or by undoing someone else's. Nor where the factory builds a
+/// project (`metadata.factory`): an agent could send its own work to another repo.
 pub(crate) fn check_review_settings(ctx: &Ctx, before: &Project, after: &Project) -> Result<()> {
     if ctx.is_human() {
         return Ok(());
@@ -113,6 +114,11 @@ pub(crate) fn check_review_settings(ctx: &Ctx, before: &Project, after: &Project
     }
     if before.reviewers != after.reviewers {
         return Err(Error::Forbidden("only a human can choose who approves review work".into()));
+    }
+    if before.metadata.get(PROJECT_REPO_KEY) != after.metadata.get(PROJECT_REPO_KEY) {
+        return Err(Error::Forbidden(format!(
+            "only a human can change where a project is built (metadata.{PROJECT_REPO_KEY})"
+        )));
     }
     Ok(())
 }
@@ -167,6 +173,11 @@ impl Store {
         let metadata = new.metadata.unwrap_or_else(|| Value::Object(Default::default()));
         if !metadata.is_object() {
             return Err(Error::Invalid("metadata must be a JSON object".into()));
+        }
+        if !ctx.is_human() && metadata.get(PROJECT_REPO_KEY).is_some() {
+            return Err(Error::Forbidden(format!(
+                "only a human can say where a project is built (metadata.{PROJECT_REPO_KEY})"
+            )));
         }
         self.write(ctx, async |tx| {
             if load_project(&tx.conn, ctx.workspace_id, &key, true).await.is_ok() {

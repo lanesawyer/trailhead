@@ -335,6 +335,67 @@ pub struct Project {
     pub deleted_at: Option<Timestamp>,
 }
 
+impl Project {
+    /// Where the factory builds this project's work, from its metadata.
+    pub fn repo(&self) -> Option<ProjectRepo> {
+        ProjectRepo::of(&self.metadata)
+    }
+}
+
+/// The key in a project's metadata that says where the factory builds it ([`ProjectRepo`]). Only a person may set,
+/// change or clear it: an agent pointing a project at another repo would choose where its own work runs.
+pub const PROJECT_REPO_KEY: &str = "factory";
+
+/// The repo a project's work is built in, and the path inside it, read from `metadata.factory`
+/// (`{"repo": "owner/name", "path": "apps/ticklist"}`). The factory of that repo works the project's graded tasks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRepo {
+    /// `owner/name`.
+    pub repo: String,
+    /// The directory the project's changes stay inside, without leading or trailing slashes; `None` is the whole
+    /// repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl ProjectRepo {
+    /// The `factory` object in a project's metadata, or `None` when it is absent or doesn't name an `owner/name` repo.
+    /// A path that is empty or `/` means the whole repo; one that climbs out (`..`) makes the whole value unreadable.
+    pub fn of(metadata: &Value) -> Option<ProjectRepo> {
+        let read: ProjectRepo = serde_json::from_value(metadata.get(PROJECT_REPO_KEY)?.clone()).ok()?;
+        let repo = read.repo.trim();
+        let (owner, name) = repo.split_once('/')?;
+        if owner.is_empty() || name.is_empty() || name.contains('/') {
+            return None;
+        }
+        let path = match read.path.as_deref().map(|p| p.trim().trim_matches('/')) {
+            None | Some("") => None,
+            Some(p) if p.split('/').any(|part| part.is_empty() || part == "." || part == "..") => return None,
+            Some(p) => Some(p.to_string()),
+        };
+        Some(ProjectRepo { repo: repo.to_string(), path })
+    }
+
+    /// Whether this names `slug` (`owner/name`), which GitHub matches without regard to case.
+    pub fn is(&self, slug: &str) -> bool {
+        self.repo.eq_ignore_ascii_case(slug)
+    }
+
+    /// Whether `file`, a path from the repo's root, lies inside [`ProjectRepo::path`]. Everything does when it's
+    /// unset.
+    pub fn contains(&self, file: &str) -> bool {
+        within(self.path.as_deref(), file)
+    }
+}
+
+/// Whether `file` lies inside the directory `path` (`None` is the whole repo).
+pub fn within(path: Option<&str>, file: &str) -> bool {
+    match path {
+        None => true,
+        Some(dir) => file.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Task {
@@ -699,6 +760,32 @@ pub struct CreatedToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_repo_reads_tolerantly() {
+        let of = |v: Value| ProjectRepo::of(&serde_json::json!({ "factory": v }));
+        let ticklist = ProjectRepo { repo: "o/apps".into(), path: Some("apps/ticklist".into()) };
+        assert_eq!(of(serde_json::json!({"repo": "o/apps", "path": "/apps/ticklist/"})), Some(ticklist.clone()));
+        assert_eq!(of(serde_json::json!({"repo": "o/apps"})).unwrap().path, None);
+        assert_eq!(of(serde_json::json!({"repo": "o/apps", "path": ""})).unwrap().path, None);
+        for bad in [
+            serde_json::json!("o/apps"),
+            serde_json::json!({"repo": "apps"}),
+            serde_json::json!({"repo": "o/a/b"}),
+            serde_json::json!({"repo": "/apps"}),
+            serde_json::json!({"repo": 3}),
+            serde_json::json!({"repo": "o/apps", "path": "apps/../shell"}),
+        ] {
+            assert_eq!(of(bad.clone()), None, "{bad}");
+        }
+        assert_eq!(ProjectRepo::of(&serde_json::json!({})), None);
+        assert_eq!(ProjectRepo::of(&Value::Null), None);
+        assert!(ticklist.is("O/Apps"));
+        assert!(ticklist.contains("apps/ticklist/src/lib.rs"));
+        assert!(!ticklist.contains("apps/ticklist2/src/lib.rs"));
+        assert!(!ticklist.contains("apps/ticklist"));
+        assert!(!ticklist.contains("Cargo.lock"));
+    }
 
     #[test]
     fn statuses_round_trip_through_their_api_names() {
