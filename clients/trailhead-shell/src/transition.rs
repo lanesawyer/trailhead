@@ -514,6 +514,17 @@ mod tests {
     }
 
     #[test]
+    fn the_direction_follows_the_persons_order_of_the_rail() {
+        let mut app = app(TransitionKind::Wipe);
+        app.world_mut().trigger(crate::MoveApp { app: TREES, to: 0 });
+        switch(&mut app, TREES);
+        assert_eq!(frame(&app).map(|f| f.direction), Some(Direction::Up), "trees is above notes now");
+        until(&mut app, |app| frame(app).is_none());
+        switch(&mut app, MAPS);
+        assert_eq!(frame(&app).map(|f| f.direction), Some(Direction::Down));
+    }
+
+    #[test]
     fn the_kind_picked_is_kept_as_a_word_and_read_back_after_a_restart() {
         for kind in TransitionKind::ALL {
             assert_eq!(TransitionKind::from_word(kind.word()), Some(kind));

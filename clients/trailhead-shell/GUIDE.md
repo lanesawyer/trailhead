@@ -116,8 +116,9 @@ fn count_settings(In(page): In<Entity>, mut commands: Commands) {
 
 ## 3. The `ActiveApp` state
 
-The shell decides which app is shown, as the `ActiveApp(pub AppId)` state. It starts on the first app given, unless
-the `LocalStore` remembers another one from last time, and the rail sets it when a person presses an app's button. An
+The shell decides which app is shown, as the `ActiveApp(pub AppId)` state. It starts on the first app on the rail,
+unless the `LocalStore` remembers another one from last time, and the rail sets it when a person presses an app's
+button. An
 app hangs everything it draws on its own value:
 
 - **A switch is covered, and an app does nothing for it.** A press on the rail marks that app's button at once; the
@@ -227,8 +228,9 @@ A shell built without a directory (`ShellPlugin` without `store_in`, as in most 
 runs.
 
 The shell keeps its own entry beside the apps' (`shell.json`): the app last shown, the text size a person picked
-with Ctrl and `=`, `-` or `0` (`text_size`, in percent), which applies to every app, and how the window switches apps
-(`transition`, the kind's word: `fade` until another is picked). It is read as the shell is built,
+with Ctrl and `=`, `-` or `0` (`text_size`, in percent), which applies to every app, how the window switches apps
+(`transition`, the kind's word: `fade` until another is picked), and the person's order of the apps on the rail
+(`rail_order`, their ids, once one has been moved). It is read as the shell is built,
 so the first frame is drawn at it. An app neither reads nor writes it: to change the size, trigger the kit's
 `ChangeTextSize`, and to lay out at every size, follow the kit guide's rule on UI pixels (section 4).
 
@@ -578,8 +580,13 @@ fn main() {
 }
 ```
 
-Adding an app is one more `.with(MyApp)`, after the ones already given: the rail shows the apps in that order, and the
-first is shown at the first start. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
+Adding an app is one more `.with(MyApp)`, after the ones already given: the rail shows the apps in that order until a
+person drags one to another place (or moves it with Alt and Up or Down), and the first is shown at the first start.
+The person's order is kept (`rail_order` in `shell.json`) and applied over the binary's at the next start: an app no
+longer given drops out of it, and a new one goes at the end, in the order given. Everything that follows the rail
+follows it too: which way a switch's cover travels, the apps' settings pages, the About page's list.
+`trailhead_shell::MoveApp { app, to }` moves an app as a drag does, and `Apps` is always in the rail's order. The
+rail's foot (Ask, the update notice, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
 theme picked, in `theme`, and each app's `LocalStore`, under `apps/`); `NetConfig::from_env` puts that under `shell` in
 Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `Shell::run` opens the window (titled Trailhead, with the app
 id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugin` with every app's `paint` applied and

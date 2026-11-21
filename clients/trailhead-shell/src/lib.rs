@@ -22,7 +22,8 @@
 //! The rail switches apps through [`transition`]: a cover closes over the app shown, the app is switched while it is
 //! covered, and the cover opens on the app picked, as the person picked in the settings.
 //!
-//! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
+//! A binary builds a [`Shell`], gives it its apps in the order the rail shows them until a person drags them into
+//! their own ([`MoveApp`]), and runs it. Underneath is
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
 //! each app's drawing. While connected to a server with an apps repo, the rail's Ask button asks it for a change to an
@@ -91,7 +92,8 @@ pub struct Manifest {
 #[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ActiveApp(pub AppId);
 
-/// The shell's apps, in the order the rail shows them.
+/// The shell's apps, in the order the rail shows them: the person's, once they have moved one ([`MoveApp`]), else
+/// the order the binary gave them in.
 #[derive(Resource, Debug)]
 pub struct Apps(Vec<Manifest>);
 
@@ -111,6 +113,23 @@ impl Apps {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Where `id` is on the rail, from the top.
+    pub fn position(&self, id: AppId) -> Option<usize> {
+        self.0.iter().position(|m| m.id == id)
+    }
+
+    /// Moves `id` to place `to` (or the end, past it), the others keeping their order. Whether it moved.
+    pub(crate) fn move_app(&mut self, id: AppId, to: usize) -> bool {
+        let Some(at) = self.position(id) else { return false };
+        let to = to.min(self.0.len() - 1);
+        if at == to {
+            return false;
+        }
+        let app = self.0.remove(at);
+        self.0.insert(to, app);
+        true
     }
 
     /// Whether the shell draws a rail: only for more than one app. Without one there is no settings gear at its foot,
@@ -148,14 +167,38 @@ pub trait ShellApp: Send + Sync + 'static {
     }
 }
 
+/// Moves an app to place `to` on the rail (and everywhere that follows its order), keeping the order for the next
+/// launch: what dragging an app's button on the rail, or Alt and Up or Down on it, does.
+#[derive(Event, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MoveApp {
+    pub app: AppId,
+    pub to: usize,
+}
+
 /// The shell's own entry in the [`LocalStore`].
 pub(crate) const SHELL: AppId = AppId("shell");
 /// Where the shell keeps the id of the app last shown.
 const ACTIVE: &str = "active";
 /// Where the shell keeps the [`TextSize`] picked, in percent, for every app.
 const TEXT_SIZE: &str = "text_size";
+/// Where the shell keeps the person's order of the apps on the rail, as their ids.
+const RAIL_ORDER: &str = "rail_order";
 
-/// The shell and its apps. The first app given is shown at first, unless the [`LocalStore`] remembers another.
+/// The apps `listed` in the person's order `kept`: those it names first, in its order, then the rest as listed. An id
+/// it names that isn't listed (an app no longer in the shell) is dropped.
+fn in_kept_order(mut listed: Vec<Manifest>, kept: Option<Vec<String>>) -> Vec<Manifest> {
+    let mut ordered = Vec::with_capacity(listed.len());
+    for id in kept.unwrap_or_default() {
+        if let Some(at) = listed.iter().position(|m| m.id.0 == id) {
+            ordered.push(listed.remove(at));
+        }
+    }
+    ordered.extend(listed);
+    ordered
+}
+
+/// The shell and its apps, on the rail in the order given until the person moves them. The first app on the rail is
+/// shown at first, unless the [`LocalStore`] remembers another.
 #[derive(Default)]
 pub struct ShellPlugin {
     apps: Vec<Box<dyn ShellApp>>,
@@ -239,6 +282,7 @@ impl Plugin for ShellPlugin {
         }
         let ids: Vec<AppId> = manifests.iter().map(|m| m.id).chain([SHELL]).collect();
         let store = LocalStore::open(self.store.clone(), &ids);
+        let manifests = in_kept_order(manifests, store.get(SHELL, RAIL_ORDER));
         let remembered: Option<String> = store.get(SHELL, ACTIVE);
         let first = manifests.iter().find(|m| Some(m.id.0) == remembered.as_deref()).unwrap_or(&manifests[0]).id;
         // Set as the app is built, so the first frame is laid out at the size kept and none is drawn at 100% first.
@@ -255,6 +299,7 @@ impl Plugin for ShellPlugin {
             .insert_state(ActiveApp(first))
             .insert_resource(AppTransition(transition.unwrap_or_default()))
             .add_plugins(TransitionPlugin)
+            .add_observer(on_move_app)
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, ((remember_active, remember_text_size, remember_transition), store::save).chain());
         if let Some((config, target)) = &self.connection {
@@ -275,7 +320,10 @@ impl Plugin for ShellPlugin {
         }
         let connected = app.world().contains_resource::<State<Connection>>();
         let mut pages = settings_pages::shell_pages(connected);
-        for shell_app in &self.apps {
+        let apps = app.world().resource::<Apps>();
+        let mut on_rail: Vec<&dyn ShellApp> = self.apps.iter().map(|a| a.as_ref()).collect();
+        on_rail.sort_by_key(|a| apps.position(a.manifest().id));
+        for shell_app in on_rail {
             let manifest = shell_app.manifest();
             pages.extend(shell_app.settings_pages().into_iter().map(|page| (manifest.id, manifest.name, page)));
         }
@@ -304,6 +352,21 @@ impl Plugin for ShellPlugin {
 /// The one camera every app's UI is drawn through.
 fn spawn_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
+}
+
+/// Moves an app on the rail, keeps the order, and lists the apps' settings pages in it.
+fn on_move_app(
+    moved: On<MoveApp>,
+    mut apps: ResMut<Apps>,
+    mut pages: ResMut<settings::SettingsPages>,
+    mut store: ResMut<LocalStore>,
+) {
+    if !apps.move_app(moved.app, moved.to) {
+        return;
+    }
+    let order: Vec<&str> = apps.iter().map(|m| m.id.0).collect();
+    store.set(SHELL, RAIL_ORDER, order);
+    pages.follow(&apps);
 }
 
 fn remember_active(active: Res<State<ActiveApp>>, mut store: ResMut<LocalStore>) {
@@ -433,6 +496,73 @@ mod tests {
         // Kept for the shell, not for an app.
         let kept = LocalStore::open(Some(dir.path().to_path_buf()), &[SHELL, NOTES]);
         assert_eq!((kept.get::<u32>(SHELL, TEXT_SIZE), kept.get::<u32>(NOTES, TEXT_SIZE)), (Some(125), None));
+    }
+
+    const TREES: AppId = AppId("trees");
+
+    fn ids(app: &App) -> Vec<AppId> {
+        app.world().resource::<Apps>().iter().map(|m| m.id).collect()
+    }
+
+    #[test]
+    fn the_persons_order_comes_first_then_new_apps_as_listed_and_gone_ones_are_dropped() {
+        let listed = |ids: &[AppId]| ids.iter().map(|id| Manifest { id: *id, name: id.0, icon: Icon::Board }).collect();
+        let kept = |ids: &[&str]| Some(ids.iter().map(|s| s.to_string()).collect());
+        let order = |m: Vec<Manifest>| m.into_iter().map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(order(in_kept_order(listed(&[NOTES, MAPS, TREES]), None)), [NOTES, MAPS, TREES]);
+        let moved = in_kept_order(listed(&[NOTES, MAPS, TREES]), kept(&["trees", "gone", "notes", "trees"]));
+        assert_eq!(order(moved), [TREES, NOTES, MAPS]);
+    }
+
+    #[test]
+    fn a_move_is_kept_and_a_restart_shows_the_rail_in_it_with_a_new_app_at_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = || dir.path().to_path_buf();
+        let mut first = app(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).with(Fake(TREES)).store_in(at()));
+        first.world_mut().trigger(MoveApp { app: TREES, to: 0 });
+        first.world_mut().trigger(MoveApp { app: NOTES, to: 9 });
+        first.update();
+        assert_eq!(ids(&first), [TREES, MAPS, NOTES]);
+        // Nothing remembered as shown, so the first on the person's rail is.
+        first.world_mut().resource_mut::<LocalStore>().remove(SHELL, ACTIVE);
+        first.update();
+        drop(first);
+        let again = app(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).with(Fake(TREES)).store_in(at()));
+        assert_eq!(ids(&again), [TREES, MAPS, NOTES]);
+        assert_eq!(active(&again), TREES);
+        drop(again);
+        // Maps is gone from this build and Lakes is new.
+        const LAKES: AppId = AppId("lakes");
+        let changed = app(ShellPlugin::new().with(Fake(LAKES)).with(Fake(NOTES)).with(Fake(TREES)).store_in(at()));
+        assert_eq!(ids(&changed), [TREES, NOTES, LAKES]);
+    }
+
+    struct Paged(AppId);
+
+    impl ShellApp for Paged {
+        fn manifest(&self) -> Manifest {
+            Manifest { id: self.0, name: self.0.0, icon: Icon::Board }
+        }
+
+        fn build(&self, _: &mut App) {}
+
+        fn settings_pages(&self) -> Vec<SettingsPage> {
+            vec![SettingsPage::new("page", "Page", |_: In<Entity>| {})]
+        }
+    }
+
+    #[test]
+    fn the_apps_settings_pages_follow_the_rail() {
+        let groups = |app: &App| -> Vec<&'static str> {
+            let pages = app.world().resource::<settings::SettingsPages>();
+            pages.iter().map(|p| p.group).filter(|g| *g != settings::SHELL_GROUP).collect()
+        };
+        let mut app = app(ShellPlugin::new().with(Paged(NOTES)).with(Paged(MAPS)).with(Paged(TREES)));
+        assert_eq!(groups(&app), ["notes", "maps", "trees"]);
+        app.world_mut().trigger(MoveApp { app: TREES, to: 0 });
+        assert_eq!(groups(&app), ["trees", "notes", "maps"]);
+        let first = app.world().resource::<settings::SettingsPages>().iter().next().unwrap().group;
+        assert_eq!(first, settings::SHELL_GROUP, "the shell's own stay first");
     }
 
     /// An app with a link job, noting when the shell takes its jobs and when it builds it.

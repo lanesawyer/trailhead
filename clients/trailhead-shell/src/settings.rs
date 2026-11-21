@@ -25,7 +25,7 @@ pub use crate::settings_pages::{
     ConnectionAct, ShellDir, Shows, TextSizePick, ThemePick, apps_text, build_text, files_text, identity_text,
     state_text, update_text,
 };
-use crate::{AppId, SHELL};
+use crate::{AppId, Apps, SHELL};
 
 /// A settings page's name in code: the app it belongs to (the shell's own pages are `shell`'s) and its key there.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -103,6 +103,11 @@ impl SettingsPages {
 
     pub fn get(&self, id: PageId) -> Option<&PageEntry> {
         self.0.iter().find(|p| p.id == id)
+    }
+
+    /// Lists the apps' pages in the order of the rail, after the shell's own, once the person has moved an app.
+    pub(crate) fn follow(&mut self, apps: &Apps) {
+        self.0.sort_by_key(|p| if p.id.app == SHELL { None } else { Some(apps.position(p.id.app)) });
     }
 }
 

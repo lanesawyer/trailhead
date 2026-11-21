@@ -1,5 +1,6 @@
 //! The rail of apps down the left edge of the window: a button for each app, the one shown marked, a press switching to
-//! it ([`crate::transition`]), and at its foot
+//! it ([`crate::transition`]), dragged (or moved with Alt and Up or Down) to put the apps in the person's order
+//! ([`crate::MoveApp`]), and at its foot
 //! the window's own buttons: Ask ([`crate::ask`]), while connected to a server with an apps repo, which opens the form
 //! for asking for a change or a new app ([`crate::ask_panel`]); and the update notice ([`crate::update`]) while a newer
 //! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]); and last the gear,
@@ -8,14 +9,17 @@
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
-use trailhead_ui::{ButtonKind, Hint, Icon, NavItem, rail, rail_foot, rail_item, set_display, tool_button};
+use trailhead_ui::{
+    ButtonKind, Hint, Icon, NavItem, ReorderItem, ReorderList, Reordered, rail, rail_foot, rail_item, set_display,
+    tool_button,
+};
 
 use crate::ask::Askable;
 use crate::connection::Connection;
 use crate::settings::SettingsGear;
 use crate::transition::{SwitchApp, Switching};
 use crate::update::UpdateReady;
-use crate::{ActiveApp, AppId, Apps};
+use crate::{ActiveApp, AppId, Apps, MoveApp};
 
 /// The rail's root.
 #[derive(Component)]
@@ -52,20 +56,24 @@ impl Plugin for RailUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_rail)
             .add_observer(on_open)
-            .add_systems(Update, (mark_shown, show_update, show_ask));
+            .add_observer(on_reordered)
+            .add_systems(Update, (order_rail, mark_shown, show_update, show_ask));
     }
 }
 
-/// The rail, its items in the order of the apps, then its foot with Ask, the update notice and the gear. Each is put down at
-/// once (`spawn_scene`), so the foot comes after the items and its buttons' nodes are there to hide before the first
-/// frame is drawn.
+/// The rail, its items in the order of the apps, a list the person can reorder, then its foot with Ask, the update
+/// notice and the gear, which isn't part of the list. Each is put down at once (`spawn_scene`), so the foot comes after
+/// the items and its buttons' nodes are there to hide before the first frame is drawn.
 fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     if !apps.has_rail() {
         return;
     }
-    let root = commands.spawn_scene(rail()).insert((Name::new("rail"), Rail)).id();
+    let list = ReorderList::vertical();
+    let root = commands.spawn_scene(rail()).insert((Name::new("rail"), Rail, list)).id();
     for manifest in apps.iter() {
-        commands.spawn_scene(rail_item(manifest.icon, manifest.name)).insert((OpenApp(manifest.id), ChildOf(root)));
+        let hint = format!("{} ({} moves it)", manifest.name, list.keys());
+        let item = (OpenApp(manifest.id), ReorderItem(manifest.id.0.to_string()), ChildOf(root));
+        commands.spawn_scene(rail_item(manifest.icon, hint)).insert(item);
     }
     let foot = commands.spawn_scene(rail_foot()).insert((Name::new("rail foot"), RailFoot, ChildOf(root))).id();
     let ask = bsn! { @tool_button(Icon::Plus, ASK_HINT, ButtonKind::Normal) Node { display: Display::None } };
@@ -116,6 +124,36 @@ fn show_update(
 fn on_open(activate: On<Activate>, items: Query<&OpenApp>, mut commands: Commands) {
     if let Ok(OpenApp(id)) = items.get(activate.entity) {
         commands.trigger(SwitchApp(*id));
+    }
+}
+
+/// An app dragged to another place on the rail, or moved there with Alt and an arrow.
+fn on_reordered(moved: On<Reordered>, rails: Query<(), With<Rail>>, apps: Res<Apps>, mut commands: Commands) {
+    if !rails.contains(moved.list) {
+        return;
+    }
+    if let Some(manifest) = apps.iter().find(|m| m.id.0 == moved.key) {
+        commands.trigger(MoveApp { app: manifest.id, to: moved.to });
+    }
+}
+
+/// Puts the rail's buttons in the order of the apps, in place, the foot staying last, in the frame they are moved.
+fn order_rail(
+    apps: Res<Apps>,
+    rails: Query<(Entity, &Children), With<Rail>>,
+    items: Query<&OpenApp>,
+    mut commands: Commands,
+) {
+    if !apps.is_changed() {
+        return;
+    }
+    for (rail, children) in &rails {
+        let mut wanted: Vec<Entity> = children.iter().collect();
+        let place = |e: &Entity| items.get(*e).ok().and_then(|open| apps.position(open.0));
+        wanted.sort_by_key(|e| place(e).unwrap_or(usize::MAX));
+        if !wanted.iter().copied().eq(children.iter()) {
+            commands.entity(rail).replace_children(&wanted);
+        }
     }
 }
 
@@ -249,6 +287,202 @@ mod tests {
         app.world_mut().resource_mut::<Askable>().0 = Some(trailhead_model::shell::AskTargets::default());
         app.update();
         assert_eq!(shown::<AskButton>(&mut app), (ask, Display::None), "not without an apps repo");
+    }
+
+    mod reorder {
+        use std::time::Duration;
+
+        use bevy::camera::NormalizedRenderTarget;
+        use bevy::input::ButtonState;
+        use bevy::input::keyboard::{Key, KeyboardInput};
+        use bevy::input_focus::FocusedInput;
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::{
+            Pointer, PointerClick, PointerDrag, PointerDragEnd, PointerDragStart, PointerPress, PointerRelease,
+        };
+        use bevy::picking::pointer::{Location, PointerId};
+        use trailhead_ui::{Lifted, ReorderPlugin, TextSize};
+
+        use super::*;
+        use crate::LocalStore;
+        use crate::transition::{AppTransition, TransitionKind};
+
+        const TREES: AppId = AppId("trees");
+        const LAKES: AppId = AppId("lakes");
+        /// The UI's scale: these tests drag at 150%.
+        const UI_SCALE: f32 = 1.5;
+        /// A rail item, the gap between them and the rail's inset at its top, in UI pixels.
+        const ITEM: f32 = 24.0;
+        const GAP: f32 = 8.0;
+        const INSET: f32 = 12.0;
+
+        fn shell(dir: &std::path::Path) -> ShellPlugin {
+            ShellPlugin::new()
+                .with(Fake(NOTES))
+                .with(Fake(MAPS))
+                .with(Fake(TREES))
+                .with(Fake(LAKES))
+                .store_in(dir.to_path_buf())
+        }
+
+        /// A windowed shell of four apps with the kit's reordering and buttons, switching at once, at 150%.
+        fn rail_app(shell: ShellPlugin) -> App {
+            let mut app = windowed(shell);
+            app.add_plugins((ReorderPlugin, bevy::ui_widgets::ButtonPlugin))
+                .init_resource::<ButtonInput<KeyCode>>()
+                .insert_resource(AppTransition(TransitionKind::None))
+                .insert_resource(TextSize::nearest(150));
+            app.update();
+            app
+        }
+
+        fn ids(app: &App) -> Vec<AppId> {
+            app.world().resource::<Apps>().iter().map(|m| m.id).collect()
+        }
+
+        /// The rail's app buttons, top to bottom.
+        fn buttons(app: &mut App) -> Vec<(Entity, AppId)> {
+            let world = app.world_mut();
+            let rail = world.query_filtered::<&Children, With<Rail>>().single(world).unwrap();
+            let children: Vec<Entity> = rail.iter().collect();
+            children.into_iter().filter_map(|e| world.get::<OpenApp>(e).map(|o| (e, o.0))).collect()
+        }
+
+        /// Lays the rail out as the window would, with no layout running: each node's place on screen.
+        fn lay_out(app: &mut App) {
+            let place = |world: &mut World, entity: Entity, rect: Rect| {
+                let node =
+                    ComputedNode { size: rect.size() * UI_SCALE, inverse_scale_factor: 1.0 / UI_SCALE, ..default() };
+                world.entity_mut(entity).insert((node, UiGlobalTransform::from_translation(rect.center() * UI_SCALE)));
+            };
+            let items = buttons(app);
+            let world = app.world_mut();
+            let rail = world.query_filtered::<Entity, With<Rail>>().single(world).unwrap();
+            place(world, rail, Rect::new(0.0, 0.0, 48.0, 480.0));
+            for (at, (item, _)) in items.into_iter().enumerate() {
+                let top = INSET + at as f32 * (ITEM + GAP);
+                place(world, item, Rect::new(12.0, top, 12.0 + ITEM, top + ITEM));
+            }
+        }
+
+        /// The middle of the button `at` from the top, in UI pixels.
+        fn middle(at: usize) -> Vec2 {
+            Vec2::new(24.0, INSET + ITEM / 2.0 + at as f32 * (ITEM + GAP))
+        }
+
+        fn pointer(ui: Vec2) -> Pointer {
+            let target = NormalizedRenderTarget::None { width: 1, height: 1 };
+            Pointer::new(PointerId::Mouse, Location { target, position: ui * UI_SCALE })
+        }
+
+        fn hit() -> HitData {
+            HitData::new(Entity::PLACEHOLDER, 0.0, None, None)
+        }
+
+        /// Presses the button `at` and drags it `by` UI pixels, as picking reports it.
+        fn drag(app: &mut App, at: usize, by: Vec2) -> Entity {
+            lay_out(app);
+            let item = buttons(app)[at].0;
+            let (from, button) = (middle(at), PointerButton::Primary);
+            let world = app.world_mut();
+            world.trigger(PointerPress { entity: item, pointer: pointer(from), button, hit: hit(), count: 1 });
+            world.flush();
+            world.trigger(PointerDragStart { entity: item, pointer: pointer(from), button, hit: hit() });
+            let distance = by * UI_SCALE;
+            world.trigger(PointerDrag { entity: item, pointer: pointer(from + by), button, distance, delta: distance });
+            world.flush();
+            app.update();
+            item
+        }
+
+        /// Lets the button go where it was dragged, over it still, as picking reports a release.
+        fn release(app: &mut App, item: Entity, at: usize, by: Vec2) {
+            let (to, button) = (pointer(middle(at) + by), PointerButton::Primary);
+            let world = app.world_mut();
+            let duration = Duration::from_millis(300);
+            world.trigger(PointerClick { entity: item, pointer: to.clone(), button, hit: hit(), duration, count: 1 });
+            world.trigger(PointerRelease { entity: item, pointer: to.clone(), button, hit: hit() });
+            world.trigger(PointerDragEnd { entity: item, pointer: to, button, distance: by * UI_SCALE });
+            world.flush();
+            app.update();
+            app.update();
+        }
+
+        fn press_key(app: &mut App, target: Entity, key_code: KeyCode, logical_key: Key) {
+            let window = app.world_mut().spawn(Window::default()).id();
+            let state = ButtonState::Pressed;
+            let input = KeyboardInput { key_code, logical_key, state, text: None, repeat: false, window };
+            app.world_mut().trigger(FocusedInput::new(target, input, window));
+            app.update();
+            app.update();
+        }
+
+        fn kept(dir: &std::path::Path) -> Option<Vec<String>> {
+            LocalStore::open(Some(dir.to_path_buf()), &[crate::SHELL]).get(crate::SHELL, crate::RAIL_ORDER)
+        }
+
+        #[test]
+        fn dragging_an_app_down_the_rail_moves_it_there_in_place_keeps_it_and_does_not_open_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = rail_app(shell(dir.path()));
+            let before = buttons(&mut app);
+            assert_eq!(ids(&app), [NOTES, MAPS, TREES, LAKES]);
+            let by = Vec2::new(0.0, (ITEM + GAP) * 2.0 + 2.0);
+            let notes = drag(&mut app, 0, by);
+            assert!(app.world().get::<Lifted>(notes).is_some());
+            release(&mut app, notes, 0, by);
+
+            assert_eq!(ids(&app), [MAPS, TREES, NOTES, LAKES]);
+            let after = buttons(&mut app);
+            let moved = [before[1], before[2], before[0], before[3]];
+            assert_eq!(after, moved, "the same buttons, moved");
+            assert_eq!(app.world().resource::<State<ActiveApp>>().get().0, NOTES, "the drag didn't open it");
+            assert!(app.world().get::<NavItem>(notes).unwrap().current, "and its mark stayed with it");
+            let rail = app.world_mut().query_filtered::<&Children, With<Rail>>().single(app.world()).unwrap();
+            let last = rail.iter().last().unwrap();
+            assert!(app.world().get::<RailFoot>(last).is_some(), "the foot stays last");
+            assert_eq!(kept(dir.path()).unwrap(), ["maps", "trees", "notes", "lakes"]);
+        }
+
+        #[test]
+        fn a_short_press_still_opens_the_app() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = rail_app(shell(dir.path()));
+            // Six pixels on screen: four of the UI's at 150%, under the threshold.
+            let by = Vec2::new(0.0, 6.0 / UI_SCALE);
+            let maps = drag(&mut app, 1, by);
+            release(&mut app, maps, 1, by);
+            assert_eq!(app.world().resource::<State<ActiveApp>>().get().0, MAPS);
+            assert_eq!(ids(&app), [NOTES, MAPS, TREES, LAKES]);
+            assert_eq!(kept(dir.path()), None, "nothing moved, nothing kept");
+        }
+
+        #[test]
+        fn escape_puts_the_app_back() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = rail_app(shell(dir.path()));
+            let by = Vec2::new(0.0, 70.0);
+            let notes = drag(&mut app, 0, by);
+            press_key(&mut app, notes, KeyCode::Escape, Key::Escape);
+            release(&mut app, notes, 0, by);
+            assert_eq!(ids(&app), [NOTES, MAPS, TREES, LAKES]);
+            assert_eq!(app.world().resource::<State<ActiveApp>>().get().0, NOTES, "and didn't open anything");
+        }
+
+        #[test]
+        fn alt_and_down_moves_the_focused_app_one_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = rail_app(shell(dir.path()));
+            let trees = buttons(&mut app)[2].0;
+            app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::AltLeft);
+            press_key(&mut app, trees, KeyCode::ArrowDown, Key::ArrowDown);
+            assert_eq!(ids(&app), [NOTES, MAPS, LAKES, TREES]);
+            press_key(&mut app, trees, KeyCode::ArrowDown, Key::ArrowDown);
+            assert_eq!(ids(&app), [NOTES, MAPS, LAKES, TREES], "the last goes no lower");
+            assert_eq!(buttons(&mut app)[3], (trees, TREES));
+            let hint = app.world().get::<Hint>(trees).unwrap().0.clone();
+            assert_eq!(hint, "trees (Alt+Up or Down moves it)");
+        }
     }
 
     #[test]
