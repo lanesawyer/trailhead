@@ -7,6 +7,8 @@
 //! and kept, not how it looks. Both give the app the shell's [`Connection`] state (`Offline` until a test sets it with
 //! [`set_connection`]), its [`ConnectionStatus`], the mirror and the outbox, with no net thread: a test fills the
 //! mirror with [`fill`] and [`feed`], reads what the app sent with [`sent`], and answers it with [`answer`].
+//!
+//! `shot` (the `shots` feature) draws the shell to PNGs, for an app's shots test.
 
 use std::time::Duration;
 
@@ -23,6 +25,8 @@ use crate::{ActiveApp, AppId, Manifest, ShellApp, ShellPlugin};
 
 #[cfg(feature = "test-server")]
 pub mod server;
+#[cfg(feature = "shots")]
+pub mod shot;
 
 /// The id of [`Other`].
 pub const OTHER: AppId = AppId("other");

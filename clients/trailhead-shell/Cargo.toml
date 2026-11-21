@@ -17,6 +17,9 @@ workspace = true
 test-support = []
 # `testing::server`: an in-process Trailhead server to go live against, which brings the task engine and the server.
 test-server = ["test-support", "dep:trailhead-core", "dep:trailhead-server", "dep:axum", "dep:tempfile", "tokio/net"]
+# `testing::shot`: the shell drawn to PNGs with no window, for an app's `#[ignore]`d shots test. Needs a render
+# adapter (a GPU, or lavapipe with `VK_DRIVER_FILES`), and pulls in nothing the shell doesn't.
+shots = ["test-support"]
 
 [dependencies]
 # Default features pull in audio (alsa), gamepads (udev), 3D and more; take only what a window of UI needs.
