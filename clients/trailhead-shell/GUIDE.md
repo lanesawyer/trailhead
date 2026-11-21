@@ -161,6 +161,11 @@ store.remove(MY_APP, "draft");
 A shell built without a directory (`ShellPlugin` without `store_in`, as in most tests) holds the values only while it
 runs.
 
+The shell keeps its own entry beside the apps' (`shell.json`): the app last shown, and the text size a person picked
+with Ctrl and `=`, `-` or `0` (`text_size`, in percent), which applies to every app. It is read as the shell is built,
+so the first frame is drawn at it. An app neither reads nor writes it: to change the size, trigger the kit's
+`ChangeTextSize`, and to lay out at every size, follow the kit guide's rule on UI pixels (section 4).
+
 ## 6. Reaching the server
 
 The connection belongs to the shell. The binary tells the shell how to connect (`Shell::connecting`,

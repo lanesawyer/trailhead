@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use trailhead_ui::{Icon, Theme};
+use trailhead_ui::{Icon, TextSize, TextSizePlugin, Theme};
 
 use crate::connection::{ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
@@ -123,6 +123,8 @@ pub trait ShellApp: Send + Sync + 'static {
 const SHELL: AppId = AppId("shell");
 /// Where the shell keeps the id of the app last shown.
 const ACTIVE: &str = "active";
+/// Where the shell keeps the [`TextSize`] picked, in percent, for every app.
+const TEXT_SIZE: &str = "text_size";
 
 /// The shell and its apps. The first app given is shown at first, unless the [`LocalStore`] remembers another.
 #[derive(Default)]
@@ -210,11 +212,19 @@ impl Plugin for ShellPlugin {
         let store = LocalStore::open(self.store.clone(), &ids);
         let remembered: Option<String> = store.get(SHELL, ACTIVE);
         let first = manifests.iter().find(|m| Some(m.id.0) == remembered.as_deref()).unwrap_or(&manifests[0]).id;
+        // Set as the app is built, so the first frame is laid out at the size kept and none is drawn at 100% first.
+        let text_size = store.get::<u32>(SHELL, TEXT_SIZE).map(TextSize::nearest);
+        if !app.is_plugin_added::<TextSizePlugin>() {
+            app.add_plugins(TextSizePlugin);
+        }
+        if let Some(text_size) = text_size {
+            app.insert_resource(text_size);
+        }
         app.insert_resource(Apps(manifests))
             .insert_resource(store)
             .insert_state(ActiveApp(first))
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, (remember_active, store::save).chain());
+            .add_systems(Update, ((remember_active, remember_text_size), store::save).chain());
         if let Some((config, target)) = &self.connection {
             let jobs = self.apps.iter().flat_map(|a| a.link_jobs());
             app.add_plugins(ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs));
@@ -255,6 +265,13 @@ fn spawn_camera(mut commands: Commands) {
 fn remember_active(active: Res<State<ActiveApp>>, mut store: ResMut<LocalStore>) {
     if active.is_changed() {
         store.set(SHELL, ACTIVE, active.get().0.0);
+    }
+}
+
+/// Keeps the text size picked (with the kit's keys, or by an app) for the next launch.
+fn remember_text_size(size: Res<TextSize>, mut store: ResMut<LocalStore>) {
+    if size.is_changed() {
+        store.set(SHELL, TEXT_SIZE, size.percent());
     }
 }
 
@@ -347,6 +364,24 @@ mod tests {
         // An app that is no longer in the shell is forgotten, not shown.
         let without = app(ShellPlugin::new().with(Fake(NOTES)).store_in(dir.path().to_path_buf()));
         assert_eq!(active(&without), NOTES);
+    }
+
+    #[test]
+    fn the_text_size_picked_is_drawn_from_the_first_frame_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = || ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).store_in(dir.path().to_path_buf());
+        let mut first = app(shell());
+        assert_eq!(*first.world().resource::<TextSize>(), TextSize::DEFAULT);
+        first.world_mut().trigger(trailhead_ui::ChangeTextSize::Bigger);
+        first.world_mut().trigger(trailhead_ui::ChangeTextSize::Bigger);
+        first.update();
+        drop(first);
+        let again = app(shell());
+        assert_eq!(again.world().resource::<TextSize>().label(), "125%");
+        assert_eq!(again.world().resource::<UiScale>().0, 1.25, "laid out at it from the first frame");
+        // Kept for the shell, not for an app.
+        let kept = LocalStore::open(Some(dir.path().to_path_buf()), &[SHELL, NOTES]);
+        assert_eq!((kept.get::<u32>(SHELL, TEXT_SIZE), kept.get::<u32>(NOTES, TEXT_SIZE)), (Some(125), None));
     }
 
     /// An app with a link job, noting when the shell takes its jobs and when it builds it.
