@@ -57,7 +57,7 @@ jobs:
       # `trailhead app from` (TRAIL-1635) opens Lookout's iroh tunnel through `trailhead-wire`, which brings in `trailhead-factory`'s
       # types; those two are allowed, the factory's runtime crates are not.
       - run: |
-          if cargo tree -p trailhead --no-default-features -e normal --prefix none --locked | grep -E '^trailhead-(control|daemon|plugins|compute|harness|provider|codehost|tracker|testkit)'; then
+          if cargo tree -p trailhead --no-default-features -e normal --prefix none --locked | grep -E '^trailhead-(factory-server|control|daemon|plugins|compute|harness|provider|codehost|tracker|testkit)'; then
             echo "::error::trailhead --no-default-features depends on factory crates"; exit 1
           fi
 
