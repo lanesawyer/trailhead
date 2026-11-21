@@ -22,7 +22,8 @@
 //! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
-//! each app's drawing.
+//! each app's drawing. While connected to a server with an apps repo, the rail's Ask button asks it for a change to an
+//! app or a new one ([`ask`]).
 
 use std::path::PathBuf;
 
@@ -32,6 +33,7 @@ use trailhead_ui::{Icon, Theme};
 use crate::connection::{ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
 
+pub mod ask;
 pub mod commands;
 pub mod connect;
 pub mod connection;
@@ -224,6 +226,7 @@ impl Plugin for ShellPlugin {
         if let Some(build) = &self.build {
             app.add_plugins(update::UpdatePlugin(build.clone()));
         }
+        app.add_plugins(ask::AskPlugin);
         for shell_app in &self.apps {
             shell_app.build(app);
         }

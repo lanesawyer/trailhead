@@ -368,7 +368,7 @@ mod tests {
         let mut app = shell(dir.path());
         assert_eq!(asks(&mut app), 0, "not while offline");
         set_connection(&mut app, Connection::Live);
-        assert_eq!(asks(&mut app), 1, "at once when live");
+        assert_eq!(asks(&mut app), 2, "at once when live, beside the Ask form's read of what can be asked about");
         for _ in 0..(POLL.as_secs() - 5) {
             app.update();
         }

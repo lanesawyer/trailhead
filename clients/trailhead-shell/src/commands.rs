@@ -99,7 +99,7 @@ impl Method {
     }
 }
 
-fn new_key() -> String {
+pub(crate) fn new_key() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
