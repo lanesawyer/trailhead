@@ -7,10 +7,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
+use trailhead_builder::{Builder, Step};
 use trailhead_builder::{Layout, ShellConfig};
-use trailhead_core::shell::{BUILD_ENV, RESTART_CODE, ShellBuild};
+use trailhead_core::shell::{BUILD_ENV, LOCAL_STATE_ENV, RESTART_CODE, ShellBuild};
 use trailhead_server::Paths;
 
+use super::app_remote::{FromServer, Link};
 use super::print_json;
 use crate::cli::AppCmd;
 use crate::client;
@@ -20,9 +22,19 @@ const STARTUP: Duration = Duration::from_secs(10);
 
 pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[OsString], json: bool) -> Result<()> {
     let config = ShellConfig::read(&paths.config_dir).map_err(anyhow::Error::msg)?;
+    let remote = ShellConfig::read_remote(&paths.config_dir).map_err(anyhow::Error::msg)?;
     let layout = Layout::new(&paths.data_dir);
-    let read = || ShellBuild { configured: config.is_some(), ..layout.read() };
+    let read = || ShellBuild { configured: config.is_some() || remote.is_some(), ..layout.read() };
     match cmd {
+        Some(AppCmd::From { endpoint }) => build_from(paths, endpoint),
+        None if remote.is_some() => {
+            let (from, config) = remote.expect("checked");
+            let code = launch_remote(paths, &from, config, &layout, args).await?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Some(AppCmd::Status) if json => {
             print_json(&serde_json::to_value(read())?);
             Ok(())
@@ -33,7 +45,7 @@ pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[
         }
         None => {
             ensure_server(url).await?;
-            let code = launch(&layout, read, |binary, rev| run(binary, rev, args), &paths.config_dir)?;
+            let code = launch(&layout, read, |binary, rev| run(binary, rev, args, None), &paths.config_dir)?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -58,10 +70,70 @@ struct Ended {
     ran: Duration,
 }
 
-/// Runs the build `rev` with the rest of the environment and `args`, until it exits.
-fn run(binary: &Path, rev: &str, args: &[OsString]) -> Result<Ended> {
+/// Saves `[shell] from` in the user config, so `trailhead app` builds and runs that server's builds here.
+fn build_from(paths: &Paths, endpoint: &str) -> Result<()> {
+    trailhead_wire::parse_endpoint_id(endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut cfg = crate::config::load(paths)?;
+    let table = cfg.shell.get_or_insert_with(Default::default);
+    if table.contains_key("repo") {
+        bail!(
+            "{} has `[shell] repo`: this machine builds the window from its own apps repo. Remove it to build another server's builds instead",
+            crate::config::path(paths).display()
+        );
+    }
+    table.insert("from".into(), toml::Value::String(endpoint.trim().to_string()));
+    crate::config::save(paths, &cfg)?;
+    println!(
+        "saved in {}. `trailhead app` now builds the window from that server's builds and runs it; the first build takes a while",
+        crate::config::path(paths).display()
+    );
+    Ok(())
+}
+
+/// `trailhead app` with `[shell] from`: reaches the server, builds its newest build here when this machine has
+/// none, keeps building its newer ones while the window runs, and runs the window as the launcher always does.
+async fn launch_remote(
+    paths: &Paths,
+    from: &str,
+    config: ShellConfig,
+    layout: &Layout,
+    args: &[OsString],
+) -> Result<i32> {
+    let link = Link::open(paths, from).await?;
+    let builder = Builder::new(FromServer::new(link, from), config, std::path::PathBuf::new(), layout.clone());
+    if layout.load().current.is_none() {
+        eprintln!(
+            "trailhead app: building the window for the first time, which takes a while (ten minutes or more); cargo's output is in {}",
+            layout.log().display()
+        );
+        if let Step::Failed(rev) = builder.step().await.map_err(anyhow::Error::msg)? {
+            let why = layout.load().error.map(|e| e.message).unwrap_or_default();
+            bail!("the build of {} failed ({why}); its output is in {}", short(&rev), layout.log().display());
+        }
+    }
+    let building = builder.spawn();
+    // The window dials the server it is built from, unless told another.
+    let dial = [OsString::from(from)];
+    let args = if args.is_empty() { &dial[..] } else { args };
+    let state = layout.state_file();
+    let read = || ShellBuild { configured: true, ..layout.read() };
+    // The window runs for hours on this thread; the builder's task carries on beside it.
+    let code = tokio::task::block_in_place(|| {
+        launch(layout, read, |binary, rev| run(binary, rev, args, Some(&state)), &paths.config_dir)
+    });
+    building.stop().await;
+    code
+}
+
+/// Runs the build `rev` with the rest of the environment and `args`, until it exits. `built_here` is the state file
+/// of a builder on this machine, for a window that should offer the builds it finds there.
+fn run(binary: &Path, rev: &str, args: &[OsString], built_here: Option<&Path>) -> Result<Ended> {
     let started = Instant::now();
-    let status = std::process::Command::new(binary)
+    let mut window = std::process::Command::new(binary);
+    if let Some(state) = built_here {
+        window.env(LOCAL_STATE_ENV, state);
+    }
+    let status = window
         .args(args)
         .env(BUILD_ENV, rev)
         .status()
@@ -144,7 +216,10 @@ fn no_build(build: &ShellBuild, layout: &Layout, config_dir: &Path) -> String {
 /// `trailhead app status`.
 fn status(build: &ShellBuild, layout: &Layout, config_dir: &Path) -> String {
     if !build.configured {
-        return format!("no builder: `[shell] repo` isn't set in {}", config_dir.join("config.toml").display());
+        return format!(
+            "no builder: `[shell] repo` isn't set in {} (on a machine with no apps repo, `trailhead app from <the server's endpoint id>`)",
+            config_dir.join("config.toml").display()
+        );
     }
     let rev = |r: &Option<String>| match r {
         Some(r) if build.is_bad(r) => format!("{} (bad)", short(r)),

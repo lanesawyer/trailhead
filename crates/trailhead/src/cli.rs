@@ -430,6 +430,11 @@ pub(crate) enum FactoryCmd {
 pub(crate) enum AppCmd {
     /// What the server's builder has built: the current and previous builds, one building, the last failure.
     Status,
+    /// On a machine with no apps repo of its own (a laptop): build and run the window from the builds of the server
+    /// at this iroh endpoint id, which `trailhead factory check` prints there as `endpoint`. Saved
+    /// as `[shell] from` in the user config; `trailhead app` then builds each of that server's builds here and
+    /// restarts onto them. Needs cargo on this machine, and no Trailhead server.
+    From { endpoint: String },
 }
 
 #[derive(Subcommand)]

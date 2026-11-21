@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use trailhead_model::shell::{RESTART_CODE, ShellBuild};
+use trailhead_model::shell::{LOCAL_STATE_ENV, RESTART_CODE, ShellBuild};
 
 use crate::LocalStore;
 use crate::connection::{Connection, SendNet};
@@ -23,6 +23,20 @@ pub const POLL: Duration = Duration::from_secs(30);
 /// The build this shell was started from: the commit the launcher named.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ThisBuild(pub String);
+
+/// The state file of a builder on this machine, when the launcher named one
+/// ([`LOCAL_STATE_ENV`]): the launcher builds the server's builds here, and starts only what it has built. The
+/// newest build is then read from this file, and the server is asked only what it brings.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct BuiltHere(pub Option<std::path::PathBuf>);
+
+impl BuiltHere {
+    /// The build this machine built last, from its builder's state file.
+    fn newest(file: &std::path::Path) -> Option<String> {
+        let state: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+        state["current"]["rev"].as_str().map(String::from)
+    }
+}
 
 /// The newer build the launcher would start, once the server has said there is one; `None` while this shell is the
 /// newest.
@@ -147,6 +161,7 @@ impl Plugin for UpdatePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ThisBuild(self.0.clone()))
             .init_resource::<UpdateReady>()
+            .insert_resource(BuiltHere(std::env::var_os(LOCAL_STATE_ENV).filter(|f| !f.is_empty()).map(Into::into)))
             .init_resource::<Asked>()
             .add_message::<BuildReply>()
             .add_message::<SendNet>()
@@ -179,11 +194,20 @@ fn read(since: String) -> Fetch {
 }
 
 /// Notes a newer build than this one, and what it brings. A failed read leaves the notice as it was.
-fn hear(mut replies: MessageReader<BuildReply>, this: Res<ThisBuild>, mut ready: ResMut<UpdateReady>) {
+fn hear(
+    mut replies: MessageReader<BuildReply>,
+    this: Res<ThisBuild>,
+    here: Res<BuiltHere>,
+    mut ready: ResMut<UpdateReady>,
+) {
     for BuildReply(reply) in replies.read() {
         match reply {
             Ok(build) => {
-                let newer = build.newest().filter(|n| *n != this.0);
+                let newest = match &here.0 {
+                    Some(file) => BuiltHere::newest(file),
+                    None => build.newest().map(String::from),
+                };
+                let newer = newest.filter(|n| *n != this.0);
                 ready.set_if_neq(UpdateReady(newer.map(|n| Newer::new(n, &build.changes, build.changes_total))));
             }
             Err(e) => debug!(error = %e, "couldn't ask the server for the newest build of the shell"),
@@ -360,6 +384,26 @@ mod tests {
         app.world_mut().write_message(BuildReply(Err("offline".into())));
         app.update();
         assert_eq!(ready(&app), None);
+    }
+
+    #[test]
+    fn a_shell_whose_machine_builds_for_itself_offers_what_was_built_here_not_what_the_server_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        let mut app = shell(dir.path());
+        app.insert_resource(BuiltHere(Some(state.clone())));
+        answer(&mut app, "c", Some("b"), &[]);
+        assert_eq!(
+            ready(&app),
+            None,
+            "the server has a newer build, but this machine hasn't built it: nothing to start"
+        );
+        std::fs::write(&state, r#"{"current": {"rev": "b", "at": "2026-11-21T00:00:00Z"}}"#).unwrap();
+        answer(&mut app, "c", Some("b"), &[]);
+        assert_eq!(ready(&app), None, "what was built here is what this shell runs");
+        std::fs::write(&state, r#"{"current": {"rev": "c", "at": "2026-11-21T00:00:00Z"}}"#).unwrap();
+        answer(&mut app, "c", Some("b"), &[]);
+        assert_eq!(ready(&app).as_deref(), Some("c"), "built here now, so it is offered");
     }
 
     #[test]

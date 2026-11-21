@@ -54,6 +54,10 @@ impl Tools for Fake {
         })
     }
 
+    fn archive<'a>(&'a self, _src: &'a Path, rev: &'a str) -> Boxed<'a, Result<Vec<u8>, String>> {
+        Box::pin(async move { Ok(format!("source of {rev}").into_bytes()) })
+    }
+
     fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>> {
         Box::pin(async move {
             self.logged.lock().unwrap().push((src.to_path_buf(), since.into(), until.into()));
@@ -103,6 +107,10 @@ impl Tools for std::sync::Arc<Fake> {
 
     fn build<'a>(&'a self, job: &'a Job) -> Boxed<'a, Result<PathBuf, String>> {
         (**self).build(job)
+    }
+
+    fn archive<'a>(&'a self, src: &'a Path, rev: &'a str) -> Boxed<'a, Result<Vec<u8>, String>> {
+        (**self).archive(src, rev)
     }
 
     fn log<'a>(&'a self, src: &'a Path, since: &'a str, until: &'a str) -> Boxed<'a, Result<Vec<String>, String>> {
@@ -164,6 +172,19 @@ async fn a_new_head_is_built_the_slots_rotate_and_old_builds_are_pruned() {
     assert_eq!(rig.builds(), ["b", "c"]);
     assert_eq!(rig.built(), ["a", "b", "c"]);
     assert_eq!(rig.layout.read().building, None);
+}
+
+#[tokio::test]
+async fn the_source_of_a_kept_build_is_handed_out_and_of_nothing_else() {
+    let rig = rig();
+    rig.step_at("a").await;
+    rig.step_at("b").await;
+    rig.step_at("c").await;
+    let builds = rig.builder.builds();
+    assert_eq!(builds.source("c").await, Some(Ok(b"source of c".to_vec())), "the newest");
+    assert_eq!(builds.source("b").await, Some(Ok(b"source of b".to_vec())), "and the one before it");
+    assert_eq!(builds.source("a").await, None, "a build no longer kept");
+    assert_eq!(builds.source("HEAD").await, None, "nor whatever else git would take for a commit");
 }
 
 #[tokio::test]

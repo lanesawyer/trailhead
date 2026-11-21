@@ -8069,6 +8069,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "iroh",
  "jiff",
  "reqwest",
  "serde",
@@ -8083,6 +8084,7 @@ dependencies = [
  "trailhead-factory-server",
  "trailhead-log",
  "trailhead-server",
+ "trailhead-wire",
  "uuid",
 ]
 
