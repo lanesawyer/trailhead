@@ -114,7 +114,7 @@ impl Shell {
                 focused_mode: UpdateMode::reactive(Duration::from_millis(100)),
                 unfocused_mode: UpdateMode::reactive_low_power(Duration::from_secs(1)),
             })
-            .add_plugins(ThemePlugin { theme: apps.theme(), choice: theme_file.load() })
+            .add_plugins(ThemePlugin { theme: apps.theme(), choice: theme_file.load(), follow_desktop: true })
             .insert_resource(theme_file)
             .add_plugins(UiPlugin)
             .add_plugins(IconUiPlugin)

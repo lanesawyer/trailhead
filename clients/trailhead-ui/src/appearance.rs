@@ -106,12 +106,20 @@ pub struct ThemePlugin {
     pub theme: Theme,
     /// The person's choice, as the app kept it from last time.
     pub choice: ThemeChoice,
+    /// Whether to ask the desktop for its accent and light or dark, and follow the window's. Off, `choice` and the
+    /// theme's own accent are final: nothing asynchronous changes them, which a drawing to a file needs.
+    pub follow_desktop: bool,
 }
 
 impl ThemePlugin {
     /// `theme`, following the desktop.
     pub fn new(theme: Theme) -> Self {
-        Self { theme, choice: ThemeChoice::Desktop }
+        Self { theme, choice: ThemeChoice::Desktop, follow_desktop: true }
+    }
+
+    /// `theme` worn as `choice` says and in its own accent, the desktop never asked.
+    pub fn fixed(theme: Theme, choice: ThemeChoice) -> Self {
+        Self { theme, choice, follow_desktop: false }
     }
 }
 
@@ -123,9 +131,13 @@ impl Plugin for ThemePlugin {
             .insert_resource(ClearColor(worn.color(&token::SURFACE_WINDOW)))
             .insert_resource(worn.resource())
             .insert_resource(appearance)
-            .insert_resource(Painted(self.theme.clone()))
-            .add_systems(Startup, ask_the_desktop)
-            .add_systems(Update, (seed_from_window, follow_window, take_the_answer, wear).chain());
+            .insert_resource(Painted(self.theme.clone()));
+        if self.follow_desktop {
+            app.add_systems(Startup, ask_the_desktop)
+                .add_systems(Update, (seed_from_window, follow_window, take_the_answer, wear).chain());
+        } else {
+            app.add_systems(Update, wear);
+        }
     }
 }
 

@@ -15,7 +15,7 @@ use bevy::state::app::StatesPlugin;
 use trailhead_ui::Icon;
 
 use crate::commands::{CommandDone, CommandId, CommandsPlugin, Outcome, Submit};
-use crate::connection::{Connection, ConnectionStatus, SendNet};
+use crate::connection::{Connection, ConnectionStatus, Dialed, LocalEndpoint, SendNet};
 use crate::mirror::MirrorPlugin;
 use crate::net::{NetCommand, Reason};
 use crate::sync::{Snapshot, SyncItem};
@@ -39,13 +39,19 @@ impl ShellApp for Other {
 }
 
 /// What the shell's connection gives its apps, without the net thread: the [`Connection`] state, the
-/// [`ConnectionStatus`], the mirror and the outbox. For a shell that was not told how to connect: one that was runs
-/// the real thing.
+/// [`ConnectionStatus`], the [`LocalEndpoint`] and the control plane [`Dialed`] (neither known), the mirror, the outbox
+/// and the [`SendNet`] messages, which go nowhere. For a shell that was not told how to connect: one that was runs the
+/// real thing.
 pub struct TestConnection;
 
 impl Plugin for TestConnection {
     fn build(&self, app: &mut App) {
-        app.init_state::<Connection>().init_resource::<ConnectionStatus>().add_plugins((MirrorPlugin, CommandsPlugin));
+        app.init_state::<Connection>()
+            .init_resource::<ConnectionStatus>()
+            .init_resource::<LocalEndpoint>()
+            .init_resource::<Dialed>()
+            .add_message::<SendNet>()
+            .add_plugins((MirrorPlugin, CommandsPlugin));
     }
 }
 
