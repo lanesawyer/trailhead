@@ -70,6 +70,7 @@
 //!   a label, a value and a note: [`meter`], updated through its [`MeterPart`]s.
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
+//! - How big the whole UI is drawn (Ctrl and `=`, `-`, `0`): [`TextSize`], changed with [`ChangeTextSize`].
 //!
 //! The kit's per-frame systems run in [`UiPlace`] in `Update`; order an app's own systems around it.
 //!
@@ -100,6 +101,8 @@ mod inline;
 mod input;
 mod keyed;
 pub mod layer;
+#[cfg(test)]
+mod layout_test;
 mod link;
 pub mod lint;
 mod menu;
@@ -122,6 +125,7 @@ mod tabs;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod text;
+mod text_size;
 mod theme;
 mod toggle;
 mod truncate;
@@ -177,6 +181,7 @@ pub use spacing::{extent, radius, space, stroke};
 pub use table::{CellAlign, ColumnWidth, TableColumn, table_head, table_row};
 pub use tabs::{TabCaption, tab, tab_strip};
 pub use text::{Size, size, text, text_dim, text_mono, text_toned, text_truncated};
+pub use text_size::{ChangeTextSize, TextSize, TextSizePlugin};
 pub use theme::{BackgroundTone, BorderTone, Surface, TextTone, Theme, Token, palette, token};
 pub use toggle::toggle_switch;
 pub use truncate::{Truncated, truncate_to_width, width_of};
@@ -187,11 +192,14 @@ pub use truncate::{Truncated, truncate_to_width, width_of};
 pub struct UiPlace;
 
 /// What the widgets need at run time: the embedded icon font, the hint, modals, sliders that write their value back,
-/// and the systems in [`UiPlace`].
+/// the [`TextSize`] and its keys, and the systems in [`UiPlace`].
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<TextSizePlugin>() {
+            app.add_plugins(TextSizePlugin);
+        }
         app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
             .init_resource::<nav::SidebarWidth>()
             .add_observer(nav::start_edge_drag)

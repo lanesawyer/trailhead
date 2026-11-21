@@ -112,16 +112,8 @@ pub fn open_modal<M: Modal>(commands: &mut Commands, modal: M) -> Entity {
 }
 
 fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
-    let height = if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto };
     Box::new(bsn_list! {
-        Node {
-            flex_direction: FlexDirection::Column,
-            row_gap: { px(space::ROWS) },
-            width: { width },
-            height: { height },
-            max_width: { vw(MAX_WIDTH_VW) },
-            max_height: { vh(MAX_HEIGHT_VH) },
-        }
+        ~{ frame_node(width, tall) }
         ModalFrame
         HintBounds
         Children [
@@ -141,6 +133,21 @@ fn frame(title: String, width: Val, tall: bool) -> Box<dyn SceneList> {
             ModalFooter
         ]
     })
+}
+
+/// The box inside the dialog, `width` wide unless the window is narrower and as tall as its content or, `tall`, as
+/// [`MAX_HEIGHT_VH`]. Its caps are shares of the window (`vw`, `vh`), which a larger [`TextSize`](crate::TextSize) does
+/// not grow, so a modal whose width in UI pixels comes out wider than the window at 200% is still held inside it.
+fn frame_node(width: Val, tall: bool) -> Node {
+    Node {
+        flex_direction: FlexDirection::Column,
+        row_gap: px(space::ROWS),
+        width,
+        height: if tall { vh(MAX_HEIGHT_VH) } else { Val::Auto },
+        max_width: vw(MAX_WIDTH_VW),
+        max_height: vh(MAX_HEIGHT_VH),
+        ..default()
+    }
 }
 
 /// Despawns a modal asked to close, unless it is locked.
@@ -243,6 +250,27 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    /// A modal's frame laid out on the test screen (800 by 600) at `ui_scale`, in logical pixels.
+    fn frame_size(width: Val, tall: bool, ui_scale: f32) -> Vec2 {
+        let mut app = crate::layout_test::layout_app(1.0, ui_scale);
+        let frame = app.world_mut().spawn(frame_node(width, tall)).id();
+        app.world_mut().spawn((Node { width: px(10), height: px(10), ..default() }, ChildOf(frame)));
+        app.update();
+        let node = app.world().get::<ComputedNode>(frame).unwrap();
+        node.size() * node.inverse_scale_factor() * ui_scale
+    }
+
+    #[test]
+    fn a_modal_is_held_inside_the_window_whatever_the_text_size() {
+        let width = px(extent::MODAL_WIDTH);
+        assert_eq!(frame_size(width, true, 1.0), Vec2::new(640.0, 480.0));
+        // 640 UI pixels are 960 logical ones at 150% and 1280 at 200%: held to 85% of the window, 680.
+        assert_eq!(frame_size(width, true, 1.5), Vec2::new(680.0, 480.0));
+        assert_eq!(frame_size(width, true, 2.0), Vec2::new(680.0, 480.0));
+        // A short one grows with its content and the text size, within the same caps.
+        assert_eq!(frame_size(px(200), false, 1.5), Vec2::new(300.0, 15.0));
+    }
 
     #[derive(Component)]
     struct Test;

@@ -356,11 +356,24 @@ these, or compares first, so the UI does not lay itself out when nothing on scre
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
 | `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
-| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag and the systems in `UiPlace`. The shell adds it. |
+| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
 | `ModalPlugin`, `InlinePlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals or answers inline edits without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
 | `layer` | module of `i32` constants | Which surface is over which (section 3). |
 | `lint` | module | The design-system lint and the scan for wholesale redraws, `lint::redraws` (section 6). |
+
+### How big the UI is drawn
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `TextSize` | resource: `TextSize::STEPS` (`[80, 90, 100, 110, 125, 150, 175, 200]`, percent), `DEFAULT` (100%), `all()`, `at(step) -> Option<TextSize>`, `nearest(percent: u32)`, `step()`, `percent() -> u32`, `scale() -> f32`, `label() -> String` ("125%"), `bigger()`, `smaller()`, `reset()`, `is_default()` | How big the whole window's UI is drawn: text, icons, spacing, controls and panels together, through Bevy's `UiScale`, which it owns. A person moves it with Ctrl (Cmd on macOS) and `=` or `+` (bigger), `-` (smaller) and `0` (100%), from anywhere in the window, a focused text field included. `all()` and `label()` are what a settings menu lists. Set it as the app is built to start at a kept size: it is drawn at from the first frame. | Trigger `ChangeTextSize`, or set the resource. Never write `UiScale`. |
+| `ChangeTextSize` | event: `Bigger`, `Smaller`, `Reset`, `To(TextSize)` | A change of size from an app, a menu or a test, as the keys make. | |
+| `TextSizePlugin` | plugin | The resource, its keys and `ChangeTextSize`. Part of `UiPlugin`. | |
+
+It scales everything rather than text alone because the kit lays out in named sizes and spaces: text grown on its
+own would overflow the buttons, rows and badges sized to hold it. In the Trailhead shell the size is kept for the next
+launch and applies to every app; an app adds nothing. The kit shows nothing when it changes (it has no toast); the
+window simply redraws larger or smaller.
 
 ### Test helpers
 
@@ -646,10 +659,34 @@ Pure functions that turn state into a view model carry most of the tests (Lookou
 `system_clipboard` must stay in the binary's Bevy features, or no text field can paste. The shell's `Cargo.toml` has
 it.
 
+### Sizes are the kit's names, and measurements are in UI pixels (TRAIL-1622)
+
+A person can draw the whole UI at 80% to 200% (`TextSize`), which sets Bevy's `UiScale`. Under it, the units `Val::Px`
+is in, UI pixels, are that multiple of the window's logical pixels. Two rules keep a view right at every size:
+
+- **Sizes come from the kit's names, never from the window.** Widths, gaps and offsets are `extent`, `space`, `radius`
+  and `stroke` values (or shares of what holds them: `percent`, `flex_grow`), so they grow with the text. A size worked
+  out from the window's pixels (`Window::width()`, `resolution`) is in logical pixels and comes out wrong by the text
+  size. To cap something at the window, use `vw` and `vh`, which are shares of the window whatever the text size (the
+  modal's frame does).
+- **Anything that reads layout or the pointer converts to UI pixels.** `ComputedNode`'s fields (`size`,
+  `content_size`, `scroll_position`, `padding`, `border`) and `UiGlobalTransform`'s translation are physical: multiply
+  by `ComputedNode::inverse_scale_factor()` for UI pixels, which `Val::Px`, `ScrollPosition`, the kit's sizes and
+  `ComputedUiRenderTargetInfo::logical_size()` are all in (Bevy calls these "logical"; under a text size they are
+  not the window's). `TextLayoutInfo::size` divided by its `scale_factor` is in UI pixels too. The window's size,
+  `Window::cursor_position()`, a pointer event's `pointer.position`, a drag's `distance` and `delta`, and a wheel's
+  pixels are logical: divide them by `UiScale` (or `TextSize::scale()`) before measuring them against layout. Bevy's
+  own sliders, scrollbars, text inputs and popovers already do. In the kit the sidebar's drag and the wheel were the
+  two places that mixed them; bevy-data-explorer, where this came from, had to fix its docks, drags, tooltips,
+  viewports and selection rectangles.
+
+Test what measures at a text size other than 100%: the kit's tests lay nodes out headless at `UiScale` 1.5
+(`layout_test::layout_app`), and a shots test takes its busiest views at 150% too.
+
 ### Look before you fix
 
 When layout or input misbehaves, measure rather than guess: log `ComputedNode` `size` and `content_size` (times
-`inverse_scale_factor` for logical pixels) of the nodes involved, and what an observer receives, with a temporary
+`inverse_scale_factor` for UI pixels) of the nodes involved, and what an observer receives, with a temporary
 `info!(target: "probe", ..)` removed before committing. Never drive a person's mouse to test it.
 
 ## 5. Recipes

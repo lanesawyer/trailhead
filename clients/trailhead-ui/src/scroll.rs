@@ -71,21 +71,22 @@ pub(super) fn on_scroll(
     mut scroll: On<PointerScroll>,
     keys: Res<ButtonInput<KeyCode>>,
     per_line: Res<MouseScrollPixelsPerLine>,
+    ui_scale: Option<Res<UiScale>>,
     parents: Query<&ChildOf>,
-    downs: Query<(), With<ScrollDown>>,
-    boths: Query<(), With<ScrollBoth>>,
+    kinds: Query<(Has<ScrollDown>, Has<ScrollBoth>)>,
     mut areas: Query<(&ComputedNode, &mut ScrollPosition)>,
 ) {
     let start = scroll.entity;
     let lineage = || std::iter::once(start).chain(parents.iter_ancestors(start));
-    let down = lineage().find(|e| downs.contains(*e));
-    let both = lineage().find(|e| boths.contains(*e));
+    let down = lineage().find(|e| kinds.get(*e).is_ok_and(|(down, _)| down));
+    let both = lineage().find(|e| kinds.get(*e).is_ok_and(|(_, both)| both));
     if down.is_none() && both.is_none() {
         return;
     }
     let pixels = scroll.to_pixels(&per_line);
+    let wheel = in_ui_pixels(Vec2::new(pixels.x, pixels.y), ui_scale.map_or(1.0, |s| s.0));
     let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-    let route = route(shift, Vec2::new(pixels.x, pixels.y), down.is_some());
+    let route = route(shift, wheel, down.is_some());
     if let (Some(down), Some(dy)) = (down, route.down) {
         move_by(&mut areas, down, Vec2::new(0.0, dy));
     }
@@ -94,6 +95,13 @@ pub(super) fn on_scroll(
     }
     // Handled here, all of it, so nothing above scrolls it a second time.
     scroll.propagate(false);
+}
+
+/// A wheel turn or a touchpad swipe of `logical` pixels on screen, in the UI pixels a [`ScrollPosition`] is in: under a
+/// larger [`TextSize`](crate::TextSize) the content follows the fingers on a touchpad, and a notch of the wheel moves
+/// as far on screen as at 100%, as a browser zoomed in does.
+fn in_ui_pixels(logical: Vec2, ui_scale: f32) -> Vec2 {
+    logical / ui_scale.max(f32::EPSILON)
 }
 
 /// How a wheel turn splits between the nearest down-only area and the nearest both-ways one.
@@ -134,7 +142,8 @@ fn scrolled(from: f32, delta: f32, range: f32) -> f32 {
 /// factor, since the rounding is in physical pixels); scrolling that pixel moved a list that fit (TRAIL-1610).
 const ROUNDING_SLACK: f32 = 1.0;
 
-/// How far an area scrolls each way, in logical pixels as [`ScrollPosition`] is: nothing along an axis its content
+/// How far an area scrolls each way, in UI pixels as [`ScrollPosition`] and `Val::Px` are (larger than logical ones
+/// under a larger [`TextSize`](crate::TextSize)): nothing along an axis its content
 /// overflows by no more than [`ROUNDING_SLACK`]. The wheel, the scrollbar and the clamp below all ask this, so an
 /// area that has no range shows no bar and does not move.
 pub(crate) fn scroll_range(computed: &ComputedNode) -> Vec2 {
@@ -200,53 +209,15 @@ mod tests {
         assert_eq!(route(true, Vec2::new(0.0, -3.0), false), Route { down: None, both: Vec2::new(-3.0, 0.0) });
     }
 
-    /// An app that lays out UI nodes headless, on a camera of `scale` with no window, as Bevy's own layout tests do.
-    fn layout_app(scale: f32) -> App {
-        use bevy::app::{HierarchyPropagatePlugin, PropagateSet};
-        use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
-        use bevy::ui::update::propagate_ui_target_cameras;
-        use bevy::ui::{ComputedUiRenderTargetInfo, ComputedUiTargetCamera, ui_layout_system};
-
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .add_plugins(HierarchyPropagatePlugin::<ComputedUiTargetCamera>::new(PostUpdate))
-            .add_plugins(HierarchyPropagatePlugin::<ComputedUiRenderTargetInfo>::new(PostUpdate))
-            .init_resource::<UiScale>()
-            .init_resource::<bevy::ui::ui_surface::UiSurface>()
-            .init_resource::<bevy::text::FontCx>()
-            .init_resource::<bevy::text::RemSize>()
-            .add_systems(PostUpdate, (ApplyDeferred, propagate_ui_target_cameras, ui_layout_system).chain())
-            .configure_sets(
-                PostUpdate,
-                PropagateSet::<ComputedUiTargetCamera>::default()
-                    .after(propagate_ui_target_cameras)
-                    .before(ui_layout_system),
-            )
-            .configure_sets(
-                PostUpdate,
-                PropagateSet::<ComputedUiRenderTargetInfo>::default()
-                    .after(propagate_ui_target_cameras)
-                    .before(ui_layout_system),
-            );
-        let physical_size = UVec2::new(800, 600);
-        app.world_mut().spawn((
-            Camera2d,
-            Camera {
-                computed: ComputedCameraValues {
-                    target_info: Some(RenderTargetInfo { physical_size, scale_factor: scale }),
-                    ..default()
-                },
-                viewport: Some(Viewport { physical_size, ..default() }),
-                ..default()
-            },
-        ));
-        app
-    }
-
     /// A body of three rows in a sidebar-like column `height` high, laid out at `scale`, the last row holding
     /// something `poke` taller than itself (as a text whose measured box overhangs its node does). Returns its range.
     fn laid_out_range(scale: f32, height: f32, poke: f32) -> Vec2 {
-        let mut app = layout_app(scale);
+        laid_out_range_at(scale, 1.0, height, poke)
+    }
+
+    /// [`laid_out_range`] on a screen of `scale` with the UI drawn at `ui_scale`.
+    fn laid_out_range_at(scale: f32, ui_scale: f32, height: f32, poke: f32) -> Vec2 {
+        let mut app = crate::layout_test::layout_app(scale, ui_scale);
         let world = app.world_mut();
         let root = world
             .spawn(Node { flex_direction: FlexDirection::Column, width: px(220), height: px(height), ..default() })
@@ -285,6 +256,22 @@ mod tests {
             assert_eq!(range.x, 0.0);
             assert!((range.y - 28.0).abs() <= 1.0, "{range} at {scale}");
         }
+    }
+
+    #[test]
+    fn under_a_larger_text_size_the_range_is_in_the_ui_pixels_a_scroll_position_is_in() {
+        for (scale, ui_scale) in [(1.0, 1.5), (2.0, 1.5), (1.0, 0.8)] {
+            assert_eq!(laid_out_range_at(scale, ui_scale, 400.0, 0.0), Vec2::ZERO, "fits at {scale} x {ui_scale}");
+            let range = laid_out_range_at(scale, ui_scale, 81.6, 0.0);
+            assert!((range.y - 28.0).abs() <= 1.0, "{range} at {scale} x {ui_scale}");
+        }
+    }
+
+    #[test]
+    fn a_wheel_turn_moves_as_far_on_screen_whatever_the_text_size() {
+        assert_eq!(in_ui_pixels(Vec2::new(0.0, -60.0), 1.0), Vec2::new(0.0, -60.0));
+        // At 150% a UI pixel is a pixel and a half on screen, so 60 on screen is 40 of the content's.
+        assert_eq!(in_ui_pixels(Vec2::new(-30.0, -60.0), 1.5), Vec2::new(-20.0, -40.0));
     }
 
     fn area(content: Vec2, inverse_scale_factor: f32) -> ComputedNode {

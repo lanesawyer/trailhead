@@ -214,13 +214,13 @@ const CAPTION_SIZE: Size = size::CARD_TITLE;
 pub(crate) struct CaptionFit {
     full: String,
     shown: String,
-    /// The width the whole words lay out at, in logical pixels, once measured.
+    /// The width the whole words lay out at, in UI pixels, once measured.
     full_px: Option<f32>,
-    /// The room, in logical pixels, the current cut was made at.
+    /// The room, in UI pixels, the current cut was made at.
     cut_room: f32,
 }
 
-/// The horizontal margins of a node, in logical pixels, which its computed size leaves out.
+/// The horizontal margins of a node, in UI pixels, which its computed size leaves out.
 fn margins(node: &Node) -> f32 {
     [node.margin.left, node.margin.right].into_iter().map(|m| if let Val::Px(m) = m { m } else { 0.0 }).sum()
 }

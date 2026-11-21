@@ -118,12 +118,13 @@ fn fit_hint(
         if size == Vec2::ZERO {
             continue;
         }
-        let Some(target_rect) = logical_rect(&nodes, target.parent()) else { continue };
+        let Some(target_rect) = rect_of(&nodes, target.parent()) else { continue };
+        // In UI pixels, as the rects are: the target's logical size divides by the text size too.
         let window = Rect::from_corners(Vec2::ZERO, screen.logical_size());
         let surface = parents
             .iter_ancestors(target.parent())
             .find(|e| bounds.contains(*e))
-            .and_then(|e| logical_rect(&nodes, e))
+            .and_then(|e| rect_of(&nodes, e))
             .map(|r| r.intersect(window));
         let positions = fit(target_rect, size, surface, window);
         if popover.positions != positions {
@@ -133,10 +134,16 @@ fn fit_hint(
     }
 }
 
-fn logical_rect(nodes: &Query<(&ComputedNode, &UiGlobalTransform)>, entity: Entity) -> Option<Rect> {
+fn rect_of(nodes: &Query<(&ComputedNode, &UiGlobalTransform)>, entity: Entity) -> Option<Rect> {
     let (node, transform) = nodes.get(entity).ok()?;
+    Some(ui_rect(node, transform))
+}
+
+/// Where a node is on screen, in UI pixels: the units `Val::Px`, a hint's gap and [`Popover`]'s placement are in, which
+/// are larger than logical pixels under a larger [`TextSize`](crate::TextSize).
+fn ui_rect(node: &ComputedNode, transform: &UiGlobalTransform) -> Rect {
     let scale = node.inverse_scale_factor();
-    Some(Rect::from_center_size(transform.translation * scale, node.size() * scale))
+    Rect::from_center_size(transform.translation * scale, node.size() * scale)
 }
 
 /// The placements for a hint of `size` under `target`: the first that fits inside `surface`, else the first inside
@@ -227,6 +234,38 @@ mod tests {
     fn a_hint_that_fits_nowhere_leaves_popover_every_choice() {
         let huge = Vec2::new(2000.0, 20.0);
         assert_eq!(fit(Rect::new(400.0, 100.0, 424.0, 124.0), huge, None, WINDOW).len(), PLACEMENTS.len());
+    }
+
+    #[test]
+    fn under_a_larger_text_size_a_hint_at_the_windows_right_edge_still_lines_up_with_its_end() {
+        for (scale, ui_scale) in [(1.0, 1.0), (1.0, 1.5), (2.0, 1.5)] {
+            let mut app = crate::layout_test::layout_app(scale, ui_scale);
+            let cog = Node {
+                position_type: PositionType::Absolute,
+                right: px(8),
+                top: px(8),
+                width: px(24),
+                height: px(24),
+                ..default()
+            };
+            let cog = app.world_mut().spawn(cog).id();
+            app.update();
+            let world = app.world();
+            let (node, transform) =
+                (world.get::<ComputedNode>(cog).unwrap(), world.get::<UiGlobalTransform>(cog).unwrap());
+            let screen = world.get::<ComputedUiRenderTargetInfo>(cog).unwrap();
+            let (target, window) = (ui_rect(node, transform), Rect::from_corners(Vec2::ZERO, screen.logical_size()));
+            assert!(
+                (window.max.x - 8.0 - target.max.x).abs() < 0.5,
+                "{target:?} in {window:?} at {scale} x {ui_scale}"
+            );
+            let chosen = fit(target, HINT, None, window);
+            assert_eq!(
+                (chosen[0].side, chosen[0].align),
+                (PopoverSide::Bottom, PopoverAlign::End),
+                "at {scale} x {ui_scale}"
+            );
+        }
     }
 
     fn app() -> App {

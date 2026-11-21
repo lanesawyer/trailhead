@@ -77,11 +77,14 @@ pub struct SidebarEdge;
 #[derive(Component, Clone, Default)]
 pub(crate) struct EdgeLine;
 
-/// On the edge while it is dragged: holds the resize cursor for the window until the drag ends, since the pointer
-/// leaves the edge as soon as it lags a fast drag. Despawning the edge mid-drag lets go too.
+/// On the edge while it is dragged, with the sidebar's width when the drag began: holds the resize cursor for the
+/// window until the drag ends, since the pointer leaves the edge as soon as it lags a fast drag. Despawning the edge
+/// mid-drag lets go too.
 #[derive(Component, Clone, Copy)]
 #[component(on_insert = hold_cursor, on_remove = release_cursor)]
-pub(crate) struct Dragging;
+pub(crate) struct Dragging {
+    from: f32,
+}
 
 fn hold_cursor(mut world: DeferredWorld, _: HookContext) {
     if let Some(mut cursor) = world.get_resource_mut::<OverrideCursor>() {
@@ -140,27 +143,38 @@ pub fn sidebar() -> impl Scene {
 pub(crate) fn start_edge_drag(
     mut start: On<PointerDragStart>,
     edges: Query<(), With<SidebarEdge>>,
+    width: Res<SidebarWidth>,
     mut commands: Commands,
 ) {
     if start.button == PointerButton::Primary && edges.contains(start.entity) {
         start.propagate(false);
-        commands.entity(start.entity).insert(Dragging);
+        commands.entity(start.entity).insert(Dragging { from: width.get() });
     }
 }
 
-/// Sizes the sidebar to wherever its edge has been dragged.
+/// Sizes the sidebar to wherever its edge has been dragged: its width when the drag began, moved by as far as the
+/// pointer has gone since. Measured from the window's left edge instead, the edge would jump the rail's width away from
+/// the pointer, and by the pointer's distance from the window's edge times the text size.
 pub(crate) fn drag_edge(
     mut drag: On<PointerDrag>,
-    edges: Query<(), With<SidebarEdge>>,
+    edges: Query<Option<&Dragging>, With<SidebarEdge>>,
     ui_scale: Res<UiScale>,
     mut width: ResMut<SidebarWidth>,
 ) {
-    if drag.button != PointerButton::Primary || !edges.contains(drag.entity) {
+    if drag.button != PointerButton::Primary {
         return;
     }
+    let Ok(dragging) = edges.get(drag.entity) else { return };
     drag.propagate(false);
-    // The pointer is in logical pixels; the sidebar is sized in UI units.
-    width.set_if_neq(SidebarWidth::new(drag.pointer.position.x / ui_scale.0));
+    // Until the drag's start has landed; the distance is the whole drag's, so nothing is lost.
+    let Some(dragging) = dragging else { return };
+    width.set_if_neq(dragged(dragging.from, drag.distance.x, ui_scale.0));
+}
+
+/// The sidebar `from` wide dragged `distance` logical pixels to the right, under a UI drawn at `ui_scale`: the sidebar
+/// is sized in UI pixels, which `ui_scale` makes larger than the pointer's logical ones.
+fn dragged(from: f32, distance: f32, ui_scale: f32) -> SidebarWidth {
+    SidebarWidth::new(from + distance / ui_scale.max(f32::EPSILON))
 }
 
 pub(crate) fn end_edge_drag(end: On<PointerDragEnd>, edges: Query<(), With<SidebarEdge>>, mut commands: Commands) {
@@ -624,12 +638,52 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<OverrideCursor>();
         let held = |world: &World| world.resource::<OverrideCursor>().0.clone();
-        let edge = world.spawn(Dragging).id();
+        let edge = world.spawn(Dragging { from: 0.0 }).id();
         assert_eq!(held(&world), Some(EntityCursor::System(SystemCursorIcon::ColResize)));
         world.entity_mut(edge).remove::<Dragging>();
         assert_eq!(held(&world), None);
-        world.spawn(Dragging).despawn();
+        world.spawn(Dragging { from: 0.0 }).despawn();
         assert_eq!(held(&world), None, "an edge despawned mid-drag lets go");
+    }
+
+    /// Drags the edge of a sidebar `from` wide, beside a rail, `distance` logical pixels under a UI drawn at
+    /// `ui_scale`, and returns the width it is left at.
+    fn drag_by(from: f32, distance: f32, ui_scale: f32) -> f32 {
+        use bevy::picking::backend::HitData;
+        use bevy::picking::events::Pointer;
+        use bevy::picking::pointer::{Location, PointerId};
+        let mut app = App::new();
+        app.insert_resource(UiScale(ui_scale))
+            .insert_resource(SidebarWidth::new(from))
+            .init_resource::<OverrideCursor>()
+            .add_observer(start_edge_drag)
+            .add_observer(drag_edge)
+            .add_observer(end_edge_drag);
+        let edge = app.world_mut().spawn(SidebarEdge).id();
+        // Where the pointer is on screen: the rail, then the sidebar, drawn at the scale.
+        let start = (extent::RAIL_WIDTH + from) * ui_scale;
+        let at = |x: f32| {
+            let target = bevy::camera::NormalizedRenderTarget::None { width: 1, height: 1 };
+            Pointer::new(PointerId::Mouse, Location { target, position: Vec2::new(x, 300.0) })
+        };
+        let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
+        let world = app.world_mut();
+        let button = PointerButton::Primary;
+        world.trigger(PointerDragStart { entity: edge, pointer: at(start), button, hit: hit.clone() });
+        world.flush();
+        let (distance, delta) = (Vec2::new(distance, 0.0), Vec2::new(distance, 0.0));
+        world.trigger(PointerDrag { entity: edge, pointer: at(start + distance.x), button, distance, delta });
+        world.flush();
+        world.resource::<SidebarWidth>().get()
+    }
+
+    #[test]
+    fn the_edge_moves_with_the_pointer_beside_a_rail_and_under_a_larger_text_size() {
+        assert_eq!(drag_by(220.0, 30.0, 1.0), 250.0);
+        assert_eq!(drag_by(300.0, -60.0, 1.0), 240.0);
+        // At 150% the pointer's 30 logical pixels are 20 of the sidebar's.
+        assert_eq!(drag_by(220.0, 30.0, 1.5), 240.0);
+        assert_eq!(drag_by(220.0, 0.0, 2.0), 220.0, "a press that hasn't moved leaves it where it was");
     }
 
     #[test]

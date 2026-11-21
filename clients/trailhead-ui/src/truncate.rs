@@ -116,6 +116,29 @@ mod tests {
     use crate::text::size;
 
     #[test]
+    fn a_laid_out_row_cuts_its_text_to_the_same_words_under_any_text_size() {
+        let full = "Sawyer Suite Tasks and more";
+        let cut = |scale: f32, ui_scale: f32| {
+            let mut app = crate::layout_test::layout_app(scale, ui_scale);
+            app.add_systems(Update, fit_truncated);
+            let world = app.world_mut();
+            let row = world.spawn(Node { width: px(210), column_gap: px(4), ..default() }).id();
+            let grow = Node { flex_grow: 1.0, min_width: px(0), ..default() };
+            let caption = world.spawn((grow, Text::new(full), Truncated { full: full.into(), size: size::BODY })).id();
+            world.entity_mut(caption).insert(ChildOf(row));
+            world.spawn((Node { width: px(30), flex_shrink: 0.0, ..default() }, ChildOf(row)));
+            app.update();
+            app.update();
+            app.world().get::<Text>(caption).unwrap().0.clone()
+        };
+        let wanted = truncate_to_width(full, 210.0 - 30.0 - 4.0, size::BODY);
+        assert!(wanted.ends_with('\u{2026}'), "{wanted}");
+        for (scale, ui_scale) in [(1.0, 1.0), (1.0, 1.5), (2.0, 1.5), (1.0, 0.8)] {
+            assert_eq!(cut(scale, ui_scale), wanted, "at {scale} x {ui_scale}");
+        }
+    }
+
+    #[test]
     fn a_box_sized_for_a_string_holds_the_whole_of_it() {
         for text in ["Class", "gene_symbol", "protein kinase C, theta"] {
             let width = width_of(text.chars().count(), size::SECONDARY);
