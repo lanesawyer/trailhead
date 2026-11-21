@@ -254,6 +254,7 @@ impl Mirror {
             trailhead_model::Entity::Claim => Kind::Claim,
             trailhead_model::Entity::Agent => Kind::Agent,
             trailhead_model::Entity::Dependency => Kind::Dependency,
+            trailhead_model::Entity::Attachment => return,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
             return self.remove(commands, kind, &id);

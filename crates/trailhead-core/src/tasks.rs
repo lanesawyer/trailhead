@@ -789,7 +789,18 @@ impl Store {
         let mut duplicates = collect(rows, task_from_row).await?;
         duplicates.sort_by(|a, b| trailhead_model::cmp_keys(&a.key, &b.key));
         let duplicates = duplicates.iter().map(|t| visible_key(ctx, t)).collect();
-        Ok(TaskDetail { task, claim, blocked_by, changes_requested, blocks, comments, duplicate_of, duplicates })
+        let attachments = crate::attachments::list_attachments_for(&conn, task.id).await?;
+        Ok(TaskDetail {
+            task,
+            claim,
+            blocked_by,
+            changes_requested,
+            blocks,
+            comments,
+            duplicate_of,
+            duplicates,
+            attachments,
+        })
     }
 
     pub async fn list_tasks(&self, ctx: &Ctx, filter: TaskFilter) -> Result<Vec<Task>> {

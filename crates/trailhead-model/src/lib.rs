@@ -8,8 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+mod attachment;
 pub mod config;
 pub mod shell;
+
+pub use attachment::*;
 
 /// A value that isn't a valid status, kind or other model value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -573,6 +576,9 @@ pub struct TaskDetail {
     pub duplicate_of: Option<TaskKey>,
     /// Keys of tasks cancelled as duplicates of this one.
     pub duplicates: Vec<TaskKey>,
+    /// The task's live pictures, metadata only, oldest first.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 /// A search result, as `GET /v1/search` returns it: the task and where the query matched it.
@@ -652,6 +658,7 @@ string_enum!(Entity "entity" {
     Comment => "comment",
     Dependency => "dependency",
     Agent => "agent",
+    Attachment => "attachment",
 });
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.

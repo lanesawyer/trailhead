@@ -4,6 +4,7 @@ use jiff::Timestamp;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::attachments::{check_remove_access, check_restore_room, load_attachment, save_attachment};
 use crate::claims::{any_claim, claim_held, put_claim};
 use crate::comments::{load_comment, save_comment};
 use crate::db::collect;
@@ -15,7 +16,9 @@ use crate::projects::{check_review_settings, load_project, save_project};
 use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{check_claim_access, check_no_parent_cycle, check_review, load_task, save_task};
-use trailhead_model::{Claim, Comment, Dependency, Entity, Event, Project, Reverted, Skipped, Task, UndoReport};
+use trailhead_model::{
+    Attachment, Claim, Comment, Dependency, Entity, Event, Project, Reverted, Skipped, Task, UndoReport,
+};
 
 /// What [`restore`] did.
 enum Restored {
@@ -94,6 +97,23 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
                 return Ok(Restored::Done(None));
             }
             let saved = save_comment(tx, &want).await?;
+            (Some(cur.task_id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
+        }
+        Entity::Attachment => {
+            let cur = load_attachment(&tx.conn, ws, parse_uuid(entity_id)?).await?;
+            let want = match target {
+                None => Attachment { deleted_at: Some(cur.deleted_at.unwrap_or(tx.now)), ..cur.clone() },
+                Some(v) => serde_json::from_value(v)?,
+            };
+            if cur.deleted_at.is_some() == want.deleted_at.is_some() {
+                return Ok(Restored::Done(None));
+            }
+            // The rules removing and adding go by.
+            match want.deleted_at {
+                Some(_) => check_remove_access(tx, &cur).await?,
+                None => check_restore_room(&tx.conn, &cur).await?,
+            }
+            let saved = save_attachment(tx, &Attachment { deleted_at: want.deleted_at, ..cur.clone() }).await?;
             (Some(cur.task_id), Some(serde_json::to_value(&cur)?), Some(serde_json::to_value(&saved)?))
         }
         Entity::Dependency => {

@@ -1,6 +1,7 @@
 //! Trailhead's domain core: schema, rules, claims, the ready queue and the event
 //! log. Every interface (REST, MCP, CLI) goes through [`Store`].
 
+mod attachments;
 mod claims;
 mod comments;
 mod db;
@@ -20,6 +21,7 @@ mod undo;
 mod webhooks;
 mod when;
 
+pub use attachments::NewAttachment;
 pub use claims::NamedClaim;
 pub use comments::NewComment;
 pub use deps::BlockersOf;
