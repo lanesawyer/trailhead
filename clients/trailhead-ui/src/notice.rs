@@ -192,6 +192,25 @@ mod tests {
         assert_eq!(app.world().get::<BackgroundTone>(notice).unwrap().0, token::STATUS_DANGER_SUBTLE);
     }
 
+    /// The order the kit's guide (section 4) warns of: what is inserted beside a queued scene lands before the scene,
+    /// and beside a scene spawned at once, after it.
+    #[test]
+    fn a_notice_written_beside_a_queued_scene_is_overwritten_but_not_beside_a_spawned_one() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>();
+        let says = Notice::new(Tone::Error, "couldn't open it");
+        let mut commands = app.world_mut().commands();
+        let queued = commands.queue_spawn_scene(notice()).insert(says.clone()).id();
+        let spawned = commands.spawn_scene(notice()).insert(says.clone()).id();
+        app.world_mut().flush();
+        app.update();
+        assert_eq!(app.world().get::<Notice>(queued), Some(&Notice::default()));
+        assert_eq!(app.world().get::<Notice>(spawned), Some(&says));
+    }
+
     #[test]
     fn a_notice_spawned_with_a_message_says_it_from_the_start() {
         let mut app = App::new();

@@ -552,6 +552,17 @@ Each app guards this with two tests: one that updates a view and checks every ot
 example app's `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`), and the kit's scan of its
 sources for the shape of a wholesale redraw, `lint::redraws` (section 6).
 
+### A marker beside a queued scene is added before the scene (TRAIL-1596)
+
+`commands.queue_spawn_scene(x(..)).insert(Marker)` inserts `Marker` at once, but the scene's own components (a text's
+`Text`, a notice's `Notice`, a nav item's `NavItem`) land a command later, over anything of the same type inserted
+beside them. So a system that waits for `Ref<Marker>::is_added()` to write into the widget finds nothing to write on
+that frame, and on the frame the widget arrives the marker is no longer new; a `Notice` inserted beside a queued
+`notice()` is overwritten by the scene's empty one. Either spawn it with `commands.spawn_scene(x(..))`, which
+resolves the scene when the command runs, so what is inserted after it lands after the scene's components (a kit
+scene always resolves at once); or spawn the widget saying what it should (`notice_with`, a text's own words); or
+watch what the scene gives (`Ref<Text>::is_added()`, `Added<Notice>`), never the marker.
+
 ### A node is never smaller than its content unless you say so (TRAIL-836)
 
 `width` or `height: percent(100)` loses to the content's size in Taffy. A full-window panel full of cards grew past
@@ -970,7 +981,9 @@ dark theme on one screen.
 ### The tests an app's views carry
 
 - **Logic, headless.** The view model as a pure function of the state, and the observers under `MinimalPlugins`
-  (recipe 2's `Press` is triggered straight from a test).
+  (recipe 2's `Press` is triggered straight from a test). An event an observer triggers (a press that becomes the
+  app's own event, the kit's `TextEntered` from a key) waits in the command queue: after `world.trigger(..)`, call
+  `world.flush()` before checking what it caused.
 - **In place.** A test that changes something and checks the entity of the changed text is the same and no other
   entity was spawned or despawned (the example app's third test), and `lint::redraws` over `src`.
 - **Theme.** If the app paints colors: that each of its tokens resolves (`Theme::has`) and that

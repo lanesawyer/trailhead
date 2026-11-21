@@ -388,6 +388,20 @@ in-process Trailhead server behind a local iroh endpoint (`Server::new().await`,
 only a test of work over the real connection wants it: Lookout's `tests/factory_link.rs` and the shell's own
 `tests/connection.rs`.
 
+Two traps in these tests:
+
+- **A marker inserted after `queue_spawn_scene` is added before the scene's components.** The scene is spawned
+  later, so on the frame a system first sees `Ref<Marker>::is_added()`, the widget's own components (its `Text`,
+  `Notice`, `NavItem`) are not there yet, and the frame they arrive `Marker` is no longer added; a component of the
+  scene's own type inserted beside it is overwritten. Spawn with `commands.spawn_scene` instead, which puts the scene
+  down when the command runs, so what is inserted after lands after it; or give the widget what it should show when
+  spawning it (`notice_with`, the text's own words); or watch what the scene gives (`Ref<Text>::is_added()`), never
+  the marker. The kit's guide, section 4, has the rule.
+- **An event triggered from an observer lands on the next flush.** An observer that triggers an event of the app's own
+  (`commands.trigger(AddItem(..))` from an `Activate` or the kit's `TextEntered`) queues it; a test that triggers the
+  press with `world.trigger(..)` and reads what it caused at once must call `app.world_mut().flush()` first (or
+  `settle`).
+
 What the example app's tests cover, and why each matters:
 
 - `pressing_adds_to_the_count_and_it_is_kept_for_the_next_shell`: the logic runs with no window, and what is kept in
