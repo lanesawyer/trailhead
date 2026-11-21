@@ -19,6 +19,9 @@
 //! [`net::Fetch`], and runs work of its own on the net thread while a control plane is held as
 //! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`].
 //!
+//! The rail switches apps through [`transition`]: a cover closes over the app shown, the app is switched while it is
+//! covered, and the cover opens on the app picked, as the person picked in the settings.
+//!
 //! A binary builds a [`Shell`], gives it its apps in the order the rail shows them, and runs it. Underneath is
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
@@ -34,12 +37,14 @@ use trailhead_ui::{Icon, TextSize, TextSizePlugin, Theme};
 use crate::connection::{Connection, ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
 use crate::settings::SettingsPage;
+use crate::transition::{AppTransition, TRANSITION, TransitionKind, TransitionPlugin};
 
 pub mod ask;
 mod ask_panel;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod cover;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 pub mod icon;
@@ -55,6 +60,7 @@ mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
 pub mod testing;
+pub mod transition;
 pub mod update;
 mod update_panel;
 pub mod view;
@@ -236,6 +242,7 @@ impl Plugin for ShellPlugin {
         let first = manifests.iter().find(|m| Some(m.id.0) == remembered.as_deref()).unwrap_or(&manifests[0]).id;
         // Set as the app is built, so the first frame is laid out at the size kept and none is drawn at 100% first.
         let text_size = store.get::<u32>(SHELL, TEXT_SIZE).map(TextSize::nearest);
+        let transition = store.get::<String>(SHELL, TRANSITION).and_then(|w| TransitionKind::from_word(&w));
         if !app.is_plugin_added::<TextSizePlugin>() {
             app.add_plugins(TextSizePlugin);
         }
@@ -245,8 +252,10 @@ impl Plugin for ShellPlugin {
         app.insert_resource(Apps::new(manifests))
             .insert_resource(store)
             .insert_state(ActiveApp(first))
+            .insert_resource(AppTransition(transition.unwrap_or_default()))
+            .add_plugins(TransitionPlugin)
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, ((remember_active, remember_text_size), store::save).chain());
+            .add_systems(Update, ((remember_active, remember_text_size, remember_transition), store::save).chain());
         if let Some((config, target)) = &self.connection {
             let jobs = self.apps.iter().flat_map(|a| a.link_jobs());
             app.add_plugins(ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs));
@@ -271,7 +280,11 @@ impl Plugin for ShellPlugin {
         }
         settings::register(app, pages);
         if self.windowed {
-            app.add_plugins((rail::RailUiPlugin, settings_modal::SettingsModalUiPlugin));
+            app.add_plugins((
+                rail::RailUiPlugin,
+                settings_modal::SettingsModalUiPlugin,
+                cover::CoverUiPlugin,
+            ));
             if self.build.is_some() {
                 app.add_plugins(update_panel::UpdatePanelUiPlugin);
             }
@@ -294,6 +307,13 @@ fn spawn_camera(mut commands: Commands) {
 fn remember_active(active: Res<State<ActiveApp>>, mut store: ResMut<LocalStore>) {
     if active.is_changed() {
         store.set(SHELL, ACTIVE, active.get().0.0);
+    }
+}
+
+/// Keeps the way of switching apps picked for the next launch.
+fn remember_transition(picked: Res<AppTransition>, mut store: ResMut<LocalStore>) {
+    if picked.is_changed() {
+        store.set(SHELL, TRANSITION, picked.0.word());
     }
 }
 

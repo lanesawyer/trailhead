@@ -21,6 +21,7 @@ use crate::connection::{Connection, ConnectionStatus, Dialed, LocalEndpoint, Sen
 use crate::mirror::MirrorPlugin;
 use crate::net::{NetCommand, Reason};
 use crate::sync::{Snapshot, SyncItem};
+use crate::transition::Switching;
 use crate::{ActiveApp, AppId, Manifest, ShellApp, ShellPlugin};
 
 #[cfg(feature = "test-server")]
@@ -85,8 +86,11 @@ pub fn settle(app: &mut App) {
     }
 }
 
-/// Shows the app `id`, as a press on the rail would, and settles.
+/// Shows the app `id` at once, and settles: the switch a press on the rail makes, without its transition, so the app is
+/// shown when this returns whatever time a test keeps. A transition under way is ended first. To test a transition,
+/// trigger [`SwitchApp`](crate::transition::SwitchApp) and step the frames.
 pub fn show(app: &mut App, id: AppId) {
+    app.world_mut().resource_mut::<Switching>().cancel();
     app.world_mut().resource_mut::<NextState<ActiveApp>>().set(ActiveApp(id));
     settle(app);
 }

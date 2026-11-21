@@ -1,4 +1,5 @@
-//! The rail of apps down the left edge of the window: a button for each app, the one shown marked, and at its foot
+//! The rail of apps down the left edge of the window: a button for each app, the one shown marked, a press switching to
+//! it ([`crate::transition`]), and at its foot
 //! the window's own buttons: Ask ([`crate::ask`]), while connected to a server with an apps repo, which opens the form
 //! for asking for a change or a new app ([`crate::ask_panel`]); and the update notice ([`crate::update`]) while a newer
 //! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]); and last the gear,
@@ -12,6 +13,7 @@ use trailhead_ui::{ButtonKind, Hint, Icon, NavItem, rail, rail_foot, rail_item, 
 use crate::ask::Askable;
 use crate::connection::Connection;
 use crate::settings::SettingsGear;
+use crate::transition::{SwitchApp, Switching};
 use crate::update::UpdateReady;
 use crate::{ActiveApp, AppId, Apps};
 
@@ -111,16 +113,17 @@ fn show_update(
     }
 }
 
-fn on_open(activate: On<Activate>, items: Query<&OpenApp>, mut next: ResMut<NextState<ActiveApp>>) {
+fn on_open(activate: On<Activate>, items: Query<&OpenApp>, mut commands: Commands) {
     if let Ok(OpenApp(id)) = items.get(activate.entity) {
-        next.set_if_different(ActiveApp(*id));
+        commands.trigger(SwitchApp(*id));
     }
 }
 
-/// Marks the button of the app shown, in place.
-fn mark_shown(active: Res<State<ActiveApp>>, mut items: Query<(&OpenApp, &mut NavItem)>) {
+/// Marks the button of the app shown, in place: the one being switched to as soon as the switch starts.
+fn mark_shown(active: Res<State<ActiveApp>>, switching: Res<Switching>, mut items: Query<(&OpenApp, &mut NavItem)>) {
+    let shown = switching.target().unwrap_or(active.get().0);
     for (open, mut item) in &mut items {
-        item.set_if_neq(NavItem { current: open.0 == active.get().0 });
+        item.set_if_neq(NavItem { current: open.0 == shown });
     }
 }
 
@@ -153,6 +156,7 @@ mod tests {
     #[test]
     fn each_app_has_a_button_and_pressing_one_shows_that_app_and_marks_it() {
         let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)));
+        app.insert_resource(crate::transition::AppTransition(crate::transition::TransitionKind::None));
         let before = items(&mut app);
         assert_eq!(
             before.iter().map(|(_, id, current)| (*id, *current)).collect::<Vec<_>>(),
