@@ -27,7 +27,8 @@ pub fn width_of(chars: usize, font_size: Size) -> f32 {
 /// Fit `text` into `width`, ending with an ellipsis if it has to be cut.
 pub fn truncate_to_width(text: &str, width: f32, font_size: Size) -> String {
     let glyph = (font_size.px() * GLYPH_WIDTH).max(1.0);
-    let fits = (width / glyph).floor().max(0.0) as usize;
+    // A width made as `width_of(n)` plus and minus some padding can come back a hair under `n` glyphs; that is `n`.
+    let fits = (width / glyph + 1e-3).floor().max(0.0) as usize;
     if text.chars().count() <= fits {
         return text.to_string();
     }
@@ -91,6 +92,15 @@ mod tests {
 
     fn computed(width: f32) -> ComputedNode {
         ComputedNode { size: Vec2::new(width, 20.0), inverse_scale_factor: 1.0, ..default() }
+    }
+
+    #[test]
+    fn a_width_made_for_the_text_fits_it_whatever_the_rounding() {
+        let inset = 2.0 * crate::spacing::space::PANEL_INSET;
+        for word in ["Server", "About", "Connection", "Appearance", "Notes"] {
+            let width = width_of(word.chars().count(), size::BODY) + inset - inset;
+            assert_eq!(truncate_to_width(word, width, size::BODY), word);
+        }
     }
 
     #[test]
