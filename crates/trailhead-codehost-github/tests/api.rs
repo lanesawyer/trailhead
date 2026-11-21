@@ -568,6 +568,43 @@ async fn publish_builds_commits_on_a_new_branch_then_on_top_of_it() {
     assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
 }
 
+/// A retry of several commits published at once is recognised as done, and one whose earlier commit differs is not,
+/// even when the head commit's tree comes out the same.
+#[tokio::test]
+async fn a_retry_of_several_commits_is_recognised_only_if_every_tree_matches() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let commit = |message: &str, path: &str, contents: &[u8]| Commit {
+        message: message.into(),
+        changes: vec![change(path, Some(contents))],
+        merges: vec![],
+    };
+    let main = head(&git, "main");
+    // The second commit overwrites the file the first wrote, so the head's tree doesn't depend on the first's contents.
+    let commits = [
+        commit("TRAIL-2: one", "a.txt", b"one\n"),
+        commit("TRAIL-2: two", "b.txt", b"two\n"),
+        commit("TRAIL-2: three", "a.txt", b"three\n"),
+    ];
+    gh.publish(&repo(), &main, "factory/trail-2", &commits).await.unwrap();
+    let published_head = head(&git, "factory/trail-2");
+
+    gh.publish(&repo(), &main, "factory/trail-2", &commits).await.unwrap();
+    assert_eq!(head(&git, "factory/trail-2"), published_head, "the retry changed nothing");
+
+    // Only the first commit differs; the head's tree is the same, but the history isn't this publish's.
+    let mut earlier = commits.clone();
+    earlier[0] = commit("TRAIL-2: one", "a.txt", b"different\n");
+    let refused = gh.publish(&repo(), &main, "factory/trail-2", &earlier).await.unwrap_err();
+    assert!(matches!(&refused, Error::Conflict(m) if m.contains("would overwrite")), "{refused:?}");
+
+    // The same commits in another order aren't it either.
+    let reordered = [commits[1].clone(), commits[0].clone(), commits[2].clone()];
+    let refused = gh.publish(&repo(), &main, "factory/trail-2", &reordered).await.unwrap_err();
+    assert!(matches!(&refused, Error::Conflict(_)), "{refused:?}");
+    assert_eq!(head(&git, "factory/trail-2"), published_head);
+}
+
 #[tokio::test]
 async fn publish_gives_each_file_its_mode() {
     let (git, url) = serve().await;
