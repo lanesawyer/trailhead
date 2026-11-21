@@ -1,7 +1,7 @@
 //! Programming-language specific knowledge, behind one interface (TRAIL-1566).
 //!
 //! What the factory knows about a language is the answer to four questions: which hosts installing its toolchain and
-//! packages needs, which lockfiles it has and which edits to them only change a dependency list, which files are its
+//! packages needs, which lockfiles it has and which edits to them bring in nothing new to fetch, which files are its
 //! source, and which edits to those are comments only. Each language is one [`Language`] in its own module, compiled
 //! in by a cargo feature of this crate (`rust`, `python`, `node`, `go`; all on by default), so a build for a stack
 //! without Python carries no `uv` code. To support a new language, implement the trait in a new module here, add its
@@ -16,7 +16,7 @@ mod python;
 #[cfg(feature = "rust")]
 mod rust;
 
-/// Whether a lockfile line is one a dependency-list-only edit may add or remove.
+/// Whether a lockfile line is one an edit that brings in nothing new may add or remove.
 pub type LockLine = fn(&str) -> bool;
 
 /// One programming language's part of the factory. Every method has a "knows nothing" default, so a language
@@ -36,6 +36,22 @@ pub trait Language: Send + Sync {
     /// only edits a dependency list. A lockfile no language reads is never taken to be safe.
     fn lockfile(&self, _file_name: &str) -> Option<LockLine> {
         None
+    }
+
+    /// Whether a patch to the lockfile `file_name` brings in nothing new to fetch, or `None` when this language
+    /// doesn't have that lockfile. By default every changed line has to pass [`Language::lockfile`]'s reader; a
+    /// language whose lockfile needs more than a line to judge reads the whole patch. An empty patch is not safe.
+    fn lock_patch_safe(&self, file_name: &str, patch: &str) -> Option<bool> {
+        let line_ok = self.lockfile(file_name)?;
+        let mut changed = 0;
+        for line in patch.lines() {
+            let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) else { continue };
+            changed += 1;
+            if !line_ok(rest.trim()) {
+                return Some(false);
+            }
+        }
+        Some(changed > 0)
     }
 
     /// Whether `path` is a source file whose patch the grader reads for comment-only edits.
@@ -66,6 +82,12 @@ pub fn languages() -> &'static [&'static dyn Language] {
 /// The lockfile reader for `file_name` from whichever language has it.
 pub(crate) fn lockfile(file_name: &str) -> Option<LockLine> {
     languages().iter().find_map(|l| l.lockfile(file_name))
+}
+
+/// Whether a patch to the lockfile `file_name` brings in nothing new, as the language that has it reads it; `false`
+/// for a lockfile no language reads.
+pub(crate) fn lock_patch_safe(file_name: &str, patch: &str) -> bool {
+    languages().iter().find_map(|l| l.lock_patch_safe(file_name, patch)).unwrap_or(false)
 }
 
 /// Whether the grader reads `path`'s patch: a lockfile some language reads, or a language's source.

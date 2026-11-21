@@ -51,6 +51,20 @@ async fn a_project_pointed_while_the_factory_runs_is_worked_on_the_next_poll() {
 }
 
 #[tokio::test]
+async fn a_change_outside_the_projects_path_is_raised_to_grade_three() {
+    let (r, _queue) = queued_rig();
+    r.tracker.point("TICK", Some((SLUG, Some("apps/ticklist"))));
+    let key = r.tracker.add_task("TICK", "Share a widget", "");
+    r.tracker.set_grade(&key, 2);
+    r.harness.push(Role::Worker, Script::new(changes_to("shell/src/widget.rs")));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.tick().await.unwrap();
+
+    assert_eq!(r.tracker.task(&key).grade, Some(gr(3)));
+    assert_eq!(notes(&r, &key), ["Raised to grade 3 (task was 2): shell/src/widget.rs is outside apps/ticklist/"]);
+}
+
+#[tokio::test]
 async fn a_pointed_project_that_is_another_repos_own_is_skipped() {
     let host = Host::new(&HostConfig::default());
     let r = rig_on(CONFIG, host.clone());
