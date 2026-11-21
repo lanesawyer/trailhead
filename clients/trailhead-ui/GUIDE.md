@@ -340,6 +340,24 @@ view.
 | `bubble` | `bubble(side: Side) -> impl Scene` | A message in a conversation: the reader's (`Side::Mine`) against the end edge in the accent, others' (`Side::Theirs`) against the start edge. Put it in a column and spawn its lines as children. | |
 | `bubble_head` | `bubble_head(icon: Icon, words: Into<String>) -> impl Scene` | A bubble's first line: an icon for the kind of message and dim words about it (who, when). | |
 
+### A picture
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `spawn_picture` | `spawn_picture(commands: &mut Commands, caption: Into<String>, picture: Picture) -> PictureParts` | A picture (a screenshot) in a box `extent::PICTURE_WIDTH` by `PICTURE_HEIGHT`, bordered, fitted inside it keeping its aspect ratio, with its caption under it cut to the box's width. Pressable as a whole: a press, Enter or Space sends `Activate` from the root, for the caller to open the large view. Spawned unparented. | Set the `Picture` on `PictureParts::frame` with `set_if_neq`; the kit shows it in place. |
+| `PictureParts` | `PictureParts { root: Entity, frame: Entity }` | Put `root` where it goes; `frame` holds the `Picture`. | |
+| `Picture` | `Loading` (default), `Ready { image: Handle<Image>, width: u32, height: u32 }`, `Failed(String)` (component on a frame) | What a frame shows: "Loading…" dim, the image, or why it failed in the danger color. `width` and `height` are the image's pixels, which the frame fits it by. | |
+| `png_image` | `png_image(bytes: &[u8]) -> Result<Image, String>` | A PNG's pixels as an `Image` to add to `Assets<Image>` (kept where it is drawn only, not in the app's memory too), or why it could not be read. Bevy is built without its image formats; this uses the `png` crate. Cache the handle by the bytes' hash rather than decoding the same picture twice. | |
+| `open_picture_view` | `open_picture_view(commands: &mut Commands, title: Into<String>, pictures: Vec<ViewedPicture>) -> Entity` | One picture, or a pair (before and after), as large as a modal may be (`wide` and `tall`), each fitted to its room under its caption. A pair stands side by side, and a `button_group` in the header shows either alone in the same place, so flipping between them shows a small difference. A second group sizes them to Fit or at Actual size (pixel for pixel, scrolling both ways). Escape, the X or a click outside closes it. Returns the modal's root. | Set the `Picture` on the frame whose `PictureViewSlot` is the picture's index, as for a thumbnail. |
+| `ViewedPicture` | `ViewedPicture { caption: String, picture: Picture }` | One picture of the large view. | |
+| `PictureViewSlot` | `PictureViewSlot(pub usize)` (component on a large view's frame) | Which of the pictures given a frame holds, from 0. | |
+| `PictureFit` | `Fit` (default), `Actual` (component on a frame) | Whether the frame fits its image to its room or shows it pixel for pixel. The large view's group sets it. | |
+| `PictureView`, `PictureImage`, `PictureStatus`, `PictureCaption` | components | The large view's modal, and a frame's image, its status words and a thumbnail's caption, which the kit keeps; for a test to find. | |
+
+The picture does not fetch or decode anything itself: the caller reads the bytes (over the API, from a file),
+decodes them with `png_image` once per picture, and sets `Picture::Ready`. Lookout's inspector shows a task's
+screenshots this way, before and after, and opens a pair in the large view on a press.
+
 ### Scrolling
 
 | Item | Signature | What it is for |
@@ -463,6 +481,8 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
 - **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
   status color; one line cut to fit its row; a caption inside a hand-built button.
+- **`spawn_choice_tile` / `spawn_picture`.** A small picture that is one of a row of choices; a picture shown for
+  itself (a screenshot), which opens large when pressed.
 - **`Keyed` / `ReorderList`.** A list that follows your data's order; a list whose order a person sets, which reports
   each move for you to apply to that data (and then `Keyed` moves the nodes).
 - **`scroll_frame` + `scroll_body` / `ScrollBoth`.** A panel's body that scrolls down; an area (a board of columns) that
@@ -581,6 +601,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `DETAIL_WIDTH`, `DETAIL_SIDEBAR_WIDTH` | 960, 280 | A detail modal and its sidebar of facts |
 | `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
 | `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 72, 44 | A choice tile's picture |
+| `PICTURE_WIDTH`, `PICTURE_HEIGHT` | 160, 100 | A picture's thumbnail box (`spawn_picture`): two side by side fit a side panel |
 
 The lint reads lines, not meaning: a number hidden in a constant named for nothing gets past it. Name constants for
 what they are for, and prefer the kit's names over constants of your own.

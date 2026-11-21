@@ -74,6 +74,9 @@
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
 //! - A list of short values a person adds to and takes from (directories): [`value_list`]; observe [`ValuesEdited`]
 //!   on it and set its [`ValueList`].
+//! - A picture (a screenshot) fitted in a box with its caption, pressable to enlarge: [`spawn_picture`], showing the
+//!   [`Picture`] on its frame (loading, an image, or why it failed); decode a PNG with [`png_image`]. One or a pair
+//!   (before and after) as large as the window: [`open_picture_view`].
 //! - A pick among things a person should see (small previews), a row of pictures with captions: [`spawn_choice_tile`]s,
 //!   the one chosen marked with [`ChoiceTile`].
 //! - Something that moves: [`ease_in`] and [`ease_out`] over real time, and a background faded with
@@ -122,6 +125,7 @@ mod nav;
 mod notice;
 mod panel_header;
 mod patch;
+mod picture;
 mod progress;
 mod reorder;
 mod scroll;
@@ -182,6 +186,10 @@ pub use nav::{
 pub use notice::{Notice, Tone, notice, notice_with};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
+pub use picture::{
+    Picture, PictureCaption, PictureFit, PictureImage, PictureParts, PictureStatus, PictureView, PictureViewSlot,
+    ViewedPicture, open_picture_view, png_image, spawn_picture,
+};
 pub use progress::{MeterPart, Progress, ProgressTone, meter, progress_bar};
 pub use reorder::{DRAG_THRESHOLD, Lifted, RELEASE_SLACK, ReorderItem, ReorderList, ReorderPlugin, Reordered};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_body_node, scroll_frame, scroll_frame_node};
@@ -229,8 +237,13 @@ impl Plugin for UiPlugin {
             .add_observer(nav::end_edge_drag)
             .add_observer(scroll::on_scroll)
             .add_observer(button_group::on_option)
+            .add_observer(picture::on_view_pick)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
+            .add_systems(
+                Update,
+                (picture::fill_picture_views, picture::show_pictures, picture::fit_pictures).chain().in_set(UiPlace),
+            )
             .add_systems(Update, select::fit_select_captions.in_set(UiPlace).after(select::show_chosen_icons))
             .add_systems(
                 PostUpdate,

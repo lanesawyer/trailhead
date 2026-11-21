@@ -106,6 +106,10 @@ pub mod extent {
     pub const TILE_PICTURE_WIDTH: f32 = 72.0;
     /// A choice tile's picture, down.
     pub const TILE_PICTURE_HEIGHT: f32 = 44.0;
+    /// A picture's thumbnail box, across (`spawn_picture`): two side by side fit a side panel.
+    pub const PICTURE_WIDTH: f32 = 160.0;
+    /// A picture's thumbnail box, down: a screen's shape.
+    pub const PICTURE_HEIGHT: f32 = 100.0;
 }
 
 /// How thick a line is: a border, a rule between panes.

@@ -31,3 +31,5 @@ bevy = { version = "0.20", default-features = false, features = [
 ] }
 # link_button opens URLs in the system's browser.
 open = "5"
+# png_image decodes a picture's bytes: Bevy is built without its image formats, and the shell already has png.
+png = "0.18"
