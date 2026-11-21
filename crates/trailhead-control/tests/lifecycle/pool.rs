@@ -828,3 +828,20 @@ async fn a_stuck_breached_sandboxs_warm_cost_is_forgotten_when_reconcile_destroy
     assert!(r.compute.get("trailhead-w1").is_none());
     assert_eq!(r.factory.sandbox_entries(), 0, "the cost went with the sandbox");
 }
+
+#[tokio::test]
+async fn a_stuck_breached_sandbox_shows_as_broken_on_the_board_after_reconcile() {
+    let r = rig();
+    let key = r.tracker.add_task("TRAIL", "Expensive", "");
+    r.harness.push(Role::Worker, Script::new(changes()).steps(10, 2_000_000));
+    // The cut-off and the destroy after it both fail, leaving the breach stuck; the destroy keeps failing.
+    r.compute.fail_after("trailhead-w1", "set_labels", 2);
+    r.compute.fail("trailhead-w1", "destroy");
+    let _ = r.factory.run_task(&r.tracker.task(&key)).await;
+
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_some(), "the destroy failed, so the sandbox is still live");
+    let board = r.factory.status().snapshot().sandboxes;
+    let state = board.iter().find(|s| s.name == "trailhead-w1").map(|s| s.state);
+    assert_eq!(state, Some(SandboxState::Broken), "{board:?}");
+}

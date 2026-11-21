@@ -89,19 +89,16 @@ impl Factory {
         // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
         // A sandbox a breach left stuck (cut-off and destroy both failed) is shown apart: waiting to be destroyed,
         // not suspended.
-        let held = |stuck: bool| -> HashSet<String> {
-            in_flight
-                .iter()
-                .flatten()
-                .filter(|t| t.status == Status::NeedsInput && !running.contains(&t.key))
-                .filter(|t| {
-                    let breach = t.run.worker_breach.as_ref();
-                    breach.is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) == stuck
-                })
-                .filter_map(|t| t.run.host.clone().or_else(|| t.run.sandbox.clone()))
-                .collect()
-        };
-        self.status.sync_sandboxes(&live, &down, &held(false), &held(true));
+        let (mut paused, mut broken) = (HashSet::new(), HashSet::new());
+        for sandbox in &live {
+            let (parked, stuck) = self.holds(in_flight.iter().flatten().filter(|t| !running.contains(&t.key)), sandbox);
+            if stuck {
+                broken.insert(sandbox.name.clone());
+            } else if parked {
+                paused.insert(sandbox.name.clone());
+            }
+        }
+        self.status.sync_sandboxes(&live, &down, &paused, &broken);
         self.warn_strays().await;
         let in_flight = in_flight?;
         // Only after a listing that succeeded: a tracker error must not wipe what the merger is tracking.
@@ -130,22 +127,7 @@ impl Factory {
             // breach left it live (stuck): that one is destroyed, not released for reuse, until it is gone. Only the
             // task the sandbox is labelled for keeps it: a parked task's record goes on naming a host its run gave
             // back long ago, and a later task's cut-short run there would never be released (TRAIL-1474).
-            let labelled = sandbox.labels.get(label::TASK);
-            let (mut parked, mut stuck) = (false, false);
-            for t in tasks.iter().filter(|t| {
-                (t.status == Status::NeedsInput
-                    || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
-                    && t.run.released.is_none()
-                    && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
-                    && labelled.is_none_or(|task| *task == t.key.0)
-            }) {
-                // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
-                if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
-                    stuck = true;
-                } else {
-                    parked = true;
-                }
-            }
+            let (parked, stuck) = self.holds(tasks.iter(), sandbox);
             if parked {
                 continue;
             }
@@ -199,6 +181,29 @@ impl Factory {
             }
         }
         Ok((done, due))
+    }
+
+    /// Whether a sandbox is kept for a parked task (`parked`) or is one a breach left live, to be destroyed (`stuck`).
+    /// The board and the destroy loop share it so they agree: only a task that hasn't given the host back, and that
+    /// the sandbox is labelled for, keeps it (TRAIL-1474).
+    fn holds<'a>(&self, tasks: impl Iterator<Item = &'a Task>, sandbox: &Sandbox) -> (bool, bool) {
+        let labelled = sandbox.labels.get(label::TASK);
+        let (mut parked, mut stuck) = (false, false);
+        for t in tasks.filter(|t| {
+            (t.status == Status::NeedsInput
+                || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
+                && t.run.released.is_none()
+                && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
+                && labelled.is_none_or(|task| *task == t.key.0)
+        }) {
+            // An earlier run's stuck flag outlives it in the run record, so only the current run's breach counts.
+            if t.run.worker_breach.as_ref().is_some_and(|b| b.stuck && t.run.sandbox.as_ref() == Some(&b.run)) {
+                stuck = true;
+            } else {
+                parked = true;
+            }
+        }
+        (parked, stuck)
     }
 
     /// Finishes the park of a run that breached its budget, cut short by a restart: its sandbox is cut off (again, if
