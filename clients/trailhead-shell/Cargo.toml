@@ -58,5 +58,5 @@ axum = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The shell's own tests use the test support and the server too.
-trailhead-shell = { workspace = true, features = ["test-server"] }
+# The shell's own tests use the test support, the server and the shots too.
+trailhead-shell = { workspace = true, features = ["test-server", "shots"] }

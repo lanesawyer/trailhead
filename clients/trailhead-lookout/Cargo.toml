@@ -43,5 +43,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 trailhead-ui = { workspace = true, features = ["test-support"] }
-# The fixtures, and `testing::server` for the factory link's tests.
-trailhead-shell = { workspace = true, features = ["test-server"] }
+# The fixtures, `testing::server` for the factory link's tests, and `testing::shot` for `tests/shots.rs`.
+trailhead-shell = { workspace = true, features = ["test-server", "shots"] }
