@@ -14,9 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
-    Agent, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask, CreatedToken, CreatedWebhook,
-    Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail,
-    TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
+    Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
+    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit,
+    Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -61,6 +61,10 @@ pub mod routes {
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
+    pub const LIST_ATTACHMENTS: Route = Route::new(Method::GET, "/v1/tasks/{task}/attachments");
+    pub const ADD_ATTACHMENT: Route = Route::new(Method::POST, "/v1/tasks/{task}/attachments");
+    pub const READ_ATTACHMENT: Route = Route::new(Method::GET, "/v1/attachments/{id}");
+    pub const REMOVE_ATTACHMENT: Route = Route::new(Method::DELETE, "/v1/attachments/{id}");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
@@ -95,7 +99,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 42] {
+    pub fn all() -> [Route; 46] {
         [
             READY,
             LIST_TASKS,
@@ -112,6 +116,10 @@ pub mod routes {
             MY_CLAIMS,
             SEARCH,
             RESOLVE_COMMENT,
+            LIST_ATTACHMENTS,
+            ADD_ATTACHMENT,
+            READ_ATTACHMENT,
+            REMOVE_ATTACHMENT,
             CREATE_PROJECT,
             UPDATE_PROJECT,
             DELETE_TASK,
@@ -210,6 +218,14 @@ async fn api_error(res: reqwest::Response) -> Error {
     let status = res.status().as_u16();
     let body: Value = res.json().await.unwrap_or(Value::Null);
     Error::Api { status, error: ApiError::from_body(&body) }
+}
+
+/// `POST /v1/tasks/{task}/attachments`: what goes with the bytes.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct NewAttachment {
+    pub name: String,
+    pub role: Option<AttachmentRole>,
+    pub set: Option<String>,
 }
 
 /// `POST /v1/tasks`.
@@ -716,6 +732,34 @@ impl Client {
     /// `POST /v1/tasks/{task}/comments`.
     pub async fn add_comment(&self, key: &TaskKey, comment: &NewComment) -> Result<Comment> {
         self.send(self.request(routes::ADD_COMMENT, Some(key.as_str())).json(comment)).await
+    }
+
+    /// `GET /v1/tasks/{task}/attachments`: the task's pictures, without their bytes.
+    pub async fn list_attachments(&self, key: &TaskKey) -> Result<Vec<Attachment>> {
+        self.send(self.request(routes::LIST_ATTACHMENTS, Some(key.as_str()))).await
+    }
+
+    /// `POST /v1/tasks/{task}/attachments`: attaches `png` (its bytes) to the task.
+    pub async fn add_attachment(&self, key: &TaskKey, new: &NewAttachment, png: Vec<u8>) -> Result<Attachment> {
+        let mut query = vec![("name", new.name.clone())];
+        query.extend(new.role.map(|r| ("role", r.to_string())));
+        query.extend(new.set.clone().map(|s| ("set", s)));
+        let req = self.request(routes::ADD_ATTACHMENT, Some(key.as_str())).query(&query);
+        self.send(req.header(reqwest::header::CONTENT_TYPE, trailhead_model::PNG).body(png)).await
+    }
+
+    /// `GET /v1/attachments/{id}`: the picture's bytes.
+    pub async fn attachment_bytes(&self, id: Uuid) -> Result<Vec<u8>> {
+        let res = self.dispatch(self.request(routes::READ_ATTACHMENT, Some(&id.to_string()))).await?;
+        if !res.status().is_success() {
+            return Err(api_error(res).await);
+        }
+        Ok(res.bytes().await.map_err(Error::Transport)?.to_vec())
+    }
+
+    /// `DELETE /v1/attachments/{id}`: the picture, removed (undo restores it).
+    pub async fn remove_attachment(&self, id: Uuid) -> Result<Attachment> {
+        self.send(self.request(routes::REMOVE_ATTACHMENT, Some(&id.to_string()))).await
     }
 
     /// `POST /v1/comments/{id}/resolve`, optionally with an answer.

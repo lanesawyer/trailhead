@@ -38,7 +38,7 @@ pub const ERROR_CODES: &[&str] = &[
     "internal",
 ];
 
-/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review` and `blocked_by` are present only when named in `include`; `blocked_by_hidden` comes with `blocked_by`.
+/// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `attachments` are present only when named in `include`; `blocked_by_hidden` comes with `blocked_by`.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
@@ -59,6 +59,9 @@ pub struct ListedTask {
     /// With `include=blocked_by`: how many unfinished blockers outside the token's scope this task has, which `blocked_by` leaves out.
     #[schema(nullable = false)]
     blocked_by_hidden: Option<u32>,
+    /// With `include=attachments`: the task's live pictures, oldest first, without their bytes (empty if none).
+    #[schema(nullable = false)]
+    attachments: Option<Vec<trailhead_core::Attachment>>,
 }
 
 /// Path and header parameters many routes share, declared once for the docs.
@@ -281,6 +284,10 @@ impl Modify for Common {
         routes::tasks::set_aside,
         routes::comments::list_comments,
         routes::comments::add_comment,
+        routes::attachments::list_attachments,
+        routes::attachments::add_attachment,
+        routes::attachments::read_attachment,
+        routes::attachments::remove_attachment,
         routes::dependencies::list_blockers,
         routes::dependencies::add_blocker,
         routes::dependencies::remove_blocker,

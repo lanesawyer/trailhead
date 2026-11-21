@@ -1,6 +1,7 @@
 //! The REST API under `/v1`, one module per resource.
 
 pub(crate) mod access;
+pub(crate) mod attachments;
 pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod config;
@@ -14,7 +15,7 @@ pub(crate) mod webhooks;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -49,6 +50,13 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/release", post(claims::release))
         .route("/tasks/{task}/set-aside", post(tasks::set_aside))
         .route("/tasks/{task}/comments", get(comments::list_comments).post(comments::add_comment))
+        .route(
+            "/tasks/{task}/attachments",
+            get(attachments::list_attachments)
+                .post(attachments::add_attachment)
+                .layer(DefaultBodyLimit::max(trailhead_core::MAX_ATTACHMENT_BYTES)),
+        )
+        .route("/attachments/{id}", get(attachments::read_attachment).delete(attachments::remove_attachment))
         .route("/tasks/{task}/blockers", get(dependencies::list_blockers).post(dependencies::add_blocker))
         .route("/tasks/{task}/blockers/{blocker}", delete(dependencies::remove_blocker))
         .route("/tasks/{task}/history", get(events::task_history))
