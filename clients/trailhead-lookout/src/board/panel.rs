@@ -292,12 +292,18 @@ fn drop_unwanted(row: &[Entity], keep: impl Fn(usize, Entity) -> bool, commands:
     }
 }
 
+/// A card whose view model changed, or that was just given its parts.
+type ChangedOrDressed = Or<(Changed<BoardCard>, Changed<Children>)>;
+
 type ToolState<'a> = (&'a ToolKind, Option<&'a Act>, Option<&'a ExternalLink>, Option<&'a InspectHolder>);
 
 /// Brings the rows of a card whose view model changed to what it now has: badges added or dropped at the end, tool
 /// buttons added, dropped, or given their new target. A badge or button that stays is the same entity.
+///
+/// A card just given its parts counts as changed too: when the card was made after this ran in a frame, its view
+/// model no longer reads as changed by the time [`dress_cards`] has given it rows to fill (TRAIL-1616).
 pub(super) fn sync_card_rows(
-    cards: Query<(&BoardCard, &Children), Changed<BoardCard>>,
+    cards: Query<(&BoardCard, &Children), ChangedOrDressed>,
     parts: Query<&CardPart>,
     kids: Query<&Children>,
     tools: Query<ToolState>,
@@ -515,6 +521,27 @@ mod in_place_tests {
     fn texts(app: &mut App, root: Entity) -> Vec<String> {
         let all = subtree(app, root);
         all.into_iter().filter_map(|e| app.world().get::<Text>(e).map(|t| t.0.clone())).collect()
+    }
+
+    #[test]
+    fn a_card_made_after_the_cards_were_dressed_in_a_frame_still_gets_its_badges_and_tools() {
+        fn make_once(mut made: Local<bool>, mut commands: Commands) {
+            if !std::mem::replace(&mut *made, true) {
+                commands.spawn(BoardCard(card("late", &["P1", "grade 2"], vec![CardAction::Edit])));
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, StatesPlugin, AssetPlugin::default(), bevy::scene::ScenePlugin))
+            .init_asset::<bevy::text::Font>()
+            .init_asset::<Image>()
+            .init_state::<Connection>()
+            .add_systems(Update, (dress_cards, make_once, update_cards, update_card_badges, sync_card_rows).chain());
+        settle(&mut app);
+        let shell = app.world_mut().query_filtered::<Entity, With<BoardCard>>().single(app.world()).unwrap();
+        let shown = texts(&mut app, shell);
+        assert!(shown.contains(&"P1".to_string()) && shown.contains(&"grade 2".to_string()), "{shown:?}");
+        let mut tools = app.world_mut().query::<&ToolKind>();
+        assert_eq!(tools.iter(app.world()).count(), 1);
     }
 
     #[test]
