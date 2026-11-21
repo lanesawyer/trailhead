@@ -9,10 +9,10 @@ use tokio::sync::Notify;
 use trailhead_daemon::{HEARTBEAT_EVERY, RENEW_EVERY, Runner, Workspace};
 use trailhead_factory::{
     Check, CheckResult, CodeHost, Daemon, Error, EventSink, Harness, HarnessKind, HarnessSetup, InstallHost,
-    PrepareRequest, Registry, Repo, Result, RunEvent, RunReport, RunRequest, SandboxId, Tracker,
+    PrepareRequest, Registry, Repo, Result, RunEvent, RunReport, RunRequest, SandboxId, ShotFiles, Shots, Tracker,
 };
 
-pub use trailhead_daemon::Connect;
+pub use trailhead_daemon::{Connect, Shot, Taken};
 
 use crate::FakeTracker;
 
@@ -69,6 +69,29 @@ pub struct FakeWorkspace {
     /// The `[factory.stack] env` the latest prepare or run request set, and what each check ran with.
     env: Mutex<BTreeMap<String, String>>,
     check_envs: Mutex<Vec<(String, BTreeMap<String, String>)>>,
+    /// What the next takes of a change's pictures come to; when it runs out, the pictures are taken and none differ.
+    taken: Mutex<VecDeque<Taken>>,
+    /// The shots commands run, with the base branch each was compared against.
+    shots_taken: Mutex<Vec<(Shots, String)>>,
+    /// The pictures a reviewer was handed, a list per review.
+    shots_kept: Mutex<Vec<Vec<Shot>>>,
+}
+
+impl FakeWorkspace {
+    /// Has the agent change these files, which path-scoped checks and the shots match against.
+    pub fn change_files(&self, files: &[&str]) {
+        *self.changed.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
+    }
+
+    /// What the next take of a change's pictures comes to. Without one, the pictures are taken and none differ.
+    pub fn take_shots(&self, taken: Taken) {
+        self.taken.lock().unwrap().push_back(taken);
+    }
+
+    /// The pictures each reviewer was handed.
+    pub fn shots_kept(&self) -> Vec<Vec<Shot>> {
+        self.shots_kept.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -166,6 +189,24 @@ impl Workspace for FakeWorkspace {
 
     fn set_env(&self, env: &BTreeMap<String, String>) {
         *self.env.lock().unwrap() = env.clone();
+    }
+
+    async fn shots(&self, shots: &Shots, base: &str) -> Taken {
+        self.shots_taken.lock().unwrap().push((shots.clone(), base.to_string()));
+        self.taken.lock().unwrap().pop_front().unwrap_or_default()
+    }
+
+    async fn keep_shots(&self, shots: &[Shot]) -> Result<Vec<ShotFiles>> {
+        self.shots_kept.lock().unwrap().push(shots.to_vec());
+        let file = |name: &str, side: &str| PathBuf::from(format!("/work.shots/review/{name}.{side}.png"));
+        Ok(shots
+            .iter()
+            .map(|s| ShotFiles {
+                name: s.name.clone(),
+                before: s.before.as_ref().map(|_| file(&s.name, "before")),
+                after: s.after.as_ref().map(|_| file(&s.name, "after")),
+            })
+            .collect())
     }
 
     async fn check(&self, check: &Check) -> CheckResult {
@@ -273,7 +314,22 @@ impl LocalDaemon {
 
     /// Has the agent change these files, which path-scoped checks match against.
     pub fn change_files(&self, files: &[&str]) {
-        *self.workspace.changed.lock().unwrap() = files.iter().map(|f| f.to_string()).collect();
+        self.workspace.change_files(files);
+    }
+
+    /// What the next take of a change's pictures comes to. Without one, the pictures are taken and none differ.
+    pub fn take_shots(&self, taken: Taken) {
+        self.workspace.take_shots(taken);
+    }
+
+    /// The shots commands the daemon ran, each with the base branch it compared against.
+    pub fn shots_taken(&self) -> Vec<(Shots, String)> {
+        self.workspace.shots_taken.lock().unwrap().clone()
+    }
+
+    /// The pictures each reviewer was handed.
+    pub fn shots_kept(&self) -> Vec<Vec<Shot>> {
+        self.workspace.shots_kept()
     }
 
     /// Has the agent leave conflict markers in these files.
@@ -633,6 +689,7 @@ mod tests {
             allowed_hosts: Vec::new(),
             env: Default::default(),
             credential: Credential { agent: "factory".into(), token: String::new() },
+            shots: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 

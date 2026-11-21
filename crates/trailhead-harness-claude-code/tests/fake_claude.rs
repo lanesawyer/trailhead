@@ -5,8 +5,8 @@ use std::process::Command;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckResult, Endpoint, Feedback, FollowUp, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, TaskKey,
-    TaskSpec, VerdictKind,
+    CheckResult, Endpoint, Feedback, FollowUp, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, ShotFiles,
+    TaskKey, TaskSpec, VerdictKind,
 };
 use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
@@ -141,6 +141,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         title: None,
         base_branch: (role == Role::Reviewer).then(|| "main".into()),
         env: Default::default(),
+        shots: Vec::new(),
     }
 }
 
@@ -440,6 +441,32 @@ fn worker_prompt_forbids_nested_repositories() {
     let p = prompt(&ctx(&r, Role::Worker, 0), None);
     assert!(p.contains("nested git repositories"));
     assert!(p.contains("clone it into a temporary directory outside the checkout"));
+}
+
+#[test]
+fn a_reviewer_is_told_where_the_change_s_pictures_are() {
+    let r = rig();
+    let mut c = ctx(&r, Role::Reviewer, 0);
+    assert!(!prompt(&c, None).contains("PNG"), "no pictures, nothing said");
+    c.shots = vec![
+        ShotFiles {
+            name: "board-dark".into(),
+            before: Some("/w.shots/review/board-dark.before.png".into()),
+            after: Some("/w.shots/review/board-dark.after.png".into()),
+        },
+        ShotFiles { name: "peak-dark".into(), before: None, after: Some("/w.shots/review/peak-dark.after.png".into()) },
+    ];
+    let p = prompt(&c, None);
+    assert!(p.contains("open the PNG files and look at them"), "{p}");
+    assert!(
+        p.contains(
+            "- board-dark: before `/w.shots/review/board-dark.before.png`, after `/w.shots/review/board-dark.after.png`"
+        ),
+        "{p}"
+    );
+    assert!(p.contains("- peak-dark (new): `/w.shots/review/peak-dark.after.png`"), "{p}");
+    c.role = Role::Worker;
+    assert!(!prompt(&c, None).contains("peak-dark"), "only a reviewer is handed them");
 }
 
 #[test]

@@ -8,10 +8,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
-use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate};
+use trailhead_client::http::{
+    Client, Error as ApiError, NewAttachment, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate,
+};
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, ProjectRepo, Result, RunPatch, Scope,
-    Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Picture, Priority, ProjectRepo, Result,
+    RunPatch, Scope, Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -290,6 +292,21 @@ impl Tracker for RestTracker {
     async fn finish(&self, key: &TaskKey, handoff: &str) -> Result<()> {
         let update = TaskUpdate { status: Some(Status::Done), handoff: Some(handoff.into()), ..TaskUpdate::default() };
         self.patch(key, update).await
+    }
+
+    async fn attach(&self, key: &TaskKey, set: &str, picture: Picture) -> Result<()> {
+        let new = NewAttachment { name: picture.name, role: Some(picture.role), set: Some(set.to_string()) };
+        self.client.add_attachment(key, &new, picture.png).await.map(drop).map_err(error)
+    }
+
+    async fn pictures(&self, key: &TaskKey, set: &str) -> Result<Vec<Picture>> {
+        let mut pictures = Vec::new();
+        for a in self.client.list_attachments(key).await.map_err(error)? {
+            let (Some(role), true) = (a.role, a.set.as_deref() == Some(set)) else { continue };
+            let png = self.client.attachment_bytes(a.id).await.map_err(error)?;
+            pictures.push(Picture { name: a.name, role, png });
+        }
+        Ok(pictures)
     }
 
     async fn create_task(

@@ -11,6 +11,9 @@ pub struct ShellConfig {
     /// The apps repo's checkout. Its `origin` remote and default branch say what to build; the builder builds in a
     /// clone of its own and never touches this one. A leading `~` is the home directory.
     pub repo: Option<String>,
+    /// For a machine with no apps repo of its own (`trailhead app` on a laptop): the endpoint id of the server whose
+    /// builds this machine builds for itself, from the source that server hands out. Not with `repo`.
+    pub from: Option<String>,
     /// The cargo package to build. Without it, the package in the repo's workspace with a binary named
     /// `trailhead-shell`.
     pub package: Option<String>,
@@ -53,6 +56,12 @@ impl ShellConfig {
     /// The `[shell]` table, as the CLI keeps it unparsed.
     pub fn from_table(table: toml::Table) -> Result<ShellConfig, String> {
         let config = ShellConfig::deserialize(table).map_err(|e| format!("[shell]: {e}"))?;
+        if config.repo.is_some() && config.from.is_some() {
+            return Err(
+                "[shell] has both repo and from: a machine builds from its own apps repo or another's builds, not both"
+                    .into(),
+            );
+        }
         if config.jobs == 0 {
             return Err("[shell] jobs must be at least 1".into());
         }
@@ -73,6 +82,26 @@ impl ShellConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
+    }
+
+    /// The `[shell]` table of the user config in `config_dir` when it names a server to build from (`from`), with
+    /// that server's endpoint id; `None` when there is no file, table or `from`.
+    pub fn read_remote(config_dir: &Path) -> Result<Option<(String, ShellConfig)>, String> {
+        #[derive(Deserialize)]
+        struct File {
+            shell: Option<toml::Table>,
+        }
+        let path = config_dir.join("config.toml");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let at = |e: String| format!("{}: {e}", path.display());
+        let file: File = toml::from_str(&text).map_err(|e| at(e.to_string()))?;
+        let Some(table) = file.shell else { return Ok(None) };
+        let config = Self::from_table(table).map_err(at)?;
+        Ok(config.from.clone().map(|from| (from, config)))
     }
 
     /// The repo's directory, with a leading `~` made the home directory.
@@ -119,6 +148,20 @@ mod tests {
         assert_eq!(ShellConfig::from_user_config("[shell]\njobs = 2\n").unwrap(), None);
         assert!(ShellConfig::from_user_config("[shell]\nrepo = \"a\"\nrepoo = \"b\"\n").is_err());
         assert!(ShellConfig::from_user_config("[shell]\nrepo = \"a\"\njobs = 0\n").is_err());
+    }
+
+    #[test]
+    fn a_table_naming_a_server_to_build_from_is_no_builder_here_and_is_read_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ShellConfig::read_remote(dir.path()).unwrap(), None, "no file");
+        std::fs::write(dir.path().join("config.toml"), "[shell]\nfrom = \"abc\"\njobs = 8\n").unwrap();
+        assert_eq!(ShellConfig::read(dir.path()).unwrap(), None, "the server on this machine builds nothing");
+        let (from, config) = ShellConfig::read_remote(dir.path()).unwrap().unwrap();
+        assert_eq!((from.as_str(), config.jobs, config.profile.as_str()), ("abc", 8, "release"));
+        std::fs::write(dir.path().join("config.toml"), "[shell]\nrepo = \"~/apps\"\n").unwrap();
+        assert_eq!(ShellConfig::read_remote(dir.path()).unwrap(), None, "a repo of its own is the other way");
+        let both = ShellConfig::from_user_config("[shell]\nrepo = \"a\"\nfrom = \"b\"\n").unwrap_err();
+        assert!(both.contains("both repo and from"), "{both}");
     }
 
     #[test]

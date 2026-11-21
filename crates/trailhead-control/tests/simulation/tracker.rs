@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, Priority, ProjectRepo, Result, RunPatch, Scope, Task,
-    TaskKey, Tracker, Verdict,
+    Credential, Error, FollowUpTask, Grade, HumanContext, Picture, Priority, ProjectRepo, Result, RunPatch, Scope,
+    Task, TaskKey, Tracker, Verdict,
 };
 
 /// An armed failure, shared by every handle on the tracker: the control plane's own, its sub-agents' and the
@@ -177,6 +177,16 @@ impl Tracker for Flaky {
     async fn finish(&self, task: &TaskKey, handoff: &str) -> Result<()> {
         self.write()?;
         self.inner.finish(task, handoff).await
+    }
+
+    async fn attach(&self, task: &TaskKey, set: &str, picture: Picture) -> Result<()> {
+        self.write()?;
+        self.inner.attach(task, set, picture).await
+    }
+
+    async fn pictures(&self, task: &TaskKey, set: &str) -> Result<Vec<Picture>> {
+        self.read()?;
+        self.inner.pictures(task, set).await
     }
 
     async fn create_task(

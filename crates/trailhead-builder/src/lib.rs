@@ -260,6 +260,22 @@ impl Builds {
     }
 }
 
+impl Builds {
+    /// The source of the build `rev`, as a gzipped tar, for a launcher on another machine to build itself
+    /// (`docs/app-platform.md`, "The window on another machine"). Only the builds kept: the newest and the one
+    /// before it. `None` for anything else.
+    pub async fn source(&self, rev: &str) -> Option<Result<Vec<u8>, String>> {
+        let state = self.layout.load();
+        let kept = [&state.current, &state.previous].into_iter().flatten().any(|b| b.rev == rev);
+        if !kept {
+            return None;
+        }
+        let src = self.layout.src();
+        let _reading = self.checkout.read().await;
+        Some(self.tools.archive(&src, rev).await)
+    }
+}
+
 impl std::fmt::Debug for Builds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Builds").field("layout", &self.layout).finish_non_exhaustive()

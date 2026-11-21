@@ -17,6 +17,7 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/config"),
     ("patch", "/v1/config"),
     ("get", "/v1/shell/build"),
+    ("get", "/v1/shell/source/{rev}"),
     ("get", "/v1/shell/ask"),
     ("post", "/v1/shell/ask"),
     ("get", "/v1/projects"),

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Check, DEFAULT_TARGET, Error, Grade, Grader, ModelAlias, PrepareRequest, Repo, Result, Usd};
+use crate::{Check, DEFAULT_TARGET, Error, Grade, Grader, ModelAlias, PrepareRequest, Repo, Result, Shots, Usd};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +51,11 @@ pub struct FactoryConfig {
     pub daemon: DaemonConfig,
     #[serde(default)]
     pub merge: MergeConfig,
+    /// `[factory.shots]`: the command that draws the repo's views to PNGs in `$SHOTS_DIR`, and the `paths` a change
+    /// has to touch for a worker to run it, before the change and after (`docs/factory/sandbox.md#pictures`). Without
+    /// it no pictures are taken.
+    #[serde(default)]
+    pub shots: Option<ScopedCheck>,
 }
 
 /// `[factory.merge]`: what the merger does with a PR whose gates passed (`docs/factory/review.md#the-merger`).
@@ -840,6 +845,9 @@ impl FactoryConfig {
 
     fn validate(&self) -> Result<()> {
         self.stack.validate()?;
+        if self.shots.as_ref().is_some_and(|s| s.run.trim().is_empty()) {
+            return Err(Error::Config("[factory.shots] run is empty; give the command, or drop the table".into()));
+        }
         if let Some(log) = &self.daemon.log
             && let Err(e) = tracing_subscriber::EnvFilter::try_new(log)
         {
@@ -961,6 +969,11 @@ impl FactoryConfig {
             .into_iter()
             .map(|(n, c)| Check { name: n.to_string(), command: c.run().to_string(), paths: c.paths().to_vec() })
             .collect()
+    }
+
+    /// The repo's `[factory.shots]`, as a run request carries it.
+    pub fn shots(&self) -> Option<Shots> {
+        self.shots.as_ref().map(|s| Shots { command: s.run.clone(), paths: s.paths.clone() })
     }
 
     /// Readies a checkout, on `branch` when given: a worker's rework, or a reviewer's look at the PR's head. Only
@@ -1213,6 +1226,20 @@ require = ["checks", "agent_review", "human"]
         assert_eq!(c.worker().budget.usd(), Usd::dollars(5.0));
         let names: Vec<_> = c.required_checks().into_iter().map(|c| c.name).collect();
         assert_eq!(names, ["fmt", "lint", "test"]);
+    }
+
+    #[test]
+    fn shots_are_a_command_and_the_paths_that_call_for_it() {
+        assert_eq!(parse(SAMPLE).unwrap().shots(), None, "a repo without the table takes none");
+        let with = format!("{SAMPLE}\n[shots]\nrun = \"make shots\"\npaths = [\"clients/**\"]\n");
+        let shots = parse(&with).unwrap().shots().unwrap();
+        assert_eq!(shots.command, "make shots");
+        assert!(shots.applies_to(&["clients/app/src/view.rs".to_string()]));
+        assert!(!shots.applies_to(&["crates/a/src/lib.rs".to_string()]));
+        let always = parse(&format!("{SAMPLE}\n[shots]\nrun = \"make shots\"\n")).unwrap().shots().unwrap();
+        assert!(always.applies_to(&[]), "no paths means every change");
+        let empty = parse(&format!("{SAMPLE}\n[shots]\nrun = \" \"\n")).unwrap_err();
+        assert!(empty.to_string().contains("[factory.shots] run is empty"), "{empty}");
     }
 
     #[test]

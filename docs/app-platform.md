@@ -225,6 +225,36 @@ Lane wants UI changes shown, live if possible. Three steps, each useful alone, c
 
 Text a connector brings in from outside is one way a bad instruction could reach an agent; connectors being grade 4 and apps having no network access is the answer for now. Sandboxing apps properly would mean running them as WASM, which is not planned while there is one user.
 
+## The window on another machine
+
+Built in TRAIL-1635 (2026-11-21), for driving the factory from a laptop while the server stays at home. The window
+already dials the server over iroh (`trailhead/ui/0`), so it runs anywhere the server allows; what was missing was a
+build of it there, kept current.
+
+- **Each machine builds its own window.** The server's builds are for the server's machine. A build for a Mac would
+  mean cross-compiling a graphics app from Linux (Apple's SDK, a fragile toolchain) or a macOS runner in CI (ten
+  times the minutes on a private repo), so neither. The other machine compiles the same commit the server built.
+- **The server hands out the source.** `GET /v1/shell/source/{rev}` answers with the apps repo at a build it keeps
+  (`current` or `previous`, nothing else) as a gzipped tar, to a person's token only. The other machine needs no
+  access to the apps repo, which is private; the framework it is pinned to is public and cargo fetches it as usual.
+- **`[shell] from = "<the server's endpoint id>"`** in the other machine's user config (`trailhead app from <id>`
+  writes it; never with `repo`). `trailhead app` then runs the same builder the server runs, with its git replaced
+  by the server (`crates/trailhead/src/cmd/app_remote.rs`): the head is the server's newest build, a checkout is that
+  build's source unpacked, and cargo builds it into the same layout (`<data dir>/shell`), which the launcher starts
+  from as it always has. It needs cargo, and no Trailhead server on that machine.
+- **Two endpoints to allow.** The launcher has its own iroh identity (`launcher.key` beside the window's
+  `endpoint.key`), since it keeps building while the window runs and two processes can't share one. Until the server
+  answers, `trailhead app` prints both `trailhead factory allow` lines to run there. It signs in with the token saved
+  for that server, else `TRAILHEAD_SHELL_TOKEN`, else one pasted at its prompt (`trailhead --as-me token add laptop`
+  on the server), and saves it where the window looks, so it is asked for once.
+- **An update is offered when this machine has built it.** The launcher names its builder's state file to the window
+  (`TRAILHEAD_SHELL_LOCAL_STATE`), and the window's notice reads the newest build from there instead of from the
+  server: the server's newest isn't one this machine can start until it has compiled it, a minute or two later. What
+  the update brings is still the server's list of commits.
+- **Not built:** a macOS app bundle or dock icon (the window is started from a terminal with `trailhead app`), and
+  the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from there.
+- **Not verified:** nothing has run on macOS. The first try is Lane's laptop.
+
 ## Other things to settle
 
 - **How long a request takes. Accepted for now.** A small change still goes through a sandbox, the agent, checks, CI, review, a merge and a build of the shell, which Rust makes slow; requests are queued work to come back to, not edits that appear as you watch. A faster path for small changes inside one app (a warm local sandbox, no second CI pass) is designed only if the wait proves bad.

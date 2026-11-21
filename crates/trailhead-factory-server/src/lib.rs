@@ -214,8 +214,20 @@ fn changed_without_restart(
 ) -> Vec<&'static str> {
     let now = FactoryConfig { merge: Default::default(), ..now };
     // Destructured so that a new section can't be left out of the comparison.
-    let FactoryConfig { repo, stack, checks, profiles, gates, grades, egress, compute, targets, daemon, merge: _ } =
-        started;
+    let FactoryConfig {
+        repo,
+        stack,
+        checks,
+        profiles,
+        gates,
+        grades,
+        egress,
+        compute,
+        targets,
+        daemon,
+        merge: _,
+        shots,
+    } = started;
     let changed: Vec<&'static str> = [
         ("repo", *repo != now.repo),
         ("stack", *stack != now.stack),
@@ -227,6 +239,7 @@ fn changed_without_restart(
         ("compute", *compute != now.compute),
         ("targets", *targets != now.targets),
         ("daemon", *daemon != now.daemon),
+        ("shots", *shots != now.shots),
     ]
     .into_iter()
     .filter_map(|(name, differs)| differs.then_some(name))
@@ -464,6 +477,7 @@ async fn wire(
         repos.push(Entry { factory: Arc::new(factory), slug });
     }
     feed.set_boards(repos.iter().map(|e| (e.slug.clone(), e.factory.status().clone())).collect());
+    feed.set_factories(repos.iter().map(|e| (e.slug.clone(), e.factory.clone())).collect());
     feed.set_state(FactoryState::Running);
     Ok(Setup { repos, store, ctx })
 }
@@ -825,10 +839,13 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// Starts the control plane inside the Trailhead server on `store`, with the API tunnel forwarding to `server`
 /// (`docs/factory/server-control-plane.md`). Only the user config's `[factory] repos` turns it on: with none listed,
-/// or with `disabled` set, this returns `None` and runs nothing. A configuration error (a repo file that won't parse, repos that collide, an
-/// unknown harness or provider, a missing repo) is returned, and the server refuses to start. Outside failures
-/// (Sprites or GitHub unreachable, a locked keyring, a daemon download)
-/// are logged and retried with backoff while the server keeps serving.
+/// or with `disabled` set, this returns `None` and runs nothing. Only a user config that can't be read is returned, and the
+/// server refuses to start on it. Everything else is logged, shown as the reason the control plane is `starting`,
+/// and retried with backoff while the server keeps serving: a repo's file that won't parse (a key from a newer
+/// Trailhead than the one installed, say), repos that collide, an unknown harness or provider, a missing repo
+/// (TRAIL-1634: a file in a repo must never be what locks a person out of their tasks), and the outside failures
+/// (Sprites or GitHub unreachable, a locked keyring, a daemon download). A repo file put right is picked up by the
+/// next try, without a restart.
 pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InServer> {
     let host_config = read_host_config(&paths)?;
     let idle = |state| Ok(InServer { feed: surface::Feed::new(state), running: None });
@@ -843,9 +860,6 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     run.opts.server = server;
     // Listing repos is the person's consent; the agent the factory acts as is the server's to make.
     run.opts.create_agent = true;
-    let plan = plan(&run, host_config)?;
-    // Fnox finds a repo's `fnox.toml` from its directory; the server's working directory is an accident.
-    let fnox_dir = plan.specs[0].dir.clone();
     let poll = Duration::from_secs(run.opts.poll_secs);
     let (drain_tx, drain) = tokio::sync::watch::channel(false);
     let (cancel_tx, cancel) = tokio::sync::watch::channel(false);
@@ -853,6 +867,11 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     let feed = surface::Feed::new(FactoryState::Starting { reason: None });
     let shared = feed.clone();
     let control = async move {
+        // First, so a repo file this build can't read is what `factory status` says, not a missing secret.
+        let planned = until_ready(&shared, &drain, || async { plan(&run, host_config.clone()) }).await;
+        let Some(plan) = planned else { return };
+        // Fnox finds a repo's `fnox.toml` from its directory; the server's working directory is an accident.
+        let fnox_dir = plan.specs[0].dir.clone();
         let Some(door) = until_ready(&shared, &drain, || open_door(server, &paths, &shared)).await else { return };
         let wired = until_ready(&shared, &drain, || {
             wire(plan.clone(), &paths, &fnox_dir, store.clone(), shared.clone(), &door)
@@ -917,7 +936,7 @@ pub struct InServer {
     pub running: Option<Running>,
 }
 
-/// The server's `/v1/factory/status` and `/v1/factory/events`, for it to mount behind its own bearer token.
+/// The server's `/v1/factory/status`, `/v1/factory/events` and `/v1/factory/refresh`, for it to mount behind its own bearer token.
 pub fn api(feed: &Feed) -> axum::Router {
     surface::routes(feed.clone())
 }
@@ -1005,6 +1024,8 @@ pub enum Command {
     Status(ops::StatusOpts),
     /// Print the daemon's service log from a task's sandbox.
     Logs(ops::LogsOpts),
+    /// Empty the worker pool so its sandboxes are made again from the image: idle ones are destroyed now with their warm checkpoints, busy ones when their run ends. For a rebuilt sandbox image, or to free the disk warm checkpoints have grown into. The next task on each sandbox pays a cold build.
+    Refresh(ops::RefreshOpts),
     /// Let a UI (Lookout) connect: add its endpoint id to the allowlist. Takes effect on a running control plane at once.
     Allow { endpoint_id: String },
     /// Stop allowing a UI endpoint.
@@ -1028,6 +1049,7 @@ pub async fn command(cmd: Command) -> Result<()> {
         Command::Check(opts) => check(&opts).await,
         Command::Status(opts) => ops::status(&opts).await,
         Command::Logs(logs) => ops::logs(&logs).await,
+        Command::Refresh(opts) => ops::refresh(&opts).await,
         Command::Allow { endpoint_id } => allow(&endpoint_id, true),
         Command::Disallow { endpoint_id } => allow(&endpoint_id, false),
         Command::Allowed => allowed(),
@@ -1249,30 +1271,61 @@ mod tests {
         assert_eq!(started.feed.state(), trailhead_factory::FactoryState::Disabled);
     }
 
+    /// Why a started control plane says it is still starting, once it says so; then stops it.
+    async fn why_starting(started: super::InServer) -> String {
+        let running = started.running.expect("the server starts with the control plane trying");
+        let said = async {
+            loop {
+                if let trailhead_factory::FactoryState::Starting { reason: Some(why) } = started.feed.state() {
+                    return why;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        let why = tokio::time::timeout(std::time::Duration::from_secs(10), said).await.expect("a reason");
+        running.stop(std::time::Duration::from_secs(5)).await;
+        why
+    }
+
     #[tokio::test]
-    async fn a_configuration_error_is_returned_not_retried() {
+    async fn a_repo_that_cant_be_read_leaves_the_server_up_and_the_control_plane_saying_why() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("no-such-repo");
         let config = format!("[factory]\nrepos = [{:?}]\n", missing.display().to_string());
         let (paths, store) = instance(dir.path(), &config).await;
-        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
-        assert!(err.contains("no-such-repo"), "{err}");
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        let why = why_starting(started).await;
+        assert!(why.contains("no-such-repo"), "{why}");
 
         let (paths, store) = instance(dir.path(), "[factory]\nrepos = 3\n").await;
         let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
-        assert!(err.contains("config.toml"), "{err}");
+        assert!(err.contains("config.toml"), "only the user config itself refuses the server: {err}");
     }
 
     #[tokio::test]
-    async fn checking_a_user_config_refuses_what_start_refuses_in_its_words() {
+    async fn a_repo_file_with_a_key_this_build_doesnt_know_leaves_the_server_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".trailhead.toml"), "project = \"P\"\n[factory.from_a_newer_trailhead]\nx = 1\n")
+            .unwrap();
+        let config = format!("[factory]\nrepos = [{:?}]\n", repo.display().to_string());
+        let (paths, store) = instance(dir.path(), &config).await;
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        let why = why_starting(started).await;
+        assert!(why.contains("from_a_newer_trailhead") && why.contains(".trailhead.toml"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn checking_a_user_config_refuses_what_keeps_the_control_plane_from_starting_in_its_words() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("no-such-repo");
         let config = format!("[factory]\nrepos = [{:?}]\n", missing.display().to_string());
         let (paths, store) = instance(dir.path(), &config).await;
         let user_config = paths.config_dir.join("config.toml");
         let checked = super::check_user_config(&user_config, &config).err().unwrap().to_string();
-        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
-        assert_eq!(checked, started);
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        assert_eq!(checked, why_starting(started).await);
         let bad = "[factory]\npause_at = { five_hour = 101 }\n";
         let err = super::check_user_config(&user_config, bad).err().unwrap().to_string();
         assert!(err.starts_with(&user_config.display().to_string()) && err.contains("0 to 100"), "{err}");
@@ -1301,8 +1354,9 @@ mod tests {
         std::fs::write(repo.join(".trailhead.toml"), file).unwrap();
         let config = format!("[factory]\nrepos = [{:?}]\n", repo.display().to_string());
         let (paths, store) = instance(dir.path(), &config).await;
-        let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
-        assert!(err.contains("`docker` feature"), "{err}");
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).unwrap();
+        let why = why_starting(started).await;
+        assert!(why.contains("`docker` feature"), "{why}");
     }
 
     #[test]

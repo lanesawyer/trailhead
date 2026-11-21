@@ -45,6 +45,50 @@ pub struct LogsOpts {
     opts: Opts,
 }
 
+#[derive(clap::Args, Clone)]
+pub struct RefreshOpts {
+    /// Every repo the server's factory runs, not only the one at or above the working directory.
+    #[arg(long)]
+    all: bool,
+    #[command(flatten)]
+    opts: Opts,
+}
+
+/// Asks the server's control plane to empty its worker pool, and prints what became of each sandbox.
+pub async fn refresh(refresh: &RefreshOpts) -> Result<()> {
+    let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
+    let slug = match refresh.all {
+        true => None,
+        false => Some(load_config(&refresh.opts)?.2.repo.repo().slug()),
+    };
+    let server = server(&refresh.opts, &paths).ok_or(Error::NoUserToken)?;
+    let reply = surface::ask_refresh(&server, slug.as_deref()).await?;
+    for line in refresh_lines(&reply) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn refresh_lines(reply: &surface::RefreshReply) -> Vec<String> {
+    let mut lines = Vec::new();
+    for repo in &reply.repos {
+        let r = &repo.refreshed;
+        lines.push(repo.repo.clone());
+        if let Some(error) = &repo.error {
+            lines.push(format!("  couldn't list its pool: {error}"));
+        }
+        lines.extend(r.destroyed.iter().map(|n| format!("  {n}: destroyed, with its warm checkpoints")));
+        lines.extend(r.on_release.iter().map(|n| format!("  {n}: busy; destroyed when its run ends")));
+        lines.extend(r.failed.iter().map(|(n, why)| format!("  {n}: couldn't be destroyed ({why}); reconcile will")));
+        lines
+            .extend(r.unreachable.iter().map(|t| format!("  target {t} didn't answer; its sandboxes weren't touched")));
+        if repo.error.is_none() && r == &Default::default() {
+            lines.push("  no pooled sandboxes".into());
+        }
+    }
+    lines
+}
+
 pub async fn status(status: &StatusOpts) -> Result<()> {
     let opts = &status.opts;
     let paths = trailhead_client::paths::Paths::from_env().ok_or(Error::NoDirs)?;
@@ -448,6 +492,33 @@ mod tests {
     use trailhead_factory::{Grade, PrRef, Priority, Repo, RunRecord, SandboxId, Usd};
 
     use super::*;
+
+    #[test]
+    fn a_refresh_says_what_became_of_each_sandbox() {
+        let refreshed = trailhead_control::Refreshed {
+            destroyed: vec!["t-w1".into()],
+            on_release: vec!["t-w2".into()],
+            failed: vec![("t-w3".into(), "busy engine".into())],
+            unreachable: vec![],
+        };
+        let reply = surface::RefreshReply {
+            repos: vec![
+                surface::RepoRefreshed { repo: "o/t".into(), refreshed, error: None },
+                surface::RepoRefreshed { repo: "o/empty".into(), refreshed: Default::default(), error: None },
+            ],
+        };
+        assert_eq!(
+            refresh_lines(&reply),
+            [
+                "o/t",
+                "  t-w1: destroyed, with its warm checkpoints",
+                "  t-w2: busy; destroyed when its run ends",
+                "  t-w3: couldn't be destroyed (busy engine); reconcile will",
+                "o/empty",
+                "  no pooled sandboxes",
+            ]
+        );
+    }
 
     fn sandbox(name: &str, labels: &[(&str, &str)]) -> Sandbox {
         Sandbox {

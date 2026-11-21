@@ -26,6 +26,7 @@ net = ["dep:iroh", "dep:trailhead-wire", "dep:clap", "dep:tracing-subscriber", "
 [dependencies]
 base64.workspace = true
 trailhead-factory.workspace = true
+trailhead-model.workspace = true
 trailhead-log = { workspace = true, optional = true }
 async-trait.workspace = true
 serde_json.workspace = true

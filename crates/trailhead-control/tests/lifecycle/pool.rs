@@ -354,6 +354,81 @@ async fn a_warm_sandbox_that_fails_preflight_goes_back_idle_and_is_picked_again(
 }
 
 #[tokio::test]
+async fn a_warm_sandbox_with_no_room_run_after_run_is_destroyed_and_a_fresh_one_built() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+    r.compute.fail("trailhead-w1", "preflight");
+    for _ in 0..2 {
+        r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        assert!(r.compute.get("trailhead-w1").is_some(), "a wait or two is waited out with the cache kept");
+    }
+    let err = r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+    assert!(matches!(err, trailhead_factory::Error::Unavailable(_)), "{err}");
+    assert!(r.compute.get("trailhead-w1").is_none(), "the third makes it the checkpoints' doing: the sandbox goes");
+    assert!(r.compute.checkpoints("trailhead-w1").is_empty(), "with its checkpoints, which is what frees the disk");
+    assert_eq!(r.factory.sandbox_entries(), 0, "and nothing is kept about it");
+
+    r.compute.heal("trailhead-w1");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(r.compute.get("trailhead-w1").unwrap().labels.contains_key(label::WARM), "a fresh one, warmed again");
+}
+
+#[tokio::test]
+async fn a_room_found_between_waits_starts_the_count_again() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    for _ in 0..2 {
+        let key = r.tracker.add_task("TRAIL", "Needs disk", "");
+        r.compute.fail("trailhead-w1", "preflight");
+        for _ in 0..2 {
+            r.factory.run_task(&r.tracker.task(&key)).await.unwrap_err();
+        }
+        r.compute.heal("trailhead-w1");
+        r.harness.push(Role::Worker, Script::new(changes()));
+        r.harness.push(Role::Reviewer, Script::new(approve()));
+        r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    }
+    assert!(r.compute.get("trailhead-w1").is_some(), "four waits, never three in a row: the cache is kept");
+}
+
+#[tokio::test]
+async fn a_refresh_destroys_idle_sandboxes_and_the_next_run_builds_a_fresh_one() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    let done = r.factory.refresh_pool().await.unwrap();
+    assert_eq!(done.destroyed, ["trailhead-w1"]);
+    assert!(done.on_release.is_empty() && done.failed.is_empty(), "{done:?}");
+    assert!(r.compute.get("trailhead-w1").is_none() && r.compute.checkpoints("trailhead-w1").is_empty());
+    assert_eq!(r.factory.sandbox_entries(), 0);
+
+    let key = r.tracker.add_task("TRAIL", "After the refresh", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    r.factory.run_task(&r.tracker.task(&key)).await.unwrap();
+    assert!(r.compute.get("trailhead-w1").unwrap().labels.contains_key(label::WARM), "made again, and warmed");
+}
+
+#[tokio::test]
+async fn a_refresh_leaves_a_busy_sandbox_to_its_run_and_destroys_it_on_release() {
+    let r = rig();
+    warm_one_sandbox(&r).await;
+    let w1 = r.compute.get("trailhead-w1").unwrap();
+    let mut busy = w1.labels.clone();
+    busy.insert(label::STATE.into(), label::BUSY.into());
+    r.compute.set_labels(&w1.id, &busy).await.unwrap();
+
+    let done = r.factory.refresh_pool().await.unwrap();
+    assert_eq!((done.destroyed.len(), done.on_release.as_slice()), (0, ["trailhead-w1".to_string()].as_slice()));
+    assert!(r.compute.get("trailhead-w1").is_some(), "a run's sandbox isn't pulled from under it");
+
+    r.factory.reconcile().await.unwrap();
+    assert!(r.compute.get("trailhead-w1").is_none(), "released by reconcile, it is destroyed rather than restored");
+}
+
+#[tokio::test]
 async fn a_cold_sandbox_that_fails_after_prepare_is_released_not_left_busy() {
     let r = rig();
     let key = r.tracker.add_task("TRAIL", "Relabel fails", "");

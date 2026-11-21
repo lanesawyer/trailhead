@@ -154,6 +154,50 @@ pub fn skipped_checks(checks: &[CheckResult]) -> String {
     format!("\n\nℹ️ Skipped, not run: {}. The change touches none of the paths they are limited to.", names.join(", "))
 }
 
+/// How a view's picture changed across a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotChange {
+    /// The view looks different.
+    Changed,
+    /// The view is new: there is no picture from before.
+    New,
+    /// The view is gone: there is no picture from after.
+    Removed,
+}
+
+/// The note a PR carries about the pictures taken of the change: which views look different, as `(name, change)`,
+/// how many `more` did than are attached, and `failed`, why some or all couldn't be taken. Empty when the pictures
+/// were taken and none differ, which is what most changes do; otherwise it starts with a blank line, like
+/// [`flaky_checks`]. GitHub has no API for putting a picture on a PR, so the note names them and says where they are.
+pub fn shots_note(task: &TaskKey, changed: &[(String, ShotChange)], more: usize, failed: Option<&str>) -> String {
+    let mut note = String::new();
+    if !changed.is_empty() {
+        let names: Vec<String> = changed
+            .iter()
+            .map(|(name, change)| match change {
+                ShotChange::Changed => format!("`{name}`"),
+                ShotChange::New => format!("`{name}` (new)"),
+                ShotChange::Removed => format!("`{name}` (removed)"),
+            })
+            .collect();
+        let more = if more > 0 { format!(", and {more} more that aren't attached") } else { String::new() };
+        note.push_str(&format!(
+            "\n\n📸 Pictures that differ from the base: {}{more}. Before and after are on {} in Trailhead (Lookout shows them side by side).",
+            names.join(", "),
+            task.0
+        ));
+    }
+    if let Some(why) = failed {
+        note.push_str(&format!("\n\n⚠️ The pictures couldn't all be taken, which doesn't hold the change up: {why}"));
+    }
+    note
+}
+
+/// The comment a PR gets when its pictures were taken but the task wouldn't take them.
+pub fn shots_not_attached(why: &str) -> String {
+    format!("⚠️ The pictures named above couldn't be attached to the task: {why}")
+}
+
 /// What the merger says, on the PR and the task, when the code host refuses to merge.
 pub fn merge_refused(why: &str) -> String {
     format!("The code host refused to merge: {why}. The merger tries again each pass.")

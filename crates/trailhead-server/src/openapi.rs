@@ -267,6 +267,7 @@ impl Modify for Common {
         routes::config::show,
         routes::config::change,
         routes::shell_build,
+        routes::shell_source,
         routes::shell::ask_targets,
         routes::shell::ask,
         routes::projects::list_projects,
