@@ -3,18 +3,24 @@
 //! It is one page with a button that counts its presses. The count is the app's logic ([`Presses`], changed by the
 //! [`Press`] event, which runs headless); the page ([`Example::build_ui`]) is spawned on entering the app, despawned
 //! on leaving it, and its count line is updated in place. The count is kept in the [`LocalStore`], so it outlives a
-//! switch to another app and a restart of the shell.
+//! switch to another app and a restart of the shell. Its page in the shell's settings ([`COUNT_SETTINGS`]) resets it.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
+use trailhead_shell::settings::{PageId, SettingsPage};
 use trailhead_shell::{ActiveApp, AppId, LocalStore, Manifest, ShellApp};
-use trailhead_ui::{BesideRail, ButtonKind, Icon, Surface, beside_rail, button, set_text, size, space, text, text_dim};
+use trailhead_ui::{
+    BesideRail, ButtonKind, Icon, Surface, beside_rail, button, set_text, setting, size, space, text, text_dim,
+};
 
 /// The example app's id.
 pub const EXAMPLE: AppId = AppId("example");
 
 /// Where the count is kept in the [`LocalStore`].
 const PRESSES: &str = "presses";
+
+/// The app's page in the shell's settings: `OpenSettings { page: Some(COUNT_SETTINGS) }` opens it.
+pub const COUNT_SETTINGS: PageId = PageId::new(EXAMPLE, "count");
 
 /// The example app, to give to `ShellPlugin::with`.
 pub struct Example;
@@ -26,6 +32,10 @@ pub struct Presses(pub u32);
 /// A person pressed the button. The page triggers it; a test can trigger it with no page.
 #[derive(Event, Debug, Clone, Copy)]
 pub struct Press;
+
+/// Sets the count back to nothing. The settings page triggers it; a test can trigger it with no page.
+#[derive(Event, Debug, Clone, Copy)]
+pub struct ResetCount;
 
 /// The page's root, present only while the app is shown.
 #[derive(Component)]
@@ -39,6 +49,10 @@ struct CountLine;
 #[derive(Component)]
 struct PressButton;
 
+/// The settings page's button.
+#[derive(Component, Clone, Default)]
+struct ResetButton;
+
 impl ShellApp for Example {
     fn manifest(&self) -> Manifest {
         Manifest { id: EXAMPLE, name: "Example", icon: Icon::Flag }
@@ -46,20 +60,47 @@ impl ShellApp for Example {
 
     fn build(&self, app: &mut App) {
         let kept = app.world().resource::<LocalStore>().get(EXAMPLE, PRESSES).unwrap_or_default();
-        app.insert_resource(Presses(kept)).add_observer(count_press);
+        app.insert_resource(Presses(kept)).add_observer(count_press).add_observer(reset_count);
     }
 
     fn build_ui(&self, app: &mut App) {
         app.add_observer(on_button)
+            .add_observer(on_reset_button)
             .add_systems(OnEnter(ActiveApp(EXAMPLE)), spawn_page)
             .add_systems(OnExit(ActiveApp(EXAMPLE)), despawn_page)
             .add_systems(Update, show_count.run_if(in_state(ActiveApp(EXAMPLE))));
+    }
+
+    fn settings_pages(&self) -> Vec<SettingsPage> {
+        vec![SettingsPage::new(COUNT_SETTINGS.key, "Count", count_settings)]
+    }
+}
+
+/// Fills the settings page, given its box when it is shown: one setting, a button that resets the count.
+fn count_settings(In(page): In<Entity>, mut commands: Commands) {
+    let control = bsn_list! {
+        @button("Reset the count", None, ButtonKind::Normal)
+        ResetButton
+        Node { align_self: AlignSelf::FlexStart }
+    };
+    let note = "Sets the count of presses back to nothing, here and in what the shell keeps.";
+    commands.spawn_scene(setting("Count", note, control)).insert(ChildOf(page));
+}
+
+fn on_reset_button(activate: On<Activate>, buttons: Query<(), With<ResetButton>>, mut commands: Commands) {
+    if buttons.contains(activate.entity) {
+        commands.trigger(ResetCount);
     }
 }
 
 fn count_press(_: On<Press>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>) {
     presses.0 += 1;
     store.set(EXAMPLE, PRESSES, presses.0);
+}
+
+fn reset_count(_: On<ResetCount>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>) {
+    presses.set_if_neq(Presses(0));
+    store.set(EXAMPLE, PRESSES, 0);
 }
 
 /// What the count line says.
@@ -152,6 +193,33 @@ mod tests {
         assert_eq!(first.world().resource::<LocalStore>().get::<u32>(EXAMPLE, PRESSES), Some(2));
         drop(first);
         assert_eq!(count(&headless(shell())), 2);
+    }
+
+    #[test]
+    fn the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count() {
+        use trailhead_shell::settings::{OpenSettings, SettingsPages, ShownPage};
+
+        let dir = tempfile::tempdir().unwrap();
+        let shell = || ShellPlugin::new().with(Example).with(Other).store_in(dir.path().to_path_buf());
+        let mut app = windowed(shell());
+        app.add_plugins(trailhead_ui::ModalPlugin);
+        let pages = app.world().resource::<SettingsPages>();
+        let ours: Vec<_> = pages.iter().filter(|p| p.id.app == EXAMPLE).map(|p| (p.group, p.title)).collect();
+        assert_eq!(ours, [("Example", "Count")]);
+
+        app.world_mut().trigger(Press);
+        app.world_mut().trigger(OpenSettings { page: Some(COUNT_SETTINGS) });
+        settle(&mut app);
+        let world = app.world_mut();
+        let shown: Vec<_> = world.query::<&ShownPage>().iter(world).map(|p| p.0).collect();
+        assert_eq!(shown, [COUNT_SETTINGS]);
+        let button = world.query_filtered::<Entity, With<ResetButton>>().single(world).unwrap();
+        app.world_mut().trigger(Activate { entity: button });
+        settle(&mut app);
+        assert_eq!(count(&app), 0);
+        assert_eq!(count_line(&mut app).1, "Pressed 0 times");
+        drop(app);
+        assert_eq!(count(&headless(shell())), 0, "and what is kept");
     }
 
     #[test]

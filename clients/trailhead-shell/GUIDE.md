@@ -44,6 +44,7 @@ pub trait ShellApp: Send + Sync + 'static {
     fn build_ui(&self, _app: &mut App) {}
     fn paint(&self, _theme: &mut Theme) {}
     fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> { Vec::new() }
+    fn settings_pages(&self) -> Vec<SettingsPage> { Vec::new() }
 }
 ```
 
@@ -57,9 +58,61 @@ pub trait ShellApp: Send + Sync + 'static {
 | `link_jobs` | Once, before `build`, and only when the shell is connected. The jobs are handed to the net thread. | The app's own work on the net thread while a control plane is held (section 6). Most apps have none and leave the default. |
 | `build` | For every app, after the shell has inserted `Apps`, the `LocalStore` and the `ActiveApp` state, and after the connection's plugin when there is one. Headless tests call it too. | The app's state, resources, messages and logic: the plugins that run under `MinimalPlugins`. Read what the `LocalStore` kept here (`app.world().resource::<LocalStore>()`). Observers of the app's own events go here. |
 | `build_ui` | Only in a windowed shell, after every app's `build` and after the shell's rail. | What spawns and draws: `OnEnter`/`OnExit` systems that spawn and despawn the app's pages, the systems that keep them in step, the observers of `Activate`, `Picked` and the like. |
+| `settings_pages` | Once, after every app's `build`, headless too; before `build_ui`. | The app's pages in the shell's settings modal, listed under the app's name (below, "Settings pages"). Most apps have none and leave the default. |
 
 The split between `build` and `build_ui` is the kit's rule that logic and drawing are separate plugins: everything an
 app decides is testable without a window, and only what draws needs one.
+
+### Settings pages
+
+The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
+from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme and the
+text size; Connection; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
+An app does not open a settings modal of its own; it adds pages to this one.
+
+```rust
+use trailhead_shell::settings::{PageId, SettingsPage};
+use trailhead_ui::{ButtonKind, button, setting};
+
+/// The page, so the app's own code can open it: `commands.trigger(OpenSettings { page: Some(COUNT_SETTINGS) })`.
+pub const COUNT_SETTINGS: PageId = PageId::new(EXAMPLE, "count");
+
+#[derive(Component, Clone, Default)]
+struct ResetButton;
+
+// In `impl ShellApp`:
+fn settings_pages(&self) -> Vec<SettingsPage> {
+    vec![SettingsPage::new(COUNT_SETTINGS.key, "Count", count_settings)]
+}
+
+/// Given the page's box (a `settings_page()`) each time the page is shown.
+fn count_settings(In(page): In<Entity>, mut commands: Commands) {
+    let control = bsn_list! {
+        @button("Reset the count", None, ButtonKind::Normal)
+        ResetButton
+        Node { align_self: AlignSelf::FlexStart }
+    };
+    commands.spawn_scene(setting("Count", "Sets the count back to nothing.", control)).insert(ChildOf(page));
+}
+```
+
+- `SettingsPage::new(key, title, fill)`: `key` names the page among the app's (`PageId::new(app_id, key)`), `title` is
+  its tab, and `fill` is any system taking `In<Entity>`, so it reads what it needs (`Res<..>`, the `LocalStore`) to
+  spawn the page as it is now. Fill the page with the kit's settings widgets only (`setting`, `setting_toggle`,
+  `spawn_settings_section`), never bare toggles or fields.
+- The page is spawned when it is shown and despawned when another is picked or the modal closes, so keep what it shows
+  current from a system of the app's (in `build_ui`) that finds the page's controls by the app's markers and updates
+  them in place; it does nothing while the page isn't there. What a control does is an observer of the app's, checking
+  the entity is its own, as anywhere.
+- `trailhead_shell::settings::OpenSettings { page: Some(id) }` opens the settings at a page (Lookout's inspector opens
+  its Logs page this way), or turns to it while they are open; `page: None` opens them at the page last shown.
+  `CloseSettings` closes them. `SettingsShown::page()` says what is open.
+- A shell with one app has no rail, and so no gear: an app with a place for one (Lookout's sidebar footer) puts a
+  `tool_button(Icon::Settings, "Settings", ButtonKind::Plain)` there with `SettingsGear` on it while
+  `Apps::has_rail()` is false. The shell opens the settings on a press of anything marked `SettingsGear`.
+- To test a page, use `testing::windowed` with the kit's `ModalPlugin` added (`app.add_plugins(ModalPlugin)`), trigger
+  `OpenSettings`, settle, and find the page's controls under the `ShownPage`; the example app's
+  `the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count` does this.
 
 ## 3. The `ActiveApp` state
 
@@ -130,7 +183,7 @@ The shell hands an app no parent entity. An app's pages are roots of their own, 
   `BesideSidebar`. Lookout does this.
 
 The kit moves the sidebar and both kinds of page over when a rail exists, and back when it does not. A shell with one
-app has no rail, and the app has the whole window. Use `Surface::Window` for a page's own background, and give overlays
+app has no rail, and the app has the whole window (`Apps::has_rail()` says which). Use `Surface::Window` for a page's own background, and give overlays
 their layer from `trailhead_ui::layer` (the kit's guide, section 3). While the connection is not live the shell draws
 its connect panel along the bottom, over whatever app is shown.
 
@@ -417,6 +470,8 @@ What the example app's tests cover, and why each matters:
   the `LocalStore` is there for a second shell built on the same directory.
 - `switching_away_despawns_the_page_and_switching_back_shows_the_kept_count`: the page exists only while the app is
   shown, and the app's logic keeps running while it is not (a press while another app is shown still counts).
+- `the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count`: the app's page is in the shell's
+  settings under its name, filled when shown, and what its control does is kept.
 - `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`: a change is made in place. The count
   line keeps its entity and the set of entities is the same before and after, which is the kit's rule that a surface
   is spawned once and updated in place. `tests/design_system.rs` runs the kit's `redraws` scan for the same rule.
@@ -471,12 +526,15 @@ parts below.
 - **`src/lib.rs`**, in order:
   - The id, `EXAMPLE: AppId = AppId("example")`, and the `LocalStore` key `PRESSES`.
   - `Example`, the type given to the shell.
-  - The logic's state and event: `Presses` (a resource) and `Press` (an event any caller can trigger).
-  - The markers: `ExamplePage` (the page's root, present only while the app is shown), `CountLine`, `PressButton`.
+  - `COUNT_SETTINGS`, the `PageId` of its page in the shell's settings.
+  - The logic's state and events: `Presses` (a resource), `Press` and `ResetCount` (events any caller can trigger).
+  - The markers: `ExamplePage` (the page's root, present only while the app is shown), `CountLine`, `PressButton`,
+    `ResetButton` (on its settings page).
   - `impl ShellApp for Example`: `manifest` names it with `Icon::Flag`; `build` reads the kept count from the
-    `LocalStore` and adds the observer that counts a press and keeps the count; `build_ui` adds the observer of the
-    button, `spawn_page` on `OnEnter(ActiveApp(EXAMPLE))`, `despawn_page` on `OnExit`, and `show_count` gated on the
-    app being shown. It has no `paint` and no `link_jobs`.
+    `LocalStore` and adds the observers that count a press and reset the count, keeping it; `build_ui` adds the
+    observers of the buttons, `spawn_page` on `OnEnter(ActiveApp(EXAMPLE))`, `despawn_page` on `OnExit`, and
+    `show_count` gated on the app being shown; `settings_pages` gives its one page, Count, which `count_settings`
+    fills with a setting holding the Reset button. It has no `paint` and no `link_jobs`.
   - `spawn_page` builds one page: a root filling `beside_rail()` with `BesideRail` and `Surface::Window`, a title, a
     dim line, the count line and a button, each a kit scene spawned under it with `ChildOf`.
   - `show_count` sets the count line's text in place with `set_text` when `Presses` changes.
@@ -517,10 +575,11 @@ whose Restart ends `Shell::run` with the restart code the launcher answers; a bi
 as long as it ends by calling `Shell::run`.
 
 While the connection is live and the server has an apps repo (`[shell] repo`), the foot of the rail also holds an Ask
-button, above the update notice. It opens a form for asking for a change to one of the apps the server's factory
+button, above the update notice, and under them all is the gear that opens the settings (section 2, "Settings
+pages"). Ask opens a form for asking for a change to one of the apps the server's factory
 builds (the projects pointed at the apps repo) or for a new app, which the server turns into a graded task, or a new
 project and its first task (`docs/app-platform.md`, "Asking for an app"). Nothing of it is an app's: a shell with one
-app has no rail, and so no Ask.
+app has no rail, and so no Ask and no update notice.
 
 ## 10. Views
 
