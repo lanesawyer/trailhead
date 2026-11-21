@@ -32,10 +32,8 @@ struct Git {
     /// A 422 message `update-branch` answers with, whatever the branches look like.
     update_refusal: Option<String>,
     workflow_scope: bool,
-    /// The token can't read check runs (a fine-grained personal token on a private repo), only Actions.
-    checks_refused: bool,
-    /// Whether the second workflow run has its job yet.
-    docs_done: bool,
+    /// The commit's combined check state, as GraphQL gives it; `None` is a commit nothing has reported on.
+    rollup: Option<&'static str>,
     /// How many more file listings answer 502, and how many were asked for.
     files_failures: usize,
     files_calls: usize,
@@ -331,25 +329,18 @@ fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
         .into_response()
 }
 
-async fn check_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
-    let mut g = g.lock().unwrap();
-    if g.checks_refused {
-        let body = json!({ "message": "Resource not accessible by personal access token" });
-        return (StatusCode::FORBIDDEN, Json(body)).into_response();
-    }
-    // The second run is one GitHub left `in_progress` with a conclusion, which must not hold CI pending.
-    let runs = json!({ "check_runs": [
-        { "name": "ci", "status": "completed", "conclusion": "success" },
-        { "name": "machete", "status": "in_progress", "conclusion": "success" },
-    ] });
-    etagged(&mut g, &headers, runs)
+async fn graphql(State(g): State<Shared>, Json(body): Json<Value>) -> Response {
+    let g = g.lock().unwrap();
+    assert!(body["variables"]["oid"].is_string(), "the commit is asked for by its oid");
+    let rollup = g.rollup.map(|state| json!({ "state": state }));
+    Json(json!({ "data": { "repository": { "object": { "statusCheckRollup": rollup } } } })).into_response()
 }
 
 async fn actions_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
     let mut g = g.lock().unwrap();
     let runs = json!({ "workflow_runs": [
         { "id": 7, "name": "CI", "status": "completed", "conclusion": "success" },
-        { "id": 8, "name": "Docs", "status": "queued", "conclusion": null },
+        { "id": 8, "name": "Docs", "status": "completed", "conclusion": "failure" },
     ] });
     etagged(&mut g, &headers, runs)
 }
@@ -362,8 +353,7 @@ async fn actions_jobs(
     let mut g = g.lock().unwrap();
     let jobs = match run {
         7 => json!([{ "id": 70, "name": "check", "status": "completed", "conclusion": "success" }]),
-        _ if g.docs_done => json!([{ "id": 80, "name": "book", "status": "completed", "conclusion": "failure" }]),
-        _ => json!([]),
+        _ => json!([{ "id": 80, "name": "book", "status": "completed", "conclusion": "failure" }]),
     };
     etagged(&mut g, &headers, json!({ "jobs": jobs }))
 }
@@ -478,7 +468,7 @@ async fn serve() -> (Shared, String) {
         .route("/repos/{o}/{r}/git/trees", post(create_tree))
         .route("/repos/{o}/{r}/pulls", post(pulls).get(list_pulls))
         .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
-        .route("/repos/{o}/{r}/commits/{sha}/check-runs", get(check_runs))
+        .route("/graphql", post(graphql))
         .route("/repos/{o}/{r}/commits/{sha}/status", get(combined_status))
         .route("/repos/{o}/{r}/actions/runs", get(actions_runs))
         .route("/repos/{o}/{r}/actions/runs/{id}/jobs", get(actions_jobs))
@@ -937,14 +927,15 @@ async fn unchanged_pr_reads_are_conditional_and_answered_from_the_cache() {
         assert_eq!((g.full_reads, g.not_modified), (1, 2));
     }
 
-    // CI on the same head: the first pass reads everything, the second only revalidates.
+    // CI on the same head: the PR is revalidated, and the combined state is asked for afresh each time.
+    git.lock().unwrap().rollup = Some("SUCCESS");
     let ci = gh.ci(&pr).await.unwrap();
     assert_eq!(ci.state, CiState::Passed);
     assert_eq!(gh.ci(&pr).await.unwrap(), ci);
     {
         let g = git.lock().unwrap();
-        assert_eq!(g.full_reads, 3);
-        assert_eq!(g.not_modified, 2 + 4);
+        assert_eq!(g.full_reads, 1);
+        assert_eq!(g.not_modified, 2 + 2);
     }
 
     // A change shows through at once: the ETag no longer matches.
@@ -1071,7 +1062,7 @@ async fn open_prs_paging_at_a_full_page_and_at_the_cap() {
 }
 
 #[tokio::test]
-async fn ci_is_read_from_actions_when_the_token_cannot_read_check_runs() {
+async fn ci_is_the_commits_combined_state_and_a_failure_names_its_jobs() {
     let (git, url) = serve().await;
     let gh = GitHub::gateway(&url);
     let main = head(&git, "main");
@@ -1079,11 +1070,13 @@ async fn ci_is_read_from_actions_when_the_token_cannot_read_check_runs() {
     gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
     let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
     let pr = gh.open_pr(&repo(), new).await.unwrap();
-    git.lock().unwrap().checks_refused = true;
 
-    // One workflow has passed; the other is queued with no jobs yet, which holds CI pending.
     assert_eq!(gh.ci(&pr).await.unwrap().state, CiState::Pending);
-
-    git.lock().unwrap().docs_done = true;
+    for (rollup, state) in [("PENDING", CiState::Pending), ("EXPECTED", CiState::Pending), ("SUCCESS", CiState::Passed)]
+    {
+        git.lock().unwrap().rollup = Some(rollup);
+        assert_eq!(gh.ci(&pr).await.unwrap().state, state);
+    }
+    git.lock().unwrap().rollup = Some("FAILURE");
     assert_eq!(gh.ci(&pr).await.unwrap().state, CiState::Failed { checks: vec!["book".into()] });
 }

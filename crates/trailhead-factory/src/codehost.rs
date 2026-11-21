@@ -200,7 +200,7 @@ pub trait CodeHost: Send + Sync {
     async fn files(&self, pr: &PrRef) -> Result<Vec<ChangedFile>>;
     /// The commit the PR's branch is at now.
     async fn head(&self, pr: &PrRef) -> Result<String>;
-    /// The repo's CI on the PR's current head: its check runs and commit statuses, which are pending until every one
+    /// The repo's CI on the PR's current head: its checks and commit statuses, which are pending until every one
     /// has finished and at least one exists, and failed with the names of those that failed as soon as any has.
     async fn ci(&self, pr: &PrRef) -> Result<Ci>;
     /// The repo's CI on `sha`, a head the PR has now or had earlier, read as `ci` reads the current one. Pending when

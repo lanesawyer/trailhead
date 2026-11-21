@@ -18,8 +18,6 @@ use trailhead_factory::{
 
 pub const API_URL: &str = "https://api.github.com";
 
-/// GitHub pages check runs 100 at a time; a commit with more than this many is read as far as this.
-const MAX_CHECK_PAGES: u32 = 10;
 /// Pages of open PRs listed, a hundred each.
 const MAX_PR_PAGES: u32 = 5;
 
@@ -426,40 +424,43 @@ fn changed_file(f: &Value) -> ChangedFile {
     }
 }
 
-/// CI from a commit's check runs and its commit statuses (the combined status's list, since its own `state` reads
-/// pending when there are none). Any failure fails it, naming what failed; otherwise it's pending until something has
-/// reported and everything has finished.
-fn summarize_ci(runs: &[Value], statuses: &[Value]) -> CiState {
+/// A commit's combined check state.
+#[derive(Debug, PartialEq, Eq)]
+enum Rollup {
+    Passed,
+    Pending,
+    Failed,
+}
+
+/// No rollup means nothing has reported yet; `EXPECTED` is a required check still to come.
+fn rollup_of(state: Option<&str>) -> Rollup {
+    match state {
+        Some("SUCCESS") => Rollup::Passed,
+        Some("FAILURE" | "ERROR") => Rollup::Failed,
+        _ => Rollup::Pending,
+    }
+}
+
+/// The failed Actions jobs and commit statuses by name, or `ci` when neither names the failure.
+fn failed_names(jobs: &[Value], statuses: &[Value]) -> Vec<String> {
     let mut failed = Vec::new();
-    let mut pending = runs.is_empty() && statuses.is_empty();
-    for run in runs {
-        let name = run["name"].as_str().unwrap_or("check").to_string();
-        // GitHub sometimes leaves a run `in_progress` after it has a conclusion, so the conclusion decides.
-        if run["status"].as_str() != Some("completed") && run["conclusion"].is_null() {
-            pending = true;
-            continue;
-        }
-        match run["conclusion"].as_str() {
-            Some("success" | "neutral" | "skipped") => {}
-            _ => failed.push(name),
+    for job in jobs {
+        // GitHub sometimes leaves a job `in_progress` after it has a conclusion, so the conclusion decides.
+        let over = job["status"].as_str() == Some("completed") || !job["conclusion"].is_null();
+        if over && !matches!(job["conclusion"].as_str(), Some("success" | "neutral" | "skipped")) {
+            failed.push(job["name"].as_str().unwrap_or("check").to_string());
         }
     }
     for status in statuses {
-        let name = status["context"].as_str().unwrap_or("status").to_string();
-        match status["state"].as_str() {
-            Some("success") => {}
-            Some("failure" | "error") => failed.push(name),
-            _ => pending = true,
+        if matches!(status["state"].as_str(), Some("failure" | "error")) {
+            failed.push(status["context"].as_str().unwrap_or("status").to_string());
         }
     }
-    if !failed.is_empty() {
-        failed.dedup();
-        CiState::Failed { checks: failed }
-    } else if pending {
-        CiState::Pending
-    } else {
-        CiState::Passed
+    failed.dedup();
+    if failed.is_empty() {
+        failed.push("ci".to_string());
     }
+    failed
 }
 
 /// The end of a job log: its last lines, within a size that fits in a prompt.
@@ -719,16 +720,17 @@ impl CodeHost for GitHub {
 
     async fn ci_at(&self, pr: &PrRef, head: &str) -> Result<CiState> {
         let r = Self::repo_path(&pr.repo);
-        let runs = self.check_runs(&r, head).await?;
-        let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
-        let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
-        Ok(summarize_ci(&runs, statuses))
+        Ok(match self.rollup(&pr.repo, head).await? {
+            Rollup::Passed => CiState::Passed,
+            Rollup::Pending => CiState::Pending,
+            Rollup::Failed => CiState::Failed { checks: self.failed_checks(&r, head).await? },
+        })
     }
 
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
         let r = Self::repo_path(&pr.repo);
         let head = CodeHost::head(self, pr).await?;
-        let found = self.check_runs(&r, &head).await?;
+        let found = self.actions_jobs(&r, &head).await?;
         let mut out = Vec::new();
         for run in &found {
             let name = run["name"].as_str().unwrap_or_default();
@@ -763,31 +765,32 @@ impl CodeHost for GitHub {
 }
 
 impl GitHub {
-    /// A commit's check runs. A fine-grained personal token can't be given `Checks: read`, so on a private repo this
-    /// listing is refused; then the commit's Actions jobs stand in ([`GitHub::actions_jobs`]), which carry the same
-    /// `name`, `status`, `conclusion` and `id`. Checks reported by other apps are not seen that way.
-    async fn check_runs(&self, r: &str, head: &str) -> Result<Vec<Value>> {
-        let mut runs = Vec::new();
-        for page in 1..=MAX_CHECK_PAGES {
-            let req = self
-                .request(Method::GET, &format!("{r}/commits/{head}/check-runs"))
-                .query(&[("per_page", "100"), ("page", &page.to_string())]);
-            let found = match self.call_cached(req).await {
-                Ok(found) => found,
-                Err(Error::Forbidden(_)) if page == 1 => return self.actions_jobs(r, head).await,
-                Err(e) => return Err(e),
-            };
-            let found = found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default();
-            runs.extend_from_slice(found);
-            if found.len() < 100 {
-                break;
-            }
+    /// What GitHub makes of a commit's checks and statuses together, the state its PR page shows: one answer that
+    /// covers checks from any app. It is read through GraphQL because that is the one reading of checks a
+    /// fine-grained personal token is allowed on a private repo as on a public one (it can't be given `Checks`, so
+    /// the REST check runs are refused there).
+    async fn rollup(&self, repo: &Repo, head: &str) -> Result<Rollup> {
+        const QUERY: &str = "query($owner:String!,$name:String!,$oid:GitObjectID!){repository(owner:$owner,name:$name)\
+            {object(oid:$oid){... on Commit{statusCheckRollup{state}}}}}";
+        let body = json!({ "query": QUERY, "variables": { "owner": repo.owner, "name": repo.name, "oid": head } });
+        let answer = self.call(self.request(Method::POST, "/graphql").json(&body)).await?;
+        let commit = &answer["data"]["repository"]["object"];
+        if commit.is_null() {
+            let why = answer["errors"][0]["message"].as_str().unwrap_or("no such commit");
+            return Err(Error::Other(format!("reading the checks of {head}: {why}")));
         }
-        Ok(runs)
+        Ok(rollup_of(commit["statusCheckRollup"]["state"].as_str()))
     }
 
-    /// The jobs of every workflow run on a commit (needs `Actions: read`). A run that has no jobs yet stands in for
-    /// them itself, so a queued workflow holds CI pending.
+    /// The names of what failed on a commit, for the note and the rework: its failed Actions jobs and commit
+    /// statuses. A failure reported only by another app's check has no name here, so it is called `ci`.
+    async fn failed_checks(&self, r: &str, head: &str) -> Result<Vec<String>> {
+        let jobs = self.actions_jobs(r, head).await?;
+        let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
+        Ok(failed_names(&jobs, combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default()))
+    }
+
+    /// The jobs of every workflow run on a commit (needs `Actions: read`); a run with no jobs yet stands in for them.
     async fn actions_jobs(&self, r: &str, head: &str) -> Result<Vec<Value>> {
         let req =
             self.request(Method::GET, &format!("{r}/actions/runs")).query(&[("head_sha", head), ("per_page", "100")]);
@@ -840,43 +843,32 @@ mod tests {
     }
 
     #[test]
-    fn ci_with_nothing_reported_is_pending() {
-        assert_eq!(summarize_ci(&[], &[]), CiState::Pending);
+    fn a_commit_with_no_rollup_or_a_check_still_expected_is_pending() {
+        assert_eq!(rollup_of(None), Rollup::Pending);
+        assert_eq!(rollup_of(Some("EXPECTED")), Rollup::Pending);
+        assert_eq!(rollup_of(Some("PENDING")), Rollup::Pending);
+        assert_eq!(rollup_of(Some("SUCCESS")), Rollup::Passed);
+        assert_eq!(rollup_of(Some("FAILURE")), Rollup::Failed);
+        assert_eq!(rollup_of(Some("ERROR")), Rollup::Failed);
     }
 
     #[test]
-    fn ci_passes_when_every_run_and_status_succeeded_or_was_skipped() {
-        let runs = [run("test", "completed", Some("success")), run("docs", "completed", Some("skipped"))];
-        assert_eq!(summarize_ci(&runs, &[status("deploy", "success")]), CiState::Passed);
-        assert_eq!(summarize_ci(&[], &[status("deploy", "success")]), CiState::Passed);
-    }
-
-    #[test]
-    fn ci_is_pending_while_a_run_or_status_hasnt_finished() {
-        let runs = [run("test", "completed", Some("success")), run("lint", "in_progress", None)];
-        assert_eq!(summarize_ci(&runs, &[]), CiState::Pending);
-        let done = [run("test", "completed", Some("success"))];
-        assert_eq!(summarize_ci(&done, &[status("deploy", "pending")]), CiState::Pending);
-    }
-
-    #[test]
-    fn ci_treats_a_run_with_a_conclusion_as_finished_whatever_its_status() {
-        let runs = [run("test", "completed", Some("success")), run("machete", "in_progress", Some("success"))];
-        assert_eq!(summarize_ci(&runs, &[]), CiState::Passed);
-        let bad = [run("machete", "in_progress", Some("failure"))];
-        assert_eq!(summarize_ci(&bad, &[]), CiState::Failed { checks: vec!["machete".into()] });
-    }
-
-    #[test]
-    fn ci_fails_naming_what_failed_even_while_other_checks_run() {
-        let runs = [
+    fn a_failure_names_the_jobs_and_statuses_that_failed_and_not_the_ones_still_running() {
+        let jobs = [
             run("test", "completed", Some("failure")),
             run("lint", "in_progress", None),
             run("fmt", "completed", Some("timed_out")),
+            run("docs", "completed", Some("skipped")),
+            run("machete", "in_progress", Some("failure")),
         ];
         assert_eq!(
-            summarize_ci(&runs, &[status("deploy", "error")]),
-            CiState::Failed { checks: vec!["test".into(), "fmt".into(), "deploy".into()] }
+            failed_names(&jobs, &[status("deploy", "error"), status("preview", "success")]),
+            vec!["test", "fmt", "machete", "deploy"]
         );
+    }
+
+    #[test]
+    fn a_failure_nothing_names_is_called_ci() {
+        assert_eq!(failed_names(&[run("test", "completed", Some("success"))], &[]), vec!["ci"]);
     }
 }
