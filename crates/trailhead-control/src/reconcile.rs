@@ -82,7 +82,10 @@ impl Factory {
         let mut due = Due::default();
         // A target that can't be reached is unknown, not empty: what ran there is left as it is until it answers.
         let (live, down) = self.list_all(&self.base_labels()).await?;
-        let in_flight = self.tracker.in_flight(self.project(), &self.queue()).await;
+        let in_flight = match self.scopes().await {
+            Ok(scopes) => self.tracker.in_flight(&scopes).await,
+            Err(e) => Err(e),
+        };
         // The tracker says which pooled sandboxes a parked task holds; a board rebuilt at boot can't know.
         // A sandbox a breach left stuck (cut-off and destroy both failed) is shown apart: waiting to be destroyed,
         // not suspended.

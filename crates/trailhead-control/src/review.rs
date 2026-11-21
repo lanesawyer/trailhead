@@ -57,7 +57,7 @@ impl Factory {
         let name = reviewer_name(&task.key, attempt, before + 1, retries);
         self.tracker.report(&task.key, RunPatch { review_rounds: Patch::Set(round), ..RunPatch::default() }).await?;
         let profile = self.config.reviewer().clone();
-        let credential = match self.tracker.create_sub_agent(&name, self.project(), token_ttl(&profile)).await {
+        let credential = match self.tracker.create_sub_agent(&name, task.key.project(), token_ttl(&profile)).await {
             Ok(credential) => credential,
             Err(e) => return Err(self.review_infra_failed(task, &name, e, false, before, retries, infra_prior).await),
         };
@@ -70,7 +70,7 @@ impl Factory {
         let req = RunRequest {
             run: name.clone(),
             role: Role::Reviewer,
-            task: spec(task, context),
+            task: spec(task, context, self.path_of(&task.key)),
             repo: self.config.repo.repo(),
             base_branch: self.config.repo.base_branch.clone(),
             branch: Self::branch(task),

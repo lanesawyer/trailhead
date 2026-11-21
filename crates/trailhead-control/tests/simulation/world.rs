@@ -202,7 +202,8 @@ pub struct World {
 }
 
 impl World {
-    /// A project the factory may review in, with one task per grade given.
+    /// The repo file's project and a project pointed at the repo, both of which the factory may review in, with one
+    /// task per grade given: the first in the file's project, the second in the pointed one.
     pub async fn new(grades: &[u8]) -> World {
         // The store's clock follows tokio's paused one, so waiting long enough lets a claim's lease run out.
         let (began, at) = (tokio::time::Instant::now(), jiff::Timestamp::now());
@@ -210,11 +211,16 @@ impl World {
         let store = Arc::new(Store::open_local(":memory:").await.unwrap().with_clock(clock));
         let (ws, user) = store.bootstrap_local("Lane").await.unwrap();
         let human = Ctx::user(ws.id, user.id);
-        let project = NewProject { key: "TRAIL".into(), name: "Trailhead".into(), ..Default::default() };
-        store.create_project(&human, project).await.unwrap();
+        let pointed = serde_json::json!({ "factory": { "repo": "lanesawyer/trailhead", "path": "src" } });
+        for (key, metadata) in [("TRAIL", None), ("TICK", Some(pointed))] {
+            let project = NewProject { key: key.into(), name: key.into(), metadata, ..Default::default() };
+            store.create_project(&human, project).await.unwrap();
+        }
         let agent = store.create_agent(&human, "factory").await.unwrap();
-        let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
-        store.update_project(&human, "TRAIL", reviewers, None).await.unwrap();
+        for key in ["TRAIL", "TICK"] {
+            let reviewers = ProjectPatch { reviewers: Some(vec!["factory".into()]), ..Default::default() };
+            store.update_project(&human, key, reviewers, None).await.unwrap();
+        }
         let ctx = store.agent_ctx(ws.id, agent.id).await.unwrap();
         let tracker = CoreTracker::new(store.clone(), ctx, "factory");
 
@@ -240,7 +246,7 @@ impl World {
         let mut tasks = Vec::new();
         for (i, grade) in grades.iter().enumerate() {
             let new = NewTask {
-                project: "TRAIL".into(),
+                project: if i == 0 { "TRAIL" } else { "TICK" }.into(),
                 title: format!("Task {i}"),
                 grade: Some(Grade::new(*grade).unwrap()),
                 ..Default::default()

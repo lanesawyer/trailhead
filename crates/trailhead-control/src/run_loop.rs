@@ -9,7 +9,9 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 use tracing::Instrument;
 use trailhead_factory::messages;
-use trailhead_factory::{ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Status, Task, TaskKey, label};
+use trailhead_factory::{
+    ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label,
+};
 
 use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
@@ -471,24 +473,28 @@ impl Factory {
         }
     }
 
-    /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a priority (below). Under a queue that means graded ones: grading a task is
-    /// what queues it. An ungraded one is skipped and reported once, in the log and on the task, rather than on every
-    /// poll (`docs/factory/review.md#grades`).
+    /// The ready tasks that are the factory's work, in the tracker's order. Then reworks of open PRs go first within a
+    /// priority (below). Under a queue that means graded ones: grading a task is what queues it. An ungraded one is
+    /// skipped and reported once, in the log and on the task, rather than on every poll
+    /// (`docs/factory/review.md#grades`). With no queue the whole file project is the factory's by configuration, so a
+    /// grade is not what releases a task there. In a project pointed at the repo only graded tasks are the factory's,
+    /// and an ungraded one is left alone without a word: a person keeps their own tasks there too.
     async fn ready_graded(&self) -> Result<Vec<Task>> {
-        let queue = self.queue();
-        // With no queue the whole project is the factory's by configuration, so a grade is not what releases a task.
-        if queue.is_empty() {
-            return Ok(in_start_order(self.tracker.ready(self.project(), &[], usize::MAX).await?));
+        let scopes = self.scopes().await?;
+        let ready = self.tracker.ready(&scopes, usize::MAX).await?;
+        let mut work = Vec::new();
+        for task in ready {
+            match Scope::of(&scopes, &task.key) {
+                Some(scope) if !scope.needs_grade() => work.push(task),
+                Some(_) if task.grade.is_some() => {
+                    self.clear_ungraded(&task).await;
+                    work.push(task);
+                }
+                Some(scope) if !scope.pointed => self.report_ungraded(&task).await,
+                _ => {}
+            }
         }
-        let ready = self.tracker.ready(self.project(), &queue, usize::MAX).await?;
-        let (graded, ungraded): (Vec<Task>, Vec<Task>) = ready.into_iter().partition(|t| t.grade.is_some());
-        for task in ungraded {
-            self.report_ungraded(&task).await;
-        }
-        for task in &graded {
-            self.clear_ungraded(task).await;
-        }
-        Ok(in_start_order(graded))
+        Ok(in_start_order(work))
     }
 
     /// A task that has been graded is no longer ungraded, so it's told again if its grade is ever cleared.
@@ -588,7 +594,13 @@ impl Factory {
         // One listing stands in for a lookup per sandbox: parked tasks, the common case, are in it. Only a task it
         // lacks (finished, cancelled, re-parented) is looked up on its own (TRAIL-258).
         let mut listing_ok = false;
-        let listed: HashMap<TaskKey, Task> = match self.tracker.in_flight(self.project(), &self.queue()).await {
+        let scopes = self.scopes().await;
+        let listing = match &scopes {
+            Ok(scopes) => self.tracker.in_flight(scopes).await,
+            Err(e) => Err(e.clone()),
+        };
+        let scopes = scopes.unwrap_or_default();
+        let listed: HashMap<TaskKey, Task> = match listing {
             Ok(tasks) => {
                 listing_ok = true;
                 tasks.into_iter().map(|t| (t.key.clone(), t)).collect()
@@ -605,9 +617,11 @@ impl Factory {
                 Some(task) => Ok(task.clone()),
                 None => self.tracker.show(&TaskKey(key.clone())).await,
             };
-            // A live task the queues' listing lacks was taken off its queue by hand (TRAIL-1147): the factory no
-            // longer owns it, so its sandbox is released rather than held until the task closes.
-            let off_queue = listing_ok && !self.queue().is_empty() && !listed.contains_key(&TaskKey(key.clone()));
+            // A live task the listing lacks was taken off its queue by hand (TRAIL-1147), or its project stopped
+            // pointing at this repo: the factory no longer owns it, so its sandbox is released rather than held until
+            // the task closes. In a project worked whole, a task missing from the listing is only one without a run.
+            let whole = Scope::of(&scopes, &TaskKey(key.clone())).is_some_and(|s| s.queue.is_empty());
+            let off_queue = listing_ok && !whole && !listed.contains_key(&TaskKey(key.clone()));
             let task = match found {
                 Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
                 Ok(task)

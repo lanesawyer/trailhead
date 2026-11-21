@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use serde_json::json;
 use trailhead_client::http::{Client, Error as ApiError, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate};
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, Result, RunPatch, Status, Task,
-    TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Priority, ProjectRepo, Result, RunPatch, Scope,
+    Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -42,6 +42,30 @@ impl RestTracker {
 }
 
 impl RestTracker {
+    /// [`Tracker::ready`] for one project (under `queue`, when there is one), before the raise and the cut.
+    async fn ready_in(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
+        // Never just `limit`: the cut comes after the reworks are merged in and the blockers raised.
+        let q = ReadyQuery { project: Some(project.to_string()), limit: Some(1000), ..ReadyQuery::default() };
+        let ready = self.client.ready(&q).await.map_err(error)?;
+        let mut queued = HashSet::new();
+        for q in queue {
+            let query = TaskQuery {
+                project: Some(project.to_string()),
+                parent: Some(q.clone()),
+                limit: Some(1000),
+                ..TaskQuery::default()
+            };
+            queued.extend(self.client.list_tasks(&query).await.map_err(error)?.into_iter().map(|t| t.task.key));
+        }
+        let mut tasks = ready
+            .into_iter()
+            .filter(|t| queue.is_empty() || queued.contains(&t.key))
+            .map(|t| Task::from_model(t, None))
+            .collect::<Result<Vec<_>>>()?;
+        tasks.extend(self.reworks(project, queue).await?);
+        Ok(tasks)
+    }
+
     /// The unheld, unblocked in-review tasks of `project` (of the `queue`'s subtasks, when there is one) waiting on a
     /// rework, in priority order.
     async fn reworks(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
@@ -136,26 +160,14 @@ impl Tracker for RestTracker {
         Arc::new(refused)
     }
 
-    async fn ready(&self, project: &str, queue: &[TaskKey], limit: usize) -> Result<Vec<Task>> {
-        // Never just `limit`: the cut comes after the reworks are merged in and the blockers raised ([`in_ready_order`]).
-        let q = ReadyQuery { project: Some(project.to_string()), limit: Some(1000), ..ReadyQuery::default() };
-        let ready = self.client.ready(&q).await.map_err(error)?;
-        let mut queued = HashSet::new();
-        for q in queue {
-            let query = TaskQuery {
-                project: Some(project.to_string()),
-                parent: Some(q.clone()),
-                limit: Some(1000),
-                ..TaskQuery::default()
-            };
-            queued.extend(self.client.list_tasks(&query).await.map_err(error)?.into_iter().map(|t| t.task.key));
+    async fn ready(&self, scopes: &[Scope], limit: usize) -> Result<Vec<Task>> {
+        let mut tasks: Vec<Task> = Vec::new();
+        let mut seen = HashSet::new();
+        for scope in scopes {
+            let found = self.ready_in(&scope.project, &scope.queue).await?;
+            tasks.extend(found.into_iter().filter(|t| seen.insert(t.key.clone())));
         }
-        let mut tasks = ready
-            .into_iter()
-            .filter(|t| queue.is_empty() || queued.contains(&t.key))
-            .map(|t| Task::from_model(t, None))
-            .collect::<Result<Vec<_>>>()?;
-        tasks.extend(self.reworks(project, queue).await?);
+        // The cut comes after the blockers are raised ([`in_ready_order`]).
         self.raise_to_blocked_priority(&mut tasks).await;
         Ok(in_ready_order(tasks, limit))
     }
@@ -179,29 +191,36 @@ impl Tracker for RestTracker {
         Err(unsupported("read a task's comments"))
     }
 
-    async fn in_flight(&self, project: &str, queue: &[TaskKey]) -> Result<Vec<Task>> {
-        let parents: Vec<Option<&TaskKey>> =
-            if queue.is_empty() { vec![None] } else { queue.iter().map(Some).collect() };
+    async fn in_flight(&self, scopes: &[Scope]) -> Result<Vec<Task>> {
         let unfinished: Vec<Status> = Status::ALL.into_iter().filter(|s| !s.is_closed()).collect();
         let mut seen = HashSet::new();
         let mut found = Vec::new();
-        for parent in parents {
-            let query = TaskQuery {
-                project: Some(project.to_string()),
-                status: unfinished.clone(),
-                parent: parent.cloned(),
-                with_claim: true,
-                limit: Some(1000),
-                ..TaskQuery::default()
-            };
-            for t in self.client.list_tasks(&query).await.map_err(error)? {
-                if t.task.metadata.get(METADATA_KEY).is_some() && seen.insert(t.task.key.clone()) {
-                    let holder = t.claim.map(|c| c.holder.unwrap_or_else(|| c.holder_id.to_string()));
-                    found.push(Task::from_model(t.task, holder)?);
+        for scope in scopes {
+            let parents: Vec<Option<&TaskKey>> =
+                if scope.queue.is_empty() { vec![None] } else { scope.queue.iter().map(Some).collect() };
+            for parent in parents {
+                let query = TaskQuery {
+                    project: Some(scope.project.clone()),
+                    status: unfinished.clone(),
+                    parent: parent.cloned(),
+                    with_claim: true,
+                    limit: Some(1000),
+                    ..TaskQuery::default()
+                };
+                for t in self.client.list_tasks(&query).await.map_err(error)? {
+                    if t.task.metadata.get(METADATA_KEY).is_some() && seen.insert(t.task.key.clone()) {
+                        let holder = t.claim.map(|c| c.holder.unwrap_or_else(|| c.holder_id.to_string()));
+                        found.push(Task::from_model(t.task, holder)?);
+                    }
                 }
             }
         }
         Ok(found)
+    }
+
+    async fn project_repos(&self) -> Result<Vec<(String, ProjectRepo)>> {
+        let projects = self.client.list_projects(false).await.map_err(error)?;
+        Ok(projects.into_iter().filter_map(|p| Some((p.key.clone(), p.repo()?))).collect())
     }
 
     async fn claim(&self, key: &TaskKey) -> Result<()> {
