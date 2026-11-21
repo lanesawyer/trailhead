@@ -102,6 +102,10 @@ pub mod extent {
     pub const DETAIL_SIDEBAR_WIDTH: f32 = 280.0;
     /// The tabs down the side of a settings modal with pages (`spawn_settings_tabs`): room for a page's name.
     pub const SETTINGS_TABS_WIDTH: f32 = 180.0;
+    /// A choice tile's picture, across (`spawn_choice_tile`): a few dozen pixels, room for a small preview.
+    pub const TILE_PICTURE_WIDTH: f32 = 72.0;
+    /// A choice tile's picture, down.
+    pub const TILE_PICTURE_HEIGHT: f32 = 44.0;
 }
 
 /// How thick a line is: a border, a rule between panes.

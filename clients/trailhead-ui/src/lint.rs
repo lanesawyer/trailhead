@@ -493,5 +493,6 @@ mod tests {
         Allowed { path: "src/accordion.rs", rule: "feathers-color", why: "wraps feathers' panes: their borders" },
         Allowed { path: "src/scrollbar.rs", rule: "raw-color", why: "fades the scrollbar's own color in and out" },
         Allowed { path: "src/skeleton.rs", rule: "raw-color", why: "pulses a token's color" },
+        Allowed { path: "src/motion.rs", rule: "raw-color", why: "fades a token's color" },
     ];
 }

@@ -11,6 +11,9 @@ pub const CONNECT: i32 = 1;
 pub const SIDEBAR_EDGE: i32 = 1;
 /// The inspector down the right.
 pub const INSPECTOR: i32 = 2;
+/// What a window that holds several apps draws over the app shown while it switches to another (the Trailhead
+/// shell's cover): over an app's own panels, under modals, menus and hints.
+pub const SWITCH: i32 = 5;
 /// Modals: every form and dialog (new task, edit, comment, answer), over a backdrop covering the window.
 pub const MODAL: i32 = 10;
 /// Menu and dropdown popups, over whatever opened them.

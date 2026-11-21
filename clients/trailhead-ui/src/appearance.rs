@@ -60,6 +60,8 @@ pub struct Appearance {
     desktop: Option<WindowTheme>,
     /// The desktop's accent, once it has answered with one.
     accent: Option<Color>,
+    /// Whether the desktop has asked for less motion.
+    reduce_motion: bool,
 }
 
 impl Appearance {
@@ -74,6 +76,12 @@ impl Appearance {
             ThemeChoice::Dark => true,
             ThemeChoice::Desktop => self.desktop != Some(WindowTheme::Light),
         }
+    }
+
+    /// Whether the desktop asks for less motion (on Linux, the portal's `reduced-motion`, or GNOME's animations turned
+    /// off): what moves to show a change (a switch between apps) should change at once instead.
+    pub fn reduce_motion(&self) -> bool {
+        self.reduce_motion
     }
 
     /// `theme` as it is worn now.
@@ -155,6 +163,7 @@ fn take_the_answer(asking: Option<ResMut<Asking>>, mut appearance: ResMut<Appear
         None => info!("the desktop has no accent to wear"),
     }
     appearance.accent = answer.accent;
+    appearance.reduce_motion = answer.reduce_motion;
     if appearance.desktop.is_none()
         && let Some(theme) = answer.theme
     {
@@ -210,7 +219,7 @@ mod tests {
             .insert_resource(Painted(painted.clone()))
             .add_systems(Update, (take_the_answer, wear).chain());
         let answered = IoTaskPool::get_or_init(Default::default)
-            .spawn(async move { Desktop { accent: Some(accent), theme: None } });
+            .spawn(async move { Desktop { accent: Some(accent), theme: None, reduce_motion: false } });
         while !answered.is_finished() {
             std::thread::yield_now();
         }

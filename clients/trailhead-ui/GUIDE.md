@@ -136,10 +136,14 @@ if let Ok(mut check) = checks.get_mut(check_entity) {
 | `SelectOptions`, `SelectTones`, `SelectIcons` | components holding `Vec<String>`, `Vec<Option<Token>>`, `Vec<Icon>` | The state a select was last given, which `SelectEdit` compares against. Read them; do not write them. | |
 | `toggle_switch` | `toggle_switch(label: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off, with its label after it. `own` goes on the switch itself (your marker). A press flips it and sends `ValueChange<bool>` from the switch. | The switch keeps its own state (`bevy::ui::Checked`). |
 | `slider` | `slider(value: f32, range: (f32, f32), decimals: i32) -> impl Scene` | A number picked on a track; a click sets the value where it lands. The kit writes the value back. | Read `SliderValue`, or observe `ValueChange<f32>`. |
+| `spawn_choice_tile` | `spawn_choice_tile(commands: &mut Commands, caption: Into<String>, chosen: bool) -> ChoiceTileParts` | One of a row of choices a person should see rather than read: a small picture (`extent::TILE_PICTURE_WIDTH` by `TILE_PICTURE_HEIGHT`, clipped to its corners) with its caption under it, pressable as a whole (it sends `Activate` and answers the pointer as a plain button does), the one chosen ringed in the accent. Spawned unparented; lay the tiles out in a row that wraps, `space::ROWS` apart. It does not choose itself. The Trailhead shell's ways of switching apps are these, each picture a preview that plays. | Set `ChoiceTile { chosen }` on every tile with `set_if_neq`; the kit repaints the ring and the caption. |
+| `ChoiceTileParts` | `ChoiceTileParts { root: Entity, picture: Entity }` | Put `root` in the row and fill `picture`. | |
+| `ChoiceTile`, `ChoicePicture`, `ChoiceCaption` | `ChoiceTile { chosen: bool }` (component on the root); markers | The tile's state, and its picture and caption. | |
 
 A fixed set of choices is a dropdown, never a button that cycles through values. Two to four short options that
 should all show at once are a `button_group`, and so is a ladder of a few short steps where you are on it
-matters (the text sizes, 80% to 200%). A list floating under a text field (a search's suggestions) is a
+matters (the text sizes, 80% to 200%). Choices that are best shown (a few kinds of motion, each a preview) are a row of
+`spawn_choice_tile`s. A list floating under a text field (a search's suggestions) is a
 `dropdown_list`, not a `select`.
 
 ### A text field
@@ -348,6 +352,21 @@ A plain write through `Mut` marks a component changed even when it lands the sam
 whole tree back through layout and a changed `Text` back through shaping. A sync that runs every frame writes through
 these, or compares first, so the UI does not lay itself out when nothing on screen moved.
 
+### Motion
+
+| Item | Signature | What it is for |
+| --- | --- | --- |
+| `ease_in` | `ease_in(t: f32) -> f32` | Starts slow, ends at full speed (`t` 0 to 1, clamped): something arriving to cover what is there. |
+| `ease_out` | `ease_out(t: f32) -> f32` | Starts at full speed and settles: something leaving to show what is under it. |
+| `BackgroundFade` | `BackgroundFade(pub f32)` (component; default 1) | A node's background drawn at this share of its tone's opacity, beside a `BackgroundTone` or `Surface`: something fading in or out. The kit repaints it after the theme does, so it holds through a theme change. Set it with `set_if_neq`. |
+
+Something that moves is driven by real time (`Res<Time<Real>>`), so a slow frame carries it further instead of
+stretching it, and is worked out from where it started rather than added to frame by frame. While it moves it writes
+`bevy::window::RequestRedraw` every frame, since the Trailhead shell's window updates only on input otherwise, and it
+stops writing when it stops moving. What moves is set in place each frame (`patch_node`, `set_if_neq` on a
+`BackgroundFade`), which is an in-place update, not a redraw. The kit's own: the scrollbar's fade, the skeleton's
+pulse; the shell's: the cover drawn while it switches apps.
+
 ### The theme and the plugins
 
 | Item | Signature | What it is for |
@@ -359,7 +378,7 @@ these, or compares first, so the UI does not lay itself out when nothing on scre
 | `Theme` | `new()`, `set(&Token, Color)`, `set_accent(&Token, Color)`, `alias(&Token, &Token)`, `paint(&Token, Color)`, `color(&Token) -> Color`, `color_on(&Token, Surface) -> Color`, `has(&Token) -> bool`, `repeated_colors() -> Vec<String>`, `light() -> Theme`, `with_accent(Color) -> Theme` | Every token and its color (section 3). |
 | `palette` | `GRAY_0` .. `GRAY_3`, `WHITE`, `ACCENT` | The raw colors the theme is painted from, named only where a theme is built. |
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
-| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. |
+| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
 | `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
@@ -388,9 +407,9 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
 
 ### Near-synonyms: which to use when
 
-- **`select` / `button_group` / `toggle_switch` / `dropdown_list` / `spawn_icon_menu`.** A choice from a fixed set is a
-  `select`. Two to four short options that should all show at once, or a short ladder of steps, are a
-  `button_group`. On or off is a `toggle_switch`. Suggestions under a text field are a `dropdown_list`. Actions behind a button are a menu.
+- **`select` / `button_group` / `spawn_choice_tile` / `toggle_switch` / `dropdown_list` / `spawn_icon_menu`.** A choice
+  from a fixed set is a `select`. Two to four short options that should all show at once, or a short ladder of steps,
+  are a `button_group`. Choices best seen, each a small picture, are choice tiles. On or off is a `toggle_switch`. Suggestions under a text field are a `dropdown_list`. Actions behind a button are a menu.
 - **`select` / `select_toned` / `select_iconed` / `inline_field`.** Plain options, options in colors that encode data,
   options with icons, and a labelled select in a sidebar whose change the caller confirms or refuses.
 - **`text_input` / `inline_text` / `spawn_search_field`.** A field in a form; a value edited where it is read, with
@@ -521,6 +540,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `FIELD_LABEL_WIDTH` | 90 | The label column in a sidebar field |
 | `DETAIL_WIDTH`, `DETAIL_SIDEBAR_WIDTH` | 960, 280 | A detail modal and its sidebar of facts |
 | `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
+| `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 72, 44 | A choice tile's picture |
 
 The lint reads lines, not meaning: a number hidden in a constant named for nothing gets past it. Name constants for
 what they are for, and prefer the kit's names over constants of your own.
@@ -555,11 +575,13 @@ click to it, even though it draws on top (TRAIL-776). Every overlay takes its la
 | `CONNECT` | 1 | The shell's connect panel along the bottom while not live |
 | `SIDEBAR_EDGE` | 1 | The sidebar's drag edge, half over the page beside it |
 | `INSPECTOR` | 2 | A side panel down the right |
+| `SWITCH` | 5 | The cover a window holding several apps draws over the app area while it switches apps (the Trailhead shell's) |
 | `MODAL` | 10 | Every form and dialog, over a backdrop covering the window |
 | `MENU` | 20 | Menu and dropdown popups, over whatever opened them |
 | `HINT` | 30 | The hint over a hovered control, over everything |
 
-The order is: the app's main surface at the bottom, panels above it, then modals, menus and hints on top. The kit's
+The order is: the app's main surface at the bottom, panels above it, the shell's cover while it switches apps, then
+modals, menus and hints on top. The kit's
 own modal, menu, dropdown and hint widgets already set theirs.
 
 ## 4. Rules that came from real bugs

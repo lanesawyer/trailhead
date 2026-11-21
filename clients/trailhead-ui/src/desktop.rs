@@ -5,7 +5,8 @@
 //!
 //! - Linux: the XDG desktop portal's `org.freedesktop.appearance` settings, which GNOME and KDE both answer, through
 //!   `busctl` or else `gdbus`. The portal also says whether the desktop prefers dark, which the window doesn't always
-//!   (winit on Wayland can't tell).
+//!   (winit on Wayland can't tell), and whether it asks for less motion: its own `reduced-motion`, or GNOME's
+//!   `enable-animations` turned off, which the portal passes on.
 //! - macOS: `AppleAccentColor` in the global defaults, one of eight fixed colors. Unset means "multicolor", which
 //!   leaves the choice to the app.
 //! - Windows: the DWM `AccentColor` value in the registry.
@@ -27,6 +28,8 @@ pub(crate) struct Desktop {
     pub accent: Option<Color>,
     /// Light or dark, where the platform says so here rather than on the window.
     pub theme: Option<WindowTheme>,
+    /// Whether it asks for less motion, where it says.
+    pub reduce_motion: bool,
 }
 
 /// Asks the desktop. Blocks for up to a few seconds.
@@ -35,57 +38,51 @@ pub(crate) fn ask() -> Desktop {
         let accent = run("defaults", &["read", "-g", "AppleAccentColor"])
             .and_then(|out| out.trim().parse().ok())
             .and_then(apple_accent);
-        Desktop { accent, theme: None }
+        Desktop { accent, theme: None, reduce_motion: false }
     } else if cfg!(windows) {
         let accent = run("reg", &["query", r"HKCU\Software\Microsoft\Windows\DWM", "/v", "AccentColor"])
             .and_then(|out| windows_accent(&out));
-        Desktop { accent, theme: None }
+        Desktop { accent, theme: None, reduce_motion: false }
     } else {
+        let reduced = portal(APPEARANCE, "reduced-motion").is_some_and(|out| numbers(&out).last() == Some(&1.0));
+        let still = || portal(GNOME, "enable-animations").is_some_and(|out| portal_false(&out));
         Desktop {
-            accent: portal("accent-color").and_then(|out| portal_accent(&out)),
-            theme: portal("color-scheme").and_then(|out| portal_scheme(&out)),
+            accent: portal(APPEARANCE, "accent-color").and_then(|out| portal_accent(&out)),
+            theme: portal(APPEARANCE, "color-scheme").and_then(|out| portal_scheme(&out)),
+            reduce_motion: reduced || still(),
         }
     }
 }
 
-/// The portal's `org.freedesktop.appearance` setting `key`, as `busctl` or else `gdbus` prints it.
-fn portal(key: &str) -> Option<String> {
+/// The portal's own settings: the accent, light or dark, and less motion.
+const APPEARANCE: &str = "org.freedesktop.appearance";
+/// GNOME's interface settings, which the portal passes on.
+const GNOME: &str = "org.gnome.desktop.interface";
+
+/// The portal's setting `key` in `namespace`, as `busctl` or else `gdbus` prints it.
+fn portal(namespace: &str, key: &str) -> Option<String> {
     const PORTAL: [&str; 3] =
         ["org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings"];
-    run(
-        "busctl",
-        &[
-            "--user",
-            "--timeout=2",
-            "call",
-            PORTAL[0],
-            PORTAL[1],
-            PORTAL[2],
-            "ReadOne",
-            "ss",
-            "org.freedesktop.appearance",
-            key,
-        ],
-    )
-    .or_else(|| {
-        let method = format!("{}.ReadOne", PORTAL[2]);
-        run(
-            "gdbus",
-            &[
-                "call",
-                "--session",
-                "--timeout=2",
-                "--dest",
-                PORTAL[0],
-                "--object-path",
-                PORTAL[1],
-                "--method",
-                &method,
-                "org.freedesktop.appearance",
-                key,
-            ],
-        )
-    })
+    run("busctl", &["--user", "--timeout=2", "call", PORTAL[0], PORTAL[1], PORTAL[2], "ReadOne", "ss", namespace, key])
+        .or_else(|| {
+            let method = format!("{}.ReadOne", PORTAL[2]);
+            run(
+                "gdbus",
+                &[
+                    "call",
+                    "--session",
+                    "--timeout=2",
+                    "--dest",
+                    PORTAL[0],
+                    "--object-path",
+                    PORTAL[1],
+                    "--method",
+                    &method,
+                    namespace,
+                    key,
+                ],
+            )
+        })
 }
 
 /// What `program` printed, if it ran and succeeded.
@@ -124,6 +121,11 @@ fn portal_scheme(out: &str) -> Option<WindowTheme> {
         Some(2.0) => Some(WindowTheme::Light),
         _ => None,
     }
+}
+
+/// Whether a yes-or-no setting is off: `v b false` from `busctl`, `(<<false>>,)` from `gdbus`.
+fn portal_false(out: &str) -> bool {
+    out.split(|c: char| !c.is_ascii_alphabetic()).any(|word| word == "false")
 }
 
 /// The registry's `0xAABBGGRR`, as `reg query` prints it.
@@ -171,6 +173,14 @@ mod tests {
         assert_eq!(portal_scheme("v u 0\n"), None, "no preference");
         assert_eq!(portal_scheme("(<<uint32 2>>,)\n"), Some(WindowTheme::Light));
         assert_eq!(portal_scheme(""), None);
+    }
+
+    #[test]
+    fn gnomes_animations_turned_off_are_read_from_either_tool() {
+        assert!(portal_false("v b false\n"));
+        assert!(portal_false("(<<false>>,)\n"));
+        assert!(!portal_false("v b true\n"));
+        assert!(!portal_false(""));
     }
 
     #[test]

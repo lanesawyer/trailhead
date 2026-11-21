@@ -70,6 +70,10 @@
 //! - How far along something is: [`progress_bar`]; set its [`Progress`], and its [`ProgressTone`] to recolor it. With
 //!   a label, a value and a note: [`meter`], updated through its [`MeterPart`]s.
 //! - A setting that is on or off: [`toggle_switch`]; observe `ValueChange<bool>` on it.
+//! - A pick among things a person should see (small previews), a row of pictures with captions: [`spawn_choice_tile`]s,
+//!   the one chosen marked with [`ChoiceTile`].
+//! - Something that moves: [`ease_in`] and [`ease_out`] over real time, and a background faded with
+//!   [`BackgroundFade`].
 //! - Writing a `Node` or `Text` only when it changes: [`patch_node`], [`set_display`], [`set_text`].
 //! - How big the whole UI is drawn (Ctrl and `=`, `-`, `0`): [`TextSize`], changed with [`ChangeTextSize`].
 //!
@@ -91,6 +95,7 @@ mod button_group;
 mod buttons;
 mod check_circle;
 mod chip;
+mod choice_tile;
 mod containers;
 mod desktop;
 mod detail;
@@ -108,6 +113,7 @@ mod link;
 pub mod lint;
 mod menu;
 mod modal;
+mod motion;
 mod nav;
 mod notice;
 mod panel_header;
@@ -142,6 +148,7 @@ pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
 pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
+pub use choice_tile::{ChoiceCaption, ChoicePicture, ChoiceTile, ChoiceTileParts, spawn_choice_tile};
 pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
@@ -160,6 +167,7 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
 };
+pub use motion::{BackgroundFade, ease_in, ease_out};
 pub use nav::{
     BesideRail, BesideSidebar, NavEdit, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar,
     nav_heading, nav_heading_action, nav_item, nav_item_noted, rail, rail_foot, rail_item, sidebar, sidebar_card,
@@ -218,6 +226,7 @@ impl Plugin for UiPlugin {
                 PostUpdate,
                 (scroll::clamp_scroll_positions, scrollbar::show_scrollbars).after(bevy::ui::UiSystems::Layout),
             )
+            .add_systems(PostUpdate, motion::fade_backgrounds.after(bevy::ui::UiSystems::Prepare))
             .add_systems(
                 Update,
                 (
@@ -237,7 +246,7 @@ impl Plugin for UiPlugin {
                     nav::show_edge_lines,
                     truncate::fit_truncated,
                     button_group::paint_groups,
-                    (hover::paint_hover_tones, check_circle::paint_check_circles),
+                    (hover::paint_hover_tones, check_circle::paint_check_circles, choice_tile::paint_choice_tiles),
                     buttons::dim_disabled_captions,
                     select::style_select_captions,
                     select::show_chosen_icons,
