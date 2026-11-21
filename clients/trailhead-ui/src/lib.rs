@@ -47,6 +47,8 @@
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
+//! - A list a person puts in their own order by dragging (or Alt and an arrow): [`ReorderList`] on it,
+//!   [`ReorderItem`] on each item, and observe [`Reordered`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Borders: [`stroke`]. Panel widths and offsets: [`extent`].
 //! - Pages picked from a row (or column) of tabs: a [`tab_strip`] holding [`tab`]s; observe
 //!   `ValueChange<Option<Entity>>` on the strip and set its `SelectedTab`. A settings modal with pages: its tabs down
@@ -119,6 +121,7 @@ mod notice;
 mod panel_header;
 mod patch;
 mod progress;
+mod reorder;
 mod scroll;
 mod scrollbar;
 mod search;
@@ -177,6 +180,7 @@ pub use notice::{Notice, Tone, notice, notice_with};
 pub use panel_header::{PanelTitle, PanelTools, panel_header};
 pub use patch::{display, patch_node, set_display, set_text};
 pub use progress::{MeterPart, Progress, ProgressTone, meter, progress_bar};
+pub use reorder::{DRAG_THRESHOLD, Lifted, RELEASE_SLACK, ReorderItem, ReorderList, ReorderPlugin, Reordered};
 pub use scroll::{ScrollBoth, ScrollDown, scroll_body, scroll_body_node, scroll_frame, scroll_frame_node};
 pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, has_room as has_scrollbar_room, scrollbar};
 pub use search::{
@@ -204,7 +208,7 @@ pub use truncate::{Truncated, truncate_to_width, width_of};
 pub struct UiPlace;
 
 /// What the widgets need at run time: the embedded icon font, the hint, modals, sliders that write their value back,
-/// the [`TextSize`] and its keys, and the systems in [`UiPlace`].
+/// reordering by dragging, the [`TextSize`] and its keys, and the systems in [`UiPlace`].
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
@@ -212,7 +216,7 @@ impl Plugin for UiPlugin {
         if !app.is_plugin_added::<TextSizePlugin>() {
             app.add_plugins(TextSizePlugin);
         }
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin, ReorderPlugin))
             .init_resource::<nav::SidebarWidth>()
             .add_observer(nav::start_edge_drag)
             .add_observer(nav::drag_edge)

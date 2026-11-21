@@ -187,6 +187,30 @@ cancels an inline edit is not passed on, so it does not also close the modal the
 The table is for a list short enough to build whole. A list of hundreds builds only what is on screen (Lookout's board
 columns do this with `PAGE` and "show more").
 
+### A list a person can reorder
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `ReorderList` | `ReorderList { orientation: ControlOrientation }`; `ReorderList::vertical()`, `horizontal()`, `keys(self) -> &'static str` | On a container whose items a person puts in their own order (the apps on the rail). `keys()` names the keys that move an item ("Alt+Up or Down"), for its hint. | |
+| `ReorderItem` | `ReorderItem(pub String)` (component) | On each child that can move, with a key that stays with it (an id, never a place). A child without one (a list's foot) stays put and nothing lands among it. | |
+| `Reordered` | `Reordered { list: Entity, key: String, from: usize, to: usize }` (entity event, on the list) | An item was moved: the one keyed `key`, from place `from` to `to` among the list's items (children without a `ReorderItem` are not counted). Apply it to your own order, in the frame you hear it. | |
+| `Lifted` | component | On an item while it is dragged, for a test or a shot to find. | |
+| `DRAG_THRESHOLD`, `RELEASE_SLACK` | `f32`, UI pixels | How far the pointer moves before a press becomes a drag (5), and how far outside its list an item can be let go and still land (32). | |
+| `ReorderPlugin` | plugin | The drag and the keys. Part of `UiPlugin`. | |
+
+A press on an item that moves the pointer further than `DRAG_THRESHOLD` lifts it: it is drawn over the others with an
+accent border (a button on a surface of its own), follows the pointer along the list, no further than its first and
+last items, and the others slide aside to show where it will land. Letting go triggers one `Reordered`; Escape, or
+letting go more than `RELEASE_SLACK` outside the list, puts everything back with no event. With an item focused, Alt
+and Up or Down (Left or Right across) moves it one place, with the same event. Hints stay hidden while an item is
+lifted, and the cursor is a closed hand.
+
+The kit only moves the items to show the drag (their `UiTransform`) and puts them back when it ends: it never
+reorders the children. Your own data stays the one source of the order, and your in-place update (`Keyed`, or
+`replace_children` on what you keep) moves the nodes (recipe 7). This is reordering within one list: dragging an item
+to another list, or dropping it onto a target, is not in the kit yet. The list does not scroll itself while an item is
+dragged near its edge.
+
 ### A panel, a page or a column
 
 | Item | Signature | What it is for |
@@ -380,9 +404,9 @@ pulse; the shell's: the cover drawn while it switches apps.
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
 | `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
-| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
+| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
-| `ModalPlugin`, `InlinePlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals or answers inline edits without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
+| `ModalPlugin`, `InlinePlugin`, `ReorderPlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals, answers inline edits or reorders a list without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
 | `layer` | module of `i32` constants | Which surface is over which (section 3). |
 | `lint` | module | The design-system lint and the scan for wholesale redraws, `lint::redraws` (section 6). |
 
@@ -426,6 +450,8 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
 - **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
   status color; one line cut to fit its row; a caption inside a hand-built button.
+- **`Keyed` / `ReorderList`.** A list that follows your data's order; a list whose order a person sets, which reports
+  each move for you to apply to that data (and then `Keyed` moves the nodes).
 - **`scroll_frame` + `scroll_body` / `ScrollBoth`.** A panel's body that scrolls down; an area (a board of columns) that
   scrolls both ways, with `ScrollDown` areas inside it.
 
@@ -710,6 +736,15 @@ is in, UI pixels, are that multiple of the window's logical pixels. Two rules ke
 
 Test what measures at a text size other than 100%: the kit's tests lay nodes out headless at `UiScale` 1.5
 (`layout_test::layout_app`), and a shots test takes its busiest views at 150% too.
+
+### A drag is not a press (TRAIL-1621)
+
+Bevy's picking reports a drag from the first pixel the pointer moves while pressed, and a release over the pressed
+button still clicks it, so an item that is both pressable and draggable would open on every drag that ends over it. A
+press becomes a drag only once the pointer has gone `DRAG_THRESHOLD` UI pixels (a drag's `distance` divided by
+`UiScale`, as everywhere); until then it is a press, and a hand that shakes still opens the item. The kit then takes
+`bevy::ui::Pressed` off the button, which is what feathers' click checks before it sends `Activate`, so the release
+that ends a drag never activates. A view never undoes this by sending `Activate` itself from a drag's end.
 
 ### Look before you fix
 
@@ -1150,6 +1185,62 @@ app's own. A modal with pages spawns `spawn_settings_tabs` into the body, a `tab
 shown as a `settings_page()` in its pane: spawned when its tab is picked and despawned when another is, its settings and
 sections in it. The Trailhead shell's settings modal (`clients/trailhead-shell/src/settings_modal.rs`) is built this way,
 and an app in the shell adds pages to it rather than opening a modal of its own.
+
+### Recipe 7: a list a person can reorder
+
+Modelled on the Trailhead shell's rail (`clients/trailhead-shell/src/rail.rs`, `on_reordered` and `order_rail`, with
+`Apps::move_app` in `lib.rs`). The order is the app's data, kept where the app keeps things; the list is marked once,
+each item keyed by its id; a `Reordered` changes the data, and the nodes follow it in place.
+
+```rust
+use bevy::prelude::*;
+use trailhead_ui::{ReorderItem, ReorderList, Reordered};
+
+/// The person's order of the things listed, by id. The app keeps it (in the shell, in its `LocalStore`).
+#[derive(Resource, Default)]
+pub struct Order(pub Vec<String>);
+
+/// The list's node.
+#[derive(Component)]
+struct Things;
+
+/// Each row, with the id it shows.
+#[derive(Component)]
+struct ThingRow(String);
+
+// In the page's spawn system, once:
+// let list = commands.spawn((Things, ReorderList::vertical(), Node { flex_direction: FlexDirection::Column, ..default() })).id();
+// for id in &order.0 { commands.spawn_scene(row_scene(id)).insert((ThingRow(id.clone()), ReorderItem(id.clone()), ChildOf(list))); }
+
+/// A move changes the order, and only the order. Logic: a test triggers `Reordered` with no page.
+fn on_reordered(moved: On<Reordered>, lists: Query<(), With<Things>>, mut order: ResMut<Order>) {
+    if !lists.contains(moved.list) {
+        return;
+    }
+    if let Some(at) = order.0.iter().position(|id| *id == moved.key) {
+        let id = order.0.remove(at);
+        order.0.insert(moved.to.min(order.0.len()), id);
+    }
+}
+
+/// Puts the rows in the order, in place, when it changes.
+fn order_rows(order: Res<Order>, lists: Query<(Entity, &Children), With<Things>>, rows: Query<&ThingRow>, mut commands: Commands) {
+    if !order.is_changed() {
+        return;
+    }
+    for (list, children) in &lists {
+        let mut kept: Vec<Entity> = children.iter().collect();
+        let place = |e: &Entity| rows.get(*e).ok().and_then(|r| order.0.iter().position(|id| *id == r.0));
+        kept.sort_by_key(|e| place(e).unwrap_or(usize::MAX));
+        commands.entity(list).replace_children(&kept);
+    }
+}
+```
+
+Run `order_rows` in `Update` before `UiPlace`, so the rows are in their new places in the frame the drag ends; a list
+kept by `Keyed` gets the same from a `sync` with the new order. A row's hint can say how to move it from the keys:
+`format!("{name} ({} moves it)", ReorderList::vertical().keys())`. A list with something that must stay put at its
+end (the rail's foot) leaves `ReorderItem` off it, and keeps it last in `replace_children`.
 
 ## 6. Checking your work
 

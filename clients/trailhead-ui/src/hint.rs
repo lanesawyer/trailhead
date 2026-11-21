@@ -8,6 +8,7 @@
 //! it describes (a modal) when it fits there: it is centred under its target, else lined up with the target's end or
 //! start edge, else put above it. Its size is known only after its first layout, so it is hidden until then.
 
+use crate::reorder::ReorderDrag;
 use crate::theme::Surface;
 use bevy::picking::events::{PointerEnter, PointerLeave};
 use bevy::prelude::*;
@@ -26,7 +27,7 @@ pub struct HintBounds;
 
 /// A shown hint, a child of what it describes.
 #[derive(Component)]
-struct HintPopup;
+pub(crate) struct HintPopup;
 
 /// Shows a hint over anything with a [`Hint`].
 pub struct HintPlugin;
@@ -55,8 +56,13 @@ fn show_hint(
     over: On<PointerEnter>,
     hints: Query<(&Hint, Option<&Children>)>,
     shown: Query<Entity, With<HintPopup>>,
+    drag: Option<Res<ReorderDrag>>,
     mut commands: Commands,
 ) {
+    // Nothing is hinted while an item is dragged over it.
+    if drag.is_some_and(|d| d.lifted()) {
+        return;
+    }
     let target = over.event_target();
     let Ok((hint, children)) = hints.get(target) else { return };
     if hint.0.is_empty() || children.is_some_and(|c| c.iter().any(|e| shown.contains(e))) {

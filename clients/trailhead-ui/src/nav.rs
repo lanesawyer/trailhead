@@ -458,8 +458,12 @@ pub struct NavItem {
     pub current: bool,
 }
 
-/// Give each nav item whose `current` changed the background that says so.
-pub(crate) fn paint_nav_items(mut items: Query<(&NavItem, &mut ButtonVariant), Changed<NavItem>>) {
+/// Give each nav item whose `current` changed the background that says so. One lifted to be reordered keeps its lifted
+/// look, and is painted when it is set down.
+#[allow(clippy::type_complexity)]
+pub(crate) fn paint_nav_items(
+    mut items: Query<(&NavItem, &mut ButtonVariant), (Changed<NavItem>, Without<crate::Lifted>)>,
+) {
     for (item, mut variant) in &mut items {
         variant.set_if_neq(if item.current { ButtonVariant::Normal } else { ButtonVariant::Plain });
     }
