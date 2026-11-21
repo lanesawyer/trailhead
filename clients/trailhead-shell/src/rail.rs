@@ -155,7 +155,7 @@ mod tests {
         let children: Vec<Entity> = app.world().get::<Children>(rail).unwrap().iter().collect();
         assert_eq!(children.last(), Some(&foot), "the foot comes after the apps");
 
-        app.world_mut().resource_mut::<UpdateReady>().0 = Some("b".into());
+        app.world_mut().resource_mut::<UpdateReady>().0 = Some(crate::update::Newer::new("b", &[], 0));
         app.update();
         assert_eq!(notice(&mut app), (foot, Display::Flex), "the same entity, shown");
 
