@@ -66,8 +66,8 @@ app decides is testable without a window, and only what draws needs one.
 ### Settings pages
 
 The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
-from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme and the
-text size; Connection; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
+from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme, the
+text size and how the window switches apps; Connection; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
 An app does not open a settings modal of its own; it adds pages to this one.
 
 ```rust
@@ -119,6 +119,18 @@ fn count_settings(In(page): In<Entity>, mut commands: Commands) {
 The shell decides which app is shown, as the `ActiveApp(pub AppId)` state. It starts on the first app given, unless
 the `LocalStore` remembers another one from last time, and the rail sets it when a person presses an app's button. An
 app hangs everything it draws on its own value:
+
+- **A switch is covered, and an app does nothing for it.** A press on the rail marks that app's button at once; the
+  shell closes a cover over the app area (everything beside the rail, under the shell's modals, taking the pointer
+  while it is up), sets `ActiveApp` once the app shown is fully covered, and opens the cover on the new app's page. How
+  it covers is the person's choice in the settings (`trailhead_shell::transition`: `None`, `Fade`, `Wipe`, `Curtain`,
+  `Iris`, `Switchback`, `Random`), each way about 160 ms to close and as long to open. What an app can count on: its
+  `OnExit` and the next app's `OnEnter` run in the same frame, as before, once the old app's page is hidden, and the
+  new page has the frame it is entered in to be laid out under the closed cover before it starts to open. What it can't: that `OnEnter` runs on the frame of the
+  press, or that `ActiveApp` is the app whose button is marked during those few frames (`Switching::target()` says
+  where a switch is going). Nothing an app keeps should hang on the timing; `trailhead_shell::transition::SwitchApp`
+  asks for a switch as the rail does. The first app shown at startup, a desktop that asks for less motion, and `None`
+  switch at once.
 
 - **Spawn on entering, despawn on leaving.** What the app draws is spawned in `OnEnter(ActiveApp(MY_ID))` and despawned
   in `OnExit(ActiveApp(MY_ID))`. A switched-away app has no entities on screen; it is drawn again when it is switched
@@ -214,8 +226,9 @@ store.remove(MY_APP, "draft");
 A shell built without a directory (`ShellPlugin` without `store_in`, as in most tests) holds the values only while it
 runs.
 
-The shell keeps its own entry beside the apps' (`shell.json`): the app last shown, and the text size a person picked
-with Ctrl and `=`, `-` or `0` (`text_size`, in percent), which applies to every app. It is read as the shell is built,
+The shell keeps its own entry beside the apps' (`shell.json`): the app last shown, the text size a person picked
+with Ctrl and `=`, `-` or `0` (`text_size`, in percent), which applies to every app, and how the window switches apps
+(`transition`, the kind's word: `fade` until another is picked). It is read as the shell is built,
 so the first frame is drawn at it. An app neither reads nor writes it: to change the size, trigger the kit's
 `ChangeTextSize`, and to lay out at every size, follow the kit guide's rule on UI pixels (section 4).
 
@@ -406,8 +419,11 @@ An app carries four kinds of test, and the example app has one of each. The help
 - **Logic, headless.** `testing::headless(ShellPlugin::new().with(MyApp).with(Other))` builds a Bevy app with
   `MinimalPlugins`, `StatesPlugin` and the shell (add `.store_in(dir)` with a temporary directory to test what
   outlives a restart), and settles it. It runs `build` only: no window, no kit plugins. Drive it by triggering the
-  app's events and with `show(&mut app, id)`, which switches apps; `Other` (id `OTHER`) is an app that does nothing,
-  standing in for "another app is shown".
+  app's events and with `show(&mut app, id)`, which switches apps at once, without the cover a press on the rail
+  draws (it ends any switch under way first), so the app is shown when it returns; `Other` (id `OTHER`) is an app that
+  does nothing, standing in for "another app is shown". A press on the rail in a test (`Activate` on its `OpenApp`
+  button) goes through the cover, which runs on real time: set `AppTransition(TransitionKind::None)` first, or step
+  the frames with `bevy::time::TimeUpdateStrategy::ManualDuration`.
 - **Drawing, in a windowed test app.** `testing::windowed(shell)` is the same with the shell windowed, which also runs
   `build_ui` and the rail, with the assets scenes need. The kit's `UiPlugin` and `ThemePlugin` are not added, so this
   checks what is spawned and kept, not how it looks. `settle(&mut app)` runs the few frames a change takes to land.
