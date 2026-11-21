@@ -308,10 +308,7 @@ impl Running {
 pub fn start(config_dir: &Path, data_dir: &Path) -> Result<Option<Running>, String> {
     let Some(config) = ShellConfig::read(config_dir)? else { return Ok(None) };
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let repo = config.repo_dir(home.as_deref()).expect("a config that was read names a repo");
-    if !repo.is_dir() {
-        return Err(format!("[shell] repo {} isn't a directory", repo.display()));
-    }
+    let repo = config.checked_repo_dir(home.as_deref())?.expect("a config that was read names a repo");
     tracing::info!(target: "shell", repo = %repo.display(), "the shell's builder is on");
     Ok(Some(Builder::new(System::new(), config, repo, Layout::new(data_dir)).spawn()))
 }

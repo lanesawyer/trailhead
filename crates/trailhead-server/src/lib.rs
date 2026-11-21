@@ -12,6 +12,7 @@ mod params;
 mod ratelimit;
 mod routes;
 mod stream;
+pub mod user_config;
 pub mod webhooks;
 
 use std::net::SocketAddr;
@@ -48,6 +49,8 @@ pub struct AppState {
     pub upgrade_pending: std::sync::atomic::AtomicBool,
     /// Where the shell's builder keeps its builds, when this server runs one; `/v1/shell/build` reads it.
     pub shell: std::sync::OnceLock<trailhead_builder::Builds>,
+    /// The user config this server started from, when it reads one; `/v1/config` shows and changes it.
+    pub config: std::sync::OnceLock<user_config::ConfigFile>,
 }
 
 impl AppState {
@@ -62,6 +65,7 @@ impl AppState {
             draining: Default::default(),
             upgrade_pending: Default::default(),
             shell: Default::default(),
+            config: Default::default(),
         }
     }
 }
@@ -271,6 +275,9 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
             }
         }
     });
+    if let Some(paths) = cfg.factory.as_ref().or(cfg.shell.as_ref()) {
+        let _ = state.config.set(user_config::ConfigFile::open(user_config::path(paths)));
+    }
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     // After the listener, so the API tunnel has a server to forward to; before the pid file, so a configuration error
     // stops the server before it says it's up.

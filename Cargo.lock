@@ -7880,6 +7880,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 
@@ -8391,8 +8392,11 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
+ "toml",
+ "toml_edit",
  "tower 0.5.3",
  "tower-http 0.7.1",
  "tracing",

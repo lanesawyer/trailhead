@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod config;
 pub mod shell;
 
 /// A value that isn't a valid status, kind or other model value.

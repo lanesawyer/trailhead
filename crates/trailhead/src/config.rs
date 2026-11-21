@@ -1,32 +1,12 @@
 //! Per-machine settings in `<config dir>/config.toml`, unlike a repo's
 //! `.trailhead.toml`, which is checked in and shared.
 
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use trailhead_server::Paths;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:7241";
 
-#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct UserConfig {
-    /// The server to use when neither `--url` nor `TRAILHEAD_URL` is set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Host-wide factory settings. Kept unparsed: the CLI doesn't depend on the factory crates, and
-    /// `trailhead_factory::HostConfig` checks the keys when the factory reads it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub factory: Option<toml::Table>,
-    /// The shell's builder (`[shell] repo` and its build settings), kept unparsed like `factory`; the server's
-    /// builder reads it (`trailhead_builder::ShellConfig`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell: Option<toml::Table>,
-}
-
-pub fn path(paths: &Paths) -> PathBuf {
-    paths.config_dir.join("config.toml")
-}
+pub use trailhead_server::user_config::{UserConfig, path};
 
 pub fn load(paths: &Paths) -> Result<UserConfig> {
     let path = path(paths);

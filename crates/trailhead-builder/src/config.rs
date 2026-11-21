@@ -85,6 +85,18 @@ impl ShellConfig {
             _ => PathBuf::from(repo),
         })
     }
+
+    /// The repo's directory as the builder needs it: there, and a git checkout. `Ok(None)` when no repo is named.
+    pub fn checked_repo_dir(&self, home: Option<&Path>) -> Result<Option<PathBuf>, String> {
+        let Some(repo) = self.repo_dir(home) else { return Ok(None) };
+        if !repo.is_dir() {
+            return Err(format!("[shell] repo {} isn't a directory", repo.display()));
+        }
+        if !repo.join(".git").exists() {
+            return Err(format!("[shell] repo {} isn't a git checkout", repo.display()));
+        }
+        Ok(Some(repo))
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +119,20 @@ mod tests {
         assert_eq!(ShellConfig::from_user_config("[shell]\njobs = 2\n").unwrap(), None);
         assert!(ShellConfig::from_user_config("[shell]\nrepo = \"a\"\nrepoo = \"b\"\n").is_err());
         assert!(ShellConfig::from_user_config("[shell]\nrepo = \"a\"\njobs = 0\n").is_err());
+    }
+
+    #[test]
+    fn the_repo_must_be_a_directory_with_a_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let config =
+            |repo: &Path| ShellConfig::from_table(toml::toml! { repo = (repo.display().to_string()) }).unwrap();
+        let missing = config(&dir.path().join("nope")).checked_repo_dir(None).unwrap_err();
+        assert!(missing.ends_with("isn't a directory"), "{missing}");
+        let plain = config(dir.path()).checked_repo_dir(None).unwrap_err();
+        assert!(plain.ends_with("isn't a git checkout"), "{plain}");
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        assert_eq!(config(dir.path()).checked_repo_dir(None).unwrap().as_deref(), Some(dir.path()));
+        let none = ShellConfig::from_table(toml::Table::new()).unwrap();
+        assert_eq!(none.checked_repo_dir(None).unwrap(), None);
     }
 }

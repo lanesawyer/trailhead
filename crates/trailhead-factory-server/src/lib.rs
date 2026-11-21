@@ -32,9 +32,8 @@ use trailhead_client::paths::{DEFAULT_BIND, Paths};
 use trailhead_codehost_github::GitHub;
 use trailhead_control::{CoreTracker, Factory, Host, Placed, daemon_binary};
 use trailhead_core::{Ctx, Store};
-use trailhead_factory::{
-    Compute, ComputeConfig, Daemon, FactoryConfig, FactoryState, HarnessSecrets, HostConfig, Target,
-};
+pub use trailhead_factory::HostConfig;
+use trailhead_factory::{Compute, ComputeConfig, Daemon, FactoryConfig, FactoryState, HarnessSecrets, Target};
 use trailhead_plugins::{CLAUDE_CODE, CLAUDE_CODE_OAUTH_TOKEN, harnesses, providers};
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
@@ -799,6 +798,27 @@ impl Running {
     }
 }
 
+/// What [`start`] checks of a user config before it starts anything, for a config that may not be written yet: `src`
+/// is its text and `user_config` where it is, which an error names. It reads the repos' files and nothing outside
+/// this machine, and starts nothing. An error is one [`start`] would refuse the server with, in the same words.
+pub fn check_user_config(user_config: &Path, src: &str) -> Result<HostConfig> {
+    let host_config = HostConfig::from_user_config(src).map_err(|e| Error::at(user_config, e))?;
+    if !host_config.disabled && !host_config.repos.is_empty() {
+        plan(&default_run()?, host_config.clone())?;
+    }
+    Ok(host_config)
+}
+
+/// The run options the server's control plane takes: every flag at its default.
+fn default_run() -> Result<RunOpts> {
+    #[derive(clap::Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        run: RunOpts,
+    }
+    Ok(<Defaults as clap::Parser>::try_parse_from(["serve"]).map_err(Error::backend)?.run)
+}
+
 /// How long the server waits before trying the control plane again after an outside failure, at first and at most.
 const RETRY_FIRST: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
@@ -819,12 +839,7 @@ pub fn start(paths: Paths, store: Arc<Store>, server: SocketAddr) -> Result<InSe
     if host_config.repos.is_empty() {
         return idle(FactoryState::Off);
     }
-    #[derive(clap::Parser)]
-    struct Defaults {
-        #[command(flatten)]
-        run: RunOpts,
-    }
-    let mut run = <Defaults as clap::Parser>::try_parse_from(["serve"]).map_err(Error::backend)?.run;
+    let mut run = default_run()?;
     run.opts.server = server;
     // Listing repos is the person's consent; the agent the factory acts as is the server's to make.
     run.opts.create_agent = true;
@@ -1246,6 +1261,23 @@ mod tests {
         let (paths, store) = instance(dir.path(), "[factory]\nrepos = 3\n").await;
         let err = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
         assert!(err.contains("config.toml"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn checking_a_user_config_refuses_what_start_refuses_in_its_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-repo");
+        let config = format!("[factory]\nrepos = [{:?}]\n", missing.display().to_string());
+        let (paths, store) = instance(dir.path(), &config).await;
+        let user_config = paths.config_dir.join("config.toml");
+        let checked = super::check_user_config(&user_config, &config).err().unwrap().to_string();
+        let started = super::start(paths, store, "127.0.0.1:7241".parse().unwrap()).err().unwrap().to_string();
+        assert_eq!(checked, started);
+        let bad = "[factory]\npause_at = { five_hour = 101 }\n";
+        let err = super::check_user_config(&user_config, bad).err().unwrap().to_string();
+        assert!(err.starts_with(&user_config.display().to_string()) && err.contains("0 to 100"), "{err}");
+        let off = format!("{config}disabled = true\n");
+        assert!(super::check_user_config(&user_config, &off).unwrap().disabled, "a disabled factory reads no repo");
     }
 
     #[cfg(not(feature = "docker"))]
