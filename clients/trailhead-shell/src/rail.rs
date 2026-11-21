@@ -1,11 +1,15 @@
 //! The rail of apps down the left edge of the window: a button for each app, the one shown marked, and at its foot
-//! the update notice ([`crate::update`]) while a newer build is ready, whose button opens the panel saying what it
-//! brings ([`crate::update_panel`]). A shell with a single app has no rail, and the app has the whole window.
+//! the window's own buttons: Ask ([`crate::ask`]), while connected to a server with an apps repo, which opens the form
+//! for asking for a change or a new app ([`crate::ask_panel`]); and the update notice ([`crate::update`]) while a newer
+//! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]). A shell with a single
+//! app has no rail, and the app has the whole window.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 use trailhead_ui::{ButtonKind, Hint, Icon, NavItem, rail, rail_foot, rail_item, set_display, tool_button};
 
+use crate::ask::Askable;
+use crate::connection::Connection;
 use crate::update::UpdateReady;
 use crate::{ActiveApp, AppId, Apps};
 
@@ -17,24 +21,36 @@ pub struct Rail;
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenApp(pub AppId);
 
-/// The rail's foot, shown while a newer build is ready.
+/// The rail's foot, holding the window's own buttons.
 #[derive(Component)]
-pub struct UpdateNotice;
+pub struct RailFoot;
 
-/// The button in the [`UpdateNotice`] that opens the update's panel, its hint saying how many changes it brings.
+/// The button at the [`RailFoot`] that opens the Ask form, shown while the connection is live and the server has an
+/// apps repo to ask about.
+#[derive(Component)]
+pub struct AskButton;
+
+/// The button at the [`RailFoot`] that opens the update's panel, shown while a newer build is ready, its hint saying
+/// how many changes it brings.
 #[derive(Component)]
 pub struct UpdateButton;
+
+/// What the Ask button's hint says.
+pub const ASK_HINT: &str = "Ask for a change or a new app";
 
 pub(crate) struct RailUiPlugin;
 
 impl Plugin for RailUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_rail).add_observer(on_open).add_systems(Update, (mark_shown, show_update));
+        app.add_systems(Startup, spawn_rail)
+            .add_observer(on_open)
+            .add_systems(Update, (mark_shown, show_update, show_ask));
     }
 }
 
-/// The rail, its items in the order of the apps, then its foot. Each is put down at once (`spawn_scene`), so the
-/// foot comes after the items and its node is there to hide before the first frame is drawn.
+/// The rail, its items in the order of the apps, then its foot with Ask above the update notice. Each is put down at
+/// once (`spawn_scene`), so the foot comes after the items and its buttons' nodes are there to hide before the first
+/// frame is drawn.
 fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     if apps.len() < 2 {
         return;
@@ -43,23 +59,39 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     for manifest in apps.iter() {
         commands.spawn_scene(rail_item(manifest.icon, manifest.name)).insert((OpenApp(manifest.id), ChildOf(root)));
     }
-    let foot = commands.spawn_scene(rail_foot()).insert((Name::new("update notice"), UpdateNotice, ChildOf(root))).id();
-    commands
-        .spawn_scene(tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary))
-        .insert((UpdateButton, ChildOf(foot)));
+    let foot = commands.spawn_scene(rail_foot()).insert((Name::new("rail foot"), RailFoot, ChildOf(root))).id();
+    let ask = bsn! { @tool_button(Icon::Plus, ASK_HINT, ButtonKind::Normal) Node { display: Display::None } };
+    commands.spawn_scene(ask).insert((AskButton, ChildOf(foot)));
+    let update =
+        bsn! { @tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary) Node { display: Display::None } };
+    commands.spawn_scene(update).insert((UpdateButton, ChildOf(foot)));
 }
 
-/// Shows the foot while a newer build is ready, and says on its button how many changes it brings, in place. A shell
+/// Shows Ask while the connection is live and the server has an apps repo to ask about.
+fn show_ask(
+    askable: Option<Res<Askable>>,
+    connection: Option<Res<State<Connection>>>,
+    buttons: Query<Entity, With<AskButton>>,
+    mut nodes: Query<&mut Node>,
+) {
+    let live = connection.is_some_and(|c| *c.get() == Connection::Live);
+    let shown = live && askable.is_some_and(|a| a.configured());
+    for button in &buttons {
+        set_display(&mut nodes, button, shown);
+    }
+}
+
+/// Shows the update button while a newer build is ready, and says on it how many changes it brings, in place. A shell
 /// the launcher didn't start never shows it.
 fn show_update(
     ready: Option<Res<UpdateReady>>,
-    notices: Query<Entity, With<UpdateNotice>>,
+    buttons: Query<Entity, With<UpdateButton>>,
     mut nodes: Query<&mut Node>,
     mut hints: Query<&mut Hint, With<UpdateButton>>,
 ) {
     let newer = ready.as_ref().and_then(|r| r.0.as_ref());
-    for notice in &notices {
-        set_display(&mut nodes, notice, newer.is_some());
+    for button in &buttons {
+        set_display(&mut nodes, button, newer.is_some());
     }
     if let Some(newer) = newer.filter(|_| ready.as_ref().is_some_and(|r| r.is_changed())) {
         let words = newer.hint();
@@ -139,13 +171,9 @@ mod tests {
         assert_eq!(world.query::<&Rail>().iter(world).count(), 0);
     }
 
-    fn notice(app: &mut App) -> (Entity, Display) {
+    fn shown<M: Component>(app: &mut App) -> (Entity, Display) {
         let world = app.world_mut();
-        world
-            .query_filtered::<(Entity, &Node), With<UpdateNotice>>()
-            .single(world)
-            .map(|(e, n)| (e, n.display))
-            .unwrap()
+        world.query_filtered::<(Entity, &Node), With<M>>().single(world).map(|(e, n)| (e, n.display)).unwrap()
     }
 
     fn hint(app: &mut App) -> (Entity, String) {
@@ -157,21 +185,28 @@ mod tests {
             .unwrap()
     }
 
+    fn foot(app: &mut App) -> (Entity, Vec<Entity>) {
+        let world = app.world_mut();
+        let foot = world.query_filtered::<Entity, With<RailFoot>>().single(world).unwrap();
+        (foot, world.get::<Children>(foot).unwrap().iter().collect())
+    }
+
     #[test]
-    fn the_update_notice_sits_at_the_rails_foot_and_shows_in_place_saying_how_many_changes() {
+    fn the_update_button_sits_at_the_rails_foot_and_shows_in_place_saying_how_many_changes() {
         let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).built_as(Some("a".into())));
-        let (foot, display) = notice(&mut app);
+        let (button, display) = shown::<UpdateButton>(&mut app);
         assert_eq!(display, Display::None, "hidden while this is the newest build");
         let rail = app.world_mut().query_filtered::<Entity, With<Rail>>().single(app.world()).unwrap();
         let children: Vec<Entity> = app.world().get::<Children>(rail).unwrap().iter().collect();
+        let (foot, buttons) = foot(&mut app);
         assert_eq!(children.last(), Some(&foot), "the foot comes after the apps");
-        let (button, _) = hint(&mut app);
-        assert_eq!(app.world().get::<ChildOf>(button).map(ChildOf::parent), Some(foot));
+        let (ask, _) = shown::<AskButton>(&mut app);
+        assert_eq!(buttons, [ask, button], "Ask above the update");
 
         let subjects = ["feat(a): one".to_string(), "fix(a): two".to_string(), "chore: three".to_string()];
         app.world_mut().resource_mut::<UpdateReady>().0 = Some(Newer::new("b", &subjects, 3));
         app.update();
-        assert_eq!(notice(&mut app), (foot, Display::Flex), "the same entity, shown");
+        assert_eq!(shown::<UpdateButton>(&mut app), (button, Display::Flex), "the same entity, shown");
         assert_eq!(hint(&mut app), (button, "Update ready: 3 changes".into()));
 
         app.world_mut().resource_mut::<UpdateReady>().0 = Some(Newer::new("c", &[], 0));
@@ -180,8 +215,31 @@ mod tests {
     }
 
     #[test]
+    fn ask_shows_only_while_live_with_an_apps_repo_to_ask_about() {
+        use bevy::state::app::AppExtStates;
+
+        let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)));
+        app.init_state::<Connection>();
+        app.update();
+        let (ask, display) = shown::<AskButton>(&mut app);
+        assert_eq!(display, Display::None);
+        assert_eq!(app.world().get::<Hint>(ask).map(|h| h.0.as_str()), Some(ASK_HINT));
+        let configured = trailhead_model::shell::AskTargets { configured: true, ..default() };
+        app.world_mut().resource_mut::<Askable>().0 = Some(configured.clone());
+        app.update();
+        assert_eq!(shown::<AskButton>(&mut app).1, Display::None, "not while offline");
+        app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
+        app.update();
+        app.update();
+        assert_eq!(shown::<AskButton>(&mut app), (ask, Display::Flex));
+        app.world_mut().resource_mut::<Askable>().0 = Some(trailhead_model::shell::AskTargets::default());
+        app.update();
+        assert_eq!(shown::<AskButton>(&mut app), (ask, Display::None), "not without an apps repo");
+    }
+
+    #[test]
     fn a_shell_the_launcher_did_not_start_never_shows_the_notice() {
         let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)));
-        assert_eq!(notice(&mut app).1, Display::None);
+        assert_eq!(shown::<UpdateButton>(&mut app).1, Display::None);
     }
 }

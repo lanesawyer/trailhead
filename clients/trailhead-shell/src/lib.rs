@@ -34,6 +34,7 @@ use crate::connection::{ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
 
 pub mod ask;
+mod ask_panel;
 pub mod commands;
 pub mod connect;
 pub mod connection;
@@ -235,6 +236,7 @@ impl Plugin for ShellPlugin {
             if self.build.is_some() {
                 app.add_plugins(update_panel::UpdatePanelUiPlugin);
             }
+            app.add_plugins(ask_panel::AskPanelUiPlugin);
             if self.connection.is_some() {
                 app.add_plugins(connect::ConnectUiPlugin);
             }

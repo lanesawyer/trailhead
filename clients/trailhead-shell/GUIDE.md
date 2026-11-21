@@ -473,6 +473,12 @@ the foot of the rail when a newer build is ready. Pressing it opens a panel list
 whose Restart ends `Shell::run` with the restart code the launcher answers; a binary needs nothing of its own for this,
 as long as it ends by calling `Shell::run`.
 
+While the connection is live and the server has an apps repo (`[shell] repo`), the foot of the rail also holds an Ask
+button, above the update notice. It opens a form for asking for a change to one of the apps the server's factory
+builds (the projects pointed at the apps repo) or for a new app, which the server turns into a graded task, or a new
+project and its first task (`docs/app-platform.md`, "Asking for an app"). Nothing of it is an app's: a shell with one
+app has no rail, and so no Ask.
+
 ## 10. Views
 
 Everything about building an app's views (the widgets, colors, sizes, spacing, icons, layers, in-place updates,
