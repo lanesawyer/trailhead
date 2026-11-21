@@ -719,18 +719,7 @@ impl CodeHost for GitHub {
 
     async fn ci_at(&self, pr: &PrRef, head: &str) -> Result<CiState> {
         let r = Self::repo_path(&pr.repo);
-        let mut runs = Vec::new();
-        for page in 1..=MAX_CHECK_PAGES {
-            let req = self
-                .request(Method::GET, &format!("{r}/commits/{head}/check-runs"))
-                .query(&[("per_page", "100"), ("page", &page.to_string())]);
-            let found = self.call_cached(req).await?;
-            let found = found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default();
-            runs.extend_from_slice(found);
-            if found.len() < 100 {
-                break;
-            }
-        }
+        let runs = self.check_runs(&r, head).await?;
         let combined = self.call_cached(self.request(Method::GET, &format!("{r}/commits/{head}/status"))).await?;
         let statuses = combined["statuses"].as_array().map(Vec::as_slice).unwrap_or_default();
         Ok(summarize_ci(&runs, statuses))
@@ -739,10 +728,9 @@ impl CodeHost for GitHub {
     async fn ci_logs(&self, pr: &PrRef, checks: &[String]) -> Result<Vec<(String, String)>> {
         let r = Self::repo_path(&pr.repo);
         let head = CodeHost::head(self, pr).await?;
-        let req = self.request(Method::GET, &format!("{r}/commits/{head}/check-runs")).query(&[("per_page", "100")]);
-        let found = self.call(req).await?;
+        let found = self.check_runs(&r, &head).await?;
         let mut out = Vec::new();
-        for run in found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        for run in &found {
             let name = run["name"].as_str().unwrap_or_default();
             let (Some(id), true) = (run["id"].as_u64(), checks.iter().any(|c| c == name)) else { continue };
             if out.iter().any(|(n, _): &(String, String)| n == name) {
@@ -768,6 +756,50 @@ impl CodeHost for GitHub {
             out.extend(files.iter().map(changed_file));
             if files.len() < 100 {
                 return Ok(out);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl GitHub {
+    /// A commit's check runs. A fine-grained personal token can't be given `Checks: read`, so on a private repo this
+    /// listing is refused; then the commit's Actions jobs stand in ([`GitHub::actions_jobs`]), which carry the same
+    /// `name`, `status`, `conclusion` and `id`. Checks reported by other apps are not seen that way.
+    async fn check_runs(&self, r: &str, head: &str) -> Result<Vec<Value>> {
+        let mut runs = Vec::new();
+        for page in 1..=MAX_CHECK_PAGES {
+            let req = self
+                .request(Method::GET, &format!("{r}/commits/{head}/check-runs"))
+                .query(&[("per_page", "100"), ("page", &page.to_string())]);
+            let found = match self.call_cached(req).await {
+                Ok(found) => found,
+                Err(Error::Forbidden(_)) if page == 1 => return self.actions_jobs(r, head).await,
+                Err(e) => return Err(e),
+            };
+            let found = found["check_runs"].as_array().map(Vec::as_slice).unwrap_or_default();
+            runs.extend_from_slice(found);
+            if found.len() < 100 {
+                break;
+            }
+        }
+        Ok(runs)
+    }
+
+    /// The jobs of every workflow run on a commit (needs `Actions: read`). A run that has no jobs yet stands in for
+    /// them itself, so a queued workflow holds CI pending.
+    async fn actions_jobs(&self, r: &str, head: &str) -> Result<Vec<Value>> {
+        let req =
+            self.request(Method::GET, &format!("{r}/actions/runs")).query(&[("head_sha", head), ("per_page", "100")]);
+        let listed = self.call_cached(req).await?;
+        let mut out = Vec::new();
+        for run in listed["workflow_runs"].as_array().map(Vec::as_slice).unwrap_or_default() {
+            let Some(id) = run["id"].as_u64() else { continue };
+            let req = self.request(Method::GET, &format!("{r}/actions/runs/{id}/jobs")).query(&[("per_page", "100")]);
+            let jobs = self.call_cached(req).await?;
+            match jobs["jobs"].as_array() {
+                Some(jobs) if !jobs.is_empty() => out.extend_from_slice(jobs),
+                _ => out.push(run.clone()),
             }
         }
         Ok(out)

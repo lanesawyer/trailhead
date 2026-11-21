@@ -32,6 +32,10 @@ struct Git {
     /// A 422 message `update-branch` answers with, whatever the branches look like.
     update_refusal: Option<String>,
     workflow_scope: bool,
+    /// The token can't read check runs (a fine-grained personal token on a private repo), only Actions.
+    checks_refused: bool,
+    /// Whether the second workflow run has its job yet.
+    docs_done: bool,
     /// How many more file listings answer 502, and how many were asked for.
     files_failures: usize,
     files_calls: usize,
@@ -329,12 +333,39 @@ fn etagged(g: &mut Git, headers: &HeaderMap, body: Value) -> Response {
 
 async fn check_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
     let mut g = g.lock().unwrap();
+    if g.checks_refused {
+        let body = json!({ "message": "Resource not accessible by personal access token" });
+        return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    }
     // The second run is one GitHub left `in_progress` with a conclusion, which must not hold CI pending.
     let runs = json!({ "check_runs": [
         { "name": "ci", "status": "completed", "conclusion": "success" },
         { "name": "machete", "status": "in_progress", "conclusion": "success" },
     ] });
     etagged(&mut g, &headers, runs)
+}
+
+async fn actions_runs(State(g): State<Shared>, headers: HeaderMap) -> Response {
+    let mut g = g.lock().unwrap();
+    let runs = json!({ "workflow_runs": [
+        { "id": 7, "name": "CI", "status": "completed", "conclusion": "success" },
+        { "id": 8, "name": "Docs", "status": "queued", "conclusion": null },
+    ] });
+    etagged(&mut g, &headers, runs)
+}
+
+async fn actions_jobs(
+    State(g): State<Shared>,
+    Path((_, _, run)): Path<(String, String, u64)>,
+    headers: HeaderMap,
+) -> Response {
+    let mut g = g.lock().unwrap();
+    let jobs = match run {
+        7 => json!([{ "id": 70, "name": "check", "status": "completed", "conclusion": "success" }]),
+        _ if g.docs_done => json!([{ "id": 80, "name": "book", "status": "completed", "conclusion": "failure" }]),
+        _ => json!([]),
+    };
+    etagged(&mut g, &headers, json!({ "jobs": jobs }))
 }
 
 async fn combined_status(State(g): State<Shared>, headers: HeaderMap) -> Response {
@@ -449,6 +480,8 @@ async fn serve() -> (Shared, String) {
         .route("/repos/{o}/{r}/pulls/{n}", get(get_pull))
         .route("/repos/{o}/{r}/commits/{sha}/check-runs", get(check_runs))
         .route("/repos/{o}/{r}/commits/{sha}/status", get(combined_status))
+        .route("/repos/{o}/{r}/actions/runs", get(actions_runs))
+        .route("/repos/{o}/{r}/actions/runs/{id}/jobs", get(actions_jobs))
         .route("/repos/{o}/{r}/pulls/{n}/files", get(pull_files))
         .route("/repos/{o}/{r}/pulls/{n}/merge", put(merge))
         .route("/repos/{o}/{r}/pulls/{n}/update-branch", put(update_branch))
@@ -1035,4 +1068,22 @@ async fn open_prs_paging_at_a_full_page_and_at_the_cap() {
     // (Page 1 is the same as the last call's, so it revalidates instead of reading in full.)
     let g = git.lock().unwrap();
     assert_eq!(g.full_reads + g.not_modified, 5);
+}
+
+#[tokio::test]
+async fn ci_is_read_from_actions_when_the_token_cannot_read_check_runs() {
+    let (git, url) = serve().await;
+    let gh = GitHub::gateway(&url);
+    let main = head(&git, "main");
+    let commit = Commit { message: "x".into(), changes: vec![change("a.txt", Some(b"a"))], merges: vec![] };
+    gh.publish(&repo(), &main, "factory/trail-1", &[commit]).await.unwrap();
+    let new = NewPr { branch: "factory/trail-1".into(), base: "main".into(), title: "t".into(), body: "b".into() };
+    let pr = gh.open_pr(&repo(), new).await.unwrap();
+    git.lock().unwrap().checks_refused = true;
+
+    // One workflow has passed; the other is queued with no jobs yet, which holds CI pending.
+    assert_eq!(gh.ci(&pr).await.unwrap().state, CiState::Pending);
+
+    git.lock().unwrap().docs_done = true;
+    assert_eq!(gh.ci(&pr).await.unwrap().state, CiState::Failed { checks: vec!["book".into()] });
 }
