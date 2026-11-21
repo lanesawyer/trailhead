@@ -1,26 +1,37 @@
 //! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its Ask and
 //! update buttons, the Ask form, the update panel listing what a newer build brings, the settings on each of the
-//! shell's pages and an app's, and the panel that says why the connection isn't live. `#[ignore]`d, since it needs a render adapter: `mise run shots` runs every app's, and says
+//! shell's pages and an app's (Appearance with its previews of switching apps caught partway), the panel that says why
+//! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
+//! (`transition-<kind>-reveal`). What moves is caught at a fixed frame, with time stepped by hand and held still while
+//! the picture is taken, so these too are the same from run to run on one renderer. `#[ignore]`d, since it needs a render adapter: `mise run shots` runs every app's, and says
 //! where the pictures went.
 
+use std::time::Duration;
+
 use bevy::prelude::*;
+use bevy::time::TimeUpdateStrategy;
 use bevy::ui_widgets::Activate;
 use trailhead_model::shell::{AskTarget, AskTargets};
 use trailhead_shell::ask::Askable;
 use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
+use trailhead_shell::cover::SwitchCover;
 use trailhead_shell::net::{ApiAccess, Reason};
 use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SettingsPage, ShellDir};
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
-use trailhead_shell::testing::{Other, set_connection, settle};
+use trailhead_shell::testing::{Other, set_connection, settle, show};
+use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
 use trailhead_shell::update::{Newer, UpdateReady};
-use trailhead_shell::{ActiveApp, AppId, AskButton, Manifest, ShellApp, ShellPlugin, UpdateButton};
+use trailhead_shell::{ActiveApp, AppId, AskButton, Manifest, OpenApp, ShellApp, ShellPlugin, UpdateButton};
 use trailhead_ui::{
-    BesideRail, Icon, Surface, TextSize, beside_rail, setting, setting_toggle, size, space, spawn_settings_section,
-    text, text_dim,
+    BesideRail, Icon, Surface, TextSize, badge, beside_rail, row, setting, setting_toggle, size, space,
+    spawn_settings_section, text, text_dim, token,
 };
 
 const NOTES: AppId = AppId("notes");
+const TRAILS: AppId = AppId("trails");
+/// How far time moves a frame, as the shots helper steps it.
+const FRAME: Duration = Duration::from_millis(16);
 
 /// An app with a page, so the window has something beside the rail.
 struct Notes;
@@ -36,7 +47,8 @@ impl ShellApp for Notes {
     fn build(&self, _: &mut App) {}
 
     fn build_ui(&self, app: &mut App) {
-        app.add_systems(OnEnter(ActiveApp(NOTES)), spawn_page);
+        app.add_systems(OnEnter(ActiveApp(NOTES)), spawn_page)
+            .add_systems(OnExit(ActiveApp(NOTES)), take_down::<NotesPage>);
     }
 
     fn settings_pages(&self) -> Vec<SettingsPage> {
@@ -71,8 +83,124 @@ fn spawn_page(mut commands: Commands) {
     commands.spawn_scene(text_dim("An app standing in beside the shell's chrome", size::BODY)).insert(ChildOf(page));
 }
 
+/// A second app that looks nothing like Notes, to switch to.
+struct Trails;
+
+impl ShellApp for Trails {
+    fn manifest(&self) -> Manifest {
+        Manifest { id: TRAILS, name: "Trails", icon: Icon::Map }
+    }
+
+    fn build(&self, _: &mut App) {}
+
+    fn build_ui(&self, app: &mut App) {
+        app.add_systems(OnEnter(ActiveApp(TRAILS)), spawn_trails)
+            .add_systems(OnExit(ActiveApp(TRAILS)), take_down::<TrailsPage>);
+    }
+}
+
+#[derive(Component)]
+struct TrailsPage;
+
+/// Takes an app's page down as the app is left.
+fn take_down<M: Component>(pages: Query<Entity, With<M>>, mut commands: Commands) {
+    for page in &pages {
+        commands.entity(page).despawn();
+    }
+}
+
+fn spawn_trails(mut commands: Commands) {
+    let node = Node {
+        flex_direction: FlexDirection::Column,
+        padding: UiRect::all(px(space::PANEL_INSET)),
+        row_gap: px(space::GROUPS),
+        ..beside_rail()
+    };
+    let page = commands.spawn((Name::new("trails"), TrailsPage, BesideRail, Surface::Window, node)).id();
+    commands.spawn_scene(text("Trails", size::APP_TITLE)).insert(ChildOf(page));
+    let badges = commands.spawn_scene(row()).insert(ChildOf(page)).id();
+    for (label, tone) in [("Open", token::STATUS_OK), ("Steep", token::STATUS_WARN), ("Closed", token::STATUS_DANGER)] {
+        commands.spawn_scene(badge(label, None, Some(tone))).insert(ChildOf(badges));
+    }
+    let trails = [
+        ("Ridge loop", "6.2 km, along the crest and back by the lake"),
+        ("Creek path", "3.1 km, flat, shaded most of the way"),
+        ("Summit switchbacks", "9.8 km, 740 m of climbing in twenty-two turns"),
+        ("Meadow cut-through", "1.4 km, muddy after rain"),
+        ("Old quarry road", "5.0 km, wide enough to walk side by side"),
+        ("Lookout spur", "0.8 km, steep, with the best view of the valley"),
+    ];
+    for (name, about) in trails {
+        let trail = commands.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, ChildOf(page))).id();
+        commands.spawn_scene(text(name, size::HEADING)).insert(ChildOf(trail));
+        commands.spawn_scene(text_dim(about, size::BODY)).insert(ChildOf(trail));
+    }
+}
+
 fn shell() -> ShellPlugin {
     ShellPlugin::new().with(Notes).with(Other).built_as(Some("0123abc".into()))
+}
+
+/// Trails first, so a switch to Notes runs down the rail from a page full to its foot.
+fn switching_shell() -> ShellPlugin {
+    ShellPlugin::new().with(Trails).with(Notes)
+}
+
+/// Holds time still while a picture is taken, so what moves stays where it was caught.
+fn hold_still(shot: &mut ShotApp, still: bool) {
+    let step = if still { Duration::ZERO } else { FRAME };
+    shot.insert_resource(TimeUpdateStrategy::ManualDuration(step));
+}
+
+/// Runs frames until `caught` holds, then saves the view held still there.
+fn catch(shot: &mut ShotApp, view: &str, caught: impl Fn(&ShotApp) -> bool) {
+    for _ in 0..200 {
+        if caught(shot) {
+            hold_still(shot, true);
+            save(shot, view);
+            hold_still(shot, false);
+            return;
+        }
+        shot.update();
+    }
+    panic!("{view} was never caught");
+}
+
+fn switch_frame(shot: &ShotApp) -> Option<CoverFrame> {
+    shot.world().resource::<Switching>().frame()
+}
+
+/// Each way of switching from Trails to Notes, caught about half closed and about half open again (eased).
+fn transitions(shot: &mut ShotApp) {
+    for kind in TransitionKind::DRAWN {
+        show(shot, TRAILS);
+        shot.insert_resource(AppTransition(kind));
+        let world = shot.world_mut();
+        let notes = world.query::<(Entity, &OpenApp)>().iter(world).find(|(_, o)| o.0 == NOTES).unwrap().0;
+        world.trigger(Activate { entity: notes });
+        let name = kind.word();
+        let at = |phase: Phase, from: f32| {
+            move |shot: &ShotApp| switch_frame(shot).is_some_and(|f| f.phase == phase && f.t >= from)
+        };
+        catch(shot, &format!("transition-{name}-cover"), at(Phase::Covering, 0.7));
+        catch(shot, &format!("transition-{name}-reveal"), at(Phase::Revealing, 0.3));
+        for _ in 0..30 {
+            shot.update();
+        }
+        let world = shot.world_mut();
+        assert_eq!(world.query_filtered::<(), With<SwitchCover>>().iter(world).count(), 0, "{name}'s cover is gone");
+    }
+}
+
+/// The Appearance page with its previews caught partway through switching.
+fn appearance(shot: &mut ShotApp) {
+    open_settings(shot, APPEARANCE);
+    let closing = |shot: &ShotApp| {
+        let world = shot.world();
+        let mut frames = world.try_query::<&CoverFrame>().unwrap();
+        frames.iter(world).any(|f| f.kind == TransitionKind::Iris && f.phase == Phase::Covering && f.t >= 0.5)
+    };
+    catch(shot, "settings-appearance", closing);
 }
 
 /// Saves the view as it is now, and fails on a frame with nothing drawn in it.
@@ -112,8 +240,7 @@ fn settings(shot: &mut ShotApp) {
     world.insert_resource(ShellDir("/home/someone/.config/trailhead/shell".into()));
     world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
     world.resource_mut::<trailhead_shell::connection::Dialed>().0 = Some("7204d50f3c".into());
-    open_settings(shot, APPEARANCE);
-    save(shot, "settings-appearance");
+    appearance(shot);
     set_connection(shot, Connection::Syncing);
     shot.world_mut().resource_mut::<ConnectionStatus>().reason = Some(Reason::SigningIn);
     settle(shot);
@@ -184,8 +311,8 @@ fn shots() {
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
     close_modals(&mut shot);
-    open_settings(&mut shot, APPEARANCE);
-    save(&mut shot, "settings-appearance");
+    close_modals(&mut shot);
+    appearance(&mut shot);
     drop(shot);
 
     // The connect panel is drawn only by a shell told how to connect, so this one adds it by hand.
@@ -195,4 +322,12 @@ fn shots() {
     world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
     settle(&mut shot);
     save(&mut shot, "connect");
+    drop(shot);
+
+    let mut shot = trailhead_shell::testing::shot::shot(
+        switching_shell(),
+        ShotOptions { size: (1024, 720), ..ShotOptions::default() },
+    );
+    hold_still(&mut shot, false);
+    transitions(&mut shot);
 }
