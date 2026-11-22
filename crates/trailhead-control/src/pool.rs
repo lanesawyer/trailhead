@@ -330,6 +330,29 @@ impl Factory {
         }
     }
 
+    /// A planner's sandbox: the one the task held for its last turn, as that turn left it, when the task still holds
+    /// it, so the agent's session on its disk carries on. It is neither restored nor prepared, which would wipe the
+    /// session. Otherwise a worker's sandbox on the base branch, from the pool, as [`Factory::acquire_worker`] gives.
+    pub(crate) async fn acquire_planner(&self, p: &Placed, task: &Task) -> Result<Sandbox> {
+        if let Some(host) = task.run.host.as_deref().filter(|_| task.keeps_planner_sandbox()) {
+            let stack = self.config.stack.tag();
+            // Listed by role too, so a sandbox whose kill switch took its role away is never handed out again.
+            let held = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?.into_iter().find(|s| {
+                s.name == host
+                    && s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack
+                    && !self.abandoned(&s.name)
+            });
+            if let Some(sandbox) = held {
+                p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+                tracing::info!(task = %task.key, sandbox = %sandbox.name, "the planner carries on in the sandbox that holds its session");
+                self.status.phase(&task.key, RunPhase::Preparing { cold: false }, Some(&sandbox.name));
+                self.status.sandbox(&sandbox);
+                return Ok(sandbox);
+            }
+        }
+        Ok(self.acquire_worker(p, task, None, false, false).await?.0)
+    }
+
     /// Opens install egress on a worker sandbox picked for a run, restores its warm checkpoint and checks its host has
     /// room. How long the restore took, or the error with whether it was the host having no room.
     async fn start_worker(

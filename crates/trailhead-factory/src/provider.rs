@@ -6,6 +6,7 @@ use crate::{Usage, Usd};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelAlias {
+    Fable,
     Opus,
     Sonnet,
     Haiku,

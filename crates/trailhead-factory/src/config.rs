@@ -383,6 +383,9 @@ pub struct RepoConfig {
     /// Minutes a task may sit parked (`needs_input`) before its pooled sandbox is given up for ready tasks that are
     /// waiting for a place, when releasing loses nothing: no unpublished work in the checkout. 0 never releases.
     pub release_parked_after: u32,
+    /// Minutes a spec task may wait on a person's reply before its planner's sandbox, which holds the planner's
+    /// session, is given up whether or not other work waits; the next turn then starts a new session. 0 never does.
+    pub release_planner_after: u32,
 }
 
 impl Default for RepoConfig {
@@ -401,6 +404,7 @@ impl Default for RepoConfig {
             max_review_rounds: default_max_review_rounds(),
             max_conflict_reworks: default_max_conflict_reworks(),
             release_parked_after: default_release_parked_after(),
+            release_planner_after: default_release_planner_after(),
         }
     }
 }
@@ -442,6 +446,9 @@ fn default_max_conflict_reworks() -> u32 {
 }
 fn default_release_parked_after() -> u32 {
     15
+}
+fn default_release_planner_after() -> u32 {
+    6 * 60
 }
 fn default_worker() -> String {
     "worker".into()
@@ -943,6 +950,12 @@ impl FactoryConfig {
 
     pub fn reviewer(&self) -> &Profile {
         &self.profiles[&self.repo.reviewer]
+    }
+
+    /// The repo's planner profile, by name: the first with `role = "planner"`. `None` when it has none, and then no
+    /// spec task is planned.
+    pub fn planner(&self) -> Option<(&str, &Profile)> {
+        self.profiles.iter().find(|(_, p)| p.role == Role::Planner).map(|(n, p)| (n.as_str(), p))
     }
 
     /// The gate a PR of this grade must pass: the repo's `[factory.gates.N]`, or the table in `docs/factory/review.md#grades`.

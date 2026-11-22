@@ -9,11 +9,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use trailhead_client::http::{
-    Client, Error as ApiError, NewAttachment, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate,
+    Client, Error as ApiError, NewAttachment, NewComment, NewNotification, NewTask, ReadyQuery, TaskQuery, TaskUpdate,
 };
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Picture, Priority, ProjectRepo, Result,
-    RunPatch, Scope, Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, NewPlanTask, Notice, Picture, PlanTask,
+    PlanTaskUpdate, Priority, ProjectRepo, Result, RunPatch, SOURCE_FACTORY, Scope, Status, TASK_PLAN_KEY, Task,
+    TaskKey, TaskPlan, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -342,12 +343,103 @@ impl Tracker for RestTracker {
         Ok(tasks.into_iter().find(|t| t.task.title.trim().eq_ignore_ascii_case(wanted)).map(|t| t.task.key))
     }
 
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>> {
+        let query = TaskQuery {
+            project: Some(spec.project().to_string()),
+            parent: Some(spec.clone()),
+            status: Status::ALL.to_vec(),
+            limit: Some(1000),
+            ..TaskQuery::default()
+        };
+        let mut children = self.client.list_tasks(&query).await.map_err(error)?;
+        children.sort_by(|a, b| model::cmp_keys(&a.task.key, &b.task.key));
+        let mut plan = Vec::new();
+        for t in children {
+            let detail = self.client.show_task(&t.task.key).await.map_err(error)?;
+            let t = t.task;
+            plan.push(PlanTask {
+                proposed: TaskPlan::of(&t.metadata).and_then(|p| p.proposed),
+                key: t.key,
+                title: t.title,
+                description: t.description,
+                status: t.status,
+                grade: t.grade,
+                blocked_by: detail.blocked_by,
+            });
+        }
+        Ok(plan)
+    }
+
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey> {
+        let new = NewTask {
+            project: spec.project().to_string(),
+            title: task.title.clone(),
+            description: task.description.clone(),
+            parent: Some(spec.0.clone()),
+            metadata: Some(json!({ TASK_PLAN_KEY: { "proposed": task.proposed } })),
+            blocked_by: task.blocked_by.iter().map(|k| k.0.clone()).collect(),
+            ..NewTask::default()
+        };
+        self.client.create_task(&new).await.map(|c| c.task.key).map_err(error)
+    }
+
+    async fn update_plan_task(&self, key: &TaskKey, update: &PlanTaskUpdate) -> Result<()> {
+        let patch = TaskUpdate {
+            title: update.title.clone(),
+            description: update.description.clone(),
+            metadata: update.proposed.as_ref().map(|p| json!({ TASK_PLAN_KEY: { "proposed": p } })),
+            ..TaskUpdate::default()
+        };
+        if patch != TaskUpdate::default() {
+            self.patch(key, patch).await?;
+        }
+        for blocker in &update.remove_blockers {
+            match self.client.remove_blocker(key, blocker).await.map_err(error) {
+                Ok(()) | Err(Error::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        for blocker in &update.add_blockers {
+            self.client.add_blocker(key, blocker).await.map_err(error)?;
+        }
+        Ok(())
+    }
+
+    async fn cancel(&self, key: &TaskKey) -> Result<()> {
+        self.status(key, Status::Cancelled).await
+    }
+
+    async fn set_description(&self, key: &TaskKey, description: &str) -> Result<()> {
+        self.patch(key, TaskUpdate { description: Some(description.into()), ..TaskUpdate::default() }).await
+    }
+
+    async fn patch_plan(&self, key: &TaskKey, patch: serde_json::Value) -> Result<()> {
+        self.patch(key, TaskUpdate { metadata: Some(json!({ TASK_PLAN_KEY: patch })), ..TaskUpdate::default() }).await
+    }
+
     async fn create_sub_agent(&self, _: &str, _: &str, _: Duration) -> Result<Credential> {
         Err(unsupported("create agents"))
     }
 
     async fn revoke_sub_agent(&self, _: &str) -> Result<()> {
         Err(unsupported("revoke agents"))
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        let new = NewNotification {
+            source: SOURCE_FACTORY.into(),
+            kind: notice.kind.clone(),
+            title: notice.title.clone(),
+            body: notice.body.clone(),
+            subject: Some(notice.subject.clone()),
+            task: notice.task.as_ref().map(|k| k.0.clone()),
+            actions: notice.actions.clone(),
+        };
+        self.client.raise_notification(&new).await.map(drop).map_err(error)
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        self.client.resolve_notifications_about(SOURCE_FACTORY, subject).await.map(drop).map_err(error)
     }
 }
 

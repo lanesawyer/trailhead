@@ -139,13 +139,14 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
             ],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => task_from_row(&row),
-        None => {
-            let current = load_task(&tx.conn, before.workspace_id, &before.id.to_string(), true).await?;
-            Err(Error::VersionConflict { expected: before.version, current: current.version })
-        }
-    }
+    let Some(row) = rows.next().await? else {
+        let current = load_task(&tx.conn, before.workspace_id, &before.id.to_string(), true).await?;
+        return Err(Error::VersionConflict { expected: before.version, current: current.version });
+    };
+    let saved = task_from_row(&row)?;
+    drop(rows);
+    crate::notifications::on_task_saved(tx, before, &saved).await?;
+    Ok(saved)
 }
 
 pub(crate) async fn update_status(tx: &Tx, before: &Task, status: Status, kind: &str) -> Result<Task> {

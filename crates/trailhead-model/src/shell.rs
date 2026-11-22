@@ -79,6 +79,9 @@ pub struct BuildError {
 /// The most characters an ask's text may have.
 pub const MAX_ASK_CHARS: usize = 8000;
 
+/// The models a person can give an ask's planner, as the factory's config names them, newest first.
+pub const PLANNER_MODELS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
+
 /// `GET /v1/shell/ask`: what a person can ask for work on from the window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -117,17 +120,30 @@ pub struct Ask {
     /// A new app, with a project of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_app: Option<NewApp>,
+    /// Plan it first: the ask becomes a spec task a planner works with the person, not a task for a worker
+    /// (`docs/app-platform.md`, "Planning an ask"). A new app is always planned, whatever this says.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan: bool,
+    /// The planner's model for this ask, one of [`PLANNER_MODELS`]; the repo's planner profile decides when absent.
+    /// Only for an ask that is planned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Ask {
     /// A change to the app in `project`.
     pub fn change(text: impl Into<String>, project: impl Into<String>) -> Ask {
-        Ask { text: text.into(), project: Some(project.into()), new_app: None }
+        Ask { text: text.into(), project: Some(project.into()), ..Ask::default() }
     }
 
     /// A new app called `name`.
     pub fn new_app(text: impl Into<String>, name: impl Into<String>) -> Ask {
-        Ask { text: text.into(), project: None, new_app: Some(NewApp { name: name.into() }) }
+        Ask { text: text.into(), new_app: Some(NewApp { name: name.into() }), ..Ask::default() }
+    }
+
+    /// This ask, planned first, by `model` when one is named.
+    pub fn planned(self, model: Option<&str>) -> Ask {
+        Ask { plan: true, model: model.map(str::to_string), ..self }
     }
 }
 
@@ -146,6 +162,9 @@ pub struct Asked {
     pub project: AskedProject,
     /// The task made. `None` only when a new app's project was made but its first task wasn't; `notes` says why.
     pub task: Option<AskedTask>,
+    /// Whether the task is a spec task for a planner, which talks the ask over before any work starts.
+    #[serde(default)]
+    pub planned: bool,
     /// What a person should know: a part that wasn't done, and how to do it by hand.
     #[serde(default)]
     pub notes: Vec<String>,
@@ -179,6 +198,8 @@ mod tests {
         assert_eq!(change, serde_json::json!({"text": "more", "project": "TICK"}));
         let new = serde_json::to_value(Ask::new_app("notes", "Trail Notes")).unwrap();
         assert_eq!(new, serde_json::json!({"text": "notes", "new_app": {"name": "Trail Notes"}}));
+        let planned = serde_json::to_value(Ask::change("more", "TICK").planned(Some("opus"))).unwrap();
+        assert_eq!(planned, serde_json::json!({"text": "more", "project": "TICK", "plan": true, "model": "opus"}));
     }
 
     fn build(current: Option<&str>, previous: Option<&str>, bad: &[&str]) -> ShellBuild {

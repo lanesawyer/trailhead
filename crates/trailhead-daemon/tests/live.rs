@@ -175,6 +175,7 @@ async fn daemon_in_a_sprite() {
                 env: Default::default(),
                 credential: cred,
                 shots: None,
+                plan: None,
             };
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let t = Instant::now();

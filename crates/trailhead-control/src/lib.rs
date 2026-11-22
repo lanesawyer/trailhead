@@ -15,9 +15,11 @@ mod infra;
 mod lifecycle;
 pub mod logs;
 mod merger;
+mod notify;
 mod person;
 mod phase;
 mod place;
+mod planner;
 mod pool;
 mod reconcile;
 mod review;
@@ -88,6 +90,10 @@ pub struct Host {
     usage_file: Option<std::path::PathBuf>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Whether any repo has looked for a pause yet, so the first look resolves a notice a restart left open.
+    pause_looked: std::sync::atomic::AtomicBool,
+    /// A pause that started or ended and that no repo's pass has told the person about yet.
+    pause_change: Mutex<Option<notify::PauseChange>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.

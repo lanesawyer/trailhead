@@ -116,6 +116,7 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
             cmd::attachments::attach(&cx, &task, &file, name, role, set).await
         }
         Cmd::Attachments { task } => cmd::attachments::list(&cx, &task).await,
+        Cmd::Inbox { all, limit, read, read_all } => cmd::notifications::inbox(&cx, all, limit, read, read_all).await,
         Cmd::Handoff { task, body } => comments::comment(&cx, &task, CommentKind::Handoff, &body, None).await,
         Cmd::Ask { task, body, to } => comments::comment(&cx, &task, CommentKind::Question, &body, to).await,
         Cmd::Verdict { task, verdict, body, model } => comments::verdict(&cx, &task, &verdict, &body, model).await,

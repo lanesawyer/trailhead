@@ -1,5 +1,7 @@
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::Env;
 use jiff::SignedDuration;
 use jiff::civil::date;
@@ -7,7 +9,7 @@ use serde_json::json;
 use trailhead_core::parse_at;
 use trailhead_core::{
     CommentKind, Error, EventFilter, Grade, GradeFilter, MatchField, NewComment, NewProject, NewTask, Priority,
-    ProjectPatch, ProjectStatus, SearchFilter, Status, TaskFilter, TaskPatch, TaskSort, Verdict,
+    ProjectPatch, ProjectStatus, SearchFilter, Status, TaskFilter, TaskKey, TaskPatch, TaskPlan, TaskSort, Verdict,
 };
 
 fn gr(n: u8) -> Grade {
@@ -1879,4 +1881,62 @@ async fn a_task_in_progress_or_closed_cant_be_set_aside() {
     assert_eq!(after.metadata["factory"]["set_aside"]["question"], json!(null));
     let notes = env.store.list_comments(&env.human, &r.key).await.unwrap();
     assert_eq!(notes.iter().filter(|c| c.kind == CommentKind::Note && c.addressed_to.is_none()).count(), 1);
+}
+
+#[tokio::test]
+async fn approving_a_plan_grades_its_open_ungraded_subtasks_and_marks_the_spec_task() {
+    let env = Env::new().await;
+    let spec = env
+        .task_with(NewTask {
+            title: "spec".into(),
+            metadata: Some(json!({"plan": {"spec": {}}})),
+            ..Default::default()
+        })
+        .await;
+    let child = |title: &str, grade: Option<Grade>| NewTask {
+        title: title.into(),
+        parent: Some(spec.key.clone()),
+        grade,
+        ..Default::default()
+    };
+    let a = env.task_with(child("a", None)).await;
+    let b = env.task_with(child("b", None)).await;
+    let mine = env.task_with(child("already graded", Some(gr(3)))).await;
+    let agent = env.agent("factory").await;
+    env.store.claim(&agent, &spec.key, None).await.unwrap();
+    let both = BTreeMap::from([(a.key.0.clone(), gr(1)), (b.key.0.to_lowercase(), gr(2))]);
+    let busy = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(&busy, Error::Invalid(why) if why.contains("planner is working")), "{busy:?}");
+    let ask = NewComment::new(CommentKind::Question, "Here is the plan");
+    env.store.add_comment(&agent, &spec.key, ask).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &spec.key).await.unwrap().status, Status::NeedsInput);
+
+    let forbidden = env.store.approve_plan(&agent, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(forbidden, Error::Forbidden(_)), "{forbidden:?}");
+    let one = BTreeMap::from([(a.key.0.clone(), gr(1))]);
+    let missing = env.store.approve_plan(&env.human, &spec.key, &one).await.unwrap_err();
+    assert!(matches!(&missing, Error::Invalid(why) if why.contains(&b.key.0)), "{missing:?}");
+    let mut stray = both.clone();
+    stray.insert(mine.key.0.clone(), gr(1));
+    let refused = env.store.approve_plan(&env.human, &spec.key, &stray).await.unwrap_err();
+    assert!(matches!(&refused, Error::Invalid(why) if why.contains(&mine.key.0)), "{refused:?}");
+    assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().grade, None, "a refusal grades nothing");
+
+    let after = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap();
+    assert_eq!((after.status, after.grade), (Status::Open, None));
+    let plan = TaskPlan::of(&after.metadata).unwrap();
+    assert!(plan.spec.unwrap().approved.is_some() && !TaskPlan::of(&after.metadata).unwrap().awaits_planner());
+    let grade = async |key: &TaskKey| env.store.get_task(&env.human, key).await.unwrap().grade;
+    assert_eq!(
+        (grade(&a.key).await, grade(&b.key).await, grade(&mine.key).await),
+        (Some(gr(1)), Some(gr(2)), Some(gr(3)))
+    );
+    let comments = env.store.list_comments(&env.human, &spec.key).await.unwrap();
+    assert!(comments.iter().all(|c| c.kind != CommentKind::Question || c.resolved_at.is_some()));
+    assert!(comments.iter().any(|c| c.kind == CommentKind::Note && c.body.contains("Plan approved by")));
+
+    let twice = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(&twice, Error::Invalid(why) if why.contains("already approved")), "{twice:?}");
+    let plain = env.task("plain").await;
+    assert!(matches!(env.store.approve_plan(&env.human, &plain.key, &both).await, Err(Error::Invalid(_))));
 }

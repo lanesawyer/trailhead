@@ -10,8 +10,8 @@ use tokio::sync::{Notify, mpsc};
 use trailhead_factory::messages::{self, Filed};
 use trailhead_factory::{
     AttachmentRole, Check, CheckResult, CodeHost, Credential, Error, EventSink, FollowUp, Harness, InstallHost, NewPr,
-    Patch, Picture, PrRef, PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome, RunPatch, RunReport,
-    RunRequest, RunResult, ShotFiles, Shots, TaskKey, Tracker, Usage, Verdict, VerdictKind,
+    Patch, Picture, PlanContext, PlanFiles, PrRef, PrepareRequest, Result, Role, RunContext, RunEvent, RunOutcome,
+    RunPatch, RunReport, RunRequest, RunResult, ShotFiles, Shots, TaskKey, Tracker, Usage, Verdict, VerdictKind,
 };
 
 use crate::shots::{Shot, Taken};
@@ -58,6 +58,19 @@ pub trait Workspace: Send + Sync {
     async fn shots(&self, shots: &Shots, base: &str) -> Taken;
     /// Writes `shots` as PNG files outside the checkout, where a reviewing agent can open them.
     async fn keep_shots(&self, shots: &[Shot]) -> Result<Vec<ShotFiles>>;
+    /// Where a planner of `task` writes its turn and keeps its session: beside the checkout, so nothing of it is in
+    /// the checkout, and on the sandbox's disk, so it lasts while the sandbox is held.
+    fn plan_dir(&self, task: &TaskKey) -> PathBuf {
+        let dir = self.dir();
+        let mut name = dir.file_name().unwrap_or_default().to_os_string();
+        name.push(".plan");
+        dir.with_file_name(name).join(task.as_str())
+    }
+}
+
+/// Whether a run of `role` holds the task's claim, as a worker and a planner do: it claims and renews it.
+fn holds_claim(role: Role) -> bool {
+    matches!(role, Role::Worker | Role::Planner)
 }
 
 /// What became of the merge of the base branch that a run's checkout started with, if any.
@@ -145,7 +158,7 @@ impl Runner {
         self.workspace.confirm_blocked(&req.blocked_hosts).await?;
         tracing::info!(task = %key, role = req.role.as_str(), "egress confirmed; starting");
         let tracker = (self.connect)(req.credential.clone()).await?;
-        if req.role == Role::Worker {
+        if holds_claim(req.role) {
             tracker.claim(&req.task.key).await?;
             tracing::info!(task = %key, "claimed");
         }
@@ -176,6 +189,10 @@ impl Runner {
             base_branch: (req.role == Role::Reviewer).then(|| req.base_branch.clone()),
             env: self.workspace.agent_env().await,
             shots: self.reviewer_shots(&req, tracker.as_ref()).await,
+            plan: req.plan.clone().map(|planning| PlanContext {
+                planning,
+                files: PlanFiles::in_dir(&self.workspace.plan_dir(&req.task.key)),
+            }),
         };
         tracing::info!(task = %key, "agent starting");
         // Where the agent's work starts, which is what it's published on top of.
@@ -222,7 +239,7 @@ impl Runner {
         };
         // The checks and publishing retries can outlast a lease too, so a worker keeps renewing through them.
         let renewing = async {
-            if req.role != Role::Worker {
+            if !holds_claim(req.role) {
                 return std::future::pending::<()>().await;
             }
             loop {
@@ -244,7 +261,7 @@ impl Runner {
             // takes for an infrastructure failure and hands the attempt back (TRAIL-214).
             Err(e) => {
                 tracing::warn!(task = %key, error = %e, "finishing the run failed");
-                if req.role == Role::Worker
+                if holds_claim(req.role)
                     && let Err(e) = tracker.release(&req.task.key).await
                 {
                     tracing::warn!(task = %key, error = %e, "couldn't release the task");
@@ -398,7 +415,7 @@ impl Runner {
                     let quiet_secs = quiet.secs();
                     let _ = events.send(RunEvent::Heartbeat { quiet_secs });
                 }
-                _ = renew.tick(), if req.role == Role::Worker => Self::renew(tracker, &req.task.key).await,
+                _ = renew.tick(), if holds_claim(req.role) => Self::renew(tracker, &req.task.key).await,
                 out = &mut run => break out?,
             }
         };
@@ -560,7 +577,15 @@ impl Runner {
         ran: &mut Vec<CheckResult>,
     ) -> Result<(RunResult, Vec<CheckResult>)> {
         let key = &req.task.key;
+        // A planner changes nothing: whatever it claims to have made, it isn't published.
+        let outcome = match outcome {
+            RunOutcome::Changes { .. } if req.role == Role::Planner => {
+                RunOutcome::Failed { reason: "a planner made changes, which planning never publishes".into() }
+            }
+            outcome => outcome,
+        };
         match outcome {
+            RunOutcome::PlanTurn(turn) => Ok((RunResult::PlanTurn(turn), Vec::new())),
             RunOutcome::Changes { commits, summary } => {
                 if let Merge::Lost(base) = &merge {
                     let (reason, note) = messages::merge_abandoned(base);
@@ -702,7 +727,7 @@ impl Runner {
                 Ok((RunResult::NeedsInput(question), Vec::new()))
             }
             RunOutcome::Failed { reason } => {
-                if req.role == Role::Worker {
+                if holds_claim(req.role) {
                     let failure = Some(messages::agent_gave_up(&reason));
                     tracker.report(key, RunPatch { failure: failure.into(), ..RunPatch::default() }).await?;
                     tracker.release(key).await?;

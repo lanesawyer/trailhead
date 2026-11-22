@@ -85,6 +85,14 @@ impl FactoryConfig {
                 "the worker and reviewer profiles must use the same adapter and provider".into(),
             ));
         }
+        // The daemon builds one harness, the worker's, and a planner runs in it too.
+        if let (Some(w), Some((name, p))) = (worker, self.planner())
+            && (w.adapter != p.adapter || w.provider != p.provider)
+        {
+            return Err(Error::Config(format!(
+                "[factory.profiles.{name}]: a planner must use the worker's adapter and provider"
+            )));
+        }
         Ok(())
     }
 

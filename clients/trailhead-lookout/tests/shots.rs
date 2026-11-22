@@ -3,7 +3,7 @@
 //! since it needs a render adapter: `mise run shots` runs every app's, and says where the pictures went.
 
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, MenuAction, MenuEvent};
 use serde_json::{Value, json};
 use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
@@ -13,6 +13,8 @@ use trailhead_lookout::LOOKOUT;
 use trailhead_lookout::Lookout;
 use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
+use trailhead_lookout::graph::OpenGraph;
+use trailhead_lookout::graph::edit::{NodeAct, NodeEdit};
 use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
 use trailhead_lookout::logs::{LogItem, LogUpdate};
 use trailhead_lookout::peak::MapMode;
@@ -21,12 +23,15 @@ use trailhead_lookout::peak::place;
 use trailhead_lookout::peak::terrain::{Peak, SEED, Trail};
 use trailhead_lookout::pictures::{OpenFolds, PictureBytes, WantsPicture};
 use trailhead_lookout::settings::{FACTORY_SETTINGS, LOGS_SETTINGS};
-use trailhead_shell::connection::Connection;
-use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project_json, sid, task_json, user_json};
+use trailhead_shell::connection::{Api, Connection};
+use trailhead_shell::fixture::{
+    agent_json, at, claim_json, comment_json, project_json, sid, sync_event, task_json, user_json,
+};
+use trailhead_shell::net::ApiAccess;
 use trailhead_shell::settings::{OpenSettings, PageId, SettingsModal};
 use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot};
-use trailhead_shell::testing::{fill, set_connection, settle};
+use trailhead_shell::testing::{feed, fill, set_connection, settle};
 use trailhead_shell::{ActiveApp, ShellPlugin};
 use trailhead_ui::{ButtonGroup, ModalRoot, TextSize};
 use trailhead_wire::ui::RepoSnapshot;
@@ -81,7 +86,7 @@ fn snapshot() -> Snapshot {
         agent_json(json!({"id": "a2", "name": "claude"})),
     ];
     let users = vec![user_json(json!({"id": "u1", "name": "lane"}))];
-    Snapshot { at: 1, projects, agents, users, tasks }
+    Snapshot { at: 1, projects, agents, users, tasks, ..Default::default() }
 }
 
 /// The factory's pool: TRAIL-3's run in its sandbox, one sandbox paused and two idle.
@@ -286,6 +291,145 @@ fn shots() {
     shot.set_theme(ShotTheme::Dark);
     look_from(&mut shot, Orbit::new(3.6, 0.7, 22.0));
     save(&mut shot, "peak-above");
+}
+
+/// A plan: a parent and its subtasks, a chain into a diamond, one finished, one waiting on a task outside the plan,
+/// one ungraded with a subtask of its own, and one standing alone.
+fn plan() -> Snapshot {
+    let mut snapshot = snapshot();
+    let mut sub = |id: &str, key: &str, title: &str, status: &str, grade: Option<i64>, blocked_by: &[&str]| {
+        let mut t = task(id, key, title, status, 2);
+        t["parent_id"] = json!(sid("g0"));
+        t["grade"] = json!(grade);
+        t["blocked_by"] = json!(blocked_by.iter().map(|b| sid(b)).collect::<Vec<_>>());
+        snapshot.tasks.push(t);
+    };
+    sub("g1", "TRAIL-21", "A README saying what the todo app is for", "done", Some(1), &[]);
+    sub("g2", "TRAIL-22", "The todo list's model and its store", "in_review", Some(2), &["g1"]);
+    sub("g3", "TRAIL-23", "Adding a todo from the field under the list", "in_progress", Some(2), &["g2"]);
+    sub("g4", "TRAIL-24", "Checking a todo off, and the done ones folding away", "open", Some(2), &["g2", "t4"]);
+    sub("g5", "TRAIL-25", "Shots of the list empty, short and long", "open", None, &["g3", "g4"]);
+    sub("g6", "TRAIL-26", "Name the app in the shell's rail", "open", Some(1), &[]);
+    snapshot.tasks.push(task("g0", "TRAIL-20", "Plan: a todo app", "open", 2));
+    let mut nested = task("g7", "TRAIL-27", "Under TRAIL-25: a long list scrolls", "open", 3);
+    nested["parent_id"] = json!(sid("g5"));
+    snapshot.tasks.push(nested);
+    snapshot
+}
+
+#[test]
+#[ignore = "needs a render adapter: run with `mise run shots`"]
+fn graph() {
+    let mut shot =
+        shot(ShellPlugin::new().with(Lookout::new()), ShotOptions { size: (1440, 800), ..ShotOptions::default() });
+    set_connection(&mut shot, Connection::Live);
+    fill(&mut shot, plan());
+    shot.world_mut().trigger(OpenGraph(sid("g0")));
+    settle(&mut shot);
+    save(&mut shot, "graph");
+    shot.set_theme(ShotTheme::Light);
+    save(&mut shot, "graph");
+    shot.set_theme(ShotTheme::Dark);
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "graph");
+}
+
+/// A spec task waiting on the reader: a plan of four tasks the planner proposes grades for (one already graded by
+/// hand), and the conversation so far, a question answered and a new one open.
+fn spec_plan() -> Snapshot {
+    let mut snapshot = snapshot();
+    snapshot.users.push(user_json(json!({"id": "u1", "name": "lane"})));
+    snapshot.agents.push(agent_json(json!({"id": "a9", "name": "factory/planner"})));
+    let mut spec = task("s0", "TRAIL-30", "Plan: a todo app", "needs_input", 2);
+    spec["created_by"] = json!(sid("u1"));
+    spec["description"] = json!(
+        "A todo app in the shell: a list of todos, a field under it to add one, a check to finish one, and the \
+         finished ones folded away under the list. It keeps its list in the app's local store, so it outlives a \
+         restart, and it needs nothing from the server."
+    );
+    spec["metadata"] = json!({"plan": {"spec": {"model": "opus"}}});
+    snapshot.tasks.push(spec);
+    let mut sub =
+        |id: &str, key: &str, title: &str, grade: Option<i64>, proposed: Option<(i64, &str)>, after: &[&str]| {
+            let mut t = task(id, key, title, "open", 2);
+            t["parent_id"] = json!(sid("s0"));
+            t["grade"] = json!(grade);
+            t["blocked_by"] = json!(after.iter().map(|b| sid(b)).collect::<Vec<_>>());
+            if let Some((g, why)) = proposed {
+                t["metadata"] = json!({"plan": {"proposed": {"grade": g, "why": why}}});
+            }
+            snapshot.tasks.push(t);
+        };
+    sub("s1", "TRAIL-31", "The app's README: what it is for", Some(1), None, &[]);
+    sub("s2", "TRAIL-32", "The list's model and its local store", None, Some((2, "new code, one crate")), &["s1"]);
+    sub("s3", "TRAIL-33", "Adding a todo from the field", None, Some((2, "a view and its field")), &["s2"]);
+    sub("s4", "TRAIL-34", "Shots of the list empty, short and long", None, None, &["s3"]);
+    snapshot
+}
+
+/// The conversation on `s0`, as comments off the stream.
+fn spec_thread(shot: &mut ShotApp) {
+    let said = |n: u8, id: &str, kind: &str, by: &str, body: &str, resolved: bool| {
+        let mut c =
+            json!({"id": id, "task_id": "s0", "kind": kind, "author_id": by, "body": body, "created_at": at(n)});
+        if resolved {
+            c["resolved_at"] = json!(at(n + 1));
+        }
+        sync_event(json!({"id": 200 + i64::from(n), "entity": "comment", "entity_id": sid(id),
+                          "kind": "comment.created", "after": comment_json(c)}))
+    };
+    let thread = [
+        said(1, "q1", "question", "a9", "Should finished todos stay on the list, or be cleared away?", true),
+        said(2, "n1", "note", "u1", "Keep them, folded away under the list.", false),
+        said(
+            3,
+            "n2",
+            "note",
+            "a9",
+            "I've drawn up four tasks, one PR each, in the order they build on each other.",
+            false,
+        ),
+        said(4, "q2", "question", "a9", "Is grade 2 right for the store, or should a person review it?", false),
+    ];
+    for item in thread {
+        feed(shot, item);
+    }
+}
+
+#[test]
+#[ignore = "needs a render adapter: run with `mise run shots`"]
+fn plan_view() {
+    let mut shot =
+        shot(ShellPlugin::new().with(Lookout::new()), ShotOptions { size: (1440, 800), ..ShotOptions::default() });
+    set_connection(&mut shot, Connection::Live);
+    let me = ApiAccess { base: String::new(), token: String::new(), user: "lane".into(), user_id: sid("u1") };
+    shot.world_mut().insert_resource(Api(me));
+    fill(&mut shot, spec_plan());
+    spec_thread(&mut shot);
+    shot.world_mut().trigger(OpenGraph(sid("s0")));
+    settle(&mut shot);
+    save(&mut shot, "plan");
+    shot.set_theme(ShotTheme::Light);
+    save(&mut shot, "plan");
+    shot.set_theme(ShotTheme::Dark);
+    // TRAIL-33's menu open, then its "Depends on…".
+    let item = |shot: &mut ShotApp, edit: NodeEdit| {
+        let world = shot.world_mut();
+        let mut q = world.query::<(Entity, &NodeAct)>();
+        q.iter(world).find(|(_, a)| a.id == sid("s3") && a.edit == edit).map(|(e, _)| e).unwrap()
+    };
+    let split = item(&mut shot, NodeEdit::Split);
+    let popup = shot.world().get::<ChildOf>(split).unwrap().parent();
+    let root = shot.world().get::<ChildOf>(popup).unwrap().parent();
+    let button = shot.world().get::<Children>(root).unwrap()[0];
+    shot.world_mut().trigger(MenuEvent { source: button, action: MenuAction::Toggle });
+    settle(&mut shot);
+    save(&mut shot, "plan-menu");
+    shot.world_mut().trigger(MenuEvent { source: button, action: MenuAction::CloseAll });
+    let depends = item(&mut shot, NodeEdit::DependsOn);
+    shot.world_mut().trigger(Activate { entity: depends });
+    settle(&mut shot);
+    save(&mut shot, "plan-depends");
 }
 
 /// Presses the mouse at `at` (logical pixels in the shot's image), moves it by `drag`, and lets go.

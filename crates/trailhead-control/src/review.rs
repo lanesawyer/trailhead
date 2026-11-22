@@ -87,6 +87,7 @@ impl Factory {
             env: self.config.stack.env.clone(),
             credential,
             shots: self.config.shots(),
+            plan: None,
         };
         let prior = shown.run.spend.unwrap_or_default();
         self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));
@@ -376,6 +377,8 @@ impl Factory {
             ..RunPatch::default()
         };
         self.tracker.report(&task.key, update).await?;
+        // The PR no longer waits on a person; it is told again if it comes back to them.
+        self.forget_review_notice(task).await;
         if round >= max {
             tracing::warn!(task = %task.key, round, "the reviewer still wants changes; parking");
             self.tracker.reopen(&task.key).await?;

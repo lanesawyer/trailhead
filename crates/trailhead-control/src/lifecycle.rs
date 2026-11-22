@@ -6,9 +6,9 @@ use tokio::time::Instant;
 use trailhead_factory::harness::is_transient_api_error;
 use trailhead_factory::messages::{self, BreachedSandbox};
 use trailhead_factory::{
-    ChangesRequested, Error, Feedback, HumanContext, Merged, Patch, PrRef, PrState, Profile, RequestKind, Result, Role,
-    RunEvent, RunPatch, RunPhase, RunReport, RunRequest, RunResult, Sandbox, SetAside, Status, Task, TaskKey, TaskSpec,
-    Tracker, Usd, VerdictKind, WorkerBreach, run_name,
+    ChangesRequested, Credential, Error, Feedback, HumanContext, Merged, Patch, PrRef, PrState, Profile, RequestKind,
+    Result, Role, RunEvent, RunPatch, RunPhase, RunReport, RunRequest, RunResult, Sandbox, SetAside, Status, Task,
+    TaskKey, TaskSpec, Tracker, Usd, VerdictKind, WorkerBreach, run_name,
 };
 
 use crate::infra::{Park, Setback};
@@ -30,6 +30,9 @@ impl Factory {
     /// One attempt at a task on `target`: a fresh sandbox, the worker, then the reviewer. `place` is the worker's
     /// place on `target`, given up when its sandbox is released, before the review is placed on its own.
     pub(crate) async fn run_task_on(&self, task: &Task, target: &Placed, place: Placement) -> Result<Outcome> {
+        if task.plan.awaits_planner() {
+            return self.run_planner_on(task, target, place).await;
+        }
         // A rework on a PR that has merged or closed since the task was queued would push to a branch nobody wants
         // (TRAIL-304). The sub-agent isn't made yet, so the factory's own identity holds the task while it's settled.
         if let (Some(pr), Some(codehost)) = (&task.run.pr, &self.codehost) {
@@ -78,29 +81,7 @@ impl Factory {
         // undone, so a retry's name carries the count of those to stay unique.
         let retries = task.run.retries.unwrap_or(0);
         let name = worker_name(&task.key, attempt, retries);
-        let credential = match self.tracker.create_sub_agent(&name, task.key.project(), token_ttl(&profile)).await {
-            Ok(credential) => credential,
-            // The name was used by a run whose give-back didn't land; skip past it rather than retry it forever.
-            Err(e @ Error::Forbidden(_)) => {
-                // The give-back below may be lost with the tracker down, so the wait grows with the skips held in
-                // memory instead of resetting to a minute. It's a wait only: the count that parks isn't raised.
-                let held = self.backoff.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
-                self.set_back_waiting(&task.key, held);
-                let update = RunPatch { retries: Patch::Set(retries + 1), ..RunPatch::default() };
-                if let Err(e) = self.tracker.report(&task.key, update).await {
-                    tracing::warn!(task = %task.key, error = %e, "couldn't skip a used run name");
-                }
-                return Err(e);
-            }
-            // No sub-agent, so nothing holds the claim: back off and count it, as the factory's own identity, which
-            // takes the claim only if the task has to be parked. Revoking the sub-agent that was never created
-            // fails, and that warning is expected.
-            Err(e) => {
-                return Err(self
-                    .infra_failed_by(task, &self.tracker, false, &name, e, task.run.infra_failures, Patch::Keep)
-                    .await);
-            }
-        };
+        let credential = self.new_sub_agent(task, &name, &profile).await?;
         let sub = self.tracker.sub_agent(&name);
         let infra_prior = task.run.infra_failures;
         // Claiming as the sub-agent before creating the sandbox keeps two control planes from racing for one task.
@@ -182,11 +163,37 @@ impl Factory {
             env: self.config.stack.env.clone(),
             credential,
             shots: self.config.shots(),
+            plan: None,
         };
         let prior = task.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
         self.conclude(task, &sub, &sandbox, &name, attempt, run, Some(place)).await
+    }
+
+    /// The run's sub-agent, named `name`, and its token. A name a run whose give-back didn't land already used is
+    /// skipped past rather than retried forever; any other failure backs the task off as an infrastructure failure,
+    /// as the factory's own identity, which takes the claim only if the task has to be parked.
+    pub(crate) async fn new_sub_agent(&self, task: &Task, name: &str, profile: &Profile) -> Result<Credential> {
+        let retries = task.run.retries.unwrap_or(0);
+        match self.tracker.create_sub_agent(name, task.key.project(), token_ttl(profile)).await {
+            Ok(credential) => Ok(credential),
+            Err(e @ Error::Forbidden(_)) => {
+                // The give-back below may be lost with the tracker down, so the wait grows with the skips held in
+                // memory instead of resetting to a minute. It's a wait only: the count that parks isn't raised.
+                let held = self.backoff.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
+                self.set_back_waiting(&task.key, held);
+                let update = RunPatch { retries: Patch::Set(retries + 1), ..RunPatch::default() };
+                if let Err(e) = self.tracker.report(&task.key, update).await {
+                    tracing::warn!(task = %task.key, error = %e, "couldn't skip a used run name");
+                }
+                Err(e)
+            }
+            // Revoking the sub-agent that was never created fails, and that warning is expected.
+            Err(e) => Err(self
+                .infra_failed_by(task, &self.tracker, false, name, e, task.run.infra_failures, Patch::Keep)
+                .await),
+        }
     }
 
     /// Follows a worker run that was going when the last control plane stopped (TRAIL-137): the daemon replays the
@@ -204,7 +211,9 @@ impl Factory {
         let mut before = task.clone();
         before.run.attempt = Some(attempt.saturating_sub(1));
         let task = &before;
-        let profile = self.config.worker().clone();
+        // A planner's turn is metered on the planner's budget, as it was started.
+        let planner = self.config.planner().filter(|_| task.plan.awaits_planner()).map(|(_, p)| p);
+        let profile = planner.unwrap_or_else(|| self.config.worker()).clone();
         let prior = task.run.spend.unwrap_or_default();
         let elapsed = task
             .run
@@ -303,7 +312,7 @@ impl Factory {
 
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
     #[allow(clippy::too_many_arguments)]
-    async fn conclude(
+    pub(crate) async fn conclude(
         &self,
         task: &Task,
         sub: &Arc<dyn Tracker>,
@@ -497,6 +506,7 @@ impl Factory {
                 }
                 Ok(Outcome::Failed { reason })
             }
+            RunResult::PlanTurn(turn) => self.conclude_plan_turn(task, sub, sandbox, name, attempt, turn).await,
             RunResult::Reviewed(_) => Err(Error::Other("a worker returned a review".into())),
         }
     }
@@ -505,7 +515,7 @@ impl Factory {
     /// without the attempt counting toward `max_attempts`, and waits out a backoff that grows with each such failure.
     /// At `max_infra_failures` in a row it's parked instead, saying so. The run's sub-agent must hold the claim. Returns the
     /// error to surface.
-    async fn infra_failed(
+    pub(crate) async fn infra_failed(
         &self,
         task: &Task,
         sub: &Arc<dyn Tracker>,

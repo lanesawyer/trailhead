@@ -15,6 +15,7 @@ pub mod language;
 pub mod logs;
 pub mod messages;
 pub mod money;
+pub mod plan;
 pub mod provider;
 pub mod registry;
 pub mod status;
@@ -50,6 +51,10 @@ pub use harness::{
 pub use host::HostConfig;
 pub use language::{Language, languages};
 pub use money::{Usage, Usd};
+pub use plan::{
+    NewPlanTask, PlanChanges, PlanContext, PlanFiles, PlanTask, PlanTaskUpdate, PlanTurn, Planning, ProposedGrade,
+    ProposedTask, Spec, TASK_PLAN_KEY, TaskPlan,
+};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use status::{
@@ -59,9 +64,10 @@ pub use status::{
 pub use target::{DEFAULT_TARGET, Spend, Target};
 pub use tracker::{
     Answered, AttachmentRole, CI_REVIEWER, ChangesRequested, Credential, FollowUpTask, Grade, HISTORY_LIMIT,
-    HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy, Patch, Picture, Priority, ProjectRepo, RequestKind,
-    ReviewBreach, RunPatch, RunRecord, Said, Scope, SetAside, Status, Task, TaskKey, TaskNote, Tracker, WorkerBreach,
-    in_ready_order, is_factory_agent, is_raised_by, key_number, raised_by,
+    HumanContext, METADATA_KEY, MergeDecision, Merged, MergedBy, NOTICE_PAUSED, NOTICE_REVIEW, Notice,
+    NotificationAction, Patch, Picture, Priority, ProjectRepo, RequestKind, ReviewBreach, RunPatch, RunRecord,
+    SOURCE_FACTORY, Said, Scope, SetAside, Status, Task, TaskKey, TaskNote, Tracker, WorkerBreach, in_ready_order,
+    is_factory_agent, is_raised_by, key_number, raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]

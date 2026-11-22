@@ -133,7 +133,9 @@ impl Factory {
             let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
+                // An open spec task keeps its sandbox for its planner's next turn, whose session is on it.
                 (t.status == Status::NeedsInput
+                    || (t.status == Status::Open && t.keeps_planner_sandbox())
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
@@ -498,6 +500,7 @@ impl Factory {
     /// Puts one in-flight task right, by its phase; true when its PR is due a review. For a task whose run isn't
     /// going: one that is, the caller follows.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        self.forget_review_notice_out_of_review(task).await;
         match phase(task, self.tracker.agent(), false) {
             Phase::Untouched | Phase::Closed => Ok(false),
             // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.

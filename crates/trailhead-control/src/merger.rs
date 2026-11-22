@@ -151,6 +151,7 @@ impl Factory {
             human_head: human_head.as_deref(),
         };
         let verdict = decide(&facts);
+        let waits = crate::notify::waits_on_person(act, &verdict.waiting);
         if verdict.withdraw {
             tracing::info!(task = %key, %head, "the gates no longer pass; withdrawing the approval");
             self.tracker.unapprove(key).await?;
@@ -175,6 +176,7 @@ impl Factory {
             comment: prev.as_ref().and_then(|d| d.comment),
             message: String::new(),
             history: prev.as_ref().map(|d| d.history.clone()).unwrap_or_default(),
+            notified: prev.as_ref().is_some_and(|d| d.notified),
         };
         // Whether a task can be approved by the control plane: the gates pass without Lane, who approves by moving it.
         if verdict.approve {
@@ -219,6 +221,7 @@ impl Factory {
             let said = prev.as_ref().map(|d| d.message.clone()).unwrap_or_default();
             std::mem::replace(&mut decision.message, said)
         });
+        decision.notified = self.tell_review(&task, pr, &grade, waits, decision.notified).await;
         if prev.as_ref() != Some(&decision) {
             if !merging && merge_mode != MergeMode::Off && prev.as_ref().is_none_or(|d| d.message != decision.message) {
                 push_said(&mut decision.history, &decision.message);

@@ -153,6 +153,7 @@ pub(super) enum ToolKind {
     Answer,
     Holder,
     Pull,
+    Graph,
 }
 
 impl ToolKind {
@@ -347,6 +348,9 @@ fn sync_tools(
     if card.pr.is_some() {
         wanted.push(ToolKind::Pull);
     }
+    if card.graph {
+        wanted.push(ToolKind::Graph);
+    }
     let kind = |e: Entity| tools.get(e).map(|t| *t.0).ok();
     drop_unwanted(current, |_, e| kind(e).is_some_and(|k| wanted.contains(&k)), commands);
     let present = |want: ToolKind| current.iter().copied().find(|e| kind(*e) == Some(want));
@@ -373,6 +377,10 @@ fn sync_tools(
                 commands.entity(tool).insert((target, ToolKind::Holder, ChildOf(row)));
             }
         }
+    }
+    if card.graph && present(ToolKind::Graph).is_none() {
+        let tool = tool_button(Icon::Graph, "Show its subtasks as a graph", ButtonKind::Plain);
+        commands.queue_spawn_scene(tool).insert((OpensGraph(card.id.clone()), ToolKind::Graph, ChildOf(row)));
     }
     let Some(pr) = &card.pr else { return };
     let hint = format!("Open pull request {}", pr.label);
@@ -484,6 +492,7 @@ mod in_place_tests {
             found: None,
             pr: None,
             holder: None,
+            graph: false,
         }
     }
 
