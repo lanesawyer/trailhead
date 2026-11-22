@@ -48,6 +48,8 @@ mod ask_panel;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod connector_settings;
+mod connectors_page;
 pub mod cover;
 pub mod desktop;
 #[cfg(any(test, feature = "test-support"))]
@@ -360,6 +362,7 @@ impl Plugin for ShellPlugin {
         if connected {
             app.add_plugins((
                 server_settings::ServerSettingsPlugin,
+                connector_settings::ConnectorSettingsPlugin,
                 notifications::NotificationsPlugin,
                 notification_settings::NotificationSettingsPlugin,
             ));
@@ -390,6 +393,7 @@ impl Plugin for ShellPlugin {
             if connected {
                 app.add_plugins((
                     server_page::ServerPageUiPlugin,
+                    connectors_page::ConnectorsPageUiPlugin,
                     notifications_page::NotificationsPageUiPlugin,
                     notifications_panel::NotificationsUiPlugin,
                     desktop::DesktopPlugin,

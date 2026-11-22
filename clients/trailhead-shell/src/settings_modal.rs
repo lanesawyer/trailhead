@@ -411,6 +411,7 @@ mod tests {
                 ("Trailhead", "Notifications"),
                 ("Trailhead", "Connection"),
                 ("Trailhead", "Server"),
+                ("Trailhead", "Connectors"),
                 ("Trailhead", "About"),
                 ("Notes", "Tidying")
             ]
@@ -439,6 +440,7 @@ mod tests {
                 "tab notifications",
                 "tab connection",
                 "tab server",
+                "tab connectors",
                 "tab about",
                 "NOTES",
                 "tab tidy"
@@ -492,7 +494,7 @@ mod tests {
         // A word in one setting's label: that setting alone, under its page.
         search(&mut app, "text size");
         assert_eq!(shown(&mut app), [], "the page gives way to what was found");
-        assert_eq!(count::<With<FoundPage>>(&mut app), 6, "every page is put up once");
+        assert_eq!(count::<With<FoundPage>>(&mut app), 7, "every page is put up once");
         assert_eq!(found(&mut app), (strs(&["Text size"]), vec!["appearance"]));
         assert_eq!(picked(&mut app), None, "no tab is the one shown");
         let up = {
