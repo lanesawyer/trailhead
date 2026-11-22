@@ -13,6 +13,7 @@ use trailhead_lookout::LOOKOUT;
 use trailhead_lookout::Lookout;
 use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
+use trailhead_lookout::graph::OpenGraph;
 use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
 use trailhead_lookout::logs::{LogItem, LogUpdate};
 use trailhead_lookout::peak::MapMode;
@@ -286,6 +287,47 @@ fn shots() {
     shot.set_theme(ShotTheme::Dark);
     look_from(&mut shot, Orbit::new(3.6, 0.7, 22.0));
     save(&mut shot, "peak-above");
+}
+
+/// A plan: a parent and its subtasks, a chain into a diamond, one finished, one waiting on a task outside the plan,
+/// one ungraded with a subtask of its own, and one standing alone.
+fn plan() -> Snapshot {
+    let mut snapshot = snapshot();
+    let mut sub = |id: &str, key: &str, title: &str, status: &str, grade: Option<i64>, blocked_by: &[&str]| {
+        let mut t = task(id, key, title, status, 2);
+        t["parent_id"] = json!(sid("g0"));
+        t["grade"] = json!(grade);
+        t["blocked_by"] = json!(blocked_by.iter().map(|b| sid(b)).collect::<Vec<_>>());
+        snapshot.tasks.push(t);
+    };
+    sub("g1", "TRAIL-21", "A README saying what the todo app is for", "done", Some(1), &[]);
+    sub("g2", "TRAIL-22", "The todo list's model and its store", "in_review", Some(2), &["g1"]);
+    sub("g3", "TRAIL-23", "Adding a todo from the field under the list", "in_progress", Some(2), &["g2"]);
+    sub("g4", "TRAIL-24", "Checking a todo off, and the done ones folding away", "open", Some(2), &["g2", "t4"]);
+    sub("g5", "TRAIL-25", "Shots of the list empty, short and long", "open", None, &["g3", "g4"]);
+    sub("g6", "TRAIL-26", "Name the app in the shell's rail", "open", Some(1), &[]);
+    snapshot.tasks.push(task("g0", "TRAIL-20", "Plan: a todo app", "open", 2));
+    let mut nested = task("g7", "TRAIL-27", "Under TRAIL-25: a long list scrolls", "open", 3);
+    nested["parent_id"] = json!(sid("g5"));
+    snapshot.tasks.push(nested);
+    snapshot
+}
+
+#[test]
+#[ignore = "needs a render adapter: run with `mise run shots`"]
+fn graph() {
+    let mut shot =
+        shot(ShellPlugin::new().with(Lookout::new()), ShotOptions { size: (1440, 800), ..ShotOptions::default() });
+    set_connection(&mut shot, Connection::Live);
+    fill(&mut shot, plan());
+    shot.world_mut().trigger(OpenGraph(sid("g0")));
+    settle(&mut shot);
+    save(&mut shot, "graph");
+    shot.set_theme(ShotTheme::Light);
+    save(&mut shot, "graph");
+    shot.set_theme(ShotTheme::Dark);
+    shot.set_text_size(TextSize::nearest(150));
+    save(&mut shot, "graph");
 }
 
 /// Presses the mouse at `at` (logical pixels in the shot's image), moves it by `drag`, and lets go.

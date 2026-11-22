@@ -114,6 +114,10 @@ pub enum BadgeKind {
     Blocked,
     /// Pictures attached to the task (screenshots before and after a change), with their count.
     Pictures,
+    /// The task's status, on a card that doesn't sit in its status's column (a node of the graph).
+    Status,
+    /// A task outside the graph's parent that this one waits on, by key.
+    Needs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,8 @@ pub struct Card {
     pub pr: Option<PrLink>,
     /// The agent holding it, whom a tool button opens in the inspector. A person holding it has no such view.
     pub holder: Option<HolderLink>,
+    /// Whether it has subtasks, so a tool button opens the graph of them.
+    pub graph: bool,
 }
 
 /// An agent holding a task: its id (what `Subject::Agent` carries) and its name.
@@ -230,7 +236,7 @@ pub fn grid(input: Input, project: &str) -> Vec<Card> {
 }
 
 /// [`build`], with subtasks under their parent in a column when `nest`, else each a top-level card naming its parent.
-pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
+pub(crate) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     // Holders are agents or, for a claim a person made, users.
@@ -294,6 +300,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
     let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
 
+    let parents: HashSet<Uuid> = input.tasks.iter().filter_map(|t| t.parent_id).collect();
     let mut pictures: HashMap<Uuid, usize> = HashMap::new();
     for a in input.attachments.iter().filter(|a| a.deleted_at.is_none()) {
         *pictures.entry(a.task_id).or_default() += 1;
@@ -391,6 +398,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                     .find(|a| a.id == *id)
                     .map(|a| HolderLink { id: id.to_string(), name: a.name.clone() })
             }),
+            graph: parents.contains(&t.id),
         }
     };
 
@@ -842,6 +850,7 @@ mod tests {
                 found: None,
                 pr: None,
                 holder: None,
+                graph: false,
             })
             .collect()
     }

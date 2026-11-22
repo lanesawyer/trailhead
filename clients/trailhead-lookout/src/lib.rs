@@ -16,6 +16,7 @@ pub mod detail;
 pub mod factory;
 pub mod factory_link;
 pub mod form;
+pub mod graph;
 pub mod inspector;
 pub mod logs;
 pub mod map;
@@ -87,6 +88,7 @@ impl ShellApp for Lookout {
         app.add_plugins((
             board::BoardUiPlugin,
             map::MapUiPlugin,
+            graph::GraphUiPlugin,
             project::ProjectUiPlugin,
             project_form::ProjectFormUiPlugin,
             projects_page::ProjectsPageUiPlugin,

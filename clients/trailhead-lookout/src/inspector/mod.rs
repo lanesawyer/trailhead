@@ -49,6 +49,7 @@ use crate::author::{
 use crate::board::Input;
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
+use crate::graph::OpensGraph;
 use crate::pictures::{OpenFolds, PictureChange, PicturePair, PictureSet, WantsPicture};
 use crate::project::OpenProject;
 use crate::settings::OpenLogs;
