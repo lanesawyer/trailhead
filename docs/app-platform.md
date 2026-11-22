@@ -161,7 +161,7 @@ The engine has due days and times, scheduled days and times, reminders, prioriti
 - Recurring tasks (in PLAN.md's Later list).
 - Labels (TRAIL-155).
 - A one-time import from Todoist (PLAN.md phase 9).
-- Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet.
+- Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet ([Notifications](#notifications)).
 - Quick capture without opening the shell. The CLI covers it today.
 
 ## Planning an ask
@@ -207,9 +207,89 @@ Decided with Lane, 2026-11-21. Not built (TRAIL-1609 and its subtasks).
 - It lies on a canvas that pans and zooms with no edge, so a large plan can be read. The canvas and the graph laid out on it are kit widgets (`trailhead-ui`), for any app.
 - First: read-only, with the grade dropdowns and Approve on a plan not yet approved. Then editing by hand: add a node, remove one, split one (a second node with the same parent and dependencies), and add or remove a dependency. No merge (cancel one, edit the other) and no moving to another parent (there is one).
 
-**Left out:** planning again after approval (follow-ups are ordinary tasks); the planner filing kit tasks for what an app needs from the kit (TRAIL-1612); a streaming conversation, over ACP or otherwise, which could replace the turns without changing the panel or the thread; saving the session out of the sandbox so a waiting planner holds none. Telling a person the planner has replied waits on notifications for the whole shell, a piece of its own.
+**Left out:** planning again after approval (follow-ups are ordinary tasks); the planner filing kit tasks for what an app needs from the kit (TRAIL-1612); a streaming conversation, over ACP or otherwise, which could replace the turns without changing the panel or the thread; saving the session out of the sandbox so a waiting planner holds none. Telling a person the planner has replied waits on [notifications](#notifications) for the whole shell, a piece of its own.
 
 **Order:** the graph, read-only (it needs nothing else here); the planner run; the chat panel; approval; the two buttons; editing by hand. The middle four prove themselves only together: the first real test is asking for a small new app and approving its plan.
+
+## Notifications
+
+Talked through with Lane, 2026-11-21 (TRAIL-1671). Nothing is built. What is not marked **Proposal** or **Open** he agreed to.
+
+One way for the server, the factory and any app to tell a person something needs them. The shell shows them, in the window and on the desktop.
+
+**The server owns them.**
+
+- A notification is a row in a table of its own in the server, beside the tasks. It is not a task-engine event: raising one and reading one are not things undo covers.
+- It carries its source (an app's id, `factory` or `server`), a kind, a title, a body in plain text, a subject (what it is about: a task's key, or a string of the app's own), its actions, and when it was raised, read and resolved.
+- It has no recipient. There is one person.
+- **Read and resolved are two things.** Read: the person saw it. Resolved: the thing no longer needs them, whoever dealt with it and wherever (a question answered from the CLI). The server resolves by rule; a resolved one stays in the history.
+- The window gets them on the sync stream, as one more kind of record in the shell's mirror, so every app and the bell read the same ones, and a second machine agrees on what is read.
+
+**What raises one.**
+
+- **The server, by rule, from the engine's events:** a question asked of a person (which covers the planner replying and a plan ready to approve, both questions on the spec task), a task in review that waits on a person, and the reminders the engine already emits (`task.due_soon`, `task.overdue`; TRAIL-1505 shares their names). The same rules resolve them: the answer, the approval, the task done.
+- **The factory,** for what the engine cannot see: a run that failed, a task it parked, a budget breach, the factory paused. This takes TRAIL-111's place.
+- **An app, while the window runs,** with a `Notify` command the shell sends to the server. An app cannot raise one while the window is closed; rules over an app's own data wait on the app data store.
+- An agent already has `ask`, which raises one by the first rule.
+
+**Trust.** No rate limits and no guard against an app that raises too many. Lane asks for the apps; one that misbehaves gets changed. The shell does say which app raised each one.
+
+**Kinds. Open: now, or after the first version.** A kind is the sort of thing a notification is, as a short name: `lookout.question`, `lookout.review`, `factory.run_failed`, `task.due_soon`. Every notification has one either way. "Kinds in the manifest" means an app lists the kinds it raises in its manifest, each with the name a person reads ("A question for you") and a level it starts at. That buys one thing: the settings page can show a row for every kind before any has been raised, so a person can turn "a task is due soon" down and leave "a question for you" up. Without it, levels are per app only (all of Lookout's or none). The cheaper start is a level per source, with the kind a free string, and the manifest list added when one app's notifications want different treatment.
+
+**Levels. Proposal.** Three: *silent* (in the list only), *bell* (the count and the ring) and *interrupt* (a desktop notification too). Every one is recorded whatever its level.
+
+**In the window.**
+
+- **A bell at the rail's foot,** with the count unread. When one arrives while the window has focus the bell rings: it swings, grows a little and shrinks back. A desktop that asks for less motion sees only the count change.
+- **Its panel** lists them, newest first, each with its source's icon and name, title, body, age and action buttons; the unread ones marked. Each can be marked read or unread, and all read at once. A switch between Unread and All; All pages back through everything the server keeps.
+- They are listed one by one. Nothing is folded together in the list.
+- **A count on an app's rail icon. Proposal:** its unread ones.
+- **Pressing one marks it read.** It does not go anywhere yet (below).
+
+**Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. **Proposal:** the same buttons on the desktop notification, which Ubuntu draws; a link needs no window focus, so it works with none of click-through's trouble. Later: buttons that act (Approve, Answer).
+
+**On the desktop.**
+
+- The shell sends them while it runs, on Ubuntu (GNOME), over the desktop's notification service on D-Bus, under the desktop entry `mise run shell-install` writes so they carry Trailhead's name and icon. The Mac and Windows are later.
+- **Only when the window does not have focus.** With focus, the bell's ring is the notice.
+- **A burst is one notification.** Several at once, those raised during quiet hours, and those raised while the window was not running become one: "10 things need you". The shell keeps the last one it announced in its `LocalStore` entry, per machine, to know what a launch missed.
+- One read or resolved elsewhere is taken down.
+- The D-Bus client is a new package, so a `Cargo.lock` change at grade 4.
+
+**Quiet hours and focus.**
+
+- They gate the interruption, never the record: no desktop notification and no ring, while the list and the count carry on.
+- Quiet hours are a daily span. Focus is switched on by hand, until a time or until switched off, from the bell's panel.
+- When either ends, one desktop notification says what arrived.
+- **Proposal:** the settings (levels, quiet hours) are kept on the server, so every machine agrees, on a Notifications page among the shell's own in Settings.
+- **Open:** whether anything breaks through (the factory stopped, a budget breach). Ubuntu's own Do Not Disturb hides ours with no work here.
+
+**How long they are kept. Open.** "Retention" is that question: the table grows forever unless something prunes it. The rows are small (a few hundred bytes), so the choices are keep everything, or drop those both read and resolved after some months. Proposal: keep everything, and prune when the list is ever slow.
+
+**Phase 2: going to the thing.** Pressing a notification, in the window or on the desktop, opens what it is about. Put off because each part is hard:
+
+- A notification would carry a target naming the thing, not a view: a task (and a comment on it) or a project, for which the shell picks the app that opens tasks, or an app and a route only that app reads. The shell switches `ActiveApp` and triggers an event the app observes.
+- A press can arrive before the mirror has synced, so the shell holds the target until the connection is live.
+- A stored route outlives the build that wrote it, so an app has to cope with one it does not know, and with a thing since deleted.
+- A settings modal or an unsent draft may be in the way.
+- Raising the window from the desktop's notification needs an activation token on Wayland; whether winit passes one through is not checked.
+- **Open, for phase 1:** the easy part alone, pressing one switches to the app that raised it with no route, is a line of code. Until then a notification's text has to say where to look (the task's key) and its link does the rest.
+
+**Also phase 2 or later:** a tray icon, so notifications arrive with the window closed (likely an effort of its own); snoozing one; hiding the text on a locked screen; the Mac. **Not planned:** email or a push to a phone.
+
+**Where it lands.**
+
+| Where | What |
+| --- | --- |
+| `trailhead-model` | The notification, its action, the kinds' names (with TRAIL-1505) |
+| `trailhead-core` | A `notifications` table in a new migration; raise, read, resolve; the rules that raise and resolve from events |
+| `trailhead-server` | `/v1/notifications` (list, raise, read, read all), the records on the sync stream, the settings |
+| `trailhead-control` | Raising what the engine cannot see, probably through the `Tracker` trait |
+| `trailhead-shell` | The mirror's records and the `Notify` command, the bell and its panel, the settings page, the desktop notifier behind a trait (so tests use a fake), quiet hours and the burst rule as plain logic |
+| `trailhead-ui` | The ring, and a count badge if the kit lacks one |
+| Lookout | Its link actions; marking a task's notifications read when the task is opened |
+
+**Order:** the table and API with the question and review rules; the bell and its panel; Ubuntu's desktop notifications; levels, quiet hours and focus; apps raising their own. The first two are enough to say the planner has replied.
 
 ## Trust, grades and undo
 
