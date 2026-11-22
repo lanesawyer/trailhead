@@ -211,7 +211,9 @@ pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, has_room as
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
-pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
+pub use select::{
+    Picked, SelectEdit, SelectHint, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned,
+};
 pub use settings::{
     SettingNote, SettingsSection, SettingsTabs, setting, setting_toggle, settings_page, spawn_settings_section,
     spawn_settings_tabs,
@@ -286,7 +288,7 @@ impl Plugin for UiPlugin {
                     button_group::paint_groups,
                     (hover::paint_hover_tones, check_circle::paint_check_circles, choice_tile::paint_choice_tiles),
                     buttons::dim_disabled_captions,
-                    select::style_select_captions,
+                    (select::style_select_captions, select::show_select_hints).chain(),
                     select::show_chosen_icons,
                 )
                     .chain()
