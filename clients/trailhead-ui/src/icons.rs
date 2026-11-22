@@ -49,8 +49,12 @@ pub enum Icon {
     Eye,
     ExternalLink,
     Filter,
+    /// Fit everything into view: a canvas's "fit all".
+    Fit,
     Flag,
     Footprints,
+    /// Nodes joined by lines: a graph of what depends on what.
+    Graph,
     Help,
     Handshake,
     History,
@@ -83,7 +87,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 48] = [
+    const ALL: [Icon; 50] = [
         Icon::Archive,
         Icon::ArchiveRestore,
         Icon::Board,
@@ -103,8 +107,10 @@ impl Icon {
         Icon::Eye,
         Icon::ExternalLink,
         Icon::Filter,
+        Icon::Fit,
         Icon::Flag,
         Icon::Footprints,
+        Icon::Graph,
         Icon::Help,
         Icon::Handshake,
         Icon::History,
@@ -156,8 +162,10 @@ impl Icon {
             Icon::Eye => "\u{e0ba}",            // eye
             Icon::ExternalLink => "\u{e0b9}",   // external-link
             Icon::Filter => "\u{e0dc}",         // filter
+            Icon::Fit => "\u{e257}",            // scan
             Icon::Flag => "\u{e0d1}",           // flag
             Icon::Footprints => "\u{e3b9}",     // footprints
+            Icon::Graph => "\u{e125}",          // network
             Icon::Help => "\u{e082}",           // circle-help
             Icon::Handshake => "\u{e5c0}",      // handshake
             Icon::History => "\u{e1f5}",        // history

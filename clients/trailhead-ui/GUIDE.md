@@ -385,6 +385,71 @@ physical pixels, so a list that fits can come out a pixel past its area, and the
 (TRAIL-1610). The wheel, the scrollbar and the kit's clamp all measure the same range, so an area with none shows no
 bar and does not move, and a position left over from taller content is brought back when the content shrinks.
 
+### A canvas and a graph
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `spawn_canvas` | `spawn_canvas(commands: &mut Commands) -> CanvasParts` | Content of any size with no edge, that a drag pans and the wheel zooms about the pointer (a sideways swipe, or Shift and the wheel, pans across). The root clips to its own box and grows into what holds it (`flex_grow`). Clicks reach what lies on it; a press that moves past `DRAG_THRESHOLD` pans instead and activates nothing. Spawned unparented. | Its `Canvas`. |
+| `CanvasParts` | `CanvasParts { root: Entity, content: Entity }` | Put `root` where it goes; fill `content` with absolutely placed nodes (`left`, `top` from its origin). | |
+| `Canvas` | component on the root: `pan() -> Vec2`, `zoom() -> f32`, `set(pan, zoom)`, `fit()`, `fitting() -> bool`, `panning() -> bool` | The view: where the content's origin sits in the box (UI pixels) and the zoom, held between `CANVAS_MIN_ZOOM` (0.25) and `CANVAS_MAX_ZOOM` (2). `fit()` fits the content in the box, centered, never zoomed in past its own size ("fit all"); a new canvas fits itself once its content has an extent. The view is apart from the content, so changing the content never moves it. | `fit()` or `set` through `Query<&mut Canvas>`. |
+| `CanvasExtent` | `CanvasExtent(pub Vec2)` (component on the root) | How big the content is, which fitting goes by. Set it when the content changes (a graph sets its own). | `set_if_neq`. |
+| `CanvasContent` | `CanvasContent { canvas: Entity }` (component) | The node the kit moves, holding what is on a canvas. | |
+| `spawn_graph` | `spawn_graph(commands: &mut Commands) -> GraphParts` | A directed graph on a canvas of its own: nodes in layers left to right by what points at what (nodes nothing points into first), ordered to keep crossings few, each edge drawn from its node's right side to its target's left in `token::BORDER`, `stroke::EDGE` thick, turning at right angles between the layers, with a square where it meets its target. A cycle is broken where a walk in the nodes' order closes it, the same way every time, and its edge still drawn. Spawned unparented. | Its `Graph`. |
+| `GraphParts` | `GraphParts { root: Entity, nodes: Entity, edges: Entity }` | `root` is the canvas's box, holding the `Graph` and the `Canvas`. `nodes` holds the node boxes, `edges` the lines, under them. | |
+| `Graph` | `Graph { nodes: Vec<GraphNode>, edges: Vec<GraphEdge> }` (component on the root) | What the graph holds. The kit lays it out when it changes and keeps a box per key in place: a box keeps its `Entity` while its key is in the graph, and lines follow the same way. The nodes' order breaks ties in the layout, so keep it steady (by key). | `set_if_neq`, with the whole of it. |
+| `GraphNode`, `GraphEdge` | `GraphNode::new(key: Into<String>, size: Vec2)`; `GraphEdge::new(from: Into<String>, to: Into<String>)` | A node's key and its box's size in UI pixels; an edge from one key to another, `from` laid out left of `to`. An edge to a key that isn't a node, or from a node to itself, is left out. | |
+| `GraphNodeBox` | `GraphNodeBox { graph: Entity, key: String }` (component) | A node's box, placed and sized by the kit, for the caller to draw the node in: spawn its content as a child, which fills the box's width and sits in the middle of its height. What the node shows is the caller's to keep in step in place. | |
+| `GraphEdgeLine` | component | A line or end mark of an edge, which the kit keeps; for a test to find. | |
+| `lay_out_graph` | `lay_out_graph(nodes: &[GraphNode], edges: &[GraphEdge]) -> GraphLayout` | The layout as a pure function, which the graph uses: each node's `Rect`, each edge's `EdgeRoute { from, to, points }`, and the whole `size`. A few hundred nodes take a few milliseconds. | |
+
+The wheel and the kit's scrolling: one observer routes every wheel turn (section 4, "Scrolling goes through the kit").
+It finds the nearest of a `ScrollDown`, a `ScrollBoth` and a `Canvas` above what the pointer is over, and the nearest
+takes the whole turn: a list that scrolls inside a canvas scrolls, and a canvas inside a page that scrolls zooms
+rather than scrolling the page. Never add a wheel observer of your own for a canvas.
+
+A graph whose nodes are an app's own cards, kept in step with its data (Lookout's `graph.rs` is the full one):
+
+```rust
+use bevy::prelude::*;
+use trailhead_ui::{Graph, GraphEdge, GraphNode, GraphNodeBox, spawn_graph};
+
+/// The graph's root, kept to set its `Graph` and fit it.
+#[derive(Component)]
+struct PlanGraph;
+
+/// What a node shows, kept by the app's logic by key.
+#[derive(Resource, Default)]
+struct Wanted {
+    nodes: Vec<(String, String)>,
+    edges: Vec<(String, String)>,
+}
+
+// In the page's spawn system, once: the canvas fills the page.
+// let parts = spawn_graph(&mut commands);
+// commands.entity(parts.root).insert((PlanGraph, ChildOf(page)));
+
+fn set_graph(wanted: Res<Wanted>, mut graphs: Query<&mut Graph, With<PlanGraph>>) {
+    let Ok(mut graph) = graphs.single_mut() else { return };
+    let size = Vec2::new(240.0, 96.0);
+    graph.set_if_neq(Graph {
+        nodes: wanted.nodes.iter().map(|(key, _)| GraphNode::new(key.clone(), size)).collect(),
+        edges: wanted.edges.iter().map(|(from, to)| GraphEdge::new(from.clone(), to.clone())).collect(),
+    });
+}
+
+/// Draws a node's card in a new box; a card already drawn is updated in place by the card's own system.
+fn fill_boxes(boxes: Query<(Entity, &GraphNodeBox), Added<GraphNodeBox>>, mut commands: Commands) {
+    for (entity, node) in &boxes {
+        commands.spawn((MyCard(node.key.clone()), ChildOf(entity)));
+    }
+}
+```
+
+`set_graph` runs before `UiPlace`, where the kit lays the graph out; `fill_boxes` after it, so a new node's box is
+filled in the frame it appears. A Fit button calls `fit()` on the root's `Canvas`. The sizes are the caller's: pick
+one the card fits at its tallest, since the box doesn't grow to its content (a card shorter than its box sits in its
+middle, where its edges meet it).
+
 ### Icons
 
 | Item | Signature | What it is for |
@@ -435,9 +500,9 @@ pulse; the shell's: the cover drawn while it switches apps.
 | `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
 | `ThemeColors` | system param: `color(&Token) -> Color`, `is_changed() -> bool` | The worn theme's colors for what no tone component reaches, such as a 3D scene's materials and lights (Lookout's trail map), so they follow the light theme and the accent too. A node's colors stay `BackgroundTone`, `TextTone` and `BorderTone`. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
-| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
+| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, canvases and graphs, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
-| `ModalPlugin`, `InlinePlugin`, `ReorderPlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals, answers inline edits or reorders a list without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
+| `ModalPlugin`, `InlinePlugin`, `ReorderPlugin`, `CanvasPlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals, answers inline edits, reorders a list or lays out a graph without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
 | `layer` | module of `i32` constants | Which surface is over which (section 3). |
 | `lint` | module | The design-system lint and the scan for wholesale redraws, `lint::redraws` (section 6). |
 
@@ -487,6 +552,9 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   each move for you to apply to that data (and then `Keyed` moves the nodes).
 - **`scroll_frame` + `scroll_body` / `ScrollBoth`.** A panel's body that scrolls down; an area (a board of columns) that
   scrolls both ways, with `ScrollDown` areas inside it.
+- **`ScrollBoth` / `spawn_canvas` / `spawn_graph`.** An area of laid-out content bigger than its box (a board of
+  columns), which scrolls to its edges; content placed by hand with no edge, which pans and zooms; nodes and edges the
+  kit lays out on a canvas.
 
 ## 3. Colors, sizes, spacing, icons and layers
 
@@ -584,6 +652,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `HAIRLINE` | 1 | A border, a divider |
 | `GRIP` | 2 | The line a drag edge shows while hovered or dragged |
 | `RING` | 1.5 | A round check's ring |
+| `EDGE` | 2 | An edge of a graph, readable zoomed out |
 
 | `extent::` | px | For |
 | --- | --- | --- |
@@ -602,6 +671,8 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
 | `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 72, 44 | A choice tile's picture |
 | `PICTURE_WIDTH`, `PICTURE_HEIGHT` | 160, 100 | A picture's thumbnail box (`spawn_picture`): two side by side fit a side panel |
+| `GRAPH_LAYERS_APART`, `GRAPH_NODES_APART` | 56, 24 | How far apart a graph's layers sit across (room for its edges' turns), and the nodes of one layer down |
+| `GRAPH_EDGE_END` | 6 | The square where a graph's edge meets the node it points to |
 
 The lint reads lines, not meaning: a number hidden in a constant named for nothing gets past it. Name constants for
 what they are for, and prefer the kit's names over constants of your own.
@@ -615,7 +686,7 @@ glyphs, so anything that is not an `Icon` shows as a box or a question mark.
 
 The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Board` (kanban), `Bot`,
 `Calendar`, `Check`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
-(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Filter`, `Flag`, `Footprints`, `Help` (circle-help),
+(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Filter`, `Fit` (scan), `Flag`, `Footprints`, `Graph` (network), `Help` (circle-help),
 `Handshake`, `History`, `Info`, `Inspect` (panel-right-open), `LogIn`, `Map`, `Monitor`, `Moon`, `Pencil`, `Plus`,
 `PullRequest` (git-pull-request), `Refresh` (refresh-cw), `Release` (lock-open), `Search`, `Send`, `Settings`,
 `Shield`, `Signpost`, `Stop` (ban), `Sun`, `TriangleAlert`, `Undo` (undo-2), `User`, `Wifi`, `WifiOff`, `X`.
@@ -721,7 +792,8 @@ though it draws on top. Give every overlay its layer from `layer` (section 3).
 ### Scrolling goes through the kit (TRAIL-836)
 
 Mark an area `ScrollBoth` or `ScrollDown`. The kit's one observer walks up from what the pointer is over to the
-nearest of each and splits the wheel turn between them. Do not add a wheel observer of your own per area: a bubbling
+nearest of each and splits the wheel turn between them; a `Canvas` nearer than either takes the whole turn to zoom
+(TRAIL-1668). Do not add a wheel observer of your own per area: a bubbling
 `PointerScroll` keeps naming the entity it was fired on, so an ancestor's handler never sees its own entity. A view
 that did rebuild its nodes would have to carry `ScrollPosition` over itself; keeping the node is the fix.
 

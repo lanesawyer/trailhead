@@ -47,6 +47,9 @@
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
+//! - Content of any size that a drag pans and the wheel zooms: [`spawn_canvas`], its view a [`Canvas`]. Nodes and the
+//!   edges between them laid out in layers on one: [`spawn_graph`], given a [`Graph`], each node's [`GraphNodeBox`]
+//!   for the caller to draw in.
 //! - A list a person puts in their own order by dragging (or Alt and an arrow): [`ReorderList`] on it,
 //!   [`ReorderItem`] on each item, and observe [`Reordered`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Borders: [`stroke`]. Panel widths and offsets: [`extent`].
@@ -100,6 +103,7 @@ mod badge;
 mod bubble;
 mod button_group;
 mod buttons;
+mod canvas;
 mod check_circle;
 mod chip;
 mod choice_tile;
@@ -107,6 +111,7 @@ mod containers;
 mod desktop;
 mod detail;
 mod field_well;
+mod graph;
 mod hint;
 mod hover;
 mod icons;
@@ -156,12 +161,19 @@ pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
 pub use bubble::{Side, bubble, bubble_head};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
+pub use canvas::{
+    CANVAS_MAX_ZOOM, CANVAS_MIN_ZOOM, Canvas, CanvasContent, CanvasExtent, CanvasParts, CanvasPlugin, spawn_canvas,
+};
 pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use choice_tile::{ChoiceCaption, ChoicePicture, ChoiceTile, ChoiceTileParts, spawn_choice_tile};
 pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
+pub use graph::{
+    EdgeRoute, Graph, GraphEdge, GraphEdgeLine, GraphLayout, GraphNode, GraphNodeBox, GraphParts, lay_out_graph,
+    spawn_graph,
+};
 pub use hint::{Hint, HintBounds};
 pub use hover::HoverTone;
 pub use icons::{Icon, button_icon, icon_text};
@@ -230,7 +242,7 @@ impl Plugin for UiPlugin {
         if !app.is_plugin_added::<TextSizePlugin>() {
             app.add_plugins(TextSizePlugin);
         }
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin, ReorderPlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin, ReorderPlugin, CanvasPlugin))
             .init_resource::<nav::SidebarWidth>()
             .add_observer(nav::start_edge_drag)
             .add_observer(nav::drag_edge)

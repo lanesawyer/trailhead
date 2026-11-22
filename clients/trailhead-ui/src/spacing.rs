@@ -110,6 +110,12 @@ pub mod extent {
     pub const PICTURE_WIDTH: f32 = 160.0;
     /// A picture's thumbnail box, down: a screen's shape.
     pub const PICTURE_HEIGHT: f32 = 100.0;
+    /// How far apart a graph's layers sit, across (`spawn_graph`): room between them for the turns of its edges.
+    pub const GRAPH_LAYERS_APART: f32 = 56.0;
+    /// How far apart the nodes of one layer of a graph sit, down: room for an edge to pass between two of them.
+    pub const GRAPH_NODES_APART: f32 = 24.0;
+    /// The square that marks where a graph's edge meets the node it points to, across.
+    pub const GRAPH_EDGE_END: f32 = 6.0;
 }
 
 /// How thick a line is: a border, a rule between panes.
@@ -120,6 +126,8 @@ pub mod stroke {
     pub const GRIP: f32 = 2.0;
     /// A round check's ring: a little heavier than a hairline, as an icon's lines are.
     pub const RING: f32 = 1.5;
+    /// An edge of a graph: heavier than a hairline, so it still reads with the canvas zoomed out.
+    pub const EDGE: f32 = 2.0;
 }
 
 #[cfg(test)]
