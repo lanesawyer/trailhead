@@ -243,7 +243,7 @@ impl Factory {
         if after == 0 || !task.plan.awaits_planner() || task.run.worker_breach.is_some() {
             return false;
         }
-        let waited = self.pool.parked_since.lock().unwrap().get(&task.key).map(|since| since.elapsed());
+        let waited = self.pool.parked_for(&task.key);
         if waited.is_none_or(|w| w < Duration::from_secs(u64::from(after) * 60)) {
             return false;
         }
@@ -259,7 +259,7 @@ impl Factory {
             tracing::debug!(task = %task.key, error = %e, "couldn't record that an idle planner's sandbox is released; keeping it for now");
             return false;
         }
-        self.pool.parked_since.lock().unwrap().remove(&task.key);
+        self.pool.unparked(&task.key);
         tracing::info!(task = %task.key, sandbox = %sandbox.name, waited = ?waited, "released an idle planner's sandbox");
         if let Err(e) = self.release_worker(sandbox).await {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't release an idle planner's sandbox; reconcile will");

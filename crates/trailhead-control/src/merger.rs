@@ -1,6 +1,9 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
 use trailhead_factory::{
-    BranchUpdate, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy, Patch,
-    PrGrade, PrRef, PrState, Result, RunPatch, Said, Scope, Status, Task, TaskKey, VerdictKind,
+    BranchUpdate, ChangedFile, CiState, Error, HISTORY_LIMIT, MergeDecision, MergeMode, MergeOutcome, Merged, MergedBy,
+    Patch, PrGrade, PrRef, PrState, Result, RunPatch, Said, Scope, Status, Task, TaskKey, VerdictKind,
 };
 
 use tokio::time::Instant;
@@ -8,6 +11,111 @@ use tokio::time::Instant;
 use crate::Factory;
 use crate::decide::{Facts, decide};
 use trailhead_factory::messages::{self, Rework, Wording, decision_message};
+
+/// What the host last said of whether a PR's head only carries the base into the head that was reviewed.
+struct Carried {
+    reviewed: String,
+    head: String,
+    carried: bool,
+}
+
+/// A branch update the merger asked the host for and is waiting on.
+pub(crate) struct Update {
+    /// The head it was asked on: the update has landed once the head moves.
+    pub head: String,
+    pub since: Instant,
+    /// How many times it has been asked on this head.
+    pub asks: u32,
+}
+
+/// What the merge path keeps between passes. In memory: a restart reads and asks again.
+#[derive(Default)]
+pub(crate) struct MergerState {
+    /// The merge mode last read from the repo's file, kept when a later read fails.
+    pub(crate) merge_mode: Mutex<MergeMode>,
+    /// Why the merge mode last couldn't be re-read, while it still can't: said once, not on every merge decision
+    /// (TRAIL-1691: a file an older server couldn't parse logged the same line 450 times in a few minutes).
+    pub(crate) merge_mode_unread: Mutex<Option<String>>,
+    /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
+    /// unchanged grades from them instead of asking the host again (TRAIL-266).
+    listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
+    /// What the host last said about whether a task's PR head is only a clean merge of the base into the reviewed
+    /// head: the answer for a (reviewed, head) pair doesn't change, so a pass's several questions about it (the
+    /// stale check, the gates) cost one round trip (TRAIL-1220).
+    carried: Mutex<HashMap<TaskKey, Carried>>,
+    /// Tasks whose PR the merger asked the host to bring up to date. The host queues the merge (a 202), so until the
+    /// head moves the PR is still behind and asking again would only queue another, unless the update never lands:
+    /// after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then reworks
+    /// (TRAIL-490, TRAIL-621).
+    updating: Mutex<HashMap<TaskKey, Update>>,
+    /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
+    pub(crate) held: Mutex<Option<crate::person::Held>>,
+}
+
+impl MergerState {
+    /// The state a factory starts with: nothing kept, and the merge mode its config was read with.
+    pub(crate) fn starting(mode: MergeMode) -> MergerState {
+        MergerState { merge_mode: Mutex::new(mode), ..MergerState::default() }
+    }
+
+    /// Drops everything kept for a task that has left the merge path. A new per-task map is cleared here too.
+    pub(crate) fn forget(&self, task: &TaskKey) {
+        self.updating.lock().unwrap().remove(task);
+        self.listed.lock().unwrap().remove(task);
+        self.carried.lock().unwrap().remove(task);
+    }
+
+    /// Drops everything kept for the tasks not in `keep`.
+    pub(crate) fn retain(&self, keep: &HashSet<&TaskKey>) {
+        self.updating.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.listed.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.carried.lock().unwrap().retain(|k, _| keep.contains(k));
+    }
+
+    /// The files of a task's PR as last listed, if that was at `head`.
+    fn listed_at(&self, task: &TaskKey, head: &str) -> Option<Vec<ChangedFile>> {
+        self.listed.lock().unwrap().get(task).filter(|(at, _)| at == head).map(|(_, files)| files.clone())
+    }
+
+    /// Keeps the files a task's PR was listed with at `head`.
+    fn list(&self, task: &TaskKey, head: &str, files: Vec<ChangedFile>) {
+        self.listed.lock().unwrap().insert(task.clone(), (head.to_string(), files));
+    }
+
+    /// Whether any listing is kept for a task.
+    pub(crate) fn lists(&self, task: &TaskKey) -> bool {
+        self.listed.lock().unwrap().contains_key(task)
+    }
+
+    /// What the host said of this (reviewed, head) pair, if it was asked.
+    fn carried(&self, task: &TaskKey, reviewed: &str, head: &str) -> Option<bool> {
+        let kept = self.carried.lock().unwrap();
+        kept.get(task).filter(|c| c.reviewed == reviewed && c.head == head).map(|c| c.carried)
+    }
+
+    /// Keeps what the host said of this (reviewed, head) pair.
+    fn carry(&self, task: &TaskKey, reviewed: &str, head: &str, carried: bool) {
+        let kept = Carried { reviewed: reviewed.to_string(), head: head.to_string(), carried };
+        self.carried.lock().unwrap().insert(task.clone(), kept);
+    }
+
+    /// The branch update asked for on a task's PR and not yet seen to land.
+    pub(crate) fn update_asked(&self, task: &TaskKey) -> Option<Update> {
+        let kept = self.updating.lock().unwrap();
+        kept.get(task).map(|u| Update { head: u.head.clone(), since: u.since, asks: u.asks })
+    }
+
+    /// Notes a branch update asked for on `head` just now, the `asks`th on it.
+    fn ask_update(&self, task: &TaskKey, head: &str, asks: u32) {
+        let asked = Update { head: head.to_string(), since: Instant::now(), asks };
+        self.updating.lock().unwrap().insert(task.clone(), asked);
+    }
+
+    /// The task's PR is no longer waiting on an update: it landed, conflicted, or was given up on.
+    fn update_over(&self, task: &TaskKey) {
+        self.updating.lock().unwrap().remove(task);
+    }
+}
 
 impl Factory {
     /// The merger (`docs/factory/review.md#the-merger`): evaluates the grade's gates on the PR's current head and
@@ -53,18 +161,14 @@ impl Factory {
         head: Option<&str>,
     ) -> Result<bool> {
         let Some(codehost) = &self.codehost else { return Ok(false) };
-        if let Some(head) = head {
-            let known = self.merger.carried.lock().unwrap().get(key).cloned();
-            if let Some((r, h, carried)) = known
-                && r == reviewed
-                && h == head
-            {
-                return Ok(carried);
-            }
+        if let Some(head) = head
+            && let Some(carried) = self.merger.carried(key, reviewed, head)
+        {
+            return Ok(carried);
         }
         let carried = codehost.carries_verdict(pr, reviewed).await?;
         if let Some(head) = head {
-            self.merger.carried.lock().unwrap().insert(key.clone(), (reviewed.to_string(), head.to_string(), carried));
+            self.merger.carry(key, reviewed, head, carried);
         }
         Ok(carried)
     }
@@ -301,9 +405,8 @@ impl Factory {
         }
         if codehost.behind(pr).await? {
             // An update asked for on this head is still queued: the head moves when it lands.
-            let queued = self.merger.updating.lock().unwrap().get(&task.key).cloned();
             let mut asked = 0;
-            if let Some((head, since, times)) = queued
+            if let Some(Update { head, since, asks: times }) = self.merger.update_asked(&task.key)
                 && head == decision.head
             {
                 if since.elapsed() < crate::UPDATE_PATIENCE {
@@ -313,7 +416,7 @@ impl Factory {
                 // A host that keeps dropping the update has likely found a conflict it only reports by dropping it.
                 if times >= crate::UPDATE_ASKS {
                     tracing::warn!(task = %task.key, pr = %pr.url, times, "the branch update never landed; reworking");
-                    self.merger.updating.lock().unwrap().remove(&task.key);
+                    self.merger.update_over(&task.key);
                     return self.rework_dropped_update(task, pr, attempt).await;
                 }
                 tracing::warn!(task = %task.key, pr = %pr.url, "the branch update never landed; asking again");
@@ -321,22 +424,18 @@ impl Factory {
             }
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
-                    self.merger.updating.lock().unwrap().remove(&task.key);
+                    self.merger.update_over(&task.key);
                     self.rework_conflict(task, pr, attempt).await?;
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {
-                    self.merger
-                        .updating
-                        .lock()
-                        .unwrap()
-                        .insert(task.key.clone(), (decision.head.clone(), Instant::now(), asked + 1));
+                    self.merger.ask_update(&task.key, &decision.head, asked + 1);
                 }
                 BranchUpdate::UpToDate => {}
             }
             return Ok(());
         }
-        self.merger.updating.lock().unwrap().remove(&task.key);
+        self.merger.update_over(&task.key);
         // A person may have set the task aside, or taken its grade off, since the gates were read: look once more
         // before merging what is no longer the factory's (TRAIL-1617).
         let current = self.tracker.show(&task.key).await?;
@@ -419,15 +518,13 @@ impl Factory {
         let Some(codehost) = &self.codehost else {
             return Ok(task.grade.map(|g| PrGrade { grade: g, task: Some(g), reasons: Vec::new() }));
         };
-        let cached = head.and_then(|h| {
-            self.merger.listed.lock().unwrap().get(&task.key).filter(|(at, _)| at == h).map(|(_, files)| files.clone())
-        });
+        let cached = head.and_then(|h| self.merger.listed_at(&task.key, h));
         let files = match cached {
             Some(files) => files,
             None => {
                 let files = codehost.files(pr).await?;
                 if let Some(h) = head {
-                    self.merger.listed.lock().unwrap().insert(task.key.clone(), (h.to_string(), files.clone()));
+                    self.merger.list(&task.key, h, files.clone());
                 }
                 files
             }

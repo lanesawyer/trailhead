@@ -38,14 +38,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::time::Instant;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels,
-    MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
+    CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels, MergeMode,
+    ModelProvider, PrRef, Sandbox, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
 use crate::infra::Backoff;
-use crate::pool::Trouble;
+use crate::merger::MergerState;
+use crate::pool::PoolState;
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
@@ -237,54 +237,6 @@ pub struct Factory {
     status: Arc<StatusBoard>,
 }
 
-/// What the merge path keeps between passes. In memory: a restart reads and asks again.
-#[derive(Default)]
-struct MergerState {
-    /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
-    merge_mode: Mutex<MergeMode>,
-    /// Why the merge mode last couldn't be re-read, while it still can't: said once, not on every merge decision
-    /// (TRAIL-1691: a file an older server couldn't parse logged the same line 450 times in a few minutes).
-    merge_mode_unread: Mutex<Option<String>>,
-    /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
-    /// unchanged grades from them instead of asking the host again (TRAIL-266).
-    listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
-    /// What the host last said about whether a task's PR head is only a clean merge of the base into the reviewed
-    /// head, keyed by that (reviewed, head) pair: the answer for a pair doesn't change, so a pass's several
-    /// questions about it (the stale check, the gates) cost one round trip (TRAIL-1220).
-    carried: Mutex<HashMap<TaskKey, (String, String, bool)>>,
-    /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
-    /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
-    /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
-    /// reworks (TRAIL-490, TRAIL-621). Each entry also counts the asks.
-    updating: Mutex<HashMap<TaskKey, (String, Instant, u32)>>,
-    /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
-    held: Mutex<Option<person::Held>>,
-}
-
-/// What the factory remembers of its pooled sandboxes. In memory: a restart counts again from nothing.
-#[derive(Default)]
-struct PoolState {
-    troubled: Mutex<HashMap<String, Trouble>>,
-    /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
-    /// memory: a restart starts the wait again (TRAIL-601).
-    parked_since: Mutex<HashMap<TaskKey, Instant>>,
-    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
-    /// starting together never take the same sandbox.
-    pool_pick: tokio::sync::Mutex<()>,
-    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
-    /// they're blocked again.
-    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
-    /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
-    warm_cost: Mutex<HashMap<SandboxId, Duration>>,
-    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
-    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
-    /// Consecutive runs that found no room on each warm pooled sandbox's host, cleared by one that did (TRAIL-1633).
-    short_preflights: Mutex<HashMap<SandboxId, u32>>,
-    /// Busy pooled sandboxes a refresh asked for, by name: destroyed on release rather than restored. In memory: a
-    /// restart forgets them, and the refresh is asked again.
-    refresh: Mutex<HashSet<String>>,
-}
-
 /// Where runs being started have been placed, and what the paid targets have cost.
 #[derive(Default)]
 struct Placing {
@@ -347,39 +299,33 @@ impl Factory {
     /// has left it: merged, closed, cancelled or otherwise out of review (TRAIL-680). A new per-task map there is
     /// cleared here too.
     pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
-        self.merger.updating.lock().unwrap().remove(task);
-        self.merger.listed.lock().unwrap().remove(task);
-        self.merger.carried.lock().unwrap().remove(task);
+        self.merger.forget(task);
     }
 
     /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
     /// task that left review any way at all (cancelled, deleted, re-parented out of the queue, done by hand) is no
     /// longer listed, so its entries go without each way out needing its own check (TRAIL-680).
     pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
-        self.merger.updating.lock().unwrap().retain(|k, _| keep.contains(k));
-        self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
-        self.merger.carried.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.retain(keep);
     }
 
     /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
     #[doc(hidden)]
     pub fn sandbox_entries(&self) -> usize {
-        self.pool.prepare_failures.lock().unwrap().len()
-            + self.pool.warm_cost.lock().unwrap().len()
-            + self.pool.short_preflights.lock().unwrap().len()
+        self.pool.entries()
     }
 
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
-        self.merger.updating.lock().unwrap().contains_key(task)
+        self.merger.update_asked(task).is_some()
     }
 
     /// Whether the merger holds the files it listed for this task's PR, so a pass at the same head can skip the
     /// listing (for tests).
     #[doc(hidden)]
     pub fn caches_pr_files(&self, task: &TaskKey) -> bool {
-        self.merger.listed.lock().unwrap().contains_key(task)
+        self.merger.lists(task)
     }
 
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
@@ -408,7 +354,7 @@ impl Factory {
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         host.note_queue_use(&config.repo.project, config.repo.queue.is_empty());
-        let merge_mode = Mutex::new(config.merge.mode);
+        let merger = MergerState::starting(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));
         status.queue(config.repo.queue.iter().cloned().map(TaskKey).collect());
@@ -418,7 +364,7 @@ impl Factory {
             tracker,
             codehost: None,
             live_settings: None,
-            merger: MergerState { merge_mode, ..MergerState::default() },
+            merger,
             pool: PoolState::default(),
             backoff: Backoff::default(),
             host,
@@ -514,7 +460,7 @@ impl Factory {
     /// Wildcards can't be looked up, so they're left out. That includes the hosts opened for this sandbox's install.
     fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let opened = self.pool.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let opened = self.pool.take_install(&sandbox.id);
         let install = self.install_egress().domains.into_iter().chain(opened);
         let mut blocked: Vec<String> = Vec::new();
         for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {
