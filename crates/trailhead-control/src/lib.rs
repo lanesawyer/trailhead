@@ -44,6 +44,7 @@ use trailhead_factory::{
     MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
+use crate::infra::Backoff;
 use crate::pool::Trouble;
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
@@ -234,17 +235,6 @@ pub struct Factory {
     placing: Placing,
     /// What this control plane shows of itself to `factory status` and the UI.
     status: Arc<StatusBoard>,
-}
-
-/// What the factory remembers of tasks that failed on the infrastructure. In memory: a restart starts the waits and
-/// counts again.
-#[derive(Default)]
-struct Backoff {
-    /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
-    setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
-    /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
-    /// is only declared when `setup` itself failed twice running (TRAIL-876).
-    setup_failures: Mutex<HashMap<TaskKey, u32>>,
 }
 
 /// What the merge path keeps between passes. In memory: a restart reads and asks again.

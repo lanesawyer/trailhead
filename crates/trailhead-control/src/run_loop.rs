@@ -465,7 +465,7 @@ impl Factory {
                 holders
                     .iter()
                     .map(|(k, parked)| {
-                        let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                        let retry = self.backoff.next_try(k);
                         describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
                     })
                     .collect(),

@@ -1,6 +1,10 @@
 //! What an infrastructure failure does to its task: the one policy a worker's run and a reviewer's share.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use trailhead_factory::{Error, RunPatch, TaskKey, Tracker, Usd};
 
@@ -70,10 +74,75 @@ impl Setback {
     }
 }
 
+/// A task held back after failing on the infrastructure.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// Failures in a row: the count that parks.
+    failures: u32,
+    /// Waits in a row for a resource its host lacks.
+    waits: u32,
+    next_try: Instant,
+}
+
+/// What the factory remembers of tasks that failed on the infrastructure. In memory: a restart starts the waits and
+/// counts again.
+#[derive(Default)]
+pub(crate) struct Backoff {
+    /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
+    setbacks: Mutex<HashMap<TaskKey, Held>>,
+    /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
+    /// is only declared when `setup` itself failed twice running (TRAIL-876).
+    setup_failures: Mutex<HashMap<TaskKey, u32>>,
+}
+
+impl Backoff {
+    /// The (failures, waits) in a row held for a task.
+    pub(crate) fn held(&self, key: &TaskKey) -> (u32, u32) {
+        self.setbacks.lock().unwrap().get(key).map_or((0, 0), |h| (h.failures, h.waits))
+    }
+
+    /// When a held task may be tried again; `None` for one that isn't held.
+    pub(crate) fn next_try(&self, key: &TaskKey) -> Option<Instant> {
+        self.setbacks.lock().unwrap().get(key).map(|h| h.next_try)
+    }
+
+    /// Holds a task for `wait` after `failures` in a row, with no waits for a resource behind it.
+    pub(crate) fn hold(&self, key: &TaskKey, failures: u32, wait: Duration) {
+        let held = Held { failures, waits: 0, next_try: Instant::now() + wait };
+        self.setbacks.lock().unwrap().insert(key.clone(), held);
+    }
+
+    /// Holds a task that waits on a resource once more: `wait` is given the waits in a row, this one included, and
+    /// says how long this one lasts.
+    pub(crate) fn hold_waiting(&self, key: &TaskKey, failures: u32, wait: impl FnOnce(u32) -> Duration) {
+        let mut setbacks = self.setbacks.lock().unwrap();
+        let waits = setbacks.get(key).map_or(0, |h| h.waits) + 1;
+        setbacks.insert(key.clone(), Held { failures, waits, next_try: Instant::now() + wait(waits) });
+    }
+
+    /// Lets a task go: it is no longer held back, whatever `setup` did on its last runs.
+    pub(crate) fn release(&self, key: &TaskKey) {
+        self.setbacks.lock().unwrap().remove(key);
+    }
+
+    /// Counts a run that failed in `setup`, and says how many have in a row.
+    pub(crate) fn setup_failed(&self, key: &TaskKey) -> u32 {
+        let mut counts = self.setup_failures.lock().unwrap();
+        let n = counts.entry(key.clone()).or_insert(0);
+        *n += 1;
+        *n
+    }
+
+    /// A run got past `setup`, or failed on something else: its `setup` failures in a row are over.
+    pub(crate) fn setup_passed(&self, key: &TaskKey) {
+        self.setup_failures.lock().unwrap().remove(key);
+    }
+}
+
 impl Factory {
     /// The (failures, waits) in a row held in memory for a task.
     pub(crate) fn held_setbacks(&self, key: &TaskKey) -> (u32, u32) {
-        self.backoff.setbacks.lock().unwrap().get(key).map_or((0, 0), |(n, w, _)| (*n, *w))
+        self.backoff.held(key)
     }
 
     /// A task that should have been parked for its failures and couldn't be asked the question: it keeps its backoff

@@ -180,7 +180,7 @@ impl Factory {
             Err(e @ Error::Forbidden(_)) => {
                 // The give-back below may be lost with the tracker down, so the wait grows with the skips held in
                 // memory instead of resetting to a minute. It's a wait only: the count that parks isn't raised.
-                let held = self.backoff.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
+                let (held, _) = self.backoff.held(&task.key);
                 self.set_back_waiting(&task.key, held);
                 let update = RunPatch::retries(retries + 1);
                 if let Err(e) = self.tracker.report(&task.key, update).await {
@@ -341,8 +341,8 @@ impl Factory {
         // API trouble.
         let api_trouble = matches!(&report.result, RunResult::Failed(reason) if is_transient_api_error(reason));
         if !api_trouble {
-            self.backoff.setbacks.lock().unwrap().remove(&task.key);
-            self.backoff.setup_failures.lock().unwrap().remove(&task.key);
+            self.backoff.release(&task.key);
+            self.backoff.setup_passed(&task.key);
         }
         let infra_failures = if api_trouble { None } else { task.run.infra_failures.filter(|n| *n > 0).map(|_| 0) };
         let update = RunPatch {
@@ -533,16 +533,11 @@ impl Factory {
         // more retries would only spend `max_infra_failures` on the same compile error (TRAIL-652).
         // Counted apart from the other infrastructure failures, so it takes two `setup` failures in a row, not one
         // after some unrelated failure (TRAIL-876).
-        let setup_failures = {
-            let mut counts = self.backoff.setup_failures.lock().unwrap();
-            if matches!(error, Error::SetupFailed(_)) {
-                let n = counts.entry(task.key.clone()).or_insert(0);
-                *n += 1;
-                *n
-            } else {
-                counts.remove(&task.key);
-                0
-            }
+        let setup_failures = if matches!(error, Error::SetupFailed(_)) {
+            self.backoff.setup_failed(&task.key)
+        } else {
+            self.backoff.setup_passed(&task.key);
+            0
         };
         let broken_base = setup_failures >= SETUP_FAILURES_TO_PARK;
         let setback = Setback::decide(&error, prior, self.held_setbacks(&task.key), max, broken_base);
@@ -577,8 +572,8 @@ impl Factory {
             match sub.ask(&task.key, &question).await {
                 // Reopened by Lane, it starts again with no wait, as its count does.
                 Ok(()) => {
-                    self.backoff.setbacks.lock().unwrap().remove(&task.key);
-                    self.backoff.setup_failures.lock().unwrap().remove(&task.key);
+                    self.backoff.release(&task.key);
+                    self.backoff.setup_passed(&task.key);
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; reconcile will requeue it");
@@ -610,21 +605,19 @@ impl Factory {
     /// Holds a task back for a backoff that grows with each infrastructure failure in a row.
     pub(crate) fn set_back(&self, key: &TaskKey, failures: u32) {
         let wait = backoff(failures, FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
-        self.backoff.setbacks.lock().unwrap().insert(key.clone(), (failures, 0, Instant::now() + wait));
+        self.backoff.hold(key, failures, wait);
     }
 
     /// Holds a task back while its host lacks a resource: the backoff grows with the waits as well as the failures,
     /// but the stored count, the one that parks, stays at `failures`.
     pub(crate) fn set_back_waiting(&self, key: &TaskKey, failures: u32) {
-        let mut setbacks = self.backoff.setbacks.lock().unwrap();
-        let waits = setbacks.get(key).map_or(0, |(_, w, _)| *w) + 1;
-        let wait = backoff(failures.saturating_add(waits), FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
-        setbacks.insert(key.clone(), (failures, waits, Instant::now() + wait));
+        let wait = |waits: u32| backoff(failures.saturating_add(waits), FIRST_INFRA_BACKOFF, MAX_INFRA_BACKOFF);
+        self.backoff.hold_waiting(key, failures, wait);
     }
 
     /// Whether a task that failed on the infrastructure has waited out its backoff.
     pub(crate) fn setback_over(&self, key: &TaskKey) -> bool {
-        self.backoff.setbacks.lock().unwrap().get(key).is_none_or(|(_, _, next_try)| Instant::now() >= *next_try)
+        self.backoff.next_try(key).is_none_or(|next_try| Instant::now() >= next_try)
     }
 
     /// Runs one step in a sandbox, pricing usage as it streams in and cancelling on a breach.
