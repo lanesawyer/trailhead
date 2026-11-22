@@ -271,6 +271,8 @@ impl Mirror {
             trailhead_model::Entity::Agent => Kind::Agent,
             trailhead_model::Entity::Dependency => Kind::Dependency,
             trailhead_model::Entity::Attachment => Kind::Attachment,
+            // Not mirrored yet (TRAIL-1678).
+            trailhead_model::Entity::Notification => return,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
             return self.remove(commands, kind, &id);

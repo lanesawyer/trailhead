@@ -131,15 +131,11 @@ pub struct Latest(pub HashMap<String, i64>);
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct InspectorState(pub Option<InspectorView>);
 
-/// Notifications about a task, not changes to it; the server's `changes_only` leaves them out, and undo can't revert them.
-fn is_notification(kind: &str) -> bool {
-    matches!(kind, "task.due_soon" | "task.overdue")
-}
-
 fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) {
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
-        if is_notification(&e.kind) {
+        // Told to a person, not a change: the server's `changes_only` leaves these out, and undo can't revert them.
+        if trailhead_model::is_notification(&e.kind) {
             continue;
         }
         if let Some(task) = trailhead_shell::sync::task_of(e) {

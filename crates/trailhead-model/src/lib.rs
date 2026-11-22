@@ -10,9 +10,11 @@ use uuid::Uuid;
 
 mod attachment;
 pub mod config;
+mod notification;
 pub mod shell;
 
 pub use attachment::*;
+pub use notification::*;
 
 /// A value that isn't a valid status, kind or other model value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -711,6 +713,7 @@ string_enum!(Entity "entity" {
     Dependency => "dependency",
     Agent => "agent",
     Attachment => "attachment",
+    Notification => "notification",
 });
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
