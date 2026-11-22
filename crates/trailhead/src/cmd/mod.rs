@@ -10,6 +10,7 @@ mod app_remote;
 pub(crate) mod attachments;
 pub(crate) mod claims;
 pub(crate) mod comments;
+pub(crate) mod connectors;
 pub(crate) mod events;
 #[cfg(feature = "factory")]
 pub(crate) mod factory;

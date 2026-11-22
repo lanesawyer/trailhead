@@ -5,18 +5,17 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use trailhead_core::{
-    CreatedTask, Grade, GradeFilter, NewTask, Priority, SearchFilter, SearchHit, Status, Task, TaskDetail, TaskFilter,
-    TaskPatch,
-};
+use trailhead_core::{CreatedTask, NewTask, SearchFilter, SearchHit, Task, TaskDetail, TaskFilter, TaskPatch};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Auth;
 use crate::error::{ApiResult, Json, Path, Query, invalid};
 use crate::openapi::{ErrorBody, IfMatch, TaskParam};
-use crate::params::{parse_list, parse_opt_at, parse_opt_date, parse_opt_time, split_list};
+use crate::params::{parse_grade_filter, parse_list, parse_opt_at, parse_opt_date, parse_opt_time, split_list};
 
-use super::{S, if_match, nullable, select_fields, with_etag};
+use trailhead_core::wire::{CreateTask, UpdateTask};
+
+use super::{S, if_match, select_fields, with_etag};
 
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -134,45 +133,6 @@ pub(crate) async fn list_tasks(State(s): S, Auth(ctx): Auth, Query(q): Query<Tas
     Ok(Json(out))
 }
 
-#[derive(Deserialize, ToSchema)]
-pub(crate) struct CreateTask {
-    project: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    /// 1 (urgent) to 4 (low). Defaults to 3.
-    priority: Option<Priority>,
-    /// The day it's due. Optional when `due_at` is set.
-    #[schema(format = Date)]
-    due_on: Option<String>,
-    /// A time it's due by. Without one, it's due by the end of `due_on` in `due_tz`.
-    #[schema(format = DateTime)]
-    due_at: Option<String>,
-    /// IANA zone the deadline was set in; decides its day and when that day ends. Without one, UTC.
-    due_tz: Option<String>,
-    /// The day to work the task (`YYYY-MM-DD`), separate from its due date.
-    /// Optional when `scheduled_at` is set.
-    #[schema(format = Date)]
-    scheduled_on: Option<String>,
-    /// A time on the scheduled day, e.g. 1pm.
-    #[schema(format = DateTime)]
-    scheduled_at: Option<String>,
-    /// IANA zone `scheduled_at` was planned in; decides its day. Without one, the UTC day.
-    scheduled_tz: Option<String>,
-    parent: Option<String>,
-    /// 1 to 4. Only a human can create a task with a grade.
-    grade: Option<Grade>,
-    metadata: Option<Value>,
-    source: Option<String>,
-    external_id: Option<String>,
-    /// Tasks that must finish before this one. Added with the task: if one is refused, no task is created.
-    #[serde(default)]
-    blocked_by: Vec<String>,
-    /// Tasks this one blocks, added the same way.
-    #[serde(default)]
-    blocks: Vec<String>,
-}
-
 #[utoipa::path(
     post, path = "/v1/tasks", tag = "tasks", request_body = CreateTask,
     responses(
@@ -221,48 +181,6 @@ pub(crate) async fn create_task(State(s): S, Auth(ctx): Auth, Json(b): Json<Crea
 pub(crate) async fn get_task(State(s): S, Auth(ctx): Auth, Path(t): Path<String>) -> ApiResult<Response> {
     let detail = s.store.task_detail(&ctx, &t).await?;
     Ok(with_etag(detail.task.version, detail))
-}
-
-#[derive(Deserialize, ToSchema)]
-pub(crate) struct UpdateTask {
-    title: Option<String>,
-    description: Option<String>,
-    status: Option<Status>,
-    priority: Option<Priority>,
-    /// 1 to 4. A human can set, raise, lower or `null` it; an agent can only raise an existing grade.
-    #[serde(default, deserialize_with = "nullable")]
-    grade: Option<Option<Grade>>,
-    /// Key of the task this one duplicates. Needs `status` `cancelled` (in this request or already);
-    /// `null` clears it, and so does leaving `cancelled`.
-    #[serde(default, deserialize_with = "nullable")]
-    duplicate_of: Option<Option<String>>,
-    /// A new day without `due_at` drops the time; `null` removes the deadline.
-    #[serde(default, deserialize_with = "nullable")]
-    #[schema(format = Date)]
-    due_on: Option<Option<String>>,
-    /// Moves the day to match; `null` keeps the day without a time.
-    #[serde(default, deserialize_with = "nullable")]
-    #[schema(format = DateTime)]
-    due_at: Option<Option<String>>,
-    #[serde(default, deserialize_with = "nullable")]
-    due_tz: Option<Option<String>>,
-    #[serde(default, deserialize_with = "nullable")]
-    /// A new day without `scheduled_at` drops the time; `null` unschedules.
-    #[schema(format = Date)]
-    scheduled_on: Option<Option<String>>,
-    /// Moves the day to match; `null` keeps the day without a time.
-    #[serde(default, deserialize_with = "nullable")]
-    #[schema(format = DateTime)]
-    scheduled_at: Option<Option<String>>,
-    #[serde(default, deserialize_with = "nullable")]
-    scheduled_tz: Option<Option<String>>,
-    #[serde(default, deserialize_with = "nullable")]
-    parent: Option<Option<String>>,
-    metadata: Option<Value>,
-    /// A handoff comment written with the update. If the update is refused, it isn't written.
-    handoff: Option<String>,
-    /// Also accepted in the body for clients that can't set headers.
-    version: Option<i64>,
 }
 
 #[utoipa::path(
@@ -370,10 +288,6 @@ pub(crate) async fn search(State(s): S, Auth(ctx): Auth, Query(q): Query<SearchQ
         }
     }
     Ok(Json(out))
-}
-
-fn parse_grade_filter(s: Option<&str>) -> ApiResult<GradeFilter> {
-    Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
 }
 
 #[derive(Deserialize, Default, ToSchema)]

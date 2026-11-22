@@ -30,9 +30,8 @@ impl Factory {
         let name = worker_name(&task.key, attempt, task.run.retries.unwrap_or(0));
         let credential = self.new_sub_agent(task, &name, &profile).await?;
         let sub = self.tracker.sub_agent(&name);
-        let infra_prior = task.run.infra_failures;
         if let Err(e) = sub.claim(&task.key).await {
-            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await);
+            return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await);
         }
         let started = RunPatch {
             attempt: Patch::Set(attempt),
@@ -43,7 +42,7 @@ impl Factory {
             ..RunPatch::default()
         };
         if let Err(e) = sub.report(&task.key, started).await {
-            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await);
+            return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await);
         }
         let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: false });
         tracing::info!(task = %task.key, run = %name, "preparing a planner sandbox");
@@ -61,7 +60,7 @@ impl Factory {
         };
         let (sandbox, context, plan) = match prepared.await {
             Ok(prepared) => prepared,
-            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await),
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await),
         };
         tracing::info!(task = %task.key, run = %name, sandbox = %sandbox.name, "starting planner");
         self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
@@ -91,15 +90,22 @@ impl Factory {
         let prior = task.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        self.conclude(task, &sub, &sandbox, &name, attempt, run, Some(place)).await
+        self.conclude(task, &sandbox, &name, attempt, run, Some(place)).await
     }
 
     /// A spec task in a repo with no planner profile: parked, as the factory's own identity, with a question saying
     /// to add one. Never planned on the worker's profile instead.
     async fn park_without_planner(&self, task: &Task) -> Result<Outcome> {
-        tracing::warn!(task = %task.key, "a spec task, but the repo has no planner profile; parking it");
+        // Read the file again first: a profile added since the server started is there, and what is owed is a restart.
+        self.merge_mode();
+        let unread = self.status.restart_needed().iter().any(|section| section == "profiles");
+        tracing::warn!(task = %task.key, unread, "a spec task, but the factory has no planner profile; parking it");
         self.tracker.claim(&task.key).await?;
-        let question = messages::no_planner_profile_question();
+        let question = if unread {
+            messages::planner_profile_needs_restart_question()
+        } else {
+            messages::no_planner_profile_question()
+        };
         if let Err(e) = self.tracker.ask(&task.key, &question).await {
             if let Err(re) = self.tracker.release(&task.key).await {
                 tracing::warn!(task = %task.key, error = %re, "couldn't release a spec task it failed to park");
@@ -142,7 +148,7 @@ impl Factory {
             false => format!("{}{}", turn.message.trim_end(), messages::plan_not_saved(&problems)),
         };
         if let Err(e) = sub.ask(&task.key, &question).await {
-            return Err(self.infra_failed(task, sub, name, e, task.run.infra_failures, Patch::Keep).await);
+            return Err(self.infra_failed(task, sub, name, e, Patch::Keep).await);
         }
         self.status.paused(&sandbox.name);
         Ok(Outcome::Parked { reason: turn.message })
@@ -237,7 +243,7 @@ impl Factory {
         if after == 0 || !task.plan.awaits_planner() || task.run.worker_breach.is_some() {
             return false;
         }
-        let waited = self.pool.parked_since.lock().unwrap().get(&task.key).map(|since| since.elapsed());
+        let waited = self.pool.parked_for(&task.key);
         if waited.is_none_or(|w| w < Duration::from_secs(u64::from(after) * 60)) {
             return false;
         }
@@ -248,12 +254,12 @@ impl Factory {
             }
             _ => self.tracker.clone(),
         };
-        let record = RunPatch { released: Patch::Set(unix_now()), ..RunPatch::default() };
+        let record = RunPatch::released(unix_now());
         if let Err(e) = writer.report(&task.key, record).await {
             tracing::debug!(task = %task.key, error = %e, "couldn't record that an idle planner's sandbox is released; keeping it for now");
             return false;
         }
-        self.pool.parked_since.lock().unwrap().remove(&task.key);
+        self.pool.unparked(&task.key);
         tracing::info!(task = %task.key, sandbox = %sandbox.name, waited = ?waited, "released an idle planner's sandbox");
         if let Err(e) = self.release_worker(sandbox).await {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't release an idle planner's sandbox; reconcile will");

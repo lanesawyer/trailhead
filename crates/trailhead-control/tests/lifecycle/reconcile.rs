@@ -398,6 +398,7 @@ async fn a_rework_request_cut_short_is_finished_by_reconcile() {
             kind: trailhead_factory::RequestKind::Conflict,
             head: None,
             settled: false,
+            answered: false,
         }),
         ..Default::default()
     };

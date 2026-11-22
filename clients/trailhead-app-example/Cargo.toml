@@ -15,8 +15,14 @@ workspace = true
 bevy = { version = "0.20", default-features = false, features = ["std", "bevy_state", "bevy_ui_widgets", "bevy_scene"] }
 trailhead-shell.workspace = true
 trailhead-ui.workspace = true
+# A note's data is read from its record with serde, and a record is named by its id.
+serde.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-# The shell's test apps and the stand-in second app, and `testing::shot` for `tests/shots.rs`.
-trailhead-shell = { workspace = true, features = ["test-support", "shots"] }
+# The shell's test apps and the stand-in second app, `testing::server` for the live test of the notes, and
+# `testing::shot` for `tests/shots.rs`.
+trailhead-shell = { workspace = true, features = ["test-support", "test-server", "shots"] }
 tempfile.workspace = true
+tokio.workspace = true
+serde_json.workspace = true

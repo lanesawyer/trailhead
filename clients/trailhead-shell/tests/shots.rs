@@ -2,7 +2,9 @@
 //! and update buttons and the bell with its counts, the Ask forms in both themes (a change to be planned first, a new
 //! app, and the answer to a planned ask), the update panel listing what a newer build brings, the bell's panel listing
 //! notifications (`notifications`, the unread ones, `notifications-all`, and `notifications-focus` with focus on), the
-//! Notifications settings page (`settings-notifications`), the settings on each of the
+//! Notifications settings page (`settings-notifications`), the Connectors page (`settings-connectors`, as read,
+//! `-edited` with edits, a refusal and a whole error shown, and `-none` on a server with no apps repo), the settings
+//! on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
 //! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
@@ -24,13 +26,15 @@ use trailhead_model::shell::{AskTarget, AskTargets, Asked, AskedProject, AskedTa
 use trailhead_shell::ask::{AskForm, Askable};
 use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
+use trailhead_shell::connector_settings::{ConnectorSettings, Saving, Typed};
 use trailhead_shell::cover::SwitchCover;
 use trailhead_shell::fixture::notification_json;
 use trailhead_shell::net::{ApiAccess, Reason};
+use trailhead_shell::notification_settings::Clock;
 use trailhead_shell::notification_settings::NotificationPrefs;
 use trailhead_shell::server_settings::{SectionState, ServerSettings};
 use trailhead_shell::settings::{
-    ABOUT, APPEARANCE, CONNECTION, NOTIFICATIONS, OpenSettings, PageId, SERVER, SettingsPage, ShellDir,
+    ABOUT, APPEARANCE, CONNECTION, CONNECTORS, NOTIFICATIONS, OpenSettings, PageId, SERVER, SettingsPage, ShellDir,
 };
 use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::fill;
@@ -345,7 +349,8 @@ fn open_settings(shot: &mut ShotApp, page: PageId) {
 fn settings(shot: &mut ShotApp) {
     let world = shot.world_mut();
     world.insert_resource(ShellDir("/home/someone/.config/trailhead/shell".into()));
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     world.resource_mut::<trailhead_shell::connection::Dialed>().0 = Some("7204d50f3c".into());
     appearance(shot);
     set_connection(shot, Connection::Syncing);
@@ -367,6 +372,12 @@ fn settings(shot: &mut ShotApp) {
     save(shot, "settings-about");
     open_settings(shot, NOTES_SETTINGS);
     save(shot, "settings-app");
+    let world = shot.world_mut();
+    let search =
+        world.query_filtered::<Entity, With<trailhead_shell::settings::SettingsSearch>>().single(world).unwrap();
+    world.entity_mut(search).insert(bevy::text::EditableText::new("command"));
+    settle(shot);
+    save(shot, "settings-search");
     close_modals(shot);
 }
 
@@ -389,6 +400,7 @@ fn live_with_news(shot: &mut ShotApp) {
     ]
     .map(String::from);
     shot.world_mut().insert_resource(UpdateReady(Some(Newer::new("4567def", &subjects, 6))));
+    shot.world_mut().insert_resource(trailhead_shell::update::BuildRepo(Some("someone/apps".into())));
     settle(shot);
 }
 
@@ -598,6 +610,87 @@ fn server(shot: &mut ShotApp) {
     close_modals(shot);
 }
 
+/// Three connectors as a server shows them: one that ran well, one whose runs fail and whose secret isn't set, and
+/// one whose `connector.toml` doesn't read.
+fn connectors_listed() -> Vec<trailhead_model::connector::ConnectorInfo> {
+    let github = serde_json::json!({
+        "id": "github", "name": "GitHub", "every_secs": 300, "timeout_secs": 120, "hosts": ["api.github.com"],
+        "settings": [
+            {"name": "repos", "kind": "list", "label": "Repositories", "help": "owner/name, one per line",
+             "required": true, "value": ["lanesawyer/trailhead", "lanesawyer/cairn"]},
+            {"name": "me", "kind": "string", "label": "Your login", "help": "Whose reviews to rank first",
+             "required": false, "value": "lanesawyer"},
+            {"name": "drafts", "kind": "boolean", "label": "Include drafts", "required": false, "value": true}
+        ],
+        "secrets": [{"name": "token", "set": true}],
+        "feeds": [{"name": "pull_requests", "fields": {"title": "string"}, "collections": ["cairn.pull_requests"]}],
+        "enabled": true, "missing": [], "running": false,
+        "last_run": {"started_at": "2026-11-22T11:58:00Z", "duration_ms": 2140, "ok": true,
+                     "feeds": {"pull_requests": {"records": 12, "created": 1, "changed": 2, "removed": 0,
+                                                 "unchanged": 9}}},
+        "next_run": "2026-11-22T12:03:00Z"
+    });
+    let jira = serde_json::json!({
+        "id": "jira", "name": "Jira", "every_secs": 600, "timeout_secs": 120, "hosts": ["example.atlassian.net"],
+        "settings": [
+            {"name": "site", "kind": "string", "label": "Site", "help": "The Jira site's host", "required": true,
+             "value": "example.atlassian.net"},
+            {"name": "max_pages", "kind": "integer", "label": "Pages at most", "required": false, "value": 5}
+        ],
+        "secrets": [{"name": "email", "set": true}, {"name": "token", "set": false}],
+        "feeds": [{"name": "tickets", "fields": {"title": "string"}, "collections": []}],
+        "enabled": true,
+        "missing": ["the secret `token` (`trailhead connector login jira token` on the server's machine)"],
+        "running": false,
+        "last_run": {"started_at": "2026-11-22T09:30:00Z", "duration_ms": 640, "ok": false,
+                     "error": "GET https://example.atlassian.net/rest/api/3/search answered 401 Unauthorized\n\
+                               The token was refused: check it is an API token for this site, not a password.\n\
+                               {\"errorMessages\":[\"Client must be authenticated to access this resource.\"]}\n\
+                               at page 1 of tickets\nretried 3 times\ngave up"}
+    });
+    let broken = serde_json::json!({
+        "id": "linear", "name": "linear", "every_secs": 0, "timeout_secs": 0, "hosts": [], "settings": [],
+        "secrets": [], "feeds": [], "enabled": false, "running": false,
+        "error": "connectors/linear/connector.toml: hosts is empty: a connector has to declare the hosts it reaches",
+        "missing": ["a connector.toml that reads"]
+    });
+    [github, jira, broken].into_iter().map(|c| serde_json::from_value(c).unwrap()).collect()
+}
+
+/// The Connectors page as read, with an edit pending and a refusal, and with none to list.
+fn connectors(shot: &mut ShotApp) {
+    set_connection(shot, Connection::Live);
+    let now: jiff::Timestamp = "2026-11-22T12:00:30Z".parse().unwrap();
+    shot.world_mut().insert_resource(Clock::new(move || now.to_zoned(jiff::tz::TimeZone::UTC)));
+    shot.world_mut().resource_mut::<ConnectorSettings>().answered(connectors_listed(), Some(true));
+    open_settings(shot, CONNECTORS);
+    save(shot, "settings-connectors");
+
+    {
+        let mut settings = shot.world_mut().resource_mut::<ConnectorSettings>();
+        let draft = settings.drafts.get_mut("jira").unwrap();
+        draft.values.insert("max_pages".into(), Typed::Text("lots".into()));
+        let draft = settings.drafts.get_mut("github").unwrap();
+        draft.values.insert("me".into(), Typed::Text("someone-else".into()));
+        settings.saves.insert(
+            "github".into(),
+            Saving {
+                refusal: Some("invalid input: github: setting `me` must be a string".into()),
+                ..Default::default()
+            },
+        );
+        settings.whole_errors.insert("jira".into());
+    }
+    settle(shot);
+    save(shot, "settings-connectors-edited");
+    close_modals(shot);
+
+    shot.world_mut().resource_mut::<ConnectorSettings>().answered(Vec::new(), Some(false));
+    open_settings(shot, CONNECTORS);
+    save(shot, "settings-connectors-none");
+    close_modals(shot);
+}
+
 #[test]
 #[ignore = "needs a render adapter: run with `mise run shots`"]
 fn shots() {
@@ -635,7 +728,8 @@ fn shots() {
     let mut shot = shot_with(shell(), ShotOptions { size: (1024, 720), ..ShotOptions::default() }, ConnectUiPlugin);
     let world = shot.world_mut();
     world.resource_mut::<ConnectionStatus>().reason = Some(Reason::NotAllowed);
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     settle(&mut shot);
     save(&mut shot, "connect");
     drop(shot);
@@ -644,6 +738,12 @@ fn shots() {
     let mut shot =
         trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1500), ..ShotOptions::default() });
     server(&mut shot);
+    drop(shot);
+
+    // Tall enough to show every connector.
+    let mut shot =
+        trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 2200), ..ShotOptions::default() });
+    connectors(&mut shot);
     drop(shot);
 
     let mut shot =

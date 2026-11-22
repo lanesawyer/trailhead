@@ -2,7 +2,7 @@
 //! settings look like it.
 //!
 //! - [`settings_page`]: a page of settings (a modal's body, or one tab's page of it), its settings a row apart.
-//! - [`spawn_settings_section`]: a group of settings under a dim heading, a group's distance from what is above it,
+//! - [`spawn_settings_section`]: a group of settings under a heading, more than a group's distance from what is above it,
 //!   with its settings in a box of their own for the caller to fill and keep (with `Keyed`).
 //! - [`setting`]: one setting, its label over its control (a select, a button group, a value), with a dim note under
 //!   it saying what it does when there is one.
@@ -16,18 +16,24 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
-use crate::containers::section;
+use crate::containers::section_frame;
 use crate::patch::display;
 use crate::spacing::{extent, space};
 use crate::tabs::tab_strip;
-use crate::text::{size, text_dim};
+use crate::text::{size, text, text_dim};
 use crate::toggle::toggle_switch;
 
-/// A page of settings, filling the width of what holds it: its settings and sections a row apart, which a section's own
-/// margin widens to a group's. Spawn the settings and sections as its children, in order.
+/// A page of settings, as wide as what holds it up to [`extent::SETTINGS_MEASURE`], so a control or a note's line
+/// never spans a wide modal: its settings and sections a row apart, which a section's own margin widens to a
+/// group's. Spawn the settings and sections as its children, in order.
 pub fn settings_page() -> impl Scene {
     bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: { px(space::ROWS) }, min_width: px(0) }
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: { px(space::ROWS) },
+            min_width: px(0),
+            max_width: { px(extent::SETTINGS_MEASURE) },
+        }
     }
 }
 
@@ -36,8 +42,10 @@ pub fn settings_page() -> impl Scene {
 pub fn setting(label: impl Into<String>, note: impl Into<String>, control: impl SceneList) -> impl Scene {
     let label = label.into();
     let note = note.into();
+    let (found_by, found_note) = (label.clone(), note.clone());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
+        SettingWords { label: { found_by }, note: { found_note } }
         Children [ @text_dim(label, size::SECONDARY) -- {control} -- @setting_note(note) ]
     }
 }
@@ -48,8 +56,10 @@ pub fn setting(label: impl Into<String>, note: impl Into<String>, control: impl 
 pub fn setting_toggle(label: impl Into<String>, note: impl Into<String>, checked: bool, own: impl Scene) -> impl Scene {
     let label = label.into();
     let note = note.into();
+    let (found_by, found_note) = (label.clone(), note.clone());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
+        SettingWords { label: { found_by }, note: { found_note } }
         Children [ @toggle_switch(label, checked, own) -- @setting_note(note) ]
     }
 }
@@ -64,6 +74,25 @@ fn setting_note(note: String) -> impl Scene {
     }
 }
 
+/// On every [`setting`] and [`setting_toggle`]: the label and note it was made with, which a search of the settings
+/// finds it by ([`SettingWords::matches`]).
+#[derive(Component, Clone, Default, Debug, PartialEq, Eq)]
+pub struct SettingWords {
+    pub label: String,
+    pub note: String,
+}
+
+impl SettingWords {
+    /// Whether every word of `query` is in the setting's label or note, ignoring case.
+    pub fn matches(&self, query: &str) -> bool {
+        crate::search::matches_search(query, &[&self.label, &self.note])
+    }
+}
+
+/// On a [`spawn_settings_section`]'s section: its heading, which a search of the settings finds all of it by.
+#[derive(Component, Clone, Default, Debug, PartialEq, Eq)]
+pub struct SettingsHeading(pub String);
+
 /// The dim line under a [`setting`] saying what it does. Set its `Text` with `set_text` to change it.
 #[derive(Component, Clone, Copy, Default, Debug)]
 pub struct SettingNote;
@@ -77,10 +106,19 @@ pub struct SettingsSection {
     pub rows: Entity,
 }
 
-/// A section of settings under `heading`, spawned unparented: put [`SettingsSection::section`] where it goes and its
+/// A section of settings under `heading`, which is a size up from the settings' own labels and in the full text
+/// color, so a page's sections can be told from what is in them. Spawned unparented: put [`SettingsSection::section`] where it goes and its
 /// settings ([`setting`], [`setting_toggle`]) in [`SettingsSection::rows`].
 pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String>) -> SettingsSection {
-    let section = commands.spawn_scene(section(heading)).id();
+    let heading = heading.into();
+    let section = commands
+        .spawn_scene(bsn! {
+            @section_frame()
+            Node { margin: { UiRect::top(px(space::GROUPS)) } }
+            Children [ @text(heading.clone(), size::HEADING) ]
+        })
+        .insert(SettingsHeading(heading))
+        .id();
     let rows = commands
         .spawn((
             Name::new("settings"),
@@ -96,6 +134,9 @@ pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String
 pub struct SettingsTabs {
     /// The whole: tabs and pane side by side.
     pub root: Entity,
+    /// The column the strip is in, [`extent::SETTINGS_TABS_WIDTH`] wide. What goes over the tabs (a search field that
+    /// narrows them) is put in as its first child.
+    pub side: Entity,
     /// A [`tab_strip`] down the side: fill it with [`crate::tab`]s, a [`crate::tab_heading`] over each group of them,
     /// and answer its `ValueChange<Option<Entity>>` by setting its `SelectedTab` and showing that tab's page.
     pub strip: Entity,
@@ -114,12 +155,22 @@ pub fn spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsT
             ChildOf(parent),
         ))
         .id();
+    let side = commands
+        .spawn((
+            Name::new("settings side"),
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(space::ROWS),
+                width: px(extent::SETTINGS_TABS_WIDTH),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .id();
     let strip = commands
-        .spawn_scene(bsn! {
-            @tab_strip(ControlOrientation::Vertical)
-            Node { width: { px(extent::SETTINGS_TABS_WIDTH) }, flex_shrink: 0.0 }
-        })
-        .insert(ChildOf(root))
+        .spawn_scene(bsn! { @tab_strip(ControlOrientation::Vertical) Node { flex_grow: 1.0 } })
+        .insert(ChildOf(side))
         .id();
     let pane = commands
         .spawn((
@@ -134,7 +185,7 @@ pub fn spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsT
             ChildOf(root),
         ))
         .id();
-    SettingsTabs { root, strip, pane }
+    SettingsTabs { root, side, strip, pane }
 }
 
 #[cfg(test)]
@@ -228,11 +279,14 @@ mod tests {
         app.update();
         let world = app.world();
         let children: Vec<Entity> = world.get::<Children>(parts.root).unwrap().iter().collect();
-        assert_eq!(children, [parts.strip, parts.pane]);
+        assert_eq!(children, [parts.side, parts.pane]);
+        let in_side: Vec<Entity> = world.get::<Children>(parts.side).unwrap().iter().collect();
+        assert_eq!(in_side, [parts.strip], "what goes over the tabs is the caller's to put first");
         let list = world.get::<bevy::ui_widgets::TabList>(parts.strip).unwrap();
         assert_eq!(list.orientation, ControlOrientation::Vertical);
-        let strip = world.get::<Node>(parts.strip).unwrap();
-        assert_eq!((strip.width, strip.flex_shrink), (px(extent::SETTINGS_TABS_WIDTH), 0.0));
+        let side = world.get::<Node>(parts.side).unwrap();
+        assert_eq!((side.width, side.flex_shrink), (px(extent::SETTINGS_TABS_WIDTH), 0.0));
+        assert_eq!(world.get::<Node>(parts.strip).unwrap().flex_grow, 1.0, "the rule runs the side's whole height");
         let pane = world.get::<Node>(parts.pane).unwrap();
         assert_eq!((pane.flex_grow, pane.min_width, pane.min_height), (1.0, px(0), px(0)));
         assert_eq!(world.get::<Node>(parts.root).unwrap().flex_grow, 1.0, "fills a tall modal's body");

@@ -4,7 +4,7 @@
 //! logged and never holds up a run, a record or a park.
 
 use trailhead_factory::{
-    GateKind, MergeDecision, NOTICE_PAUSED, NOTICE_REVIEW, Notice, NotificationAction, Patch, PrGrade, PrRef, RunPatch,
+    GateKind, MergeDecision, NOTICE_PAUSED, NOTICE_REVIEW, Notice, NotificationAction, PrGrade, PrRef, RunPatch,
     Status, Task, TaskKey,
 };
 
@@ -121,8 +121,7 @@ impl Factory {
             }
         };
         let Some(decision) = current.run.merge.filter(|m| m.notified) else { return };
-        let cleared =
-            RunPatch { merge: Patch::Set(MergeDecision { notified: false, ..decision }), ..RunPatch::default() };
+        let cleared = RunPatch::merge(MergeDecision { notified: false, ..decision });
         if let Err(e) = self.tracker.report(key, cleared).await {
             tracing::warn!(task = %key, error = %e, "couldn't clear the review notification's mark; trying again later");
             return;

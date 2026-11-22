@@ -90,6 +90,9 @@ async fn agent_works_a_task_over_mcp() {
                 | "my_claims"
                 | "list_projects"
                 | "show_project"
+                | "app_collections"
+                | "list_records"
+                | "get_record"
         );
         assert_eq!(a.read_only_hint, Some(expect), "{}", t.name);
     }
@@ -426,4 +429,83 @@ async fn an_agent_sees_a_tasks_pictures_but_not_their_bytes() {
     assert_eq!(out, "AUTH-1 has no pictures");
     let (_, out) = call(&client, "show", json!({"task": "AUTH-2"})).await;
     assert!(out.contains("\n1 picture"), "{out}");
+}
+
+#[tokio::test]
+async fn an_agent_reads_and_writes_the_apps_its_token_reaches() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = common::local_config(dir.path());
+    let (store, ctx) = open_local(&cfg).await.unwrap();
+    let shape = r#"
+        [collections.snoozes]
+        fields = { item = "string", until = "timestamp", note = "string?" }
+
+        [collections.pull_requests]
+        from = "github.pull_requests"
+    "#;
+    let feeds = |_: &str| Some([("title".to_string(), "string".parse().unwrap())].into());
+    let declaration = trailhead_core::app_data::Declaration::parse(shape).unwrap().with_feeds(feeds).unwrap();
+    store.register_app(&ctx, "cairn", declaration).await.unwrap();
+    let notes =
+        trailhead_core::app_data::Declaration::parse("[collections.notes]\nfields = { text = \"string\" }").unwrap();
+    store.register_app(&ctx, "notes", notes).await.unwrap();
+    let bot = store.create_agent(&ctx, "bot").await.unwrap();
+    let opts = TokenOptions { apps: Some(vec!["cairn".into()]), ..Default::default() };
+    let (_, bot) = store.create_token_with(&ctx, Principal::Agent(bot.id), "bot", opts).await.unwrap();
+    let none = store.create_agent(&ctx, "none").await.unwrap();
+    let (_, none) = store.create_token(&ctx, Principal::Agent(none.id), "none").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let app = router(Arc::new(AppState::new(store)));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client = connect(&url, &bot).await;
+    let (err, out) = call(&client, "app_collections", json!({})).await;
+    assert_eq!((err, out.as_str()), (false, "cairn: pull_requests, snoozes"));
+    let (_, out) = call(&client, "app_collections", json!({"app": "cairn"})).await;
+    assert_eq!(
+        out,
+        "pull_requests: title string (filled from github.pull_requests; read-only)\nsnoozes: item string, note string?, until timestamp"
+    );
+    let (err, out) = call(&client, "app_collections", json!({"app": "notes"})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+
+    let snooze = json!({"item": "review", "until": "2026-11-23T09:00:00Z"});
+    let args = json!({"app": "cairn", "collection": "snoozes", "key": "lanesawyer/trailhead#1", "data": snooze});
+    let (err, out) = call(&client, "write_record", args.clone()).await;
+    assert!(!err && out.starts_with("created ") && out.contains(" v1 key=\"lanesawyer/trailhead#1\" "), "{out}");
+    let id = out.split_whitespace().nth(1).unwrap().to_string();
+    let (_, out) = call(&client, "write_record", args).await;
+    assert!(out.starts_with("unchanged ") && out.contains(" v1 "), "{out}");
+    let patch = json!({"app": "cairn", "collection": "snoozes", "id": id, "data": {"note": "soon"}, "version": 1});
+    let (err, out) = call(&client, "write_record", patch.clone()).await;
+    assert!(!err && out.starts_with("changed ") && out.contains("\"note\":\"soon\""), "{out}");
+    let (err, out) = call(&client, "write_record", patch).await;
+    assert!(err && out.starts_with("error[version_conflict]"), "{out}");
+    let (err, out) =
+        call(&client, "write_record", json!({"app": "cairn", "collection": "snoozes", "data": {"item": 1}})).await;
+    assert!(err && out.contains("field `item` should be a string"), "{out}");
+    let fed = json!({"app": "cairn", "collection": "pull_requests", "key": "1", "data": {"title": "x"}});
+    let (err, out) = call(&client, "write_record", fed).await;
+    assert!(err && out.starts_with("error[forbidden]") && out.contains("filled from feed"), "{out}");
+
+    let (_, out) = call(&client, "list_records", json!({"app": "cairn", "collection": "snoozes"})).await;
+    assert_eq!(out.lines().count(), 1, "{out}");
+    let (_, by_key) =
+        call(&client, "get_record", json!({"app": "cairn", "collection": "snoozes", "key": "lanesawyer/trailhead#1"}))
+            .await;
+    let (_, by_id) = call(&client, "get_record", json!({"app": "cairn", "collection": "snoozes", "id": id})).await;
+    assert_eq!((by_key.as_str(), by_id.as_str()), (out.as_str(), out.as_str()));
+    let (err, out) = call(&client, "delete_record", json!({"app": "cairn", "collection": "snoozes", "id": id})).await;
+    assert!(!err && out.starts_with("deleted "), "{out}");
+    let (_, out) = call(&client, "list_records", json!({"app": "cairn", "collection": "snoozes"})).await;
+    assert_eq!(out, "no records");
+    client.cancel().await.unwrap();
+
+    let client = connect(&url, &none).await;
+    let (err, out) = call(&client, "app_collections", json!({})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+    let (err, out) = call(&client, "list_records", json!({"app": "cairn", "collection": "snoozes"})).await;
+    assert!(err && out.starts_with("error[forbidden]"), "{out}");
+    client.cancel().await.unwrap();
 }

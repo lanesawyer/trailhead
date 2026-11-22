@@ -185,6 +185,7 @@ mod tests {
             kind,
             head: None,
             settled: false,
+            answered: false,
         }
     }
 

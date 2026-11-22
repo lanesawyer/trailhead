@@ -35,6 +35,28 @@ pub async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(Ctx,
     Ok((ctx, token))
 }
 
+/// A connector's agent (`connector/<id>`) hands its own feeds over and does nothing else: its token reaches no other
+/// route, REST or MCP. `feed_of` is the connector whose feed route this request is, if it is one.
+pub async fn refuse_connectors(state: &AppState, ctx: &Ctx, feed_of: Option<&str>) -> Result<(), Error> {
+    if ctx.agent_id.is_none() {
+        return Ok(());
+    }
+    match state.store.connector_of(ctx).await? {
+        Some(id) if feed_of != Some(id.as_str()) => {
+            Err(Error::Forbidden(format!("connector/{id} may only hand over its own feeds")))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The connector of a `/v1/connectors/{id}/feeds/{feed}` path.
+fn feed_route(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/v1/connectors/")?;
+    let (id, rest) = rest.split_once('/')?;
+    let feed = rest.strip_prefix("feeds/")?;
+    (!feed.is_empty() && !feed.contains('/')).then_some(id)
+}
+
 /// The authenticated caller.
 pub struct Auth(pub Ctx);
 
@@ -43,6 +65,9 @@ impl FromRequestParts<Arc<AppState>> for Auth {
 
     async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, ApiError> {
         let (mut ctx, _) = authenticate(state, &parts.headers).await?;
+        let path = parts.extensions.get::<axum::extract::OriginalUri>().map_or(&parts.uri, |o| &o.0).path();
+        let feed_of = (parts.method == axum::http::Method::PUT).then(|| feed_route(path)).flatten();
+        refuse_connectors(state, &ctx, feed_of).await?;
         if let Some(Batch(id)) = parts.extensions.get::<Batch>() {
             ctx.batch_id = *id;
         }
@@ -63,5 +88,17 @@ pub async fn human_only(
         Ok((ctx, _)) if ctx.is_human() => next.run(req).await,
         Ok(_) => ApiError(Error::Forbidden("only the user can read the factory's status".into())).into_response(),
         Err(e) => ApiError(e).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_a_feed_route_names_a_connector() {
+        assert_eq!(super::feed_route("/v1/connectors/github/feeds/pull_requests"), Some("github"));
+        for other in ["/v1/connectors/github", "/v1/connectors/github/run", "/v1/connectors/github/feeds/", "/v1/tasks"]
+        {
+            assert_eq!(super::feed_route(other), None, "{other}");
+        }
     }
 }

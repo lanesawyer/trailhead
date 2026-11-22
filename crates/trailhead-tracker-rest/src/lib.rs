@@ -14,7 +14,7 @@ use trailhead_client::http::{
 use trailhead_factory::{
     Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, NewPlanTask, Notice, Picture, PlanTask,
     PlanTaskUpdate, Priority, ProjectRepo, Result, RunPatch, SOURCE_FACTORY, Scope, Status, TASK_PLAN_KEY, Task,
-    TaskKey, TaskPlan, Tracker, Verdict, VerdictKind, in_ready_order,
+    TaskKey, TaskPlan, Tracker, Verdict, VerdictKind, in_ready_order, raise_to_blocked_priority,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -101,29 +101,12 @@ impl RestTracker {
         Ok(reworks)
     }
 
-    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
-    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read is left out of the walk.
-    async fn raise_to_blocked_priority(&self, tasks: &mut [Task]) {
-        let mut seen: std::collections::HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = Default::default();
-        for task in tasks.iter_mut() {
-            let mut stack = vec![task.key.clone()];
-            let mut visited = HashSet::new();
-            while let Some(key) = stack.pop() {
-                if !visited.insert(key.clone()) {
-                    continue;
-                }
-                if !seen.contains_key(&key) {
-                    let read = match self.client.show_task(&key).await {
-                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
-                        _ => None,
-                    };
-                    seen.insert(key.clone(), read);
-                }
-                if let Some((priority, blocks)) = &seen[&key] {
-                    task.priority = task.priority.min(*priority);
-                    stack.extend(blocks.iter().cloned());
-                }
-            }
+    /// A task's own priority and the keys it blocks, for [`raise_to_blocked_priority`]: `None` for one that is
+    /// finished or can't be read.
+    async fn priority_and_blocks(&self, key: TaskKey) -> Option<(Priority, Vec<TaskKey>)> {
+        match self.client.show_task(&key).await {
+            Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
+            _ => None,
         }
     }
 }
@@ -171,7 +154,7 @@ impl Tracker for RestTracker {
             tasks.extend(found.into_iter().filter(|t| seen.insert(t.key.clone())));
         }
         // The cut comes after the blockers are raised ([`in_ready_order`]).
-        self.raise_to_blocked_priority(&mut tasks).await;
+        raise_to_blocked_priority(&mut tasks, |key| self.priority_and_blocks(key)).await;
         Ok(in_ready_order(tasks, limit))
     }
 

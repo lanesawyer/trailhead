@@ -327,6 +327,7 @@ const FACTORY_NESTED: &[(&str, Kind)] = &[
     ("changes_requested.kind", Kind::String),
     ("changes_requested.head", Kind::String),
     ("changes_requested.settled", Kind::Bool),
+    ("changes_requested.answered", Kind::Bool),
     ("review_breach", Kind::Object),
     ("review_breach.round", Kind::Unsigned),
     ("review_breach.attempt", Kind::Unsigned),
@@ -561,7 +562,7 @@ mod tests {
             "message": "m", "history": [{ "at": "t", "message": "m" }]
         });
         let requested = json!({
-            "reviewer": "r", "body": "b", "attempt": 1, "kind": "ci", "head": "h", "settled": false
+            "reviewer": "r", "body": "b", "attempt": 1, "kind": "ci", "head": "h", "settled": false, "answered": false
         });
         let review_breach = json!({ "round": 1, "attempt": 1, "reason": "x", "parked": false });
         let worker_breach = json!({ "run": "x", "reason": "x", "parked": false, "stuck": true });

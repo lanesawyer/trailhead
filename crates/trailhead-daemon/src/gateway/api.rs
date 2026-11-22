@@ -338,7 +338,9 @@ mod tests {
         (head, body)
     }
 
-    /// A fake upstream that answers every request with a small JSON body and reports what it was sent.
+    /// A fake upstream that answers every request with a small JSON body and reports what it was sent. It answers one
+    /// request a connection and says so: without `Connection: close` the gateway's client kept the connection to use
+    /// again, and a request sent as it closed came back 502 about once in a dozen runs.
     async fn upstream() -> (String, mpsc::UnboundedReceiver<(String, Vec<u8>)>) {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
@@ -352,7 +354,7 @@ mod tests {
                     let _ = tx.send(seen);
                     let body = r#"{"ok":true}"#;
                     let resp = format!(
-                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = s.write_all(resp.as_bytes()).await;

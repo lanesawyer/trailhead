@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CiState, CodeHost, Commit, MergedBy, NewPr, Patch, PrRef, RateLimit, Role, RunOutcome, RunPatch, Status, Tracker,
+    CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
 };
 use trailhead_testkit::{Script, TrackerOp};
 
@@ -351,10 +351,7 @@ async fn pending_ci_is_not_reworked() {
 async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
-    r.tracker
-        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
-        .await
-        .unwrap();
+    r.tracker.report(&key, trailhead_factory::RunPatch::conflict_reworks(4)).await.unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
@@ -372,10 +369,7 @@ async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
 async fn an_answered_ci_park_is_reworked_with_the_base_merged_in() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
-    r.tracker
-        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
-        .await
-        .unwrap();
+    r.tracker.report(&key, trailhead_factory::RunPatch::conflict_reworks(4)).await.unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
@@ -481,9 +475,12 @@ async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() 
 #[tokio::test]
 async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
     let (mut r, queue) = queued_rig_with(&merging());
-    let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
+    let mode = Arc::new(std::sync::Mutex::new(Ok::<_, String>(trailhead_factory::MergeMode::On)));
     let source = mode.clone();
-    r.factory = r.factory.with_merge_mode_source(Box::new(move || source.lock().unwrap().clone()));
+    r.factory = r.factory.with_live_settings(Box::new(move || {
+        let merge_mode = source.lock().unwrap().clone()?;
+        Ok(trailhead_control::LiveSettings { merge_mode, restart_for: Vec::new() })
+    }));
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     *mode.lock().unwrap() = Ok(trailhead_factory::MergeMode::Off);

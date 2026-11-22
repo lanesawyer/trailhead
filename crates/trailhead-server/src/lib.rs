@@ -3,6 +3,8 @@
 
 mod ask;
 mod auth;
+pub mod connectors;
+pub mod declarations;
 mod error;
 mod idempotency;
 mod llms;
@@ -51,6 +53,8 @@ pub struct AppState {
     pub shell: std::sync::OnceLock<trailhead_builder::Builds>,
     /// The user config this server started from, when it reads one; `/v1/config` shows and changes it.
     pub config: std::sync::OnceLock<user_config::ConfigFile>,
+    /// The connectors this server knows, from the apps repo it builds, and their runs.
+    pub connectors: Arc<connectors::Connectors>,
 }
 
 impl AppState {
@@ -66,6 +70,7 @@ impl AppState {
             upgrade_pending: Default::default(),
             shell: Default::default(),
             config: Default::default(),
+            connectors: Default::default(),
         }
     }
 }
@@ -253,7 +258,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     spawn_archiver(state.clone());
     spawn_heap_trim();
     webhooks::spawn(state.clone());
-    spawn_reminders(state.clone(), ctx);
+    spawn_reminders(state.clone(), ctx.clone());
     if let Some(paths) = cfg.factory.as_ref().or(cfg.shell.as_ref()) {
         let _ = state.config.set(user_config::ConfigFile::open(user_config::path(paths)));
     }
@@ -282,6 +287,16 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     #[cfg(not(feature = "factory"))]
     let _ = &cfg.factory;
     let builder = cfg.shell.as_ref().and_then(|paths| start_builder(&state, paths));
+    if let (Some(builds), Some(paths)) = (state.shell.get(), &cfg.shell) {
+        let mut addr = listener.local_addr()?;
+        if addr.ip().is_unspecified() {
+            addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+        }
+        let url = format!("http://{addr}");
+        state.connectors.configure(connectors::RunConfig::new(url, paths.data_dir.clone(), cfg.creds.clone()));
+        spawn_declarations(state.clone(), builds.clone(), ctx.clone());
+        connectors::spawn_scheduler(state.clone(), ctx.clone(), connectors::SchedulerOptions::default());
+    }
     if let Some(pid_file) = &cfg.pid_file {
         write_pid_file(pid_file)?;
     }
@@ -357,6 +372,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     if let Some(builder) = builder {
         builder.stop().await;
     }
+    state.connectors.revoke_tokens(&state.store, &ctx).await;
     let restart = restart.load(std::sync::atomic::Ordering::SeqCst);
     // Before the pid file goes, which the CLI waits for: a server it starts next then finds the lock free.
     drop(lock);
@@ -423,6 +439,26 @@ fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::R
             None
         }
     }
+}
+
+/// Registers the apps' declarations and reads the connectors from the builder's checkout now and after each build it
+/// finishes, as the local user, until the server stops.
+fn spawn_declarations(state: Arc<AppState>, builds: trailhead_builder::Builds, ctx: Ctx) {
+    let mut built = builds.built();
+    let mut stopping = state.shutdown.subscribe();
+    tokio::spawn(async move {
+        loop {
+            built.mark_unchanged();
+            if declarations::register_built(&state.store, &ctx.next_batch(), &builds).await.is_none() {
+                tracing::info!(target: "shell", "no built apps repo to read the apps' collections from yet");
+            }
+            connectors::register_built(&state.connectors, &builds).await;
+            tokio::select! {
+                changed = built.changed() => if changed.is_err() { break },
+                _ = stopping.wait_for(|s| *s) => break,
+            }
+        }
+    });
 }
 
 /// Why [`serve_local`] returned.

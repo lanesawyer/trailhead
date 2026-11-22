@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -162,6 +164,15 @@ macro_rules! run_fields {
             pub fn apply(&mut self, patch: RunPatch) {
                 $( patch.$name.apply(&mut self.$name); )*
             }
+        }
+
+        impl RunPatch {
+            $(
+                /// A write that sets this one field and keeps every other.
+                pub fn $name(value: $ty) -> RunPatch {
+                    RunPatch { $name: Patch::Set(value), ..RunPatch::default() }
+                }
+            )*
         }
     };
 }
@@ -367,6 +378,12 @@ pub struct ChangesRequested {
     /// for the record but is no longer pending.
     #[serde(default)]
     pub settled: bool,
+    /// The factory answered this request's verdict as stale, with a handoff, because the PR had moved on since
+    /// (reconcile's stale request). A request for changes that stands after that is a new one, however alike its
+    /// words: without this a person asking twice in the same words was answered as stale again, and the task sat
+    /// in review with nobody owing it a move (TRAIL-1705).
+    #[serde(default)]
+    pub answered: bool,
 }
 
 /// A request as task metadata holds it. Records from before `kind` say a conflict with a flag, and CI by the
@@ -385,6 +402,8 @@ struct StoredRequest {
     head: Option<String>,
     #[serde(default)]
     settled: bool,
+    #[serde(default)]
+    answered: bool,
 }
 
 impl From<StoredRequest> for ChangesRequested {
@@ -401,6 +420,7 @@ impl From<StoredRequest> for ChangesRequested {
             kind,
             head: stored.head,
             settled: stored.settled,
+            answered: stored.answered,
         }
     }
 }
@@ -542,6 +562,36 @@ pub fn in_ready_order(mut tasks: Vec<Task>, limit: usize) -> Vec<Task> {
     tasks.sort_by_key(|t| (t.priority, !t.changes_requested));
     tasks.truncate(limit);
     tasks
+}
+
+/// The step of [`Tracker::ready`] before [`in_ready_order`]: raises each task's priority to the highest among itself
+/// and the open tasks it blocks, directly or through a chain, so work that holds up urgent work is listed as urgent.
+/// `read` answers a task's own priority and the keys of the tasks it blocks, or `None` for one that is finished or
+/// can't be read (out of scope, say), which is left out of the walk. Each task is read once, however many of the
+/// listed tasks reach it.
+pub async fn raise_to_blocked_priority<F, Fut>(tasks: &mut [Task], mut read: F)
+where
+    F: FnMut(TaskKey) -> Fut,
+    Fut: Future<Output = Option<(Priority, Vec<TaskKey>)>>,
+{
+    let mut seen: HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = HashMap::new();
+    for task in tasks.iter_mut() {
+        let mut stack = vec![task.key.clone()];
+        let mut visited = HashSet::new();
+        while let Some(key) = stack.pop() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if !seen.contains_key(&key) {
+                let found = read(key.clone()).await;
+                seen.insert(key.clone(), found);
+            }
+            if let Some((priority, blocks)) = &seen[&key] {
+                task.priority = task.priority.min(*priority);
+                stack.extend(blocks.iter().cloned());
+            }
+        }
+    }
 }
 
 /// One project a repo's factory works, and which of its tasks are the factory's work.
@@ -805,6 +855,7 @@ mod tests {
             kind: RequestKind::Ci,
             head: None,
             settled: false,
+            answered: false,
         };
         let written = serde_json::to_value(&request).unwrap();
         assert_eq!(written["kind"], "ci");
@@ -840,5 +891,43 @@ mod tests {
         let keys = |tasks: Vec<Task>| tasks.into_iter().map(|t| t.key.0).collect::<Vec<_>>();
         assert_eq!(keys(in_ready_order(tasks.clone(), 10)), ["TRAIL-3", "TRAIL-2", "TRAIL-4", "TRAIL-5", "TRAIL-1"]);
         assert_eq!(keys(in_ready_order(tasks, 2)), ["TRAIL-3", "TRAIL-2"]);
+    }
+
+    #[tokio::test]
+    async fn a_task_takes_the_priority_of_the_most_urgent_open_task_it_holds_up() {
+        // 1 blocks 2, which blocks 3 (urgent); 4 blocks 5 (urgent, but finished); 6 blocks itself round a cycle.
+        let blocks = |key: &str| -> Option<(u8, Vec<&str>)> {
+            match key {
+                "TRAIL-1" => Some((4, vec!["TRAIL-2"])),
+                "TRAIL-2" => Some((3, vec!["TRAIL-3"])),
+                "TRAIL-3" => Some((1, vec![])),
+                "TRAIL-4" => Some((3, vec!["TRAIL-5"])),
+                "TRAIL-6" => Some((2, vec!["TRAIL-7"])),
+                "TRAIL-7" => Some((3, vec!["TRAIL-6"])),
+                // Finished, or out of reach.
+                _ => None,
+            }
+        };
+        let reads = std::cell::RefCell::new(Vec::new());
+        let read = |key: TaskKey| {
+            reads.borrow_mut().push(key.0.clone());
+            let found = blocks(&key.0).map(|(priority, blocks)| {
+                (Priority::new(priority).unwrap(), blocks.into_iter().map(|k| TaskKey(k.into())).collect())
+            });
+            async move { found }
+        };
+        let mut tasks = vec![
+            task("TRAIL-1", 4, false),
+            task("TRAIL-2", 3, false),
+            task("TRAIL-4", 3, false),
+            task("TRAIL-6", 2, false),
+        ];
+        raise_to_blocked_priority(&mut tasks, read).await;
+        let priorities: Vec<u8> = tasks.iter().map(|t| t.priority.get()).collect();
+        assert_eq!(priorities, [1, 1, 3, 2], "through a chain; not from a finished task; a cycle ends");
+        let mut read_once = reads.borrow().clone();
+        read_once.sort();
+        read_once.dedup();
+        assert_eq!(reads.borrow().len(), read_once.len(), "each task is read once: {:?}", reads.borrow());
     }
 }

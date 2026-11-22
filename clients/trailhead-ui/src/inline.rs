@@ -640,6 +640,7 @@ mod tests {
     use bevy::input_focus::FocusLost;
 
     use super::*;
+    use crate::test_support::settle;
 
     #[derive(Resource, Default)]
     struct Edits(Vec<InlineEdited>);
@@ -660,13 +661,6 @@ mod tests {
             .add_observer(|e: On<InlineEdited>, mut edits: ResMut<Edits>| edits.0.push(e.clone()))
             .add_observer(|e: On<InlineChosen>, mut choices: ResMut<Choices>| choices.0.push(e.clone()));
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn text(app: &mut App, value: &str, lines: f32) -> (Entity, Entity) {

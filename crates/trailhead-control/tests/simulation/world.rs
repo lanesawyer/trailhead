@@ -740,6 +740,12 @@ impl World {
     }
 
     /// Whether a person has an unanswered question on the task.
+    /// Whether an unfinished task blocks this one: the move is then owed to the blocker, which the check looks at
+    /// in its own turn.
+    pub async fn blocked(&self, key: &TaskKey) -> bool {
+        !self.store.task_detail(&self.human, &key.0).await.unwrap().blocked_by.is_empty()
+    }
+
     pub async fn asked(&self, key: &TaskKey) -> bool {
         let task = self.store.get_task(&self.human, &key.0).await.unwrap();
         let open = self.store.open_questions(&self.human, &[task.id]).await.unwrap();

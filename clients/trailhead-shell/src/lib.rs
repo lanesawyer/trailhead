@@ -17,7 +17,8 @@
 //! The shell holds the one connection to the Trailhead server ([`connection`]), which every app shares: its state,
 //! the mirror of the task engine's records ([`mirror`]), and the outbox of [`commands`]. An app reads the API with a
 //! [`net::Fetch`], and runs work of its own on the net thread while a control plane is held as
-//! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`].
+//! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`]. Its own data in the app data store it
+//! declares with [`ShellApp::collections`]: the shell mirrors those records ([`records`]) beside the tasks.
 //!
 //! The rail switches apps through [`transition`]: a cover closes over the app shown, the app is switched while it is
 //! covered, and the cover opens on the app picked, as the person picked in the settings.
@@ -38,6 +39,7 @@ use trailhead_ui::{Icon, TextSize, TextSizePlugin, Theme};
 
 use crate::connection::{Connection, ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
+use crate::records::{Collections, RecordMirror};
 use crate::settings::SettingsPage;
 use crate::transition::{AppTransition, TRANSITION, TransitionKind, TransitionPlugin};
 
@@ -46,6 +48,8 @@ mod ask_panel;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod connector_settings;
+mod connectors_page;
 pub mod cover;
 pub mod desktop;
 #[cfg(any(test, feature = "test-support"))]
@@ -61,6 +65,8 @@ mod notifications_panel;
 mod place;
 mod previews;
 mod rail;
+pub mod record_sync;
+pub mod records;
 mod server_page;
 pub mod server_settings;
 pub mod settings;
@@ -177,6 +183,13 @@ pub trait ShellApp: Send + Sync + 'static {
     /// once, after [`ShellApp::build`]; each page's fill runs when the page is shown ([`settings::SettingsPage`]).
     fn settings_pages(&self) -> Vec<SettingsPage> {
         Vec::new()
+    }
+
+    /// What the app keeps in the app data store: its `collections.toml`, and the collections it reads, each with the
+    /// type its records' data deserializes into. A connected shell mirrors them ([`records`]); the shell takes them
+    /// once, before [`ShellApp::build`]. Nothing by default.
+    fn collections(&self) -> Collections {
+        Collections::none()
     }
 }
 
@@ -315,9 +328,18 @@ impl Plugin for ShellPlugin {
             .add_observer(on_move_app)
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, ((remember_active, remember_text_size, remember_transition), store::save).chain());
+        let kept: Vec<(AppId, Collections)> = self
+            .apps
+            .iter()
+            .map(|a| (a.manifest().id, a.collections()))
+            .filter(|(_, collections)| !collections.is_empty())
+            .collect();
         if let Some((config, target)) = &self.connection {
             let jobs = self.apps.iter().flat_map(|a| a.link_jobs());
-            app.add_plugins(ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs));
+            let records = kept.iter().map(|(id, collections)| collections.spec(*id));
+            app.add_plugins(
+                ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs).with_records(records),
+            );
             if let Some(token) = self.token.clone() {
                 app.add_systems(Startup, move |mut send: MessageWriter<SendNet>| {
                     send.write(SendNet(NetCommand::Login(token.clone())));
@@ -327,6 +349,11 @@ impl Plugin for ShellPlugin {
         if let Some(build) = &self.build {
             app.add_plugins(update::UpdatePlugin(build.clone()));
         }
+        if let Some(mut mirror) = app.world_mut().get_resource_mut::<RecordMirror>() {
+            for (id, collections) in &kept {
+                mirror.keep(*id, collections);
+            }
+        }
         app.add_plugins((ask::AskPlugin, settings::SettingsPlugin));
         for shell_app in &self.apps {
             shell_app.build(app);
@@ -335,6 +362,7 @@ impl Plugin for ShellPlugin {
         if connected {
             app.add_plugins((
                 server_settings::ServerSettingsPlugin,
+                connector_settings::ConnectorSettingsPlugin,
                 notifications::NotificationsPlugin,
                 notification_settings::NotificationSettingsPlugin,
             ));
@@ -365,6 +393,7 @@ impl Plugin for ShellPlugin {
             if connected {
                 app.add_plugins((
                     server_page::ServerPageUiPlugin,
+                    connectors_page::ConnectorsPageUiPlugin,
                     notifications_page::NotificationsPageUiPlugin,
                     notifications_panel::NotificationsUiPlugin,
                     desktop::DesktopPlugin,

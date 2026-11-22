@@ -288,6 +288,10 @@ pub(crate) enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// The connectors the server runs from the apps repo: list them, turn one on or off, change its settings, run
+    /// it now, and give it its secrets. Acts as you, whatever `--as` or `.trailhead.toml` says: only a person may.
+    #[command(subcommand)]
+    Connector(ConnectorCmd),
     /// Start the Trailhead window: the newest shell the server built from the apps repo named by `[shell] repo` in
     /// the user config.toml, falling back to the one before when it fails to start. Arguments after it go to the
     /// shell.
@@ -442,6 +446,36 @@ pub(crate) enum FactoryCmd {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum ConnectorCmd {
+    /// Every connector the apps repo's last build holds: on or off, its last run, and what it still needs.
+    Ls,
+    /// One connector: its settings, secrets (set or not, never their values), feeds and the apps they fill, and runs.
+    Show { id: String },
+    /// Turn it on, so the server runs it every `every` once it has what it needs. Makes its agent, `connector/<id>`.
+    Enable { id: String },
+    /// Turn it off. A run in progress finishes.
+    Disable { id: String },
+    /// Change one of its settings: a list takes each word given (`set github repos a/b c/d`), a boolean true or false,
+    /// an integer its digits (`set jira since -- -5` for a negative one), a string the words joined.
+    Set {
+        id: String,
+        setting: String,
+        #[arg(required_unless_present = "unset", conflicts_with = "unset")]
+        value: Vec<String>,
+        /// Clear the setting instead.
+        #[arg(long)]
+        unset: bool,
+    },
+    /// Run it now; returns once the run has started.
+    Run { id: String },
+    /// Save its secrets on the server's machine, read from stdin (no echo at a terminal): each one it declares, or
+    /// only the one named. Kept in the credential store the factory's secrets are in; the API never shows them.
+    Login { id: String, secret: Option<String> },
+    /// Remove its saved secrets, or only the one named.
+    Logout { id: String, secret: Option<String> },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum AppCmd {
     /// What the server's builder has built: the current and previous builds, one building, the last failure.
     Status,
@@ -486,6 +520,9 @@ pub(crate) enum AgentCmd {
         /// Limit the token to these projects (comma-separated keys).
         #[arg(long, value_delimiter = ',')]
         projects: Vec<String>,
+        /// Let the token reach these apps' data (comma-separated ids). Without, it reaches none.
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
@@ -537,6 +574,10 @@ pub(crate) enum TokenCmd {
         /// Limit the token to these projects (comma-separated keys).
         #[arg(long, value_delimiter = ',')]
         projects: Vec<String>,
+        /// Let it reach these apps' data (comma-separated ids). Without, an agent's token reaches none and yours
+        /// what you do.
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
@@ -553,6 +594,10 @@ pub(crate) enum TokenCmd {
         /// Comma-separated project keys; "all" opens it to every project.
         #[arg(long, value_delimiter = ',')]
         projects: Option<Vec<String>>,
+        /// Comma-separated app ids; "default" goes back to the token's default: none for an agent's, every app for
+        /// yours.
+        #[arg(long, value_delimiter = ',')]
+        apps: Option<Vec<String>>,
         /// Requests per minute, or "none" to remove the limit.
         #[arg(long)]
         rate_limit: Option<String>,
@@ -600,6 +645,34 @@ mod tests {
             .unwrap();
         assert_eq!(cli.url.as_deref(), Some("http://127.0.0.1:1"));
         assert!(matches!(cli.cmd, Cmd::Webhook(WebhookCmd::Add { ref target, .. }) if target == "http://hook/x"));
+    }
+
+    #[test]
+    fn connector_commands_parse() {
+        use super::ConnectorCmd;
+        let parse = |args: &[&str]| match Cli::try_parse_from([&["trailhead", "connector"], args].concat()) {
+            Ok(Cli { cmd: Cmd::Connector(c), .. }) => Ok(c),
+            Ok(_) => panic!("not a connector command"),
+            Err(e) => Err(e),
+        };
+        let set = parse(&["set", "github", "repos", "a/b", "c/d"]).unwrap();
+        assert!(matches!(set, ConnectorCmd::Set { ref value, unset: false, .. } if value == &["a/b", "c/d"]));
+        assert!(matches!(
+            parse(&["set", "github", "repos", "--unset"]).unwrap(),
+            ConnectorCmd::Set { unset: true, .. }
+        ));
+        assert!(parse(&["set", "github", "repos"]).is_err(), "a value or --unset");
+        assert!(parse(&["set", "github", "repos", "x", "--unset"]).is_err());
+        let negative = parse(&["set", "jira", "since", "--", "-5"]).unwrap();
+        assert!(matches!(negative, ConnectorCmd::Set { ref value, .. } if value == &["-5"]));
+        assert!(matches!(parse(&["login", "github"]).unwrap(), ConnectorCmd::Login { secret: None, .. }));
+        assert!(matches!(parse(&["logout", "github", "token"]).unwrap(), ConnectorCmd::Logout { secret: Some(_), .. }));
+        for args in
+            [&["ls"][..], &["show", "github"], &["enable", "github"], &["disable", "github"], &["run", "github"]]
+        {
+            parse(args).unwrap();
+        }
+        assert!(Cli::try_parse_from(["trailhead", "--json", "connector", "ls"]).unwrap().json);
     }
 
     #[test]

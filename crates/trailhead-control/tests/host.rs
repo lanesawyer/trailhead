@@ -10,6 +10,7 @@ use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Compute, FactoryConfig, Labels, Patch, Role, RunOutcome, RunPatch, SandboxSpec, Scope, TaskKey, VerdictKind, label,
 };
+use trailhead_testkit::fixtures::until;
 use trailhead_testkit::{
     FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
 };
@@ -144,16 +145,6 @@ async fn a_repos_own_cap_still_applies_under_a_roomy_host() {
     hold(&compute, "trail-99-a1", "alpha").await;
     queue(&a);
     assert!(a.factory.tick().await.unwrap().is_empty());
-}
-
-async fn until(what: &str, mut done: impl FnMut() -> bool) {
-    for _ in 0..400 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 #[tokio::test]

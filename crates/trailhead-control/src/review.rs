@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use trailhead_factory::messages;
 use trailhead_factory::{
     ChangesRequested, CheckResult, Error, Patch, PrGrade, PrRef, RequestKind, Result, ReviewBreach, Role, RunPatch,
-    RunPhase, RunReport, RunRequest, RunResult, Status, Task, TaskKey, Usd, Verdict, VerdictKind, review_name,
+    RunPhase, RunReport, RunRequest, RunResult, Status, Task, TaskKey, Tracker, Usd, Verdict, VerdictKind, review_name,
 };
 
 use crate::infra::{Park, Setback};
@@ -76,7 +77,7 @@ impl Factory {
             head,
         };
         let name = &round.name;
-        let counted = RunPatch { review_rounds: Patch::Set(round.number), ..RunPatch::default() };
+        let counted = RunPatch::review_rounds(round.number);
         self.tracker.report(&task.key, counted).await?;
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(name, task.key.project(), token_ttl(&profile)).await {
@@ -115,26 +116,42 @@ impl Factory {
         self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        // A sandbox that won't go doesn't undo the review: the verdict and spend are still recorded, and reconcile
-        // destroys the orphan.
+        // What the review came to is recorded before its sandbox goes, as a worker's is: a control plane that stops
+        // between the two has the verdict and the spend, and reconcile destroys the sandbox it left.
+        let recorded = self.record_review(task, &shown, &round, &sub, run).await;
+        // A sandbox that won't go doesn't undo the review either: reconcile destroys the orphan.
         if let Err(e) = target.compute.destroy(&sandbox.id).await {
             tracing::warn!(task = %task.key, error = %e, "couldn't destroy the reviewer's sandbox; reconcile will");
         } else {
             self.status.sandbox_gone(&sandbox.name);
         }
+        let run = recorded?;
+        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
+            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
+        }
+        self.act_on_review(task, &shown, pr, &round, grade, run).await
+    }
+
+    /// Records what a reviewer's run came to, as the reviewer: its spend, and for a verdict that it was reviewed. A
+    /// run the infrastructure lost, or a record that can't be written, gives the round back
+    /// ([`Factory::review_infra_failed`]) and is the error returned.
+    async fn record_review(
+        &self,
+        task: &Task,
+        shown: &Task,
+        round: &Round,
+        sub: &Arc<dyn Tracker>,
+        run: Result<Run>,
+    ) -> Result<Finished> {
+        let attempt = round.attempt;
         let run = match run {
             Ok(Run::Lost(e, spend)) => {
-                // What the run cost before it failed counts toward the budget across retries (TRAIL-447).
-                if let Err(re) =
-                    sub.report(&task.key, RunPatch { spend: Patch::Set(spend), ..RunPatch::default() }).await
-                {
-                    tracing::warn!(task = %task.key, error = %re, "couldn't record the failed review's spend");
-                }
-                return Err(self.review_infra_failed(task, &round, e, false).await);
+                self.record_lost_spend(sub, &task.key, spend).await;
+                return Err(self.review_infra_failed(task, round, e, false).await);
             }
             Ok(Run::Report(report, spend)) => Finished::Report(report, spend),
             Ok(Run::Breach(reason, spend)) => Finished::Breach(reason, spend),
-            Err(e) => return Err(self.review_infra_failed(task, &round, e, false).await),
+            Err(e) => return Err(self.review_infra_failed(task, round, e, false).await),
         };
         // A request for changes is marked reviewed by `request_rework`, in the same write as the review it records, so
         // a review can't be counted as done without its rework being requested or the task parked.
@@ -167,12 +184,9 @@ impl Factory {
         // A review that can't be recorded didn't happen: the round is given back and the task reviewed again, rather
         // than acting on a verdict the task doesn't carry.
         if let Err(e) = sub.report(&task.key, record).await {
-            return Err(self.review_infra_failed(task, &round, e, false).await);
+            return Err(self.review_infra_failed(task, round, e, false).await);
         }
-        if let Err(e) = self.tracker.revoke_sub_agent(name).await {
-            tracing::warn!(task = %task.key, error = %e, "couldn't revoke the reviewer's sub-agent; its token will expire");
-        }
-        self.act_on_review(task, &shown, pr, &round, grade, run).await
+        Ok(run)
     }
 
     /// Acts on a review that is recorded: the verdict's gates or rework, a round with no verdict given back, or a
@@ -189,7 +203,7 @@ impl Factory {
         let Round { attempt, before, retries, .. } = *round;
         match run {
             Finished::Report(RunReport { result: RunResult::Reviewed(verdict), .. }, _) => {
-                self.backoff.setbacks.lock().unwrap().remove(&task.key);
+                self.backoff.release(&task.key);
                 if let (Some(raise), Some(mut grade)) = (&verdict.raise_grade, grade)
                     && grade.raise(raise.grade, &raise.reason)
                 {
@@ -203,6 +217,7 @@ impl Factory {
                         kind: RequestKind::Review,
                         head: round.head.clone(),
                         settled: false,
+                        answered: false,
                     };
                     let rounds = before + 1;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.
@@ -230,11 +245,11 @@ impl Factory {
                 // rather than being reviewed again on the next reconcile (TRAIL-319). The reviewer's sandbox has
                 // already had its destroy attempted (a failed destroy is left for reconcile), so there's nothing
                 // to suspend.
-                self.backoff.setbacks.lock().unwrap().remove(&task.key);
+                self.backoff.release(&task.key);
                 tracing::warn!(task = %task.key, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
                 let breach = ReviewBreach { round: round.number, attempt, reason: reason.clone(), parked: false };
-                let pending = RunPatch { review_breach: Patch::Set(breach.clone()), ..RunPatch::default() };
+                let pending = RunPatch::review_breach(breach.clone());
                 if let Err(e) = self.tracker.report(&task.key, pending).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the reviewer's breach before parking");
                 }
@@ -299,16 +314,11 @@ impl Factory {
             };
             match parked.await {
                 Ok(()) => {
-                    self.backoff.setbacks.lock().unwrap().remove(&task.key);
+                    self.backoff.release(&task.key);
                 }
                 Err(e) => {
                     tracing::warn!(task = %task.key, error = %e, "couldn't park the task; the next reconcile tries again");
-                    // The task needs its backoff, or reconcile reviews it again at once.
-                    self.back_off(&task.key, &setback);
-                    let keep = RunPatch { infra_failures: Patch::Set(setback.unparked()), ..RunPatch::default() };
-                    if let Err(e) = self.tracker.report(&task.key, keep).await {
-                        tracing::warn!(task = %task.key, error = %e, "couldn't keep the infrastructure failure count");
-                    }
+                    self.park_failed(&self.tracker, &task.key, &setback).await;
                 }
             }
         }

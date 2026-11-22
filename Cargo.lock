@@ -8093,9 +8093,13 @@ name = "trailhead-app-example"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
  "trailhead-shell",
  "trailhead-ui",
+ "uuid",
 ]
 
 [[package]]
@@ -8180,6 +8184,23 @@ dependencies = [
  "tokio",
  "tracing",
  "trailhead-factory",
+]
+
+[[package]]
+name = "trailhead-connector"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "trailhead-core",
+ "trailhead-model",
+ "trailhead-server",
 ]
 
 [[package]]
@@ -8360,6 +8381,8 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+ "toml",
  "utoipa",
  "uuid",
 ]

@@ -454,6 +454,7 @@ mod tests {
     use super::*;
     use crate::ShellPlugin;
     use crate::ask::AskReply;
+    use crate::testing::settle;
     use crate::testing::{TestConnection, set_connection};
     use crate::tests::{Fake, MAPS, NOTES};
 
@@ -476,12 +477,6 @@ mod tests {
             Some(AskTargets { configured: true, repo: Some("lane/apps".into()), targets });
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     fn one<F: bevy::ecs::query::QueryFilter>(app: &mut App) -> Entity {

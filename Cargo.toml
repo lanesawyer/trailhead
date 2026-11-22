@@ -91,6 +91,8 @@ allow_attributes = "warn"
 fn_params_excessive_bools = "warn"
 implicit_clone = "warn"
 manual_let_else = "warn"
+# A `_` arm that stands for exactly one variant hides that variant when another is added: name it.
+match_wildcard_for_single_variants = "warn"
 needless_pass_by_ref_mut = "warn"
 redundant_clone = "warn"
 semicolon_if_nothing_returned = "warn"

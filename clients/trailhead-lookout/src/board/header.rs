@@ -174,6 +174,7 @@ mod header_tests {
 
     use super::super::testing::run;
     use super::*;
+    use trailhead_shell::testing::settle;
 
     fn app() -> App {
         let mut app = App::new();
@@ -186,12 +187,6 @@ mod header_tests {
         app.world_mut().spawn(HeaderBar);
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     /// Every entity under the header bar, in order.

@@ -157,6 +157,7 @@ mod in_place_tests {
     use trailhead_shell::sync::{Snapshot, SyncItem};
 
     use super::*;
+    use trailhead_shell::testing::settle;
 
     fn app() -> App {
         let mut app = App::new();
@@ -179,12 +180,6 @@ mod in_place_tests {
         }));
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn update_task(app: &mut App, id: &str, status: &str) {

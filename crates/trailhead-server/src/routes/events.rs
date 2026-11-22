@@ -1,8 +1,11 @@
 //! The event log, undo and revert.
 
+use std::collections::BTreeMap;
+
 use axum::extract::State;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use trailhead_core::app_data::AppUndoReport;
 use trailhead_core::{Event, EventFilter, UndoReport};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
@@ -122,13 +125,45 @@ pub(crate) struct RevertBody {
     since: String,
 }
 
+/// What a revert did to tasks, and to the apps' data.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RevertReport {
+    #[serde(flatten)]
+    tasks: UndoReport,
+    /// Each app whose data the actor changed since, by id: what was reverted there and what skipped. Left out when
+    /// there is none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[schema(nullable = false)]
+    apps: BTreeMap<String, AppUndoReport>,
+    /// Apps whose revert failed, by id, with why; each app is reverted on its own, so the others still are. Left out
+    /// when none failed.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[schema(nullable = false)]
+    apps_failed: BTreeMap<String, String>,
+}
+
 #[utoipa::path(
     post, path = "/v1/revert", tag = "undo", request_body = RevertBody,
     responses(
-        (status = 200, description = "What was reverted and what was skipped, either because someone else changed it later (`later_event` names that event) or because restoring a task would form a parent cycle (`later_event` is null, the cause is in `reason`). A `since` older than 90 days is clamped to the undo window", body = UndoReport),
+        (status = 200, description = "What was reverted and what was skipped, either because someone else changed it later (`later_event` names that event) or because restoring a task would form a parent cycle (`later_event` is null, the cause is in `reason`). The actor's writes to apps' data are reverted too, each app in its own transaction after the tasks, and reported under `apps`. A `since` older than 90 days is clamped to the undo window", body = RevertReport),
         (status = 403, description = "`forbidden`: humans only", body = ErrorBody),
     )
 )]
-pub(crate) async fn revert(State(s): S, Auth(ctx): Auth, Json(b): Json<RevertBody>) -> ApiResult<Json<Value>> {
-    Ok(Json(json!(s.store.revert_actor(&ctx, b.actor_id, parse_time(&b.since)?).await?)))
+pub(crate) async fn revert(State(s): S, Auth(ctx): Auth, Json(b): Json<RevertBody>) -> ApiResult<Json<RevertReport>> {
+    let since = parse_time(&b.since)?;
+    let tasks = s.store.revert_actor(&ctx, b.actor_id, since).await?;
+    let mut report = RevertReport { tasks, apps: BTreeMap::new(), apps_failed: BTreeMap::new() };
+    for (app, _) in s.store.list_apps(&ctx).await? {
+        match s.store.revert_app_actor(&ctx, &app, b.actor_id, since).await {
+            Ok(r) if r.reverted.is_empty() && r.skipped.is_empty() => {}
+            Ok(r) => {
+                report.apps.insert(app, r);
+            }
+            Err(e) => {
+                tracing::warn!(app, error = %e, "reverting an actor's writes to an app failed");
+                report.apps_failed.insert(app, e.to_string());
+            }
+        }
+    }
+    Ok(Json(report))
 }

@@ -9,9 +9,7 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 use tracing::Instrument;
 use trailhead_factory::messages;
-use trailhead_factory::{
-    ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label,
-};
+use trailhead_factory::{ControlState, Labels, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label};
 
 use crate::notify::PauseChange;
 use crate::phase::{Phase, phase};
@@ -312,13 +310,9 @@ impl Factory {
         let delay = Duration::from_secs(u64::from(after) * 60);
         let mut due: Vec<(TaskKey, Duration)> = self
             .pool
-            .parked_since
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| !busy.contains(*key))
-            .map(|(key, since)| (key.clone(), since.elapsed()))
-            .filter(|(_, parked_for)| *parked_for >= delay)
+            .parked()
+            .into_iter()
+            .filter(|(key, parked_for)| !busy.contains(key) && *parked_for >= delay)
             .collect();
         if due.is_empty() {
             return 0;
@@ -395,13 +389,13 @@ impl Factory {
                 }
             }
             // Recorded before the release, so reconcile and `factory status` don't look for a sandbox that is going.
-            let record = RunPatch { released: Patch::Set(unix_now()), ..RunPatch::default() };
+            let record = RunPatch::released(unix_now());
             if let Err(e) = self.tracker.report(&key, record).await {
                 // Most likely the asker's lease on the task hasn't lapsed yet, which keeps everyone else out of it.
                 tracing::debug!(task = %key, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
                 continue;
             }
-            self.pool.parked_since.lock().unwrap().remove(&key);
+            self.pool.unparked(&key);
             released += 1;
             tracing::info!(task = %key, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
             if let Err(e) = self.release_worker(sandbox).await {
@@ -467,7 +461,7 @@ impl Factory {
                 holders
                     .iter()
                     .map(|(k, parked)| {
-                        let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                        let retry = self.backoff.next_try(k);
                         describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
                     })
                     .collect(),
@@ -519,7 +513,7 @@ impl Factory {
         if task.run.ungraded != Some(true) {
             return;
         }
-        let update = RunPatch { ungraded: Patch::Set(false), ..RunPatch::default() };
+        let update = RunPatch::ungraded(false);
         if let Err(e) = self.tracker.report(&task.key, update).await {
             // Keep the key out of the set only if nothing was cleared, so a failed write is retried next poll.
             if was_reported {
@@ -536,7 +530,7 @@ impl Factory {
         tracing::info!(task = %task.key, "no grade; skipping it until a human sets one");
         let told = async {
             self.tracker.note(&task.key, &messages::ungraded_note()).await?;
-            self.tracker.report(&task.key, RunPatch { ungraded: Patch::Set(true), ..RunPatch::default() }).await
+            self.tracker.report(&task.key, RunPatch::ungraded(true)).await
         };
         if let Err(e) = told.await {
             tracing::warn!(task = %task.key, error = %e, "couldn't note that the task has no grade");
@@ -602,7 +596,7 @@ impl Factory {
             .filter(|s| s.labels.get(label::TASK).is_some_and(|t| !running.contains(&TaskKey(t.clone()))))
             .collect();
         if candidates.is_empty() {
-            self.pool.parked_since.lock().unwrap().clear();
+            self.pool.forget_parked();
             return Ok(held);
         }
         let mut parked = HashSet::new();
@@ -665,7 +659,7 @@ impl Factory {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
                     if task.status == Status::NeedsInput {
                         let key = task.key.clone();
-                        self.pool.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
+                        self.pool.seen_parked(&key);
                         if self.release_idle_planner(&task, sandbox).await {
                             released.push(sandbox.name.clone());
                             continue;
@@ -689,7 +683,7 @@ impl Factory {
                 released.push(sandbox.name.clone());
             }
         }
-        self.pool.parked_since.lock().unwrap().retain(|key, _| parked.contains(key));
+        self.pool.keep_parked(|key| parked.contains(key));
         if released.is_empty() {
             return Ok(held);
         }

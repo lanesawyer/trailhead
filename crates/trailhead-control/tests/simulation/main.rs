@@ -166,6 +166,8 @@ async fn check(world: &World) -> Result<(), (String, String)> {
             Status::Open if task.grade.is_none() && task.run.set_aside.is_some() => {}
             // An approved spec task is finished with, and a plan's task waits for a person to grade it.
             Status::Open if task.plan_approved() || task.held_by_plan() => {}
+            // A plan's later task waits for the one it depends on, whoever that one is waiting for (TRAIL-1706).
+            Status::Open if world.blocked(key).await => {}
             Status::Open if task.run.sandbox.is_none() => return stuck("the factory never started it"),
             Status::Open => return stuck("it is back in the queue and the factory doesn't start it"),
             Status::InProgress => return stuck("it is in progress with no run going"),

@@ -5,10 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::{Notify, mpsc};
 use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner};
-use trailhead_factory::{
-    CodeHost, Commit, Credential, Endpoint, FileChange, ModelId, NewPr, Repo, Role, RunOutcome, RunRequest, TaskKey,
-    TaskSpec, Tracker,
-};
+use trailhead_factory::{CodeHost, Commit, FileChange, NewPr, Repo, Role, RunOutcome, RunRequest, TaskKey, Tracker};
 use trailhead_testkit::{FakeCodeHost, FakeTracker, FakeWorkspace, Script, ScriptedHarness};
 
 #[tokio::test]
@@ -71,33 +68,6 @@ async fn a_reviewer_gets_the_base_branch_and_pr_title_and_a_worker_gets_neither(
 }
 
 fn request(key: TaskKey, repo: Repo, role: Role, pr: Option<trailhead_factory::PrRef>) -> RunRequest {
-    RunRequest {
-        grade: None,
-        run: "r1".into(),
-        role,
-        task: TaskSpec {
-            key,
-            title: "Add a greeting".into(),
-            description: String::new(),
-            previous_failure: None,
-            context: Default::default(),
-            path: None,
-        },
-        repo,
-        base_branch: "develop".into(),
-        branch: "factory/r1".into(),
-        pr,
-        feedback: None,
-        model: ModelId("fake-sonnet".into()),
-        endpoint: Endpoint { base_url: "http://gateway.invalid".into() },
-        max_steps: 5,
-        required_checks: Vec::new(),
-        worker_checks: Vec::new(),
-        blocked_hosts: Vec::new(),
-        allowed_hosts: Vec::new(),
-        env: Default::default(),
-        credential: Credential { agent: "factory".into(), token: String::new() },
-        shots: None,
-        plan: None,
-    }
+    let base = trailhead_testkit::fixtures::run_request(key);
+    RunRequest { role, repo, base_branch: "develop".into(), pr, ..base }
 }

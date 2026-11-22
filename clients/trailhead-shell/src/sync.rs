@@ -276,19 +276,19 @@ pub enum StreamEnd {
 pub struct Resume(Arc<Mutex<Option<ResumePoint>>>);
 
 #[derive(Clone, Copy)]
-struct ResumePoint {
+pub(crate) struct ResumePoint {
     /// The id of the last event handed on, or the snapshot's.
-    last: i64,
+    pub(crate) last: i64,
     /// Since when the stream has not been open; `None` while it is.
-    down_since: Option<Instant>,
+    pub(crate) down_since: Option<Instant>,
 }
 
 impl Resume {
-    fn point(&self) -> Option<ResumePoint> {
+    pub(crate) fn point(&self) -> Option<ResumePoint> {
         *self.0.lock().expect("resume lock")
     }
 
-    fn set(&self, point: Option<ResumePoint>) {
+    pub(crate) fn set(&self, point: Option<ResumePoint>) {
         *self.0.lock().expect("resume lock") = point;
     }
 
@@ -316,13 +316,13 @@ impl Resume {
         }
     }
 
-    fn advance(&self, id: i64) {
+    pub(crate) fn advance(&self, id: i64) {
         if let Some(p) = self.0.lock().expect("resume lock").as_mut() {
             p.last = p.last.max(id);
         }
     }
 
-    fn opened(&self) {
+    pub(crate) fn opened(&self) {
         if let Some(p) = self.0.lock().expect("resume lock").as_mut() {
             p.down_since = None;
         }
@@ -415,14 +415,14 @@ async fn snapshot(remote: &Remote, emit: &mut impl FnMut(SyncItem) -> bool) -> R
 }
 
 #[derive(Debug, Default, PartialEq)]
-struct Frame {
-    id: Option<String>,
-    data: String,
+pub(crate) struct Frame {
+    pub(crate) id: Option<String>,
+    pub(crate) data: String,
 }
 
 /// Removes the first complete server-sent-events frame (ended by a blank line) from `buf`. Frames are decoded
 /// whole, so a multi-byte character split across chunks survives.
-fn take_frame(buf: &mut Vec<u8>) -> Option<Frame> {
+pub(crate) fn take_frame(buf: &mut Vec<u8>) -> Option<Frame> {
     let (pos, len) = [&b"\r\n\r\n"[..], b"\n\n", b"\r\r"]
         .into_iter()
         .filter_map(|sep| buf.windows(sep.len()).position(|w| w == sep).map(|p| (p, sep.len())))

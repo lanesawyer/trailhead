@@ -352,6 +352,7 @@ mod tests {
     use trailhead_shell::fixture::{project, task};
 
     use super::*;
+    use trailhead_shell::testing::settle;
 
     fn world() -> (Vec<Project>, Vec<Task>) {
         let projects = vec![
@@ -415,12 +416,6 @@ mod tests {
         app.world_mut().resource_mut::<NextState<View>>().set(View::Projects);
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     fn shown(app: &mut App) -> Vec<String> {
