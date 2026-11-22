@@ -217,8 +217,8 @@ pub use select::{
     Picked, SelectEdit, SelectHint, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned,
 };
 pub use settings::{
-    SettingNote, SettingsSection, SettingsTabs, setting, setting_toggle, settings_page, spawn_settings_section,
-    spawn_settings_tabs,
+    SettingNote, SettingWords, SettingsHeading, SettingsSection, SettingsTabs, setting, setting_toggle, settings_page,
+    spawn_settings_section, spawn_settings_tabs,
 };
 pub use skeleton::{SkeletonBar, skeleton};
 pub use slider::slider;

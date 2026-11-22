@@ -43,37 +43,16 @@ use crate::{AppId, Apps, SHELL};
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ShellDir(pub PathBuf);
 
-// What the settings' search finds each of the shell's pages by: what its settings are called.
-const APPEARANCE_WORDS: &[&str] =
-    &["theme", "light", "dark", "desktop", "text size", "zoom", "switching apps", "transition", "motion"];
-const NOTIFICATION_WORDS: &[&str] =
-    &["levels", "silent", "bell", "interrupt", "quiet hours", "focus", "sound", "counts", "badge"];
-const CONNECTION_WORDS: &[&str] =
-    &["server", "endpoint id", "allow command", "re-dial", "disconnect", "signed in", "state"];
-const SERVER_WORDS: &[&str] = &[
-    "window builds",
-    "apps repo",
-    "build profile",
-    "jobs",
-    "factory",
-    "repos",
-    "usage",
-    "pause",
-    "user config",
-    "restart",
-];
-const ABOUT_WORDS: &[&str] = &["build", "version", "commit", "updates", "apps", "files"];
-
 /// The shell's own pages, in the order they are listed: Notifications, Connection and Server only with a connection.
 pub(crate) fn shell_pages(connected: bool) -> Vec<(AppId, &'static str, SettingsPage)> {
-    let mut pages = vec![SettingsPage::new(APPEARANCE.key, "Appearance", appearance_page).keywords(APPEARANCE_WORDS)];
+    let mut pages = vec![SettingsPage::new(APPEARANCE.key, "Appearance", appearance_page)];
     if connected {
         let notifications = crate::notifications_page::notifications_page;
-        pages.push(SettingsPage::new(NOTIFICATIONS.key, "Notifications", notifications).keywords(NOTIFICATION_WORDS));
-        pages.push(SettingsPage::new(CONNECTION.key, "Connection", connection_page).keywords(CONNECTION_WORDS));
-        pages.push(SettingsPage::new(SERVER.key, "Server", crate::server_page::server_page).keywords(SERVER_WORDS));
+        pages.push(SettingsPage::new(NOTIFICATIONS.key, "Notifications", notifications));
+        pages.push(SettingsPage::new(CONNECTION.key, "Connection", connection_page));
+        pages.push(SettingsPage::new(SERVER.key, "Server", crate::server_page::server_page));
     }
-    pages.push(SettingsPage::new(ABOUT.key, "About", about_page).keywords(ABOUT_WORDS));
+    pages.push(SettingsPage::new(ABOUT.key, "About", about_page));
     pages.into_iter().map(|page| (SHELL, SHELL_GROUP, page)).collect()
 }
 

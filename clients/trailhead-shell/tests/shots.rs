@@ -345,7 +345,8 @@ fn open_settings(shot: &mut ShotApp, page: PageId) {
 fn settings(shot: &mut ShotApp) {
     let world = shot.world_mut();
     world.insert_resource(ShellDir("/home/someone/.config/trailhead/shell".into()));
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     world.resource_mut::<trailhead_shell::connection::Dialed>().0 = Some("7204d50f3c".into());
     appearance(shot);
     set_connection(shot, Connection::Syncing);
@@ -370,7 +371,7 @@ fn settings(shot: &mut ShotApp) {
     let world = shot.world_mut();
     let search =
         world.query_filtered::<Entity, With<trailhead_shell::settings::SettingsSearch>>().single(world).unwrap();
-    world.entity_mut(search).insert(bevy::text::EditableText::new("size"));
+    world.entity_mut(search).insert(bevy::text::EditableText::new("command"));
     settle(shot);
     save(shot, "settings-search");
     close_modals(shot);
@@ -642,7 +643,8 @@ fn shots() {
     let mut shot = shot_with(shell(), ShotOptions { size: (1024, 720), ..ShotOptions::default() }, ConnectUiPlugin);
     let world = shot.world_mut();
     world.resource_mut::<ConnectionStatus>().reason = Some(Reason::NotAllowed);
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     settle(&mut shot);
     save(&mut shot, "connect");
     drop(shot);

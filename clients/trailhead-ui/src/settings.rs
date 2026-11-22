@@ -42,8 +42,10 @@ pub fn settings_page() -> impl Scene {
 pub fn setting(label: impl Into<String>, note: impl Into<String>, control: impl SceneList) -> impl Scene {
     let label = label.into();
     let note = note.into();
+    let (found_by, found_note) = (label.clone(), note.clone());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
+        SettingWords { label: { found_by }, note: { found_note } }
         Children [ @text_dim(label, size::SECONDARY) -- {control} -- @setting_note(note) ]
     }
 }
@@ -54,8 +56,10 @@ pub fn setting(label: impl Into<String>, note: impl Into<String>, control: impl 
 pub fn setting_toggle(label: impl Into<String>, note: impl Into<String>, checked: bool, own: impl Scene) -> impl Scene {
     let label = label.into();
     let note = note.into();
+    let (found_by, found_note) = (label.clone(), note.clone());
     bsn! {
         Node { flex_direction: FlexDirection::Column, row_gap: { px(space::STACKED) } }
+        SettingWords { label: { found_by }, note: { found_note } }
         Children [ @toggle_switch(label, checked, own) -- @setting_note(note) ]
     }
 }
@@ -69,6 +73,25 @@ fn setting_note(note: String) -> impl Scene {
         Node { display: { shown } }
     }
 }
+
+/// On every [`setting`] and [`setting_toggle`]: the label and note it was made with, which a search of the settings
+/// finds it by ([`SettingWords::matches`]).
+#[derive(Component, Clone, Default, Debug, PartialEq, Eq)]
+pub struct SettingWords {
+    pub label: String,
+    pub note: String,
+}
+
+impl SettingWords {
+    /// Whether every word of `query` is in the setting's label or note, ignoring case.
+    pub fn matches(&self, query: &str) -> bool {
+        crate::search::matches_search(query, &[&self.label, &self.note])
+    }
+}
+
+/// On a [`spawn_settings_section`]'s section: its heading, which a search of the settings finds all of it by.
+#[derive(Component, Clone, Default, Debug, PartialEq, Eq)]
+pub struct SettingsHeading(pub String);
 
 /// The dim line under a [`setting`] saying what it does. Set its `Text` with `set_text` to change it.
 #[derive(Component, Clone, Copy, Default, Debug)]
@@ -92,8 +115,9 @@ pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String
         .spawn_scene(bsn! {
             @section_frame()
             Node { margin: { UiRect::top(px(space::GROUPS)) } }
-            Children [ @text(heading, size::HEADING) ]
+            Children [ @text(heading.clone(), size::HEADING) ]
         })
+        .insert(SettingsHeading(heading))
         .id();
     let rows = commands
         .spawn((
