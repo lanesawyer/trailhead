@@ -117,6 +117,7 @@ pub mod routes {
     pub const LIST_RECORDS: Route = Route::new(Method::GET, "/v1/apps/{app}/records/{collection}");
     pub const CREATE_RECORD: Route = Route::new(Method::POST, "/v1/apps/{app}/records/{collection}");
     pub const PATCH_RECORD: Route = Route::new(Method::PATCH, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const REPLACE_RECORD: Route = Route::new(Method::PUT, "/v1/apps/{app}/records/{collection}/{id}");
     pub const DELETE_RECORD: Route = Route::new(Method::DELETE, "/v1/apps/{app}/records/{collection}/{id}");
     pub const PUT_RECORD: Route = Route::new(Method::PUT, "/v1/apps/{app}/keys/{collection}/{key}");
     pub const APP_BATCH: Route = Route::new(Method::POST, "/v1/apps/{app}/batch");
@@ -127,7 +128,7 @@ pub mod routes {
     pub const APP_EVENT_STREAM: Route = Route::new(Method::GET, "/v1/apps/{app}/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 63] {
+    pub fn all() -> [Route; 64] {
         [
             READY,
             LIST_TASKS,
@@ -186,6 +187,7 @@ pub mod routes {
             LIST_RECORDS,
             CREATE_RECORD,
             PATCH_RECORD,
+            REPLACE_RECORD,
             DELETE_RECORD,
             PUT_RECORD,
             APP_BATCH,
@@ -491,6 +493,13 @@ pub enum Call {
         id: Uuid,
         patch: Value,
     },
+    /// Replaces a record's fields, whole; its key stays. The version it expects goes in `If-Match`.
+    ReplaceRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+        data: Value,
+    },
     /// Removes a record.
     DeleteRecord {
         app: String,
@@ -549,6 +558,7 @@ impl Call {
                 (routes::CREATE_RECORD, vec![("app", app.clone()), ("collection", collection.clone())])
             }
             Call::PatchRecord { app, collection, id, .. } => (routes::PATCH_RECORD, record(app, collection, id)),
+            Call::ReplaceRecord { app, collection, id, .. } => (routes::REPLACE_RECORD, record(app, collection, id)),
             Call::DeleteRecord { app, collection, id, .. } => (routes::DELETE_RECORD, record(app, collection, id)),
             Call::PutRecord { app, collection, key, .. } => (
                 routes::PUT_RECORD,
@@ -589,6 +599,7 @@ impl Call {
             Call::SetNotificationSettings(b) => Some(json(b)),
             Call::CreateRecord { key, data, .. } => Some(serde_json::json!({ "key": key, "data": data })),
             Call::PatchRecord { patch, .. } => Some(patch.clone()),
+            Call::ReplaceRecord { data, .. } => Some(data.clone()),
             Call::DeleteRecord { .. } => None,
             Call::PutRecord { data, .. } => Some(data.clone()),
             Call::AppBatch { writes, .. } => Some(serde_json::json!({ "writes": writes })),
@@ -1278,6 +1289,19 @@ impl Client {
         self.send_call(&Call::PatchRecord { app, collection, id, patch }, version).await
     }
 
+    /// `PUT /v1/apps/{app}/records/{collection}/{id}`: the record's fields, whole; its key stays.
+    pub async fn replace_record(
+        &self,
+        app: &str,
+        collection: &str,
+        id: Uuid,
+        data: Value,
+        version: Option<i64>,
+    ) -> Result<Written> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::ReplaceRecord { app, collection, id, data }, version).await
+    }
+
     /// `DELETE /v1/apps/{app}/records/{collection}/{id}`: the record as it was.
     pub async fn delete_record(&self, app: &str, collection: &str, id: Uuid, version: Option<i64>) -> Result<Record> {
         let (app, collection) = (app.into(), collection.into());
@@ -1431,6 +1455,10 @@ mod tests {
         let patch =
             Call::PatchRecord { app: "cairn".into(), collection: "snoozes".into(), id, patch: serde_json::json!({}) };
         assert_eq!((patch.method(), patch.path()), (Method::PATCH, format!("/v1/apps/cairn/records/snoozes/{id}")));
+        let data = serde_json::json!({"item": "x"});
+        let replace = Call::ReplaceRecord { app: "cairn".into(), collection: "snoozes".into(), id, data: data.clone() };
+        assert_eq!((replace.method(), replace.path()), (Method::PUT, format!("/v1/apps/cairn/records/snoozes/{id}")));
+        assert_eq!(replace.body(), Some(data));
         let undo = Call::UndoApp { app: "cairn".into(), undo: AppUndo::BatchId(id) };
         assert_eq!(undo.body(), Some(serde_json::json!({"batch_id": id})));
         let batch = Call::AppBatch { app: "cairn".into(), writes: vec![BatchWrite::Delete { id, version: None }] };
