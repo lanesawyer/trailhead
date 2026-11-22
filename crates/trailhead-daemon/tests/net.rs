@@ -14,11 +14,11 @@ use trailhead_control::{Factory, Host, Outcome};
 use trailhead_daemon::net::DaemonProtocol;
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    Commit, Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FileChange, FromDaemon, Labels, Role,
-    RunEvent, RunOutcome, RunRequest, RunResult, SandboxId, SandboxSpec, Secret, Status, TaskKey, ToDaemon, Tracker,
-    Usd, VerdictKind,
+    Compute, Credential, Daemon, DaemonSecrets, Error, FactoryConfig, FromDaemon, Labels, Role, RunEvent, RunOutcome,
+    RunRequest, RunResult, SandboxId, SandboxSpec, Secret, Status, TaskKey, ToDaemon, Tracker, Usd, VerdictKind,
 };
 use trailhead_plugins::CLAUDE_CODE;
+use trailhead_testkit::fixtures::{changes, until};
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 use trailhead_wire::daemon::{Launch, RemoteDaemon};
 use trailhead_wire::{ALPN, build_id, read_frame, sandbox_key, write_frame};
@@ -152,45 +152,9 @@ impl Rig {
 }
 
 fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
-    RunRequest {
-        grade: None,
-        run: run.into(),
-        role: Role::Worker,
-        task: trailhead_factory::TaskSpec {
-            key,
-            title: "Slow".into(),
-            description: String::new(),
-            previous_failure: None,
-            context: Default::default(),
-            path: None,
-        },
-        repo: trailhead_factory::Repo { owner: "o".into(), name: "r".into() },
-        base_branch: "main".into(),
-        branch: format!("factory/{run}"),
-        pr: None,
-        feedback: None,
-        model: trailhead_factory::ModelId("fake-sonnet".into()),
-        endpoint: trailhead_factory::Endpoint { base_url: "http://gateway.invalid".into() },
-        max_steps: 5,
-        required_checks: Vec::new(),
-        worker_checks: Vec::new(),
-        blocked_hosts: Vec::new(),
-        allowed_hosts: Vec::new(),
-        env: Default::default(),
-        credential,
-        shots: None,
-    }
-}
-
-fn changes() -> RunOutcome {
-    RunOutcome::Changes {
-        commits: vec![Commit {
-            message: "feat: greet".into(),
-            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
-            merges: vec![],
-        }],
-        summary: "Adds a greeting.".into(),
-    }
+    let mut request = trailhead_testkit::fixtures::run_request(key);
+    request.task.title = "Slow".into();
+    RunRequest { run: run.into(), branch: format!("factory/{run}"), credential, ..request }
 }
 
 #[tokio::test]
@@ -379,26 +343,16 @@ async fn a_prepare_survives_a_dropped_connection() {
         let sandbox = sandbox.clone();
         async move { remote.prepare(&sandbox, req).await }
     });
-    until(|| r.local.prepares_started() == 1).await;
+    until("the prepare to start", || r.local.prepares_started() == 1).await;
 
     // The connection drops partway through a long build.
     r.remote.forget(&sandbox).await;
-    until(|| r.compute.wakes("cold") == 2).await;
+    until("the second wake", || r.compute.wakes("cold") == 2).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     gate.notify_one();
 
     tokio::time::timeout(Duration::from_secs(20), prepare).await.unwrap().unwrap().unwrap();
     assert_eq!(r.local.prepares_started(), 1, "the retry joined the prepare in flight");
-}
-
-async fn until(mut cond: impl FnMut() -> bool) {
-    for _ in 0..200 {
-        if cond() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("timed out waiting");
 }
 
 #[tokio::test]

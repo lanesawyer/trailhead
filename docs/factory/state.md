@@ -9,7 +9,9 @@ Decided: the control plane keeps no database of its own. Run state lives in Trai
 | State | Where |
 | --- | --- |
 | Task status, ownership, lease | Trailhead claims and statuses |
-| Sandbox name, PR URL, profile, grade, attempt and escalation count, spend so far | Trailhead task `metadata` |
+| Sandbox name, PR URL, profile, grade, attempt count, spend so far | Trailhead task `metadata` |
+| A plan: the spec task's ask, chosen model, whether the plan is ready and when it was approved; each subtask's proposed grade | Trailhead task `metadata.plan` (TRAIL-1669) |
+| A planner's Claude Code session, between turns | The sandbox's disk, beside the checkout, while the spec task holds the sandbox; lost with it, after which the next turn starts a new session from the thread |
 | Live sandboxes, per-repo concurrency count (and the host-wide `max_sandboxes` across repos, which counts worker sandboxes only, not reviewers) | Sprites API, by labels (`repo`, `task`, `role`) |
 | Pooled worker Sprites and their warm checkpoints | Sprites API, labels (`pool`, `state`, `warm`) |
 | Spend within the current step | The daemon, re-reported on reconnect |
@@ -33,7 +35,7 @@ On Docker (TRAIL-119), where the table says Sprites API read the Docker engine f
 
 Trailhead already has the service layer the factory needs: REST under `/v1`, MCP at `/mcp`, SSE and webhooks, behind per-agent bearer tokens that can be scoped to projects and rate-limited. Agents create sub-agents (`<parent>/<name>`) whose tokens inherit their scope; revoking an agent revokes everything under it.
 
-- **Identity.** The control plane acts as one agent (`factory`, which a person creates with `trailhead --as-me agent add factory`) and creates a sub-agent per sandbox, scoped to the repo's project, revoked when the task finishes.
+- **Identity.** The control plane acts as one agent (`factory`, which the server creates if it is missing) and creates a sub-agent per sandbox, scoped to the repo's project, revoked when the task finishes.
 - **Keys.** The control plane's iroh key and the master key its daemons' keys derive from are created once and kept in the credential store (`secret:factory-keys`: keyring, or a `0600` file). Losing them strands running sandboxes, which reconcile then requeues.
 - **Orchestration.** The control plane follows Trailhead's events in-process (it's the same server when the factory is built in).
 - **Reaching the server.** Trailhead is one server and one SQLite file wherever it runs, reached from other machines through a tunnel to its loopback port (`docs/PLAN.md`, "Remote access"). People and outside agents use `dumbpipe`. Decided in M4 (2026-10-27), replacing a `dumbpipe` client and ticket in each sandbox: sandboxes use an iroh API tunnel instead. The control plane serves `trailhead/api/0` on its iroh endpoint and forwards each stream to the server's loopback port. It lets in only daemons it started, and the server still checks every bearer token. The daemon exposes the tunnel as a loopback port, and its REST `Tracker` talks to `/v1` through it. A sandbox holds no ticket and needs no egress beyond the iroh relays it already has. Its Trailhead access lives and dies with the control plane, which hosts the server anyway. Turso and hosted mode are deferred.

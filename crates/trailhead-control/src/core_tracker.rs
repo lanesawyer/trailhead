@@ -12,9 +12,10 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Picture, Priority,
-    ProjectRepo, Result, RunPatch, RunRecord, Scope, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind,
-    in_ready_order, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, NewPlanTask, Notice,
+    Picture, PlanTask, PlanTaskUpdate, Priority, ProjectRepo, Result, RunPatch, RunRecord, SOURCE_FACTORY, Scope,
+    TASK_PLAN_KEY, Task, TaskKey, TaskNote, TaskPlan, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent,
+    is_raised_by, raise_to_blocked_priority,
 };
 use uuid::Uuid;
 
@@ -228,31 +229,12 @@ impl CoreTracker {
         Ok(tasks)
     }
 
-    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
-    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read (out of scope, say) is
-    /// left out of the walk.
-    async fn raise_to_blocked_priority(&self, ctx: &Ctx, tasks: &mut [Task]) {
-        // Each task's own priority and the keys it blocks, or None for one that is finished or can't be read.
-        let mut seen: HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = HashMap::new();
-        for task in tasks.iter_mut() {
-            let mut stack = vec![task.key.clone()];
-            let mut visited = std::collections::HashSet::new();
-            while let Some(key) = stack.pop() {
-                if !visited.insert(key.clone()) {
-                    continue;
-                }
-                if !seen.contains_key(&key) {
-                    let read = match self.store.task_detail(ctx, &key).await {
-                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
-                        _ => None,
-                    };
-                    seen.insert(key.clone(), read);
-                }
-                if let Some((priority, blocks)) = &seen[&key] {
-                    task.priority = task.priority.min(*priority);
-                    stack.extend(blocks.iter().cloned());
-                }
-            }
+    /// A task's own priority and the keys it blocks, for [`raise_to_blocked_priority`]: `None` for one that is
+    /// finished or can't be read.
+    async fn priority_and_blocks(&self, ctx: &Ctx, key: TaskKey) -> Option<(Priority, Vec<TaskKey>)> {
+        match self.store.task_detail(ctx, &key).await {
+            Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
+            _ => None,
         }
     }
 
@@ -348,7 +330,7 @@ impl Tracker for CoreTracker {
             tasks.extend(found.into_iter().filter(|t| seen.insert(t.key.clone())));
         }
         // The raise goes in before the cut ([`in_ready_order`]).
-        self.raise_to_blocked_priority(&ctx, &mut tasks).await;
+        raise_to_blocked_priority(&mut tasks, |key| self.priority_and_blocks(&ctx, key)).await;
         Ok(in_ready_order(tasks, limit))
     }
 
@@ -598,6 +580,87 @@ impl Tracker for CoreTracker {
         Ok(tasks.into_iter().find(|t| same_title(&t.title, title)).map(|t| t.key))
     }
 
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>> {
+        let ctx = self.ctx().await?;
+        let filter = TaskFilter {
+            project: Some(spec.project().to_string()),
+            parent: Some(spec.clone()),
+            statuses: trailhead_core::Status::ALL.to_vec(),
+            ..TaskFilter::default()
+        };
+        let mut children = self.list_all(&ctx, filter).await?;
+        children.sort_by(|a, b| trailhead_core::cmp_keys(&a.key, &b.key));
+        let mut plan = Vec::new();
+        for t in children {
+            let detail = self.store.task_detail(&ctx, &t.key).await.map_err(map_err)?;
+            plan.push(PlanTask {
+                proposed: TaskPlan::of(&t.metadata).and_then(|p| p.proposed),
+                key: t.key,
+                title: t.title,
+                description: t.description,
+                status: t.status,
+                grade: t.grade,
+                blocked_by: detail.blocked_by,
+            });
+        }
+        Ok(plan)
+    }
+
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey> {
+        let ctx = self.ctx().await?;
+        let new = trailhead_core::NewTask {
+            project: spec.project().to_string(),
+            title: task.title.clone(),
+            description: task.description.clone(),
+            parent: Some(spec.clone()),
+            metadata: Some(json!({ TASK_PLAN_KEY: { "proposed": task.proposed } })),
+            blocked_by: task.blocked_by.clone(),
+            ..Default::default()
+        };
+        Ok(self.store.create_task(&ctx, new).await.map_err(map_err)?.key)
+    }
+
+    async fn update_plan_task(&self, task: &TaskKey, update: &PlanTaskUpdate) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let patch = TaskPatch {
+            title: update.title.clone(),
+            description: update.description.clone(),
+            metadata: update.proposed.as_ref().map(|p| json!({ TASK_PLAN_KEY: { "proposed": p } })),
+            ..TaskPatch::default()
+        };
+        if patch.title.is_some() || patch.description.is_some() || patch.metadata.is_some() {
+            self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
+        }
+        for blocker in &update.remove_blockers {
+            match self.store.remove_dependency(&ctx, &blocker.0, &task.0).await {
+                Ok(()) | Err(trailhead_core::Error::NotFound(_)) => {}
+                Err(e) => return Err(map_err(e)),
+            }
+        }
+        for blocker in &update.add_blockers {
+            self.store.add_dependency(&ctx, &blocker.0, &task.0).await.map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    async fn cancel(&self, task: &TaskKey) -> Result<()> {
+        self.set_status(task, trailhead_core::Status::Cancelled, None).await
+    }
+
+    async fn set_description(&self, task: &TaskKey, description: &str) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let patch = TaskPatch { description: Some(description.to_string()), ..TaskPatch::default() };
+        self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
+        Ok(())
+    }
+
+    async fn patch_plan(&self, task: &TaskKey, patch: serde_json::Value) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let patch = TaskPatch { metadata: Some(json!({ TASK_PLAN_KEY: patch })), ..TaskPatch::default() };
+        self.store.update_task(&ctx, &task.0, patch, None).await.map_err(map_err)?;
+        Ok(())
+    }
+
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential> {
         let ctx = self.ctx().await?;
         let full = format!("{}/{name}", self.agent);
@@ -614,6 +677,7 @@ impl Tracker for CoreTracker {
             projects: Some(vec![project.to_string()]),
             rate_limit_per_minute: None,
             expires_in: Some(expires_in),
+            apps: None,
         };
         let (_, secret) =
             self.store.create_token_with(&ctx, Principal::Agent(agent.id), name, opts).await.map_err(map_err)?;
@@ -626,5 +690,24 @@ impl Tracker for CoreTracker {
             Ok(_) | Err(trailhead_core::Error::NotFound(_)) => Ok(()),
             Err(e) => Err(map_err(e)),
         }
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let new = trailhead_core::NewNotification {
+            source: SOURCE_FACTORY.into(),
+            kind: notice.kind.clone(),
+            title: notice.title.clone(),
+            body: notice.body.clone(),
+            subject: Some(notice.subject.clone()),
+            task: notice.task.as_ref().map(|k| k.0.clone()),
+            actions: notice.actions.clone(),
+        };
+        self.store.raise_notification(&ctx, new).await.map(drop).map_err(map_err)
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        let ctx = self.ctx().await?;
+        self.store.resolve_notifications_about(&ctx, SOURCE_FACTORY, subject).await.map(drop).map_err(map_err)
     }
 }

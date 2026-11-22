@@ -19,7 +19,7 @@ Decided (2026-10-26): build the factory into Trailhead and evolve Trailhead into
 - **One process for coordination.** With the factory feature on, the Trailhead server is the control plane. The orchestrator follows the events table in-process, woken by the store's commit signal (TRAIL-164).
 - **One tunnel.** Trailhead already reaches other machines through an iroh tunnel to its loopback port (`dumbpipe`). Sandboxes use the same tunnel, and the factory's daemon protocol rides on it as server routes alongside REST and MCP.
 - **Keep the `Tracker` trait.** In-process inside the server, REST from the daemon. It keeps the engine/factory boundary clean, makes test fakes possible, and leaves other trackers open.
-- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). Today the factory is a separate binary built from this repo, so `cargo install trailhead` is the engine alone either way (TRAIL-116).
+- **Engine still usable alone.** Factory crates sit behind a Cargo feature, so `cargo install trailhead` without it stays a small task engine for existing users (OpenClaw, the maintainer's reader app). The feature is `factory`, on by default in the `trailhead` crate; `--no-default-features` builds the engine alone.
 - **Plan and license.** `docs/PLAN.md` was rewritten to match (TRAIL-87). Trailhead is AGPL-3.0, so the factory is too.
 
 ## Components
@@ -51,7 +51,7 @@ flowchart LR
 | Area | Decision | Notes |
 | --- | --- | --- |
 | Language | Rust | Control plane and in-sandbox daemon |
-| Home | Inside Trailhead | Server is the control plane; factory behind a Cargo feature. For now a separate binary beside the server (TRAIL-164, TRAIL-116) |
+| Home | Inside Trailhead | Server is the control plane; factory behind a Cargo feature (TRAIL-164, TRAIL-1073) |
 | Plugin seams | `Compute`, `Harness`, `ModelProvider`, `Tracker`, `CodeHost` | Traits in core; vendor crates compiled in by feature; in-memory fakes for tests |
 | Compute | Fly.io Sprites; Docker for local sandboxes | Own thin wrapper over the Sprites HTTP API, not the unofficial `sprites` crate. Docker through bollard, selected with `[factory.compute] kind = "docker"` (TRAIL-119); on dev machines it's rootless Docker in a lima VM that mise installs |
 | Environment | mise, hidden behind standard checks | Users give stack and commands for setup, fmt, lint, typecheck, test, build |

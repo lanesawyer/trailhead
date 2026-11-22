@@ -436,7 +436,7 @@ fn write(seq: u64, section: Section, change: ConfigChange) -> Fetch {
 }
 
 /// The server's own words for a refusal, or the whole chain for anything else.
-fn said(e: &trailhead_client::http::Error) -> String {
+pub(crate) fn said(e: &trailhead_client::http::Error) -> String {
     match e {
         trailhead_client::http::Error::Api { error, .. } => error.message.clone(),
         other => other.chain(),
@@ -574,8 +574,8 @@ pub(crate) mod tests {
         })
     }
 
-    /// Runs `fetches` against a server answering each with the next of `answers`, and says what was asked.
-    fn run(app: &mut App, fetch: &Fetch, answers: &[(&str, String)]) -> Vec<String> {
+    /// Runs `fetch` against a server answering each request with the next of `answers`, and says what was asked.
+    pub(crate) fn run(app: &mut App, fetch: &Fetch, answers: &[(&str, String)]) -> Vec<String> {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -602,7 +602,7 @@ pub(crate) mod tests {
         served.join().unwrap()
     }
 
-    fn body_of(request: &str) -> serde_json::Value {
+    pub(crate) fn body_of(request: &str) -> serde_json::Value {
         serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
     }
 

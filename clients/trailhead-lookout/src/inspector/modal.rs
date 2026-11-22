@@ -34,6 +34,8 @@ pub(super) struct ModalUi {
 pub(super) struct Tools {
     pub(super) previous: Entity,
     pub(super) next: Entity,
+    /// Opens the graph of the task's subtasks, shown while it has some.
+    pub(super) graph: Entity,
     /// The ⋯ menu's root, hidden while there is nothing it can do.
     pub(super) menu: Entity,
     /// Where the menu's last command stands.
@@ -94,6 +96,10 @@ pub(super) fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
     };
     let previous = arrow(commands, Icon::ChevronUp, "Previous task in the column (K)", Step::Previous);
     let next = arrow(commands, Icon::ChevronDown, "Next task in the column (J)", Step::Next);
+    let graph = commands
+        .spawn_scene(tool_button(Icon::Graph, "Show its subtasks as a graph", ButtonKind::Plain))
+        .insert((OpensGraph(String::new()), ChildOf(row)))
+        .id();
     let menu = spawn_icon_menu(commands, Icon::Ellipsis, "More actions");
     commands.entity(row).add_child(menu.root);
     let items = MENU_ACTIONS
@@ -108,12 +114,12 @@ pub(super) fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
         })
         .collect();
     commands.entity(tools).insert_children(0, &[row]);
-    Tools { previous, next, menu: menu.root, note, items }
+    Tools { previous, next, graph, menu: menu.root, note, items }
 }
 
 /// Keeps the header's controls in line with the task: an arrow is off at its column's end, the menu shows only what
 /// the task offers (and nothing while offline), and the note says where its last command stands.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn sync_tools(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,
@@ -138,6 +144,11 @@ pub(super) fn sync_tools(
     let live = *connection.get() == Connection::Live;
     gate_button(&mut commands, tools.previous, neighbours.previous.is_some());
     gate_button(&mut commands, tools.next, neighbours.next.is_some());
+    let parent = view.task.as_ref().is_some_and(|t| t.spec || !t.subtasks.is_empty());
+    set_display(&mut nodes, tools.graph, parent);
+    if let Subject::Task(id) = &view.subject {
+        commands.entity(tools.graph).insert(OpensGraph(id.clone()));
+    }
     let mut any = false;
     for (action, item) in &tools.items {
         let shown = live && offers(view, action);

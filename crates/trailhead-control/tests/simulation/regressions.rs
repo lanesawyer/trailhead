@@ -166,3 +166,41 @@ fn a_sandbox_left_busy_isnt_kept_for_a_parked_task_that_gave_it_back() {
         ],
     );
 }
+
+/// TRAIL-1705: a person's second request for changes, after a rework cut short by the tracker was reviewed again,
+/// was left in review with no rework and no park.
+#[test]
+fn a_second_request_for_changes_after_a_cut_short_rework_is_reworked() {
+    replay(
+        &[2, 1],
+        &[
+            Tick(15975976188496081242),
+            PersonRequestsChanges(0),
+            Fault(TrackerFailsWrite(5)),
+            Tick(14024096533343620225),
+            Reconcile(126197172041173617),
+            Restart,
+            Push(0),
+            Reconcile(6379847023459284176),
+            PersonRequestsChanges(0),
+        ],
+    );
+}
+
+/// TRAIL-1706: the check, not the factory. A plan's second task depends on its first, which parked on a question;
+/// the second was reported as never started, though it was waiting on the first, and that on a person.
+#[test]
+fn a_plans_task_blocked_by_a_parked_one_is_waiting_not_stuck() {
+    replay(
+        &[2, 1],
+        &[
+            Tick(16204281920552100258),
+            PersonAsksForPlan,
+            Tick(9902673986993973339),
+            PersonAnswersPlan,
+            Tick(4258611411094695303),
+            PersonApprovesPlan,
+            Tick(11639520468415140020),
+        ],
+    );
+}

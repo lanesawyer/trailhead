@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use trailhead_control::Outcome;
 use trailhead_factory::{
-    CiState, CodeHost, Commit, MergedBy, NewPr, Patch, PrRef, RateLimit, Role, RunOutcome, RunPatch, Status, Tracker,
+    CiState, CodeHost, Commit, MergedBy, NewPr, PrRef, RateLimit, Role, RunOutcome, Status, Tracker,
 };
 use trailhead_testkit::{Script, TrackerOp};
 
@@ -351,10 +351,7 @@ async fn pending_ci_is_not_reworked() {
 async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
-    r.tracker
-        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
-        .await
-        .unwrap();
+    r.tracker.report(&key, trailhead_factory::RunPatch::conflict_reworks(4)).await.unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
@@ -372,10 +369,7 @@ async fn failed_ci_parks_the_task_at_the_conflict_rework_cap() {
 async fn an_answered_ci_park_is_reworked_with_the_base_merged_in() {
     let (r, queue) = queued_rig_with(SHADOW);
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
-    r.tracker
-        .report(&key, trailhead_factory::RunPatch { conflict_reworks: Patch::Set(4), ..RunPatch::default() })
-        .await
-        .unwrap();
+    r.tracker.report(&key, trailhead_factory::RunPatch::conflict_reworks(4)).await.unwrap();
     r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
     r.factory.reconcile().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
@@ -481,9 +475,12 @@ async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() 
 #[tokio::test]
 async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
     let (mut r, queue) = queued_rig_with(&merging());
-    let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
+    let mode = Arc::new(std::sync::Mutex::new(Ok::<_, String>(trailhead_factory::MergeMode::On)));
     let source = mode.clone();
-    r.factory = r.factory.with_merge_mode_source(Box::new(move || source.lock().unwrap().clone()));
+    r.factory = r.factory.with_live_settings(Box::new(move || {
+        let merge_mode = source.lock().unwrap().clone()?;
+        Ok(trailhead_control::LiveSettings { merge_mode, restart_for: Vec::new() })
+    }));
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     *mode.lock().unwrap() = Ok(trailhead_factory::MergeMode::Off);
@@ -1439,4 +1436,82 @@ async fn a_status_comment_posted_anew_when_the_merge_is_announced_is_the_one_rec
     let new = task.run.merge.unwrap().comment.unwrap();
     assert_ne!(new, id, "the comment posted after the merge is recorded");
     assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; merged.");
+}
+
+#[tokio::test]
+async fn a_pr_waiting_on_a_person_alone_tells_them_once_and_their_approval_resolves_it() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    assert!(r.tracker.notices().is_empty(), "CI is still running: not yet the person's turn");
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let open = r.tracker.open_notices();
+    assert_eq!(open.len(), 1, "told once, not on every pass: {open:?}");
+    let notice = &open[0];
+    assert_eq!(notice.kind, trailhead_factory::NOTICE_REVIEW);
+    assert_eq!(notice.task.as_ref(), Some(&key));
+    assert!(notice.title.starts_with(&format!("{key} ")), "{}", notice.title);
+    assert!(notice.body.contains("grade 3"), "{}", notice.body);
+    assert_eq!(notice.actions.len(), 1);
+    assert_eq!(
+        (notice.actions[0].label.as_str(), notice.actions[0].url.as_str()),
+        ("Open the pull request", pr.url.as_str())
+    );
+    assert!(r.tracker.task(&key).run.merge.unwrap().notified);
+
+    r.tracker.approve_as_human(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.open_notices().is_empty(), "approved: it no longer waits on them");
+    assert_eq!(r.tracker.notices().len(), 1, "nothing new raised");
+    assert!(!r.tracker.task(&key).run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_rework_takes_back_the_review_notice_and_the_next_wait_is_told_afresh() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1);
+
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert!(task.changes_requested, "sent for a rework");
+    assert!(r.tracker.open_notices().is_empty(), "a rework is the factory's to do, not the person's");
+    assert!(!task.run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_failed_raise_leaves_the_merger_as_it_was_and_is_tried_again() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.fail_next("factory", TrackerOp::Notify, 1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    let decision = task.run.merge.expect("the decision is recorded all the same");
+    assert!(!decision.notified, "not told, so not marked");
+    assert_eq!(said(&r), ["Grade 3 (task was 1; Cargo.toml changed): waiting for a person."]);
+    assert!(r.tracker.notices().is_empty());
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1, "the next pass tells them");
+    assert!(r.tracker.task(&key).run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_task_a_person_takes_out_of_review_has_its_review_notice_resolved() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1);
+
+    r.tracker.set_status(&key, Status::Open);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.open_notices().is_empty());
+    assert!(!r.tracker.task(&key).run.merge.unwrap().notified);
 }

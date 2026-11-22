@@ -215,6 +215,7 @@ fn add(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::settle;
 
     #[derive(Resource, Default)]
     struct Edits(Vec<Vec<String>>);
@@ -229,13 +230,6 @@ mod tests {
             .add_observer(|edited: On<ValuesEdited>, mut edits: ResMut<Edits>| edits.0.push(edited.values.clone()))
             .add_systems(Update, (sync_value_lists, paint_value_lines).chain());
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn lines(app: &mut App) -> Vec<(Entity, String)> {

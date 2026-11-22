@@ -185,7 +185,7 @@ async fn tokens_can_be_rescoped_without_reissuing() {
     assert_eq!(t.projects.as_ref().map(Vec::len), Some(2));
     assert_eq!(t.rate_limit_per_minute, Some(30), "omitted fields stay");
 
-    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(None) };
+    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(None), apps: None };
     let t = s.update_token(&env.human, token.id, lift).await.unwrap();
     assert_eq!((t.projects, t.rate_limit_per_minute), (None, None));
     let t = s.update_token(&env.human, token.id, TokenPatch { projects: Some(Some(vec![])), ..Default::default() });
@@ -216,7 +216,7 @@ async fn a_changed_scope_applies_on_the_next_request() {
         TokenOptions { projects: Some(vec!["AUTH".into()]), rate_limit_per_minute: Some(10), ..Default::default() };
     let (token, secret) = s.create_token_with(&env.human, me, "x", opts).await.unwrap();
     assert!(s.authenticate(&secret).await.unwrap().is_scoped());
-    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(Some(100)) };
+    let lift = TokenPatch { projects: Some(None), rate_limit_per_minute: Some(Some(100)), apps: None };
     s.update_token(&env.human, token.id, lift).await.unwrap();
     let (ctx, t) = s.authenticate_token(&secret).await.unwrap();
     assert!(!ctx.is_scoped());

@@ -286,8 +286,8 @@ fn camp_lines(c: &Camp) -> Vec<String> {
     lines
 }
 
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 fn rebuild_map(
     changed: Query<(), Or<(Changed<Rev>, Changed<Campsite>, Changed<Run>)>>,
     mut removed_data: RemovedComponents<Rev>,
@@ -408,7 +408,7 @@ fn on_mode_picked(picked: On<Picked>, toggles: Query<(), With<ModeToggle>>, mut 
 }
 
 /// Shows the flat map's layers only in [`MapMode::Flat`], and the toggle's choice as the mode is.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn show_mode(
     mode: Option<Res<State<MapMode>>>,
     mut layers: Query<&mut Visibility, Or<(With<Terrain>, With<TokenLayer>)>>,
@@ -528,7 +528,6 @@ fn terrain(map: &MapModel, factory: &FactoryStatus) -> Vec<(String, Block, Vec<L
 
 /// Brings the terrain to the model and the factory's link, changing only what differs, and moves tokens' targets,
 /// which [`glide`] walks.
-#[allow(clippy::too_many_arguments)]
 fn redraw(
     map: Res<TrailMap>,
     factory: Res<FactoryStatus>,
@@ -838,6 +837,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),
@@ -920,6 +920,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: Some("#306 has auto-merge on but CI failed".into()),
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
@@ -1013,6 +1014,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),

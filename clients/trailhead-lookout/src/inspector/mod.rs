@@ -33,7 +33,8 @@ use trailhead_client::http::{Call, NewComment, Revert, TaskUpdate, Undo};
 use trailhead_client::text::Text as Wording;
 use trailhead_factory::{GateKind, MergeDecision, MergedBy, RunRecord};
 use trailhead_model::{
-    Agent, Attachment, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey, User,
+    Agent, Attachment, Claim, Comment, CommentKind, Grade, Priority, Project, Status, Task, TaskDetail, TaskKey,
+    TaskPlan, User,
 };
 #[cfg(test)]
 use trailhead_shell::commands::Method;
@@ -49,16 +50,17 @@ use crate::author::{
 use crate::board::Input;
 use crate::detail::{Detail, Refetch};
 use crate::factory::FactoryStatus;
+use crate::graph::OpensGraph;
 use crate::pictures::{OpenFolds, PictureChange, PicturePair, PictureSet, WantsPicture};
 use crate::project::OpenProject;
 use crate::settings::OpenLogs;
 use crate::widgets::{
     ButtonKind, DetailPanes, Hint, Icon, InlineChosen, InlineEdited, InlineField, InlineText, Keyed, Modal,
-    ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, bubble,
-    bubble_head, button, comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer,
-    link_button, menu_item, open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar,
-    section_frame, select, select_iconed, size, space, spawn_detail_panes, spawn_icon_menu, status_label, text,
-    text_dim, text_input, text_toned, token, tool_button,
+    ModalClosed, ModalRoot, ModalSlots, PanelTitle, Picked, SelectEdit, Side, TextTone, Token, badge, button,
+    comment_icon, display, extent, grade_tone, inline_field, inline_text_sized, layer, link_button, menu_item, message,
+    open_modal, panel, panel_header, priority_tone, row, scroll_body, scroll_frame, scrollbar, section_frame, select,
+    select_iconed, size, space, spawn_detail_panes, spawn_icon_menu, status_label, text, text_dim, text_input,
+    text_toned, token, tool_button,
 };
 
 mod compose;
@@ -131,15 +133,11 @@ pub struct Latest(pub HashMap<String, i64>);
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct InspectorState(pub Option<InspectorView>);
 
-/// Notifications about a task, not changes to it; the server's `changes_only` leaves them out, and undo can't revert them.
-fn is_notification(kind: &str) -> bool {
-    matches!(kind, "task.due_soon" | "task.overdue")
-}
-
 fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) {
     for item in items.read() {
         let SyncItem::Event(e) = item else { continue };
-        if is_notification(&e.kind) {
+        // Told to a person, not a change: the server's `changes_only` leaves these out, and undo can't revert them.
+        if trailhead_model::is_notification(&e.kind) {
             continue;
         }
         if let Some(task) = trailhead_shell::sync::task_of(e) {
@@ -148,7 +146,7 @@ fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) 
     }
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn rebuild(
     selection: Res<Selection>,
     latest: Res<Latest>,

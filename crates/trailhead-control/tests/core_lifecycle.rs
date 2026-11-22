@@ -19,9 +19,10 @@ fn pr(n: u8) -> Priority {
 }
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Scope, Status,
-    TaskKey, Tracker, Usd, Verdict, VerdictKind, label,
+    CodeHost, FactoryConfig, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Scope, Status, TaskKey, Tracker,
+    Usd, Verdict, VerdictKind, label,
 };
+use trailhead_testkit::fixtures::changes;
 use trailhead_testkit::{
     Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
 };
@@ -122,17 +123,6 @@ impl Rig {
     async fn revoked(&self, agent: &str) -> bool {
         let agents = self.store.list_agents(&self.human).await.unwrap();
         agents.iter().find(|a| a.name == agent).unwrap_or_else(|| panic!("no agent {agent}")).revoked_at.is_some()
-    }
-}
-
-fn changes() -> RunOutcome {
-    RunOutcome::Changes {
-        commits: vec![Commit {
-            message: "feat: greet".into(),
-            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
-            merges: vec![],
-        }],
-        summary: "Adds a greeting.".into(),
     }
 }
 
@@ -1889,7 +1879,7 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     let (r, key, pr) = approved_auto_mergeable().await;
 
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
-    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    r.tracker.report(&key, RunPatch::merging(head)).await.unwrap();
     r.codehost.push_to(&pr);
     r.factory.reconcile().await.unwrap();
     let task = r.show(&key).await;
@@ -1904,7 +1894,7 @@ async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
     // The intent names the current head, and the head stays put: only the gates change (a grade
     // raised to one that needs a person).
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
-    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    r.tracker.report(&key, RunPatch::merging(head)).await.unwrap();
     let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
     r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
     r.factory.reconcile().await.unwrap();
@@ -2012,6 +2002,7 @@ async fn a_record_written_over_an_older_one_keeps_none_of_its_fields() {
     let key = r.task("Add a greeting").await;
     let pr = PrRef { repo: Repo { owner: "o".into(), name: "r".into() }, number: 4, url: "https://host/o/r/4".into() };
     let request = |settled: bool, head: Option<&str>| ChangesRequested {
+        answered: false,
         reviewer: "factory/trail-1-a1-r1".into(),
         body: "Add a test.".into(),
         attempt: 1,

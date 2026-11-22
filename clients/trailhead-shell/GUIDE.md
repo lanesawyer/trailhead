@@ -20,8 +20,9 @@ An app is:
 - **Built only from the kit.** Its views use `trailhead-ui` and nothing else for UI: no `bevy::feathers`, no hand-made
   controls, no color literals. When it needs something the kit lacks, the kit grows; the app does not work around it
   (the kit's guide, section 1).
-- **A client of the Trailhead API only.** It reads the tasks and projects the shell mirrors, makes reads of its own
-  through the shell's connection, and writes through the shell's commands. It never touches the server's database or
+- **A client of the Trailhead API only.** It reads the tasks and projects the shell mirrors, and the records of its
+  own collections in the app data store, makes reads of its own through the shell's connection, and writes through
+  the shell's commands. It never touches the server's database or
   `trailhead-core`.
 - **Without file, network or process access of its own.** No `std::fs`, `std::net` or `std::process`, and no `unsafe`.
   What it keeps on this machine goes in the `LocalStore`, which the shell writes; what it reads and writes on the
@@ -45,6 +46,7 @@ pub trait ShellApp: Send + Sync + 'static {
     fn paint(&self, _theme: &mut Theme) {}
     fn link_jobs(&self) -> Vec<Box<dyn LinkJob>> { Vec::new() }
     fn settings_pages(&self) -> Vec<SettingsPage> { Vec::new() }
+    fn collections(&self) -> Collections { Collections::none() }
 }
 ```
 
@@ -59,6 +61,7 @@ pub trait ShellApp: Send + Sync + 'static {
 | `build` | For every app, after the shell has inserted `Apps`, the `LocalStore` and the `ActiveApp` state, and after the connection's plugin when there is one. Headless tests call it too. | The app's state, resources, messages and logic: the plugins that run under `MinimalPlugins`. Read what the `LocalStore` kept here (`app.world().resource::<LocalStore>()`). Observers of the app's own events go here. |
 | `build_ui` | Only in a windowed shell, after every app's `build` and after the shell's rail. | What spawns and draws: `OnEnter`/`OnExit` systems that spawn and despawn the app's pages, the systems that keep them in step, the observers of `Activate`, `Picked` and the like. |
 | `settings_pages` | Once, after every app's `build`, headless too; before `build_ui`. | The app's pages in the shell's settings modal, listed under the app's name (below, "Settings pages"). Most apps have none and leave the default. |
+| `collections` | Once, before `build`, headless too. | What the app keeps in the app data store: its `collections.toml` and the collections it reads, each with its Rust type (section 6, "An app's own data"). An app that keeps nothing leaves the default. |
 
 The split between `build` and `build_ui` is the kit's rule that logic and drawing are separate plugins: everything an
 app decides is testable without a window, and only what draws needs one.
@@ -67,8 +70,10 @@ app decides is testable without a window, and only what draws needs one.
 
 The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
 from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme, the
-text size and how the window switches apps; Connection; Server, the server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
-An app does not open a settings modal of its own; it adds pages to this one.
+text size and how the window switches apps; Notifications, how the person wants to be told; Connection; Server, the
+server's user config; Connectors, the connectors the server runs for the apps; About), then each app's under the
+app's name, in the order of the rail, whichever app is shown. An app does not open a settings modal of its own; it adds
+pages to this one.
 
 ```rust
 use trailhead_shell::settings::{PageId, SettingsPage};
@@ -100,6 +105,12 @@ fn count_settings(In(page): In<Entity>, mut commands: Commands) {
   its tab, and `fill` is any system taking `In<Entity>`, so it reads what it needs (`Res<..>`, the `LocalStore`) to
   spawn the page as it is now. Fill the page with the kit's settings widgets only (`setting`, `setting_toggle`,
   `spawn_settings_section`), never bare toggles or fields.
+- Typing in the modal's search field shows the settings that match from every page, each page under its title: a
+  setting whose label or note holds every word typed, all of a section whose heading does, and all of a page whose
+  title or app name does. A page gets this by being built from the kit's `setting`, `setting_toggle` and
+  `spawn_settings_section`, which carry the words they are found by; anything else on a page (a row of buttons, a
+  notice) shows with its section or page. While a search shows, every page is filled at once, so a page's `fill`
+  and the systems that keep it current must not assume it is the only page there.
 - The page is spawned when it is shown and despawned when another is picked or the modal closes, so keep what it shows
   current from a system of the app's (in `build_ui`) that finds the page's controls by the app's markers and updates
   them in place; it does nothing while the page isn't there. What a control does is an observer of the app's, checking
@@ -218,7 +229,7 @@ store.remove(MY_APP, "draft");
   filter, an unsent draft, a count of the reader's own. The shell keeps the app last shown there too.
 - **When it is saved:** after the frame a value changed in, and once more when the shell restarts onto a newer
   build (the update notice on the rail), so nothing kept is lost to a restart.
-- **What it is not for:** the app's data. That lives on the server, as tasks or (later) in the app data store. Losing
+- **What it is not for:** the app's data. That lives on the server, as tasks or in the app data store (section 6). Losing
   this file loses nothing a person cannot put back in a moment, and a write that fails is logged and tried again on
   the next change, never worth stopping the shell for.
 - **When to read and write it:** read it in `build`, into the app's resources; write it in the system or observer that
@@ -263,7 +274,7 @@ The other resources: `Api(ApiAccess { base, token, user, user_id })` once signed
 
 The shell keeps a mirror of the task engine's records as entities (`trailhead_shell::mirror`). Each holds its record
 as its `trailhead-model` type in a `Mirrored<T>` component (`Task`, `Project`, `Comment`, `Claim`, `Agent`, `User`,
-`Dependency`, and `Attachment`, a picture's metadata), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
+`Dependency`, `Attachment`, a picture's metadata, and `Notification`), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
 the lot, and an event replaces one entity only if it is newer. An app never writes to them.
 
 ```rust
@@ -405,6 +416,203 @@ fn describe(outcome: &Outcome) -> String {
 Lookout's fuller `describe` is in `author.rs`. Lookout keeps the edit in flight in a `Pending` on the control, which
 also lets it refuse a second edit while the first is unanswered.
 
+### Notifications
+
+The server keeps what a person is told (`docs/app-platform.md`, "Notifications"); the shell mirrors them as
+`Mirrored<Notification>` and shows them: the bell at the rail's foot with the count of unread ones, its panel, and on
+each app's button the count of the unread ones whose `source` is that app's id. An app draws none of it. What it can do
+(`trailhead_shell::notifications`):
+
+- **Hear one arrive.** `NotificationArrived(Notification)` is a message written when a notification arrives raised and
+  unread off the event stream while the shell runs, and wasn't held before: never for one loaded with a snapshot, at
+  launch or after a long disconnect, and never for a change to one (read, unread, resolved). Read it with a
+  `MessageReader` to do something of your own. It is written whatever the person's settings say; what the shell does
+  about it is theirs (below).
+- **Mark the ones about a task read** when the person opens the task: `commands.trigger(ReadNotificationsAbout {
+  task_id })` sends a read for each unread one about it. Lookout does this when its task modal opens a task
+  (`clients/trailhead-lookout/src/detail.rs`).
+- **Mark one read or unread yourself** with a command, `Call::ReadNotification(id)`, `Call::UnreadNotification(id)` or
+  `Call::ReadAllNotifications`; the stream brings the change back to the mirror, as for any write.
+- **Open the panel**: `commands.trigger(OpenNotifications)`.
+- **Hold a bell of your own** in a shell with one app, which has no rail: put a
+  `tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain)` with `NotificationBell` on it where the app keeps such
+  things (Lookout's sidebar footer, beside the gear) while `Apps::has_rail()` is false. The shell puts the count on it,
+  rings it and opens the panel when it is pressed.
+- `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps', and follows the person's
+  setting; `source_label` names a source as the panel does (an app's icon and name, Trailhead for `server`, Factory
+  for `factory`).
+
+**The person's settings** (`trailhead_shell::notification_settings`) decide what the shell does with each one. They are
+kept on the server and held in `NotificationPrefs { settings, answered, error }`, read when the connection goes live,
+every minute while it is, after a save and when the Notifications page opens; until the server has said them, the
+defaults hold (every source interrupts, the sound and the counts on). An arrival does what
+`settings.alert(source, now, minute of the day)` says, with the time and zone from the `Clock` resource (the
+machine's own; a test inserts `Clock::new(..)` to set it):
+
+| Alert | What the shell does |
+| --- | --- |
+| `None` (a silent source) | Listed in the panel only, and left out of every count, the bell's and the rail's. |
+| `Count` (quiet hours or focus) | Counted; no ring, no sound, no desktop notification. Held for the notice at their end. |
+| `Ring` (a bell source) | The bell rings (`RingBells`), with the sound if `settings.sound`; never the desktop. |
+| `Interrupt` | With window focus, the bell rings with the sound; without it, the desktop shows it, with its theme's sound if `settings.sound`. |
+
+When quiet hours or focus end, what arrived meanwhile and is still unread is said once: one ring with focus, one
+desktop notification ("3 things need you") for those from interrupting sources without. The sound inside the window
+is the desktop theme's own message sound, played by the desktop (`canberra-gtk-play`, through the `Sound` resource
+`Shell::run` inserts); the shell ships none. The person sets all of it on the Notifications page among the shell's own
+settings, and focus from the bell's panel; each saves the settings last read with only that part changed
+(`SaveNotificationSettings`, a `PUT` command). An app reads `NotificationPrefs` if it wants to, and changes nothing
+of it.
+
+The desktop's own notifications are the shell's too (`trailhead_shell::desktop`): one that arrives while the window
+has no focus is shown there, with its link buttons, and taken down once it is read or resolved; several arriving
+together are one. An app does nothing for it. A test that wants to see what would be shown inserts a `Desktop` holding
+its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there. The same goes for
+the sound: a `Sound` holding a `Speaker` of the test's own, as `src/notification_settings.rs`'s tests do.
+
+**Raising one of your own.** Trigger `Notify` from the app's code, and the shell sends it to the server as a command:
+
+```rust
+use trailhead_shell::notifications::{Notify, ResolveNotifications};
+
+commands.trigger(
+    Notify::new(MY_APP, "ticklist.due", "Three are due today")
+        .body("Pay the rent, call the vet, water the plants.")
+        .subject("due-today")
+        .link("Open the list", "https://example.com/list"),
+);
+// Later, when the thing no longer needs the person, wherever they dealt with it:
+commands.trigger(ResolveNotifications { source: MY_APP, subject: "due-today".into() });
+```
+
+- `source` is the app's own id: the panel names the app on it and the rail counts it on the app's button, and the
+  person's level for the app decides whether it rings or interrupts. `kind` is a short name of the sort of thing it is
+  (`<app>.<what>`). `.task(key)` ties it to a task, which resolves it when the task is finished.
+- It comes back on the event stream like any other, so do not show it yourself, and nothing is answered to the app.
+- Only while the connection is `Live`: raised otherwise it is dropped (the log says so). An app cannot raise one while
+  the window is closed.
+- The example app raises one every tenth press and resolves it when the count is reset (`count_press`,
+  `reset_count`); its test `every_tenth_press_raises_a_notification_and_a_reset_resolves_it` checks what is sent.
+
+To test them, give a snapshot notifications (`fixture::notification_json`) or feed an event with `"entity":
+"notification"` and a kind of `notification.raised`, as `src/notifications.rs`'s tests do.
+
+### An app's own data: the record mirror
+
+What an app keeps that isn't a task (a snooze, a bookmark, a pull request a connector brings) lives in the server's
+app data store, one SQLite file per app (`docs/app-platform.md`, "The app data store and connectors"). The rule for
+which is which: **something done elsewhere is a record, not a task.** A pull request or a Jira ticket is finished in
+GitHub or Jira, so it is a record an app shows; a task is what gets done in Trailhead, with its status, claims and
+ready queue. Something kept (a contact, a note) is a record too.
+
+**Declaring.** The shape of the data is declared in a file, `apps/<id>/collections.toml` in the apps repo, beside the
+app's `Cargo.toml`, not in its Rust: the server checks every write against it and a connector has to know it, and
+neither links the app. The server registers it from the checkout its builder last built, so a shape goes live with the
+window that uses it.
+
+```toml
+[collections.snoozes]
+fields = { item = "string", until = "timestamp?" }
+
+[collections.pull_requests]
+from = "github.pull_requests"
+```
+
+A field is `string`, `integer`, `number`, `boolean`, `timestamp` (RFC 3339), `day` (`YYYY-MM-DD`), `url` or `json`,
+`[]` after it for a list, then `?` for optional. A shape changes by addition only (a new collection, a new optional
+field); anything else is a new collection. A collection with `from = "<connector>.<feed>"` is filled from a
+connector's feed and is read-only to the app. Adding or changing this file is a grade 3 change.
+
+The Rust side names the collections the app reads and the type each record's data deserializes into, with serde:
+
+```rust
+use serde::{Deserialize, Serialize};
+use trailhead_shell::records::Collections;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Snooze {
+    pub item: String,
+    pub until: Option<jiff::Timestamp>,
+}
+
+// In `impl ShellApp`:
+fn collections(&self) -> Collections {
+    Collections::declared(include_str!("../collections.toml")).keep::<Snooze>("snoozes")
+}
+```
+
+`Collections::declared` panics on a file that doesn't parse and `keep` on a collection the file doesn't declare (or
+one kept twice), so any test that builds the app catches a typo. A connected shell then mirrors each kept collection
+while it is live: a snapshot read page by page, then the app's own event stream, with a cursor per app, resumed after
+a drop as the tasks' stream is. An app the server has no declaration for yet, or that the token doesn't reach, is not
+an error: the shell says so once in its log and asks again about once a minute.
+
+**Reading.** Each record is an entity holding a `trailhead_shell::records::Record<T>`, read with an ordinary query:
+
+```rust
+use trailhead_shell::records::{Record, RecordMirror};
+
+fn rows(snoozes: Query<&Record<Snooze>>, mirror: Option<Res<RecordMirror>>) {
+    let loaded = mirror.is_some_and(|m| m.loaded(MY_APP, "snoozes"));
+    for snooze in &snoozes {
+        let (_id, _key, _version, _item) = (snooze.id, &snooze.key, snooze.version, &snooze.data.item);
+    }
+}
+```
+
+- `Record<T>` has `app`, `collection`, `id` (a UUID), `key` (the name something outside gave it, unique in its
+  collection), `version`, `created_at`, `updated_at` and `data: T`. The entity also has a `RecordOf { app,
+  collection, id }`. Filter on `collection` when one type is kept in two collections.
+- The mirror is the only thing that changes them: a snapshot replaces everything held of the app, an event replaces
+  one record in place only if its version is newer, and a removal despawns it. Watch `Changed<Record<T>>` (or
+  `Ref<Record<T>>::is_changed`) and `RemovedComponents<Record<T>>` to redraw only what changed, and keep rows with the
+  kit's `Keyed` by record id, as the example app does.
+- **"Empty" or "not yet".** `RecordMirror::loaded(app, collection)` is true once the collection has been read at
+  least once, and stays true through a drop of the connection. Before it, no records means "not loaded yet"; after
+  it, "none". `RecordMirror::status(app)` says where the app's sync is (`Loading`, `Live`, `Reconnecting`,
+  `NotRegistered`, `Forbidden`), and `feed(app, collection)` names the feed a collection is filled from.
+- A record whose data doesn't deserialize into `T` (a field the app's type doesn't expect, say) is left out, said once
+  in the log, and an older copy that did read stays. It never panics. Keep `T` in step with the file: an optional
+  field is an `Option`.
+- `RecordMirror` exists only in a shell with a connection (or a test's), so take it as `Option<Res<RecordMirror>>`.
+
+**Writing.** Every write is a command through the outbox, as a task write is (above, "A write: the commands"):
+`trailhead_shell::records` makes the `Request` to send in a `Submit`.
+
+| Write | Request | If-Match |
+| --- | --- | --- |
+| Create | `records::create(MY_APP, "snoozes", &snooze)` | none |
+| Create with a key (a taken key is refused) | `records::create_keyed(MY_APP, "snoozes", key, &snooze)` | none |
+| Write by key: make the record with this key look like this, creating it if there is none | `records::put(MY_APP, "snoozes", key, &snooze)` | none |
+| Change (a JSON merge patch of the fields: `null` removes an optional one) | `record.change(json!({"until": null}))` | the record's version |
+| Replace the fields, whole (the key stays) | `record.replace(&snooze)` | the record's version |
+| Remove | `record.delete()` | the record's version |
+
+The answer is a `CommandDone` for the `source`, as for a task: `Ok`, `Conflict` when the record changed since the
+version the control saw, `Forbidden`, or `Failed` with the server's words (a field missing, unknown or of the wrong
+type is named). Do not apply a write locally: the result comes back through the stream into the mirror. A write to a
+collection filled from a feed is refused at once by the shell, as `Forbidden`, without going to the server, so offer
+no control that writes to one. Several writes as one transaction is `Call::AppBatch` in a `Request::new`, and undo
+is `Call::UndoApp`.
+
+**Testing.** Under `test-support`, with no server:
+
+- `trailhead_shell::fixture::record_json(json!({"id": "n1", "data": {..}, "version": 2}))` makes a whole record from
+  the fields a test cares about (short names stand in for ids, as for tasks: `fixture::id("n1")`), and
+  `fixture::app_event(json!({"id": 1, "collection": .., "record_id": "n1", "before": .., "after": ..}))` an event off
+  an app's stream (a removal has `before` and no `after`).
+- `testing::fill_records(&mut app, MY_APP, vec![("snoozes", vec![record_json(..)])])` replaces what the mirror holds
+  of the app, marks those collections loaded, and settles; `testing::feed_record(&mut app, MY_APP, app_event(..))`
+  hands it one event (its `id` above the last one fed).
+- Writes are checked with `sent` and answered with `answer`, as for tasks.
+
+Under `test-server`, against a real server: `Server::declare_app(&MyApp)` registers the app's `collections.toml`
+(`PUT /v1/apps/{app}/declaration`, as the builder would), `Server::client()` writes as someone else would,
+`testing::server::live(&server, ShellPlugin::new().with(MyApp))` builds a headless shell connected to it and runs it
+until live, and `testing::server::records_caught_up(&mut shell, &server, MY_APP)` runs it until every kept
+collection has loaded and the app's newest event is applied. None of it names the network, so the app's lint stays
+clean. The example app's `tests/notes.rs` is the one to copy.
+
 ### Work of your own on the net thread: `LinkJob`
 
 A `LinkJob` is work an app runs on the net thread for as long as a control plane is held, such as a stream of its own
@@ -418,7 +626,7 @@ only jobs today. An app that only reads the API uses `Fetch`, not a job.
 
 ## 7. Testing an app
 
-An app carries four kinds of test, and the example app has one of each. The helpers are the shell's, in
+An app carries four kinds of test, and the example app has one of each, plus a live test of its own data. The helpers are the shell's, in
 `trailhead_shell::testing`, behind its `test-support` feature: turn it on for `trailhead-shell` in
 `[dev-dependencies]`. It pulls in nothing the shell does not already.
 
@@ -468,9 +676,11 @@ answer(&mut app, out[0].source, Outcome::Failed("try later".into()));
 The shell's `test-server` feature (which turns on `test-support`) adds `trailhead_shell::testing::server`: an
 in-process Trailhead server behind a local iroh endpoint (`Server::new().await`, `Server::config` for the shell's
 `NetConfig`, `endpoint`, `allowed_and_live`), to go live against with a shell told to connect, driven with
-`testing::until`, `send`, `state` and `reason`. It brings the task engine, the server and axum into the lockfile, so
-only a test of work over the real connection wants it: Lookout's `tests/factory_link.rs` and the shell's own
-`tests/connection.rs`.
+`testing::until`, `send`, `state` and `reason`; `live`, `Server::declare_app` and `records_caught_up` do it for an
+app's own data with nothing of the network named in the test (section 6, "An app's own data"). It brings the task
+engine, the server and axum into the lockfile, so only a test of work over the real connection wants it: Lookout's
+`tests/factory_link.rs`, the shell's own `tests/connection.rs` and `tests/records.rs`, and the example app's
+`tests/notes.rs`.
 
 Two traps in these tests:
 
@@ -492,11 +702,19 @@ What the example app's tests cover, and why each matters:
   the `LocalStore` is there for a second shell built on the same directory.
 - `switching_away_despawns_the_page_and_switching_back_shows_the_kept_count`: the page exists only while the app is
   shown, and the app's logic keeps running while it is not (a press while another app is shown still counts).
+- `every_tenth_press_raises_a_notification_and_a_reset_resolves_it`: what the app raises and resolves is sent as
+  commands, checked with `sent`, without a server.
 - `the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count`: the app's page is in the shell's
   settings under its name, filled when shown, and what its control does is kept.
 - `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`: a change is made in place. The count
   line keeps its entity and the set of entities is the same before and after, which is the kit's rule that a surface
   is spawned once and updated in place. `tests/design_system.rs` runs the kit's `redraws` scan for the same rule.
+- `notes::tests::an_add_and_a_remove_are_sent_as_commands_and_a_refusal_is_kept_to_show`: an app's writes to its own
+  data, from fixtures (`fill_records`), checked with `sent` and answered with `answer`.
+- `notes::tests::a_note_changed_added_or_removed_elsewhere_is_shown_in_place`: records arriving by the stream
+  (`feed_record`) change the rows in place, by key.
+- `tests/notes.rs`: the notes against an in-process server (`testing::server::live`), declared, loaded, added to and
+  removed from.
 
 ### Showing how it looks: the shots test
 
@@ -542,27 +760,41 @@ and with no display, no Wayland, X11 or D-Bus, needed). CI does not run them yet
 parts below.
 
 - **`Cargo.toml`.** Depends on `bevy` 0.20 with only the features it uses (`std`, `bevy_state`, `bevy_ui_widgets`,
-  `bevy_scene`), on `trailhead-shell` and on `trailhead-ui`; for tests, `trailhead-shell` with `test-support` and
-  `tempfile`. An app that reads the mirror adds `trailhead-model`; one that writes adds `trailhead-client` with
+  `bevy_scene`), on `trailhead-shell` and on `trailhead-ui`, and on `serde` and `uuid` for its notes' records; for
+  tests, `trailhead-shell` with `test-support`, `test-server` (the live test of the notes) and `shots`, `tempfile`,
+  `tokio` and `serde_json`.
+- **`collections.toml`.** The app's collections in the app data store: `notes`, each with a `text`. In an apps repo it
+  is `apps/<id>/collections.toml`, which the server registers itself; this one is registered by the app's tests. An app that reads the mirror adds `trailhead-model`; one that writes adds `trailhead-client` with
   `http`. No feathers, and nothing that reaches the file system, the network or other processes.
 - **`src/lib.rs`**, in order:
   - The id, `EXAMPLE: AppId = AppId("example")`, and the `LocalStore` key `PRESSES`.
   - `Example`, the type given to the shell.
   - `COUNT_SETTINGS`, the `PageId` of its page in the shell's settings.
   - The logic's state and events: `Presses` (a resource), `Press` and `ResetCount` (events any caller can trigger).
+    `count_press` raises a notification every `MILESTONE` presses and `reset_count` resolves it (section 6,
+    "Notifications").
   - The markers: `ExamplePage` (the page's root, present only while the app is shown), `CountLine`, `PressButton`,
     `ResetButton` (on its settings page).
   - `impl ShellApp for Example`: `manifest` names it with `Icon::Flag`; `build` reads the kept count from the
     `LocalStore` and adds the observers that count a press and reset the count, keeping it; `build_ui` adds the
     observers of the buttons, `spawn_page` on `OnEnter(ActiveApp(EXAMPLE))`, `despawn_page` on `OnExit`, and
     `show_count` gated on the app being shown; `settings_pages` gives its one page, Count, which `count_settings`
-    fills with a setting holding the Reset button. It has no `paint` and no `link_jobs`.
+    fills with a setting holding the Reset button; `collections` keeps `notes` as `Note`s. It has no `paint` and no
+    `link_jobs`. `build` adds the notes' logic (`NotesPlugin`) and `build_ui` their drawing (`NotesUiPlugin`).
   - `spawn_page` builds one page: a root filling `beside_rail()` with `BesideRail` and `Surface::Window`, a title, a
     dim line, the count line and a button, each a kit scene spawned under it with `ChildOf`.
   - `show_count` sets the count line's text in place with `set_text` when `Presses` changes.
   - The tests (section 7), on the shell's `testing` helpers.
+- **`src/notes.rs`**: the notes, an app's own data (section 6, "An app's own data"). `Note` is a record's data;
+  `AddNote` and `RemoveNote` are the events the page triggers, which `NotesPlugin` turns into commands
+  (`records::create`, `Record::delete`), keeping what the server said of the last one in `NotesProblem`.
+  `NotesUiPlugin` keeps the rows in step with the mirror by key with the kit's `Keyed` (`sync_rows`, only when a note
+  changed), the line over them saying "Not loaded yet", "No notes yet" or how many, the notice saying a refusal, and
+  Add and each row's remove button disabled while the connection isn't live. `spawn_notes` spawns the section under
+  the page.
 - **`tests/design_system.rs`**: the lint over the app's sources, with an empty allowlist, and the kit's `redraws`
   scan with an empty one.
+- **`tests/notes.rs`**: the notes live against an in-process server.
 
 ## 9. Adding an app to a shell
 
@@ -590,7 +822,7 @@ The person's order is kept (`rail_order` in `shell.json`) and applied over the b
 longer given drops out of it, and a new one goes at the end, in the order given. Everything that follows the rail
 follows it too: which way a switch's cover travels, the apps' settings pages, the About page's list.
 `trailhead_shell::MoveApp { app, to }` moves an app as a drag does, and `Apps` is always in the rail's order. The
-rail's foot (Ask, the update notice, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
+rail's foot (Ask, the update notice, the bell, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
 theme picked, in `theme`, and each app's `LocalStore`, under `apps/`); `NetConfig::from_env` puts that under `shell` in
 Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `Shell::run` opens the window (titled Trailhead, with the app
 id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugin` with every app's `paint` applied and
@@ -602,11 +834,11 @@ whose Restart ends `Shell::run` with the restart code the launcher answers; a bi
 as long as it ends by calling `Shell::run`.
 
 While the connection is live and the server has an apps repo (`[shell] repo`), the foot of the rail also holds an Ask
-button, above the update notice, and under them all is the gear that opens the settings (section 2, "Settings
-pages"). Ask opens a form for asking for a change to one of the apps the server's factory
+button, above the update notice; under them is the bell (section 6, "Notifications"), in any shell with a connection,
+and under it all the gear that opens the settings (section 2, "Settings pages"). Ask opens a form for asking for a change to one of the apps the server's factory
 builds (the projects pointed at the apps repo) or for a new app, which the server turns into a graded task, or a new
 project and its first task (`docs/app-platform.md`, "Asking for an app"). Nothing of it is an app's: a shell with one
-app has no rail, and so no Ask and no update notice.
+app has no rail, and so no Ask and no update notice, and its bell and gear are the app's to place.
 
 ## 10. Views
 

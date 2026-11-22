@@ -30,11 +30,14 @@ pub(crate) async fn list_users(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<V
     Ok(Json(json!(s.store.list_users(&ctx).await?)))
 }
 
-/// A token's optional project scope and rate limit.
+/// A token's optional project scope, app scope and rate limit.
 #[derive(Deserialize, Default, ToSchema)]
 pub(crate) struct TokenLimits {
     /// Project keys or ids. Omitted or empty means every project.
     projects: Option<Vec<String>>,
+    /// App ids whose data it reaches, never more than yours. Omitted or empty: an agent's token reaches no app's data,
+    /// a person's what yours does.
+    apps: Option<Vec<String>>,
     rate_limit_per_minute: Option<i64>,
     /// Seconds until the token stops working. Omitted means never, unless your own token expires sooner.
     expires_in_seconds: Option<i64>,
@@ -46,6 +49,7 @@ impl From<TokenLimits> for TokenOptions {
             projects: l.projects,
             rate_limit_per_minute: l.rate_limit_per_minute,
             expires_in: l.expires_in_seconds.map(jiff::SignedDuration::from_secs),
+            apps: l.apps,
         }
     }
 }
@@ -136,9 +140,14 @@ pub(crate) struct UpdateToken {
     #[serde(default, deserialize_with = "nullable")]
     #[schema(value_type = Option<i64>)]
     rate_limit_per_minute: Option<Option<i64>>,
+    /// App ids whose data it reaches. `null` or `[]` goes back to the default: none for an agent's token, every app
+    /// for a person's not limited to projects.
+    #[serde(default, deserialize_with = "nullable")]
+    #[schema(value_type = Option<Vec<String>>)]
+    apps: Option<Option<Vec<String>>>,
 }
 
-/// Changes a token's project scope or rate limit without reissuing its secret.
+/// Changes a token's project scope, app scope or rate limit without reissuing its secret.
 /// Omitted fields stay as they are. Humans only, for their own tokens and their agents'.
 #[utoipa::path(
     patch, path = "/v1/tokens/{id}", tag = "tokens", params(("id" = Uuid, Path, description = "Token id")),
@@ -155,7 +164,7 @@ pub(crate) async fn update_token(
     Path(id): Path<Uuid>,
     Json(b): Json<UpdateToken>,
 ) -> ApiResult<Json<Value>> {
-    let patch = TokenPatch { projects: b.projects, rate_limit_per_minute: b.rate_limit_per_minute };
+    let patch = TokenPatch { projects: b.projects, rate_limit_per_minute: b.rate_limit_per_minute, apps: b.apps };
     Ok(Json(json!(s.store.update_token(&ctx, id, patch).await?)))
 }
 

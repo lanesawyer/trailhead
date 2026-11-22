@@ -202,6 +202,7 @@ mod tests {
 
     use super::*;
     use crate::ShellPlugin;
+    use crate::testing::settle;
     use crate::tests::{Fake, MAPS, NOTES};
     use crate::update::Newer;
 
@@ -214,12 +215,6 @@ mod tests {
             .add_plugins(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)).built_as(Some("a".into())).windowed());
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     fn newer(app: &mut App, subjects: &[&str], total: usize) {

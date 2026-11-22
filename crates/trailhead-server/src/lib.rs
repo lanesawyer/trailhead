@@ -3,6 +3,8 @@
 
 mod ask;
 mod auth;
+pub mod connectors;
+pub mod declarations;
 mod error;
 mod idempotency;
 mod llms;
@@ -51,6 +53,8 @@ pub struct AppState {
     pub shell: std::sync::OnceLock<trailhead_builder::Builds>,
     /// The user config this server started from, when it reads one; `/v1/config` shows and changes it.
     pub config: std::sync::OnceLock<user_config::ConfigFile>,
+    /// The connectors this server knows, from the apps repo it builds, and their runs.
+    pub connectors: Arc<connectors::Connectors>,
 }
 
 impl AppState {
@@ -66,6 +70,7 @@ impl AppState {
             upgrade_pending: Default::default(),
             shell: Default::default(),
             config: Default::default(),
+            connectors: Default::default(),
         }
     }
 }
@@ -249,32 +254,11 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
         webhook_targets: webhooks::Targets::Any,
         ..AppState::new(store)
     });
-    let reaper = state.clone();
-    let reminder_ctx = ctx.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(15));
-        loop {
-            tick.tick().await;
-            if let Err(e) = reaper.store.reap_expired_claims(&ctx.next_batch()).await {
-                tracing::warn!(error = %e, "reaping expired claims failed");
-            }
-        }
-    });
+    spawn_reaper(state.clone(), ctx.clone());
     spawn_archiver(state.clone());
     spawn_heap_trim();
     webhooks::spawn(state.clone());
-    let reminders = state.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tick.tick().await;
-            if let Err(e) =
-                reminders.store.emit_due_reminders(&reminder_ctx.next_batch(), DEFAULT_REMINDER_WINDOW).await
-            {
-                tracing::warn!(error = %e, "emitting due reminders failed");
-            }
-        }
-    });
+    spawn_reminders(state.clone(), ctx.clone());
     if let Some(paths) = cfg.factory.as_ref().or(cfg.shell.as_ref()) {
         let _ = state.config.set(user_config::ConfigFile::open(user_config::path(paths)));
     }
@@ -303,11 +287,18 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     #[cfg(not(feature = "factory"))]
     let _ = &cfg.factory;
     let builder = cfg.shell.as_ref().and_then(|paths| start_builder(&state, paths));
-    if let Some(pid_file) = &cfg.pid_file {
-        if let Some(dir) = pid_file.parent() {
-            std::fs::create_dir_all(dir)?;
+    if let (Some(builds), Some(paths)) = (state.shell.get(), &cfg.shell) {
+        let mut addr = listener.local_addr()?;
+        if addr.ip().is_unspecified() {
+            addr.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
         }
-        std::fs::write(pid_file, format!("{}\n", std::process::id()))?;
+        let url = format!("http://{addr}");
+        state.connectors.configure(connectors::RunConfig::new(url, paths.data_dir.clone(), cfg.creds.clone()));
+        spawn_declarations(state.clone(), builds.clone(), ctx.clone());
+        connectors::spawn_scheduler(state.clone(), ctx.clone(), connectors::SchedulerOptions::default());
+    }
+    if let Some(pid_file) = &cfg.pid_file {
+        write_pid_file(pid_file)?;
     }
     tracing::info!(addr = %cfg.bind, db = %cfg.db.display(), "trailhead listening");
     let stopping = state.shutdown.clone();
@@ -326,7 +317,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     };
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         use std::sync::atomic::Ordering::SeqCst;
-        #[cfg_attr(not(feature = "factory"), allow(unused_mut))]
+        #[cfg_attr(not(feature = "factory"), expect(unused_mut))]
         let mut upgrade = signals.first().await;
         if upgrade {
             tracing::info!("a newer trailhead is installed; restarting onto it once the factory's runs finish");
@@ -339,7 +330,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
             match factory.runs_in_flight() {
                 0 => tracing::info!("stopping the factory; no runs in flight"),
                 runs => {
-                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight")
+                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight");
                 }
             }
             factory.drain();
@@ -381,6 +372,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     if let Some(builder) = builder {
         builder.stop().await;
     }
+    state.connectors.revoke_tokens(&state.store, &ctx).await;
     let restart = restart.load(std::sync::atomic::Ordering::SeqCst);
     // Before the pid file goes, which the CLI waits for: a server it starts next then finds the lock free.
     drop(lock);
@@ -400,6 +392,39 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     Ok(Exit::Stopped)
 }
 
+/// Releases claims whose lease ran out, every 15 seconds.
+fn spawn_reaper(state: Arc<AppState>, ctx: Ctx) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            if let Err(e) = state.store.reap_expired_claims(&ctx.next_batch()).await {
+                tracing::warn!(error = %e, "reaping expired claims failed");
+            }
+        }
+    });
+}
+
+/// Emits the reminders that have come due, every minute.
+fn spawn_reminders(state: Arc<AppState>, ctx: Ctx) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) = state.store.emit_due_reminders(&ctx.next_batch(), DEFAULT_REMINDER_WINDOW).await {
+                tracing::warn!(error = %e, "emitting due reminders failed");
+            }
+        }
+    });
+}
+
+fn write_pid_file(pid_file: &Path) -> std::io::Result<()> {
+    if let Some(dir) = pid_file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(pid_file, format!("{}\n", std::process::id()))
+}
+
 /// Starts the shell's builder when the user config asks for one. A broken `[shell]` table is logged, and the server
 /// runs without a builder: unlike the factory's, nothing else depends on it.
 fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::Running> {
@@ -414,6 +439,26 @@ fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::R
             None
         }
     }
+}
+
+/// Registers the apps' declarations and reads the connectors from the builder's checkout now and after each build it
+/// finishes, as the local user, until the server stops.
+fn spawn_declarations(state: Arc<AppState>, builds: trailhead_builder::Builds, ctx: Ctx) {
+    let mut built = builds.built();
+    let mut stopping = state.shutdown.subscribe();
+    tokio::spawn(async move {
+        loop {
+            built.mark_unchanged();
+            if declarations::register_built(&state.store, &ctx.next_batch(), &builds).await.is_none() {
+                tracing::info!(target: "shell", "no built apps repo to read the apps' collections from yet");
+            }
+            connectors::register_built(&state.connectors, &builds).await;
+            tokio::select! {
+                changed = built.changed() => if changed.is_err() { break },
+                _ = stopping.wait_for(|s| *s) => break,
+            }
+        }
+    });
 }
 
 /// Why [`serve_local`] returned.
@@ -508,7 +553,7 @@ impl Signals {
         false
     }
 
-    #[cfg_attr(not(feature = "factory"), allow(dead_code))]
+    #[cfg_attr(not(feature = "factory"), expect(dead_code))]
     async fn next(&mut self) {
         tokio::select! {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),

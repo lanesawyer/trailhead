@@ -305,6 +305,7 @@ mod tests {
 
     use super::*;
     use crate::board::BoardPlugin;
+    use trailhead_shell::testing::settle;
 
     fn task(id: &str, project: &str, status: &str, parent: Option<&str>) -> Value {
         let mut t = json!({"id": id, "key": id.to_uppercase(), "title": id, "project_id": project, "status": status,
@@ -328,12 +329,6 @@ mod tests {
         app.world_mut().trigger(OpenProject("TRAIL".into()));
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn cards(app: &mut App) -> HashMap<String, Entity> {

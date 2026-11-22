@@ -47,9 +47,15 @@ fn on_link_pressed(activate: On<Activate>, links: Query<&ExternalLink>) {
     let Ok(link) = links.get(activate.entity) else {
         return;
     };
+    open_link(&link.url);
+}
+
+/// Opens `url` in the system's browser, as a [`link_button`] does when pressed: for a link that is pressed somewhere
+/// the kit doesn't draw, such as a notification on the desktop.
+pub fn open_link(url: &str) {
     // Detached: a browser that isn't already running would otherwise hold the frame until it finished starting.
-    match open::that_detached(&link.url) {
-        Ok(()) => info!("opened {}", link.url),
-        Err(error) => warn!("could not open {}: {error}", link.url),
+    match open::that_detached(url) {
+        Ok(()) => info!("opened {url}"),
+        Err(error) => warn!("could not open {url}: {error}"),
     }
 }

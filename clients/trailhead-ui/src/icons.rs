@@ -30,12 +30,16 @@ pub enum Icon {
     /// Putting something away that can come back: archiving a project.
     Archive,
     ArchiveRestore,
+    /// Something needs the person: the shell's notifications.
+    Bell,
     /// A row of rows: the board.
     Board,
     Bot,
     /// A day: when something is due or planned.
     Calendar,
     Check,
+    /// Everything marked done or seen at once: marking every notification read.
+    CheckCheck,
     ChevronDown,
     ChevronRight,
     ChevronUp,
@@ -48,9 +52,15 @@ pub enum Icon {
     Ellipsis,
     Eye,
     ExternalLink,
+    /// The software factory, as what raised something.
+    Factory,
     Filter,
+    /// Fit everything into view: a canvas's "fit all".
+    Fit,
     Flag,
     Footprints,
+    /// Nodes joined by lines: a graph of what depends on what.
+    Graph,
     Help,
     Handshake,
     History,
@@ -83,13 +93,15 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    const ALL: [Icon; 48] = [
+    const ALL: [Icon; 53] = [
         Icon::Archive,
         Icon::ArchiveRestore,
+        Icon::Bell,
         Icon::Board,
         Icon::Bot,
         Icon::Calendar,
         Icon::Check,
+        Icon::CheckCheck,
         Icon::ChevronDown,
         Icon::ChevronRight,
         Icon::ChevronUp,
@@ -102,9 +114,12 @@ impl Icon {
         Icon::Ellipsis,
         Icon::Eye,
         Icon::ExternalLink,
+        Icon::Factory,
         Icon::Filter,
+        Icon::Fit,
         Icon::Flag,
         Icon::Footprints,
+        Icon::Graph,
         Icon::Help,
         Icon::Handshake,
         Icon::History,
@@ -139,10 +154,12 @@ impl Icon {
         match self {
             Icon::Archive => "\u{e041}",        // archive
             Icon::ArchiveRestore => "\u{e2cd}", // archive-restore
+            Icon::Bell => "\u{e059}",           // bell
             Icon::Board => "\u{e4dc}",          // kanban
             Icon::Bot => "\u{e1bb}",            // bot
             Icon::Calendar => "\u{e063}",       // calendar
             Icon::Check => "\u{e06c}",          // check
+            Icon::CheckCheck => "\u{e38e}",     // check-check
             Icon::ChevronDown => "\u{e06d}",    // chevron-down
             Icon::ChevronRight => "\u{e06f}",   // chevron-right
             Icon::ChevronUp => "\u{e070}",      // chevron-up
@@ -155,9 +172,12 @@ impl Icon {
             Icon::Ellipsis => "\u{e0b6}",       // ellipsis
             Icon::Eye => "\u{e0ba}",            // eye
             Icon::ExternalLink => "\u{e0b9}",   // external-link
+            Icon::Factory => "\u{e29f}",        // factory
             Icon::Filter => "\u{e0dc}",         // filter
+            Icon::Fit => "\u{e257}",            // scan
             Icon::Flag => "\u{e0d1}",           // flag
             Icon::Footprints => "\u{e3b9}",     // footprints
+            Icon::Graph => "\u{e125}",          // network
             Icon::Help => "\u{e082}",           // circle-help
             Icon::Handshake => "\u{e5c0}",      // handshake
             Icon::History => "\u{e1f5}",        // history

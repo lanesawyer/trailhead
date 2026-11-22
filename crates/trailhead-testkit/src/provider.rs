@@ -14,6 +14,7 @@ impl FakeProvider {
 impl ModelProvider for FakeProvider {
     fn resolve(&self, alias: ModelAlias) -> ModelId {
         let name = match alias {
+            ModelAlias::Fable => "fable",
             ModelAlias::Opus => "opus",
             ModelAlias::Sonnet => "sonnet",
             ModelAlias::Haiku => "haiku",

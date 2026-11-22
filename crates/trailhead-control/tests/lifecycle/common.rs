@@ -9,6 +9,7 @@ use trailhead_factory::{
     conventional_title, label, run_name,
 };
 pub use trailhead_factory::{Grade, Priority};
+pub use trailhead_testkit::fixtures::until;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness};
 
 pub fn gr(n: u8) -> Grade {
@@ -214,16 +215,6 @@ pub fn no_stall() -> String {
 budget = { usd = 5",
         1,
     )
-}
-
-pub async fn until(what: &str, mut cond: impl FnMut() -> bool) {
-    for _ in 0..500 {
-        if cond() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 pub fn request_changes(body: &str) -> RunOutcome {

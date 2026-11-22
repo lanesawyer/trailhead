@@ -97,7 +97,7 @@ pub(super) fn on_escape(
 }
 
 /// What a dropdown of the panel picked: a status to move to, how far back "revert" goes, or the comment box's kind.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn on_pick(
     picked: On<Picked>,
     moves: Query<&StatusMove>,
@@ -209,7 +209,7 @@ pub(super) struct Drawn {
 /// in the side panel. Selecting a different subject builds the sections anew, once; while the same one stays
 /// selected, only what changed is set: text through its `Text`, a list's new rows appended, the rest left as the same
 /// entities (and the scroll position where it was).
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn sync_panel(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,
@@ -725,6 +725,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
+            restart_for: Vec::new(),
             human_grades: Some(human),
             usage: Vec::new(),
         };
@@ -812,6 +813,7 @@ mod tests {
                     last_error: None,
                     human_grades: Some(human),
                     holding: None,
+                    restart_for: Vec::new(),
                     usage: Vec::new(),
                 },
             );

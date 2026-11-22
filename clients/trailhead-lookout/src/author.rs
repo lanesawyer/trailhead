@@ -388,7 +388,7 @@ impl Starting<'_, '_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn on_act(
     activate: On<Activate>,
     acts: Query<&Act>,
@@ -419,7 +419,7 @@ fn on_act(
         // Comments and answers are written in the task modal's comment box.
         Act::Comment(key) => commands.trigger(OpenComposer { key: key.clone(), answer: None }),
         Act::Answer { key, comment_id, question } => {
-            commands.trigger(OpenComposer { key: key.clone(), answer: Some((comment_id.clone(), question.clone())) })
+            commands.trigger(OpenComposer { key: key.clone(), answer: Some((comment_id.clone(), question.clone())) });
         }
         Act::PickParent(key) => {
             if let Some(open) = &mut form.open {
@@ -761,7 +761,7 @@ fn fill_form(
 
 /// Keeps the form in step with its draft, in place: which parts show, the parent picked, the suggestions under the
 /// search, and the queue dropdown's rows for the project picked.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 fn dress_form(
     form: Res<Form>,
     authoring: Res<Authoring>,
@@ -863,6 +863,7 @@ mod tests {
     use serde_json::{Value, json};
     use trailhead_shell::commands::Method;
     use trailhead_shell::commands::{CommandId, CommandsPlugin, Outbox};
+    use trailhead_shell::testing::settle;
 
     fn task() -> Value {
         task_json(json!({"id": "t1", "key": "TRAIL-7", "title": "old", "description": "a\nb", "priority": 2,
@@ -920,6 +921,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: None,
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         factory.repos.insert("o/r".into(), state);
@@ -1214,6 +1216,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: None,
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
@@ -1275,12 +1278,6 @@ mod tests {
 
     fn modals(app: &mut App) -> usize {
         app.world_mut().query_filtered::<(), With<crate::widgets::ModalRoot>>().iter(app.world()).count()
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     #[test]
@@ -1381,6 +1378,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
+            restart_for: Vec::new(),
             human_grades: Some(human),
             usage: Vec::new(),
         };

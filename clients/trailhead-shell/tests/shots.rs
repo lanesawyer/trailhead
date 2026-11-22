@@ -1,5 +1,10 @@
-//! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its Ask and
-//! update buttons, the Ask form, the update panel listing what a newer build brings, the settings on each of the
+//! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its plus, Ask
+//! and update buttons and the bell with its counts, the Ask forms in both themes (a change to be planned first, a new
+//! app, and the answer to a planned ask), the update panel listing what a newer build brings, the bell's panel listing
+//! notifications (`notifications`, the unread ones, `notifications-all`, and `notifications-focus` with focus on), the
+//! Notifications settings page (`settings-notifications`), the Connectors page (`settings-connectors`, as read,
+//! `-edited` with edits, a refusal and a whole error shown, and `-none` on a server with no apps repo), the settings
+//! on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
 //! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
@@ -17,19 +22,31 @@ use bevy::picking::pointer::{Location, PointerId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy::ui_widgets::Activate;
-use trailhead_model::shell::{AskTarget, AskTargets};
-use trailhead_shell::ask::Askable;
+use trailhead_model::shell::{AskTarget, AskTargets, Asked, AskedProject, AskedTask};
+use trailhead_shell::ask::{AskForm, Askable};
 use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
+use trailhead_shell::connector_settings::{ConnectorSettings, Saving, Typed};
 use trailhead_shell::cover::SwitchCover;
+use trailhead_shell::fixture::notification_json;
 use trailhead_shell::net::{ApiAccess, Reason};
+use trailhead_shell::notification_settings::Clock;
+use trailhead_shell::notification_settings::NotificationPrefs;
 use trailhead_shell::server_settings::{SectionState, ServerSettings};
-use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SERVER, SettingsPage, ShellDir};
-use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
+use trailhead_shell::settings::{
+    ABOUT, APPEARANCE, CONNECTION, CONNECTORS, NOTIFICATIONS, OpenSettings, PageId, SERVER, SettingsPage, ShellDir,
+};
+use trailhead_shell::sync::Snapshot;
+use trailhead_shell::testing::fill;
+use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle, show};
 use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
 use trailhead_shell::update::{Newer, UpdateReady};
-use trailhead_shell::{ActiveApp, AppId, Apps, AskButton, Manifest, OpenApp, ShellApp, ShellPlugin, UpdateButton};
+use trailhead_shell::{
+    ActiveApp, AppId, Apps, AskButton, BellButton, FilterPick, Manifest, NewAppButton, OpenApp, ShellApp, ShellPlugin,
+    UpdateButton,
+};
+use trailhead_ui::Picked;
 use trailhead_ui::{
     BesideRail, Icon, Surface, TextSize, badge, beside_rail, row, setting, setting_toggle, size, space,
     spawn_settings_section, text, text_dim, token,
@@ -332,7 +349,8 @@ fn open_settings(shot: &mut ShotApp, page: PageId) {
 fn settings(shot: &mut ShotApp) {
     let world = shot.world_mut();
     world.insert_resource(ShellDir("/home/someone/.config/trailhead/shell".into()));
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     world.resource_mut::<trailhead_shell::connection::Dialed>().0 = Some("7204d50f3c".into());
     appearance(shot);
     set_connection(shot, Connection::Syncing);
@@ -354,6 +372,12 @@ fn settings(shot: &mut ShotApp) {
     save(shot, "settings-about");
     open_settings(shot, NOTES_SETTINGS);
     save(shot, "settings-app");
+    let world = shot.world_mut();
+    let search =
+        world.query_filtered::<Entity, With<trailhead_shell::settings::SettingsSearch>>().single(world).unwrap();
+    world.entity_mut(search).insert(bevy::text::EditableText::new("command"));
+    settle(shot);
+    save(shot, "settings-search");
     close_modals(shot);
 }
 
@@ -376,7 +400,142 @@ fn live_with_news(shot: &mut ShotApp) {
     ]
     .map(String::from);
     shot.world_mut().insert_resource(UpdateReady(Some(Newer::new("4567def", &subjects, 6))));
+    shot.world_mut().insert_resource(trailhead_shell::update::BuildRepo(Some("someone/apps".into())));
     settle(shot);
+}
+
+/// Starts the Ask form afresh holding `draft`, as if typed.
+fn draft(shot: &mut ShotApp, draft: impl FnOnce(&mut AskForm)) {
+    let mut form = shot.world_mut().resource_mut::<AskForm>();
+    *form = AskForm::default();
+    draft(&mut form);
+}
+
+/// The Ask forms in `theme`: a change to Notes with "Plan this first" on and a model chosen, a new app, and what the
+/// form says once a planned ask is made.
+fn asking(shot: &mut ShotApp, theme: ShotTheme) {
+    shot.set_theme(theme);
+    let text = "Pin a note to the top of the list, and keep it there after a restart.";
+    draft(shot, |f| {
+        f.text = text.into();
+        f.plan = true;
+        f.model = Some("opus");
+    });
+    press::<AskButton>(shot);
+    save(shot, "ask-change-planned");
+    close_modals(shot);
+
+    let text = "Plan a day's hike: the trails I want to walk, how long each takes, and what to pack.";
+    draft(shot, |f| {
+        f.text = text.into();
+        f.name = "Hike Planner".into();
+    });
+    press::<NewAppButton>(shot);
+    save(shot, "ask-new-app");
+    let asked = Asked {
+        project: AskedProject { key: "HP".into(), name: "Hike Planner".into(), created: true },
+        task: Some(AskedTask { key: "HP-1".into(), title: "Hike Planner".into() }),
+        planned: true,
+        notes: Vec::new(),
+    };
+    shot.world_mut().resource_mut::<AskForm>().phase = trailhead_shell::ask::Phase::Asked(asked);
+    settle(shot);
+    save(shot, "ask-planned");
+    close_modals(shot);
+    shot.set_theme(ShotTheme::Dark);
+}
+
+/// Notifications from the server, the factory and Notes, unread, read and resolved, one with a link; raised long
+/// enough ago that each says its date, so the pictures don't change with the clock.
+fn notified(shot: &mut ShotApp) {
+    let n = |id: &str, source: &str, at: &str, fields: serde_json::Value| {
+        let mut all = serde_json::json!({"id": id, "source": source, "created_at": at});
+        all.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        notification_json(all)
+    };
+    let notifications = vec![
+        n(
+            "n5",
+            "server",
+            "2026-10-09T10:00:00Z",
+            serde_json::json!({
+                "title": "TRAIL-1678: the planner asks a question",
+                "body": "Should the bell sit above the gear, or under the update notice?",
+            }),
+        ),
+        n(
+            "n4",
+            "factory",
+            "2026-10-08T09:30:00Z",
+            serde_json::json!({
+                "kind": "factory.review", "title": "TRAIL-1650 waits for your review",
+                "body": "Every other gate passed.",
+                "actions": [{"label": "Pull request", "url": "https://github.com/o/r/pull/412"}],
+            }),
+        ),
+        n(
+            "n3",
+            "notes",
+            "2026-10-07T18:00:00Z",
+            serde_json::json!({
+                "title": "Three notes are due today", "body": "",
+            }),
+        ),
+        n(
+            "n2",
+            "server",
+            "2026-10-05T12:00:00Z",
+            serde_json::json!({
+                "title": "TRAIL-1601 is overdue", "body": "It was due on the 4th.",
+                "read_at": "2026-10-05T13:00:00Z",
+            }),
+        ),
+        n(
+            "n1",
+            "factory",
+            "2026-10-02T08:00:00Z",
+            serde_json::json!({
+                "title": "The factory paused", "body": "The five-hour window reached 80%.",
+                "read_at": "2026-10-02T08:05:00Z", "resolved_at": "2026-10-02T13:00:00Z",
+            }),
+        ),
+    ];
+    fill(shot, Snapshot { at: 1, notifications, ..Default::default() });
+}
+
+/// The bell's panel with the unread ones, then with all of them.
+fn notifications(shot: &mut ShotApp) {
+    press::<BellButton>(shot);
+    save(shot, "notifications");
+    let world = shot.world_mut();
+    let switch = world.query_filtered::<Entity, With<FilterPick>>().single(world).unwrap();
+    world.trigger(Picked { entity: switch, index: 1 });
+    settle(shot);
+    save(shot, "notifications-all");
+    let world = shot.world_mut();
+    world.trigger(Picked { entity: switch, index: 0 });
+    close_modals(shot);
+}
+
+/// The Notifications page as read (the factory at Bell, the server Silent, quiet hours at night, the sound off), then
+/// the bell's panel with focus on until it is ended.
+fn notification_settings(shot: &mut ShotApp) {
+    set_connection(shot, Connection::Live);
+    let mut settings = trailhead_model::NotificationSettings::default();
+    settings.levels.insert("factory".into(), trailhead_model::NotificationLevel::Bell);
+    settings.levels.insert("server".into(), trailhead_model::NotificationLevel::Silent);
+    settings.quiet_hours = Some(trailhead_model::QuietHours { start: 22 * 60, end: 7 * 60 + 30 });
+    settings.sound = false;
+    *shot.world_mut().resource_mut::<NotificationPrefs>() =
+        NotificationPrefs { settings: settings.clone(), answered: true, error: None };
+    open_settings(shot, NOTIFICATIONS);
+    save(shot, "settings-notifications");
+    close_modals(shot);
+    settings.focus = Some(trailhead_model::Focus { until: None });
+    shot.world_mut().resource_mut::<NotificationPrefs>().settings = settings;
+    press::<BellButton>(shot);
+    save(shot, "notifications-focus");
+    close_modals(shot);
 }
 
 /// What a server with an apps repo and a factory says of its user config.
@@ -451,16 +610,99 @@ fn server(shot: &mut ShotApp) {
     close_modals(shot);
 }
 
+/// Three connectors as a server shows them: one that ran well, one whose runs fail and whose secret isn't set, and
+/// one whose `connector.toml` doesn't read.
+fn connectors_listed() -> Vec<trailhead_model::connector::ConnectorInfo> {
+    let github = serde_json::json!({
+        "id": "github", "name": "GitHub", "every_secs": 300, "timeout_secs": 120, "hosts": ["api.github.com"],
+        "settings": [
+            {"name": "repos", "kind": "list", "label": "Repositories", "help": "owner/name, one per line",
+             "required": true, "value": ["lanesawyer/trailhead", "lanesawyer/cairn"]},
+            {"name": "me", "kind": "string", "label": "Your login", "help": "Whose reviews to rank first",
+             "required": false, "value": "lanesawyer"},
+            {"name": "drafts", "kind": "boolean", "label": "Include drafts", "required": false, "value": true}
+        ],
+        "secrets": [{"name": "token", "set": true}],
+        "feeds": [{"name": "pull_requests", "fields": {"title": "string"}, "collections": ["cairn.pull_requests"]}],
+        "enabled": true, "missing": [], "running": false,
+        "last_run": {"started_at": "2026-11-22T11:58:00Z", "duration_ms": 2140, "ok": true,
+                     "feeds": {"pull_requests": {"records": 12, "created": 1, "changed": 2, "removed": 0,
+                                                 "unchanged": 9}}},
+        "next_run": "2026-11-22T12:03:00Z"
+    });
+    let jira = serde_json::json!({
+        "id": "jira", "name": "Jira", "every_secs": 600, "timeout_secs": 120, "hosts": ["example.atlassian.net"],
+        "settings": [
+            {"name": "site", "kind": "string", "label": "Site", "help": "The Jira site's host", "required": true,
+             "value": "example.atlassian.net"},
+            {"name": "max_pages", "kind": "integer", "label": "Pages at most", "required": false, "value": 5}
+        ],
+        "secrets": [{"name": "email", "set": true}, {"name": "token", "set": false}],
+        "feeds": [{"name": "tickets", "fields": {"title": "string"}, "collections": []}],
+        "enabled": true,
+        "missing": ["the secret `token` (`trailhead connector login jira token` on the server's machine)"],
+        "running": false,
+        "last_run": {"started_at": "2026-11-22T09:30:00Z", "duration_ms": 640, "ok": false,
+                     "error": "GET https://example.atlassian.net/rest/api/3/search answered 401 Unauthorized\n\
+                               The token was refused: check it is an API token for this site, not a password.\n\
+                               {\"errorMessages\":[\"Client must be authenticated to access this resource.\"]}\n\
+                               at page 1 of tickets\nretried 3 times\ngave up"}
+    });
+    let broken = serde_json::json!({
+        "id": "linear", "name": "linear", "every_secs": 0, "timeout_secs": 0, "hosts": [], "settings": [],
+        "secrets": [], "feeds": [], "enabled": false, "running": false,
+        "error": "connectors/linear/connector.toml: hosts is empty: a connector has to declare the hosts it reaches",
+        "missing": ["a connector.toml that reads"]
+    });
+    [github, jira, broken].into_iter().map(|c| serde_json::from_value(c).unwrap()).collect()
+}
+
+/// The Connectors page as read, with an edit pending and a refusal, and with none to list.
+fn connectors(shot: &mut ShotApp) {
+    set_connection(shot, Connection::Live);
+    let now: jiff::Timestamp = "2026-11-22T12:00:30Z".parse().unwrap();
+    shot.world_mut().insert_resource(Clock::new(move || now.to_zoned(jiff::tz::TimeZone::UTC)));
+    shot.world_mut().resource_mut::<ConnectorSettings>().answered(connectors_listed(), Some(true));
+    open_settings(shot, CONNECTORS);
+    save(shot, "settings-connectors");
+
+    {
+        let mut settings = shot.world_mut().resource_mut::<ConnectorSettings>();
+        let draft = settings.drafts.get_mut("jira").unwrap();
+        draft.values.insert("max_pages".into(), Typed::Text("lots".into()));
+        let draft = settings.drafts.get_mut("github").unwrap();
+        draft.values.insert("me".into(), Typed::Text("someone-else".into()));
+        settings.saves.insert(
+            "github".into(),
+            Saving {
+                refusal: Some("invalid input: github: setting `me` must be a string".into()),
+                ..Default::default()
+            },
+        );
+        settings.whole_errors.insert("jira".into());
+    }
+    settle(shot);
+    save(shot, "settings-connectors-edited");
+    close_modals(shot);
+
+    shot.world_mut().resource_mut::<ConnectorSettings>().answered(Vec::new(), Some(false));
+    open_settings(shot, CONNECTORS);
+    save(shot, "settings-connectors-none");
+    close_modals(shot);
+}
+
 #[test]
 #[ignore = "needs a render adapter: run with `mise run shots`"]
 fn shots() {
     let mut shot = shot(shell(), ShotOptions { size: (1024, 720), ..ShotOptions::default() });
+    notified(&mut shot);
     live_with_news(&mut shot);
     save(&mut shot, "rail");
 
-    press::<AskButton>(&mut shot);
-    save(&mut shot, "ask");
-    close_modals(&mut shot);
+    notifications(&mut shot);
+
+    asking(&mut shot, ShotTheme::Dark);
+    asking(&mut shot, ShotTheme::Light);
 
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
@@ -472,11 +714,12 @@ fn shots() {
     shot.set_text_size(TextSize::nearest(150));
     save(&mut shot, "rail");
     press::<AskButton>(&mut shot);
-    save(&mut shot, "ask");
+    save(&mut shot, "ask-change");
     close_modals(&mut shot);
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
     close_modals(&mut shot);
+    notifications(&mut shot);
     close_modals(&mut shot);
     appearance(&mut shot);
     drop(shot);
@@ -485,7 +728,8 @@ fn shots() {
     let mut shot = shot_with(shell(), ShotOptions { size: (1024, 720), ..ShotOptions::default() }, ConnectUiPlugin);
     let world = shot.world_mut();
     world.resource_mut::<ConnectionStatus>().reason = Some(Reason::NotAllowed);
-    world.resource_mut::<LocalEndpoint>().0 = Some("4f7c2a9e1b".into());
+    world.resource_mut::<LocalEndpoint>().0 =
+        Some("4f7c2a9e1b63d05a8c17e2f9b4a06d3c5e81f72a9b0c4d6e3f58a1b27c90d4e6".into());
     settle(&mut shot);
     save(&mut shot, "connect");
     drop(shot);
@@ -494,6 +738,18 @@ fn shots() {
     let mut shot =
         trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1500), ..ShotOptions::default() });
     server(&mut shot);
+    drop(shot);
+
+    // Tall enough to show every connector.
+    let mut shot =
+        trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 2200), ..ShotOptions::default() });
+    connectors(&mut shot);
+    drop(shot);
+
+    let mut shot =
+        trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1100), ..ShotOptions::default() });
+    notified(&mut shot);
+    notification_settings(&mut shot);
     drop(shot);
 
     let mut shot = trailhead_shell::testing::shot::shot(

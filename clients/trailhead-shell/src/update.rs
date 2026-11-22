@@ -24,6 +24,18 @@ pub const POLL: Duration = Duration::from_secs(30);
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ThisBuild(pub String);
 
+/// The apps repo the builds are of, as `owner/name` on GitHub, once the server has said: what the About page links
+/// this build's commit by. `None` until then, and for a repo that isn't on GitHub.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct BuildRepo(pub Option<String>);
+
+impl BuildRepo {
+    /// Where the commit `rev` is read on the web.
+    pub fn commit_url(&self, rev: &str) -> Option<String> {
+        self.0.as_ref().map(|repo| format!("https://github.com/{repo}/commit/{rev}"))
+    }
+}
+
 /// The state file of a builder on this machine, when the launcher named one
 /// ([`LOCAL_STATE_ENV`]): the launcher builds the server's builds here, and starts only what it has built. The
 /// newest build is then read from this file, and the server is asked only what it brings.
@@ -161,6 +173,7 @@ impl Plugin for UpdatePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ThisBuild(self.0.clone()))
             .init_resource::<UpdateReady>()
+            .init_resource::<BuildRepo>()
             .insert_resource(BuiltHere(std::env::var_os(LOCAL_STATE_ENV).filter(|f| !f.is_empty()).map(Into::into)))
             .init_resource::<Asked>()
             .add_message::<BuildReply>()
@@ -193,16 +206,22 @@ fn read(since: String) -> Fetch {
     })
 }
 
-/// Notes a newer build than this one, and what it brings. A failed read leaves the notice as it was.
+/// Notes a newer build than this one and what it brings, and the repo the builds are of. A failed read leaves both
+/// as they were.
 fn hear(
     mut replies: MessageReader<BuildReply>,
     this: Res<ThisBuild>,
     here: Res<BuiltHere>,
     mut ready: ResMut<UpdateReady>,
+    mut repo: ResMut<BuildRepo>,
 ) {
     for BuildReply(reply) in replies.read() {
         match reply {
             Ok(build) => {
+                // Kept once known: an answer without it (a builder that hasn't looked yet) doesn't take the link away.
+                if build.repo.is_some() {
+                    repo.set_if_neq(BuildRepo(build.repo.clone()));
+                }
                 let newest = match &here.0 {
                     Some(file) => BuiltHere::newest(file),
                     None => build.newest().map(String::from),
@@ -412,7 +431,11 @@ mod tests {
         let mut app = shell(dir.path());
         assert_eq!(asks(&mut app), 0, "not while offline");
         set_connection(&mut app, Connection::Live);
-        assert_eq!(asks(&mut app), 2, "at once when live, beside the Ask form's read of what can be asked about");
+        assert_eq!(
+            asks(&mut app),
+            3,
+            "at once when live, beside the Ask form's read of what can be asked about and the notification settings"
+        );
         for _ in 0..(POLL.as_secs() - 5) {
             app.update();
         }

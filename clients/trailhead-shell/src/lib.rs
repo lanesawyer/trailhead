@@ -17,7 +17,8 @@
 //! The shell holds the one connection to the Trailhead server ([`connection`]), which every app shares: its state,
 //! the mirror of the task engine's records ([`mirror`]), and the outbox of [`commands`]. An app reads the API with a
 //! [`net::Fetch`], and runs work of its own on the net thread while a control plane is held as
-//! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`].
+//! [`net::LinkJob`]s, which it gives the shell from [`ShellApp::link_jobs`]. Its own data in the app data store it
+//! declares with [`ShellApp::collections`]: the shell mirrors those records ([`records`]) beside the tasks.
 //!
 //! The rail switches apps through [`transition`]: a cover closes over the app shown, the app is switched while it is
 //! covered, and the cover opens on the app picked, as the person picked in the settings.
@@ -27,8 +28,9 @@
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
 //! each app's drawing. While connected to a server with an apps repo, the rail's Ask button asks it for a change to an
-//! app or a new one ([`ask`]). The gear under it opens the window's [`settings`], whose pages are the shell's own and
-//! those each app adds with [`ShellApp::settings_pages`].
+//! app or a new one ([`ask`]). The bell under it, with the count of unread [`notifications`], opens their panel, and
+//! the gear under that opens the window's [`settings`], whose pages are the shell's own and those each app adds with
+//! [`ShellApp::settings_pages`].
 
 use std::path::PathBuf;
 
@@ -37,6 +39,7 @@ use trailhead_ui::{Icon, TextSize, TextSizePlugin, Theme};
 
 use crate::connection::{Connection, ConnectionPlugin, SendNet};
 use crate::net::{LinkJob, NetCommand, NetConfig};
+use crate::records::{Collections, RecordMirror};
 use crate::settings::SettingsPage;
 use crate::transition::{AppTransition, TRANSITION, TransitionKind, TransitionPlugin};
 
@@ -45,21 +48,31 @@ mod ask_panel;
 pub mod commands;
 pub mod connect;
 pub mod connection;
+pub mod connector_settings;
+mod connectors_page;
 pub mod cover;
+pub mod desktop;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 pub mod icon;
 pub mod lint;
 pub mod mirror;
 pub mod net;
+pub mod notification_settings;
+pub mod notifications;
+mod notifications_page;
+mod notifications_panel;
 mod place;
 mod previews;
 mod rail;
+pub mod record_sync;
+pub mod records;
 mod server_page;
 pub mod server_settings;
 pub mod settings;
 mod settings_modal;
 mod settings_pages;
+pub mod sound;
 mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
@@ -70,7 +83,11 @@ mod update_panel;
 pub mod view;
 mod window;
 
-pub use rail::{AskButton, OpenApp, Rail, SettingsButton, UpdateButton};
+pub use notifications_panel::{
+    BellCount, CardPart, EmptyLine, FilterPick, MarkAllRead, MarkOne, NotificationCard, NotificationFilter,
+    NotificationList, NotificationsPanel, OpenNotifications, PanelNotice, ShowOlderButton,
+};
+pub use rail::{AppCount, AskButton, BellButton, NewAppButton, OpenApp, Rail, SettingsButton, UpdateButton};
 pub use store::LocalStore;
 pub use view::RememberView;
 pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
@@ -166,6 +183,13 @@ pub trait ShellApp: Send + Sync + 'static {
     /// once, after [`ShellApp::build`]; each page's fill runs when the page is shown ([`settings::SettingsPage`]).
     fn settings_pages(&self) -> Vec<SettingsPage> {
         Vec::new()
+    }
+
+    /// What the app keeps in the app data store: its `collections.toml`, and the collections it reads, each with the
+    /// type its records' data deserializes into. A connected shell mirrors them ([`records`]); the shell takes them
+    /// once, before [`ShellApp::build`]. Nothing by default.
+    fn collections(&self) -> Collections {
+        Collections::none()
     }
 }
 
@@ -304,9 +328,18 @@ impl Plugin for ShellPlugin {
             .add_observer(on_move_app)
             .add_systems(Startup, spawn_camera)
             .add_systems(Update, ((remember_active, remember_text_size, remember_transition), store::save).chain());
+        let kept: Vec<(AppId, Collections)> = self
+            .apps
+            .iter()
+            .map(|a| (a.manifest().id, a.collections()))
+            .filter(|(_, collections)| !collections.is_empty())
+            .collect();
         if let Some((config, target)) = &self.connection {
             let jobs = self.apps.iter().flat_map(|a| a.link_jobs());
-            app.add_plugins(ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs));
+            let records = kept.iter().map(|(id, collections)| collections.spec(*id));
+            app.add_plugins(
+                ConnectionPlugin::new(config.clone(), target.clone()).with_jobs(jobs).with_records(records),
+            );
             if let Some(token) = self.token.clone() {
                 app.add_systems(Startup, move |mut send: MessageWriter<SendNet>| {
                     send.write(SendNet(NetCommand::Login(token.clone())));
@@ -316,13 +349,23 @@ impl Plugin for ShellPlugin {
         if let Some(build) = &self.build {
             app.add_plugins(update::UpdatePlugin(build.clone()));
         }
+        if let Some(mut mirror) = app.world_mut().get_resource_mut::<RecordMirror>() {
+            for (id, collections) in &kept {
+                mirror.keep(*id, collections);
+            }
+        }
         app.add_plugins((ask::AskPlugin, settings::SettingsPlugin));
         for shell_app in &self.apps {
             shell_app.build(app);
         }
         let connected = app.world().contains_resource::<State<Connection>>();
         if connected {
-            app.add_plugins(server_settings::ServerSettingsPlugin);
+            app.add_plugins((
+                server_settings::ServerSettingsPlugin,
+                connector_settings::ConnectorSettingsPlugin,
+                notifications::NotificationsPlugin,
+                notification_settings::NotificationSettingsPlugin,
+            ));
         }
         let mut pages = settings_pages::shell_pages(connected);
         let apps = app.world().resource::<Apps>();
@@ -348,7 +391,13 @@ impl Plugin for ShellPlugin {
                 app.add_plugins(connect::ConnectUiPlugin);
             }
             if connected {
-                app.add_plugins(server_page::ServerPageUiPlugin);
+                app.add_plugins((
+                    server_page::ServerPageUiPlugin,
+                    connectors_page::ConnectorsPageUiPlugin,
+                    notifications_page::NotificationsPageUiPlugin,
+                    notifications_panel::NotificationsUiPlugin,
+                    desktop::DesktopPlugin,
+                ));
             }
             for shell_app in &self.apps {
                 shell_app.build_ui(app);
@@ -426,10 +475,10 @@ mod tests {
             let id = self.0;
             app.init_resource::<Seen>()
                 .add_systems(OnEnter(ActiveApp(id)), move |mut seen: ResMut<Seen>| {
-                    seen.0.push(format!("enter {}", id.0))
+                    seen.0.push(format!("enter {}", id.0));
                 })
                 .add_systems(OnExit(ActiveApp(id)), move |mut seen: ResMut<Seen>| {
-                    seen.0.push(format!("exit {}", id.0))
+                    seen.0.push(format!("exit {}", id.0));
                 });
         }
 

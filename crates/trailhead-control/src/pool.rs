@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::time::Instant;
 use trailhead_factory::{
     CheckpointId, Egress, Error, Labels, PrepareRequest, Result, Role, RunPhase, Sandbox, SandboxId, SandboxSpec, Task,
-    install_host_allowed, label,
+    TaskKey, install_host_allowed, label,
 };
 
 use crate::timing::backoff;
@@ -67,13 +68,13 @@ impl Factory {
                 opened.push(need.host.clone());
             }
             p.compute.set_egress(&sandbox.id, &egress).await?;
-            self.pool.install_opened.lock().unwrap().insert(sandbox.id.clone(), opened);
+            self.pool.opened_install(&sandbox.id, opened);
         }
         p.daemon.prepare(&sandbox.id, req).await
     }
 
     fn forget_install_opened(&self, sandbox: &Sandbox) {
-        self.pool.install_opened.lock().unwrap().remove(&sandbox.id);
+        self.pool.take_install(&sandbox.id);
     }
 
     /// A sandbox for `task`, its checkout prepared on `branch` when given (a reviewer's is the PR's head).
@@ -148,7 +149,7 @@ impl Factory {
         branch_if_present: bool,
         merge_base: bool,
     ) -> Result<(Sandbox, Option<String>)> {
-        let pick = self.pool.pool_pick.lock().await;
+        let pick = self.pool.pick.lock().await;
         // The task's own sandbox first, when it holds one (a parked rework resumes in it, TRAIL-1121); then idle ones.
         let mut idle = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?;
         // The one the tracker says it ran on comes first; any other labelled for it is left over from an earlier attempt.
@@ -233,47 +234,15 @@ impl Factory {
             prepared = p.daemon.prepare(&sandbox.id, PrepareRequest { setup: None, ..prepare }).await;
         }
         if let Err(e) = prepared {
-            self.forget_install_opened(&sandbox);
-            p.daemon.forget(&sandbox.id).await;
-            if matches!(e, Error::SetupFailed(_)) {
-                // The code failed, not the sandbox, and the same error would come from any other: it is released
-                // rather than destroyed as broken. Release restores a warm checkpoint, so a sandbox that was idle
-                // returns to the pool; a new one has none yet (the checkpoint comes after a good prepare) and is
-                // destroyed, costing nothing a retry wouldn't pay again, as `setup` would fail on it too.
-                tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; releasing the sandbox");
-                self.give_back(&sandbox, &busy).await;
-                return Err(e);
-            }
-            // One failure is as likely a network blip or a briefly broken `main` as a bad sandbox, and releasing
-            // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
-            // again and again means the sandbox itself is the problem, so it leaves the pool.
-            let failures = {
-                let mut counts = self.pool.prepare_failures.lock().unwrap();
-                let n = counts.entry(sandbox.id.clone()).or_default();
-                *n += 1;
-                *n
-            };
-            if failures < PREPARE_FAILURES_BEFORE_DESTROY {
-                tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed; releasing the sandbox");
-                self.give_back(&sandbox, &busy).await;
-                return Err(e);
-            }
-            tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
-            self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
-            match p.compute.destroy(&sandbox.id).await {
-                Ok(()) => self.forget_sandbox(&sandbox.id),
-                Err(d) => {
-                    tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
-                }
-            }
+            self.prepare_failed(p, &sandbox, &busy, &e).await;
             return Err(e);
         }
-        self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
+        self.pool.prepare_passed(&sandbox.id);
         let prepare_took = preparing.elapsed();
         // A checkpoint pauses the sandbox while its whole filesystem is copied (minutes on Docker), and what it saves the
         // next prepare is mostly dependencies, which rarely change. So the warm point is kept while a prepare from it
         // takes no longer than taking a new one did; a slower prepare means it has gone stale.
-        let cost = self.pool.warm_cost.lock().unwrap().get(&sandbox.id).copied();
+        let cost = self.pool.warm_cost(&sandbox.id);
         let rewarm = warm.is_none() || cost.is_none_or(|cost| prepare_took > cost);
         let mut taken = None;
         let warmed = async {
@@ -282,7 +251,7 @@ impl Factory {
             if rewarm {
                 let cp = p.compute.checkpoint(&sandbox.id, "warm").await?;
                 taken = Some(cp.clone());
-                self.pool.warm_cost.lock().unwrap().insert(sandbox.id.clone(), checkpointing.elapsed());
+                self.pool.set_warm_cost(&sandbox.id, Some(checkpointing.elapsed()));
                 labels = self.pooled(Some(p), label::BUSY, Some(&cp.0), Some(task));
                 p.compute.set_labels(&sandbox.id, &labels).await?;
             }
@@ -317,17 +286,36 @@ impl Factory {
                 // The cost recorded for the new checkpoint goes with it: release restores the old one, which that
                 // cost doesn't describe, and the next stale check would compare against the wrong figure.
                 if taken.is_some() {
-                    let mut costs = self.pool.warm_cost.lock().unwrap();
-                    match cost {
-                        Some(cost) => costs.insert(sandbox.id.clone(), cost),
-                        None => costs.remove(&sandbox.id),
-                    };
+                    self.pool.set_warm_cost(&sandbox.id, cost);
                 }
                 // The old warm checkpoint (if any) is what release restores; a new sandbox has none and is destroyed.
                 self.give_back(&sandbox, &busy).await;
                 Err(e)
             }
         }
+    }
+
+    /// A planner's sandbox: the one the task held for its last turn, as that turn left it, when the task still holds
+    /// it, so the agent's session on its disk carries on. It is neither restored nor prepared, which would wipe the
+    /// session. Otherwise a worker's sandbox on the base branch, from the pool, as [`Factory::acquire_worker`] gives.
+    pub(crate) async fn acquire_planner(&self, p: &Placed, task: &Task) -> Result<Sandbox> {
+        if let Some(host) = task.run.host.as_deref().filter(|_| task.keeps_planner_sandbox()) {
+            let stack = self.config.stack.tag();
+            // Listed by role too, so a sandbox whose kill switch took its role away is never handed out again.
+            let held = p.list(&self.pooled(None, label::BUSY, None, Some(task))).await?.into_iter().find(|s| {
+                s.name == host
+                    && s.labels.get(label::STACK).map(String::as_str).unwrap_or("") == stack
+                    && !self.abandoned(&s.name)
+            });
+            if let Some(sandbox) = held {
+                p.compute.set_egress(&sandbox.id, &self.agent_egress()).await?;
+                tracing::info!(task = %task.key, sandbox = %sandbox.name, "the planner carries on in the sandbox that holds its session");
+                self.status.phase(&task.key, RunPhase::Preparing { cold: false }, Some(&sandbox.name));
+                self.status.sandbox(&sandbox);
+                return Ok(sandbox);
+            }
+        }
+        Ok(self.acquire_worker(p, task, None, false, false).await?.0)
     }
 
     /// Opens install egress on a worker sandbox picked for a run, restores its warm checkpoint and checks its host has
@@ -352,8 +340,41 @@ impl Factory {
             let short = matches!(e, Error::Unavailable(_));
             return Err((e, short));
         }
-        self.pool.short_preflights.lock().unwrap().remove(&sandbox.id);
+        self.pool.had_room(&sandbox.id);
         Ok(restored)
+    }
+
+    /// A worker sandbox whose prepare failed, put where it belongs: back in the pool, or destroyed once it has failed
+    /// too often to be the network's or the code's doing.
+    async fn prepare_failed(&self, p: &Placed, sandbox: &Sandbox, busy: &Labels, e: &Error) {
+        self.forget_install_opened(sandbox);
+        p.daemon.forget(&sandbox.id).await;
+        if matches!(e, Error::SetupFailed(_)) {
+            // The code failed, not the sandbox, and the same error would come from any other: it is released
+            // rather than destroyed as broken. Release restores a warm checkpoint, so a sandbox that was idle
+            // returns to the pool; a new one has none yet (the checkpoint comes after a good prepare) and is
+            // destroyed, costing nothing a retry wouldn't pay again, as `setup` would fail on it too.
+            tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; releasing the sandbox");
+            self.give_back(sandbox, busy).await;
+            return;
+        }
+        // One failure is as likely a network blip or a briefly broken `main` as a bad sandbox, and releasing
+        // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
+        // again and again means the sandbox itself is the problem, so it leaves the pool.
+        let failures = self.pool.prepare_failed(&sandbox.id);
+        if failures < PREPARE_FAILURES_BEFORE_DESTROY {
+            tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed; releasing the sandbox");
+            self.give_back(sandbox, busy).await;
+            return;
+        }
+        tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
+        self.pool.prepare_passed(&sandbox.id);
+        match p.compute.destroy(&sandbox.id).await {
+            Ok(()) => self.forget_sandbox(&sandbox.id),
+            Err(d) => {
+                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            }
+        }
     }
 
     /// Deals with a worker sandbox that was labelled busy but couldn't be started. `no_room` is a warm sandbox, not
@@ -393,7 +414,7 @@ impl Factory {
         let Some(warm) = sandbox.labels.get(label::WARM).cloned() else {
             return self.destroy_pooled(p, sandbox).await;
         };
-        if self.pool.refresh.lock().unwrap().contains(&sandbox.name) {
+        if self.pool.wants_refresh(&sandbox.name) {
             tracing::info!(sandbox = %sandbox.name, "refresh: destroying the pooled sandbox on release");
             p.daemon.forget(&sandbox.id).await;
             return self.destroy_pooled(p, sandbox).await;
@@ -420,13 +441,13 @@ impl Factory {
     /// checkpoints grown too big: idle ones are destroyed now, with their checkpoints, and busy ones when they are
     /// released, instead of being restored. The next run on each pays a cold prepare.
     pub async fn refresh_pool(&self) -> Result<Refreshed> {
-        let _pick = self.pool.pool_pick.lock().await;
+        let _pick = self.pool.pick.lock().await;
         let (pooled, down) = self.list_all(&self.pool_labels()).await?;
         let mut done = Refreshed { unreachable: down.into_iter().collect(), ..Refreshed::default() };
         done.unreachable.sort();
         for s in pooled {
             if s.labels.get(label::STATE).map(String::as_str) != Some(label::IDLE) {
-                self.pool.refresh.lock().unwrap().insert(s.name.clone());
+                self.pool.ask_refresh(&s.name);
                 done.on_release.push(s.name);
                 continue;
             }
@@ -452,23 +473,18 @@ impl Factory {
     /// Drops what the control plane keeps per sandbox, for one that no longer exists, so the maps don't grow
     /// with every sandbox a long-running server has destroyed (TRAIL-1251).
     pub(crate) fn forget_sandbox(&self, id: &SandboxId) {
-        self.pool.prepare_failures.lock().unwrap().remove(id);
-        self.pool.warm_cost.lock().unwrap().remove(id);
-        self.pool.short_preflights.lock().unwrap().remove(id);
+        self.pool.forget(id);
     }
 
     /// Counts a preflight that found no room on `id`'s host, and says whether that makes too many in a row.
     fn short_too_often(&self, id: &SandboxId) -> bool {
-        let mut counts = self.pool.short_preflights.lock().unwrap();
-        let n = counts.entry(id.clone()).or_default();
-        *n += 1;
-        *n >= SHORT_PREFLIGHTS_BEFORE_DESTROY
+        self.pool.short_again(id) >= SHORT_PREFLIGHTS_BEFORE_DESTROY
     }
 
     async fn destroy_pooled(&self, p: &Placed, sandbox: &Sandbox) -> Result<()> {
         p.compute.destroy(&sandbox.id).await?;
         self.forget_sandbox(&sandbox.id);
-        self.pool.refresh.lock().unwrap().remove(&sandbox.name);
+        self.pool.refreshed(&sandbox.name);
         self.status.sandbox_gone(&sandbox.name);
         Ok(())
     }
@@ -504,7 +520,7 @@ impl Factory {
             match self.destroy_pooled(p, sandbox).await {
                 Ok(()) => {
                     tracing::info!(sandbox = %name, "destroyed a broken pooled sandbox");
-                    self.pool.troubled.lock().unwrap().remove(name);
+                    self.pool.untroubled(name);
                     done.destroyed.push(name.clone());
                 }
                 Err(e) => {
@@ -522,7 +538,7 @@ impl Factory {
         match self.release_worker(sandbox).await {
             Ok(()) => {
                 tracing::info!(sandbox = %name, took = ?started.elapsed(), "released a pooled sandbox");
-                self.pool.troubled.lock().unwrap().remove(name);
+                self.pool.untroubled(name);
                 done.released.push(name.clone());
             }
             Err(e) if self.failed(name) => {
@@ -546,13 +562,11 @@ impl Factory {
             ?took,
             "giving up on a pooled sandbox that won't release; leaving it out of the pool and starting a new one"
         );
-        if let Some(t) = self.pool.troubled.lock().unwrap().get_mut(name) {
-            t.abandoned = true;
-        }
+        self.pool.abandon(name);
         if p.compute.destroy(&sandbox.id).await.is_ok() {
             self.forget_sandbox(&sandbox.id);
             self.status.sandbox_gone(name);
-            self.pool.troubled.lock().unwrap().remove(name);
+            self.pool.untroubled(name);
             return;
         }
         self.mark_broken(sandbox).await;
@@ -575,18 +589,193 @@ impl Factory {
     }
 
     pub(crate) fn abandoned(&self, name: &str) -> bool {
-        self.pool.troubled.lock().unwrap().get(name).is_some_and(|t| t.abandoned)
+        self.pool.abandoned(name)
     }
 
     /// Whether a troubled sandbox's backoff has run out, or it isn't troubled.
     pub(crate) fn due(&self, name: &str) -> bool {
-        self.pool.troubled.lock().unwrap().get(name).is_none_or(|t| Instant::now() >= t.next_try)
+        self.pool.due(name)
     }
 
     /// Records a failure and backs off. True once the sandbox has used up its tries or its patience.
     fn failed(&self, name: &str) -> bool {
+        self.pool.failed(name)
+    }
+}
+
+/// The first wait between tries at a troubled sandbox, doubling up to [`MAX_BACKOFF`].
+const FIRST_BACKOFF: Duration = Duration::from_secs(30);
+
+const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
+/// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
+struct Trouble {
+    failures: u32,
+    since: Instant,
+    next_try: Instant,
+    /// Given up on: out of the pool and the sandbox cap, even if labelling it broken failed too.
+    abandoned: bool,
+}
+
+/// What the factory remembers of its pooled sandboxes. In memory: a restart counts again from nothing.
+#[derive(Default)]
+pub(crate) struct PoolState {
+    troubled: Mutex<HashMap<String, Trouble>>,
+    /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
+    /// memory: a restart starts the wait again (TRAIL-601).
+    parked_since: Mutex<HashMap<TaskKey, Instant>>,
+    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
+    /// starting together never take the same sandbox.
+    pub(crate) pick: tokio::sync::Mutex<()>,
+    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
+    /// they're blocked again.
+    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
+    /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
+    warm_cost: Mutex<HashMap<SandboxId, Duration>>,
+    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
+    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
+    /// Consecutive runs that found no room on each warm pooled sandbox's host, cleared by one that did (TRAIL-1633).
+    short_preflights: Mutex<HashMap<SandboxId, u32>>,
+    /// Busy pooled sandboxes a refresh asked for, by name: destroyed on release rather than restored. In memory: a
+    /// restart forgets them, and the refresh is asked again.
+    refresh: Mutex<HashSet<String>>,
+}
+
+/// One more in a row for `id`, and how many that makes.
+fn count_again(counts: &Mutex<HashMap<SandboxId, u32>>, id: &SandboxId) -> u32 {
+    let mut counts = counts.lock().unwrap();
+    let n = counts.entry(id.clone()).or_default();
+    *n += 1;
+    *n
+}
+
+impl PoolState {
+    /// Drops what is kept per sandbox, for one that no longer exists. A new per-sandbox map is cleared here too.
+    fn forget(&self, id: &SandboxId) {
+        self.prepare_failures.lock().unwrap().remove(id);
+        self.warm_cost.lock().unwrap().remove(id);
+        self.short_preflights.lock().unwrap().remove(id);
+    }
+
+    /// How many entries the per-sandbox maps hold between them.
+    pub(crate) fn entries(&self) -> usize {
+        self.prepare_failures.lock().unwrap().len()
+            + self.warm_cost.lock().unwrap().len()
+            + self.short_preflights.lock().unwrap().len()
+    }
+
+    /// Counts a failed prepare of a sandbox, and says how many it has had in a row.
+    fn prepare_failed(&self, id: &SandboxId) -> u32 {
+        count_again(&self.prepare_failures, id)
+    }
+
+    /// A prepare went through, or the sandbox is gone: its failed prepares in a row are over.
+    fn prepare_passed(&self, id: &SandboxId) {
+        self.prepare_failures.lock().unwrap().remove(id);
+    }
+
+    /// Counts a run that found no room on a sandbox's host, and says how many have in a row.
+    fn short_again(&self, id: &SandboxId) -> u32 {
+        count_again(&self.short_preflights, id)
+    }
+
+    /// A run found room on the sandbox's host: its runs in a row without are over.
+    fn had_room(&self, id: &SandboxId) {
+        self.short_preflights.lock().unwrap().remove(id);
+    }
+
+    /// How long the sandbox's last warm checkpoint took, when one was timed.
+    fn warm_cost(&self, id: &SandboxId) -> Option<Duration> {
+        self.warm_cost.lock().unwrap().get(id).copied()
+    }
+
+    /// Keeps how long the sandbox's warm checkpoint took, or with `None` forgets it.
+    fn set_warm_cost(&self, id: &SandboxId, cost: Option<Duration>) {
+        let mut costs = self.warm_cost.lock().unwrap();
+        match cost {
+            Some(cost) => costs.insert(id.clone(), cost),
+            None => costs.remove(id),
+        };
+    }
+
+    /// Keeps the hosts opened for a sandbox's install on top of the install set.
+    fn opened_install(&self, id: &SandboxId, hosts: Vec<String>) {
+        self.install_opened.lock().unwrap().insert(id.clone(), hosts);
+    }
+
+    /// The hosts opened for a sandbox's install, which are then no longer kept.
+    pub(crate) fn take_install(&self, id: &SandboxId) -> Vec<String> {
+        self.install_opened.lock().unwrap().remove(id).unwrap_or_default()
+    }
+
+    /// Asks for a busy sandbox to be destroyed on release rather than restored.
+    fn ask_refresh(&self, name: &str) {
+        self.refresh.lock().unwrap().insert(name.to_string());
+    }
+
+    fn wants_refresh(&self, name: &str) -> bool {
+        self.refresh.lock().unwrap().contains(name)
+    }
+
+    /// The sandbox a refresh was asked for is gone.
+    fn refreshed(&self, name: &str) {
+        self.refresh.lock().unwrap().remove(name);
+    }
+
+    /// Notes a task seen parked while it holds a pooled sandbox: the wait before the sandbox is given up counts
+    /// from the first time.
+    pub(crate) fn seen_parked(&self, key: &TaskKey) {
+        self.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
+    }
+
+    /// How long a task has been seen parked, if it has been.
+    pub(crate) fn parked_for(&self, key: &TaskKey) -> Option<Duration> {
+        self.parked_since.lock().unwrap().get(key).map(|since| since.elapsed())
+    }
+
+    /// Every task seen parked, and for how long.
+    pub(crate) fn parked(&self) -> Vec<(TaskKey, Duration)> {
+        self.parked_since.lock().unwrap().iter().map(|(key, since)| (key.clone(), since.elapsed())).collect()
+    }
+
+    pub(crate) fn unparked(&self, key: &TaskKey) {
+        self.parked_since.lock().unwrap().remove(key);
+    }
+
+    pub(crate) fn forget_parked(&self) {
+        self.parked_since.lock().unwrap().clear();
+    }
+
+    /// Forgets every parked task `still` doesn't keep.
+    pub(crate) fn keep_parked(&self, still: impl Fn(&TaskKey) -> bool) {
+        self.parked_since.lock().unwrap().retain(|key, _| still(key));
+    }
+
+    /// The sandbox released, or is gone: it is no longer in trouble.
+    fn untroubled(&self, name: &str) {
+        self.troubled.lock().unwrap().remove(name);
+    }
+
+    /// Gives up on a troubled sandbox: out of the pool and the cap.
+    fn abandon(&self, name: &str) {
+        if let Some(t) = self.troubled.lock().unwrap().get_mut(name) {
+            t.abandoned = true;
+        }
+    }
+
+    fn abandoned(&self, name: &str) -> bool {
+        self.troubled.lock().unwrap().get(name).is_some_and(|t| t.abandoned)
+    }
+
+    /// Whether a troubled sandbox's backoff has run out, or it isn't troubled.
+    fn due(&self, name: &str) -> bool {
+        self.troubled.lock().unwrap().get(name).is_none_or(|t| Instant::now() >= t.next_try)
+    }
+
+    /// Records a failure to release and backs off. True once the sandbox has used up its tries or its patience.
+    fn failed(&self, name: &str) -> bool {
         let now = Instant::now();
-        let mut troubled = self.pool.troubled.lock().unwrap();
+        let mut troubled = self.troubled.lock().unwrap();
         let t = troubled.entry(name.to_string()).or_insert(Trouble {
             failures: 0,
             since: now,
@@ -597,18 +786,4 @@ impl Factory {
         t.next_try = now + backoff(t.failures, FIRST_BACKOFF, MAX_BACKOFF);
         !t.abandoned && (t.failures >= RELEASE_ATTEMPTS || now - t.since >= RELEASE_PATIENCE)
     }
-}
-
-/// The first wait between tries at a troubled sandbox, doubling up to [`MAX_BACKOFF`].
-const FIRST_BACKOFF: Duration = Duration::from_secs(30);
-
-const MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
-
-/// A pooled sandbox that keeps failing to release. Kept in memory only, so a restart counts again from zero.
-pub(crate) struct Trouble {
-    failures: u32,
-    since: Instant,
-    next_try: Instant,
-    /// Given up on: out of the pool and the sandbox cap, even if labelling it broken failed too.
-    abandoned: bool,
 }

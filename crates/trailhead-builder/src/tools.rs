@@ -30,6 +30,9 @@ pub struct Job {
     pub package: Option<String>,
     pub profile: String,
     pub jobs: u32,
+    /// The connectors' packages to build with the shell, in the same cargo run. Each one's program is the package's
+    /// binary of the same name, which lands beside the shell's.
+    pub connectors: Vec<String>,
 }
 
 /// git and cargo, as the builder uses them. Errors are a line for a person.
@@ -43,7 +46,8 @@ pub trait Tools: Send + Sync + 'static {
     /// Clones into `src` when it isn't there, fetches, and checks out `rev` detached.
     fn checkout<'a>(&'a self, src: &'a Path, origin: &'a Origin, rev: &'a str) -> Boxed<'a, Result<(), String>>;
 
-    /// Builds the shell, and says where the binary is.
+    /// Builds the shell and the job's connectors, and says where the shell's binary is; each connector's program is
+    /// beside it, named after its package.
     fn build<'a>(&'a self, job: &'a Job) -> Boxed<'a, Result<PathBuf, String>>;
 
     /// The files of `rev` in the clone at `src`, as a gzipped tar, for a machine that builds the shell itself.
@@ -155,8 +159,11 @@ impl Tools for System {
             let err = log.try_clone().map_err(|e| e.to_string())?;
             let jobs = job.jobs.to_string();
             let mut cmd = Command::new(&self.cargo);
-            cmd.args(["build", "--locked", "--profile", &job.profile, "-p", &package, "-j", &jobs])
-                .current_dir(&job.src)
+            cmd.args(["build", "--locked", "--profile", &job.profile, "-p", &package, "-j", &jobs]);
+            for connector in &job.connectors {
+                cmd.args(["-p", connector]);
+            }
+            cmd.current_dir(&job.src)
                 .env("CARGO_TARGET_DIR", &job.target)
                 .env("CARGO_TERM_COLOR", "never")
                 .stdin(Stdio::null())

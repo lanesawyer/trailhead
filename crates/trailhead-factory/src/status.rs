@@ -147,6 +147,14 @@ pub struct TargetSpend {
     pub capped: bool,
 }
 
+/// What a person is told when `[factory]` sections changed in the repo's file and wait for a restart.
+pub fn restart_needed(sections: &[String]) -> String {
+    format!(
+        "restart the server to apply the changed [factory] settings ({}): only the merge mode is re-read while it runs",
+        sections.join(", ")
+    )
+}
+
 /// How full one of the subscription's usage windows is (Claude's `five_hour` session or `seven_day` week), as a run
 /// last heard (`RunEvent::Quota`). Host-wide: every repo's board carries the same readings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,6 +179,11 @@ pub struct FactorySnapshot {
     /// (TRAIL-804).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holding: Option<String>,
+    /// The `[factory]` sections of the repo's file that have changed since the server read them and are only read
+    /// at start, so the server has to be restarted for them to apply (TRAIL-1690). Empty while the file and the
+    /// running factory agree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart_for: Vec<String>,
     /// Today's spend on each target that has a daily cap. Not on the event stream: it is as fresh as the last
     /// placement pass.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -230,6 +243,11 @@ pub enum FactoryEvent {
     Holding {
         holding: Option<String>,
     },
+    /// The sections of the repo's file that wait for a restart changed: empty once the file and the running factory
+    /// agree again.
+    RestartNeeded {
+        sections: Vec<String>,
+    },
     /// A usage window's reading changed: every window, as in the snapshot's `usage`.
     Usage {
         usage: Vec<UsageWindow>,
@@ -262,6 +280,10 @@ impl FactoryEvent {
             FactoryEvent::Unknown => "unknown event".to_string(),
             FactoryEvent::Holding { holding: Some(why) } => format!("holding merges: {why}"),
             FactoryEvent::Holding { holding: None } => "no longer holding merges".to_string(),
+            FactoryEvent::RestartNeeded { sections } if sections.is_empty() => {
+                "the repo's factory settings match the running factory again".to_string()
+            }
+            FactoryEvent::RestartNeeded { sections } => restart_needed(sections),
             FactoryEvent::Usage { usage } => {
                 let windows: Vec<String> = usage.iter().map(|w| format!("{} {}%", w.window, w.used_percent)).collect();
                 format!("usage: {}", windows.join(", "))

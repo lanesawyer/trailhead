@@ -22,7 +22,7 @@ pub(crate) async fn ask_targets(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<
 #[utoipa::path(
     post, path = "/v1/shell/ask", tag = "meta", request_body = Ask,
     responses(
-        (status = 201, description = "A graded task in the app's project, or a new app's project pointed at the apps repo and its first graded task. A new app whose project was made but whose first task wasn't has `task: null` and says why in `notes`", body = Asked),
+        (status = 201, description = "A graded task in the app's project; or, with `plan`, and always for a new app (whose project is made, pointed at the apps repo), an ungraded spec task that the factory's planner talks over with the person before any work starts (`planned`). A new app whose project was made but whose task wasn't has `task: null` and says why in `notes`", body = Asked),
         (status = 403, description = "`forbidden`: only a person can ask; an agent's token is refused", body = ErrorBody),
     )
 )]

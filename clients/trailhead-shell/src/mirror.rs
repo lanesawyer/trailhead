@@ -12,7 +12,10 @@
 //!   delete brings it back. A deleted task takes its claim, comments, pictures and the edges into it with it, which the stream
 //!   sends no events for; an undo restores the task, and those come back with the next snapshot or event for them;
 //! - a dependency (a blocker edge, keyed by both ids) has no version either, so the id of its event ranks it;
-//! - agents and users have no events yet, so they change only with a snapshot.
+//! - agents and users have no events yet, so they change only with a snapshot;
+//! - a notification has no version either, so the id of its event ranks it, as a comment's does. It is never deleted.
+//!   One that arrives raised and unread off the stream, not known before, is also told to the rest of the shell as a
+//!   [`NotificationArrived`]; one in a snapshot never is.
 //!
 //! Each entity holds its data as its `trailhead-model` type in a [`Mirrored`] component, read once as it arrives.
 //! Data that doesn't read (a status a newer server added, say) is left out with a warning rather than shown half-read.
@@ -22,7 +25,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Attachment, Claim, Comment, Dependency, Project, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, Dependency, Notification, Project, Task, User};
 use uuid::Uuid;
 
 use crate::sync::{Snapshot, SyncItem};
@@ -39,6 +42,8 @@ pub enum Kind {
     Dependency,
     /// A picture on a task: its metadata.
     Attachment,
+    /// Something a person is told.
+    Notification,
 }
 
 /// The Trailhead id: a UUID, except for a claim, which is keyed by its task's.
@@ -50,7 +55,7 @@ pub struct TrailheadId(pub String);
 pub struct Rev(pub i64);
 
 /// The entity as the API sent it, read into its model type: a [`Task`], [`Project`], [`Comment`], [`Claim`],
-/// [`Attachment`] or [`Agent`]. A task's `claim`, `open_questions`, `last_handoff` and `last_review` are entities of their own.
+/// [`Attachment`], [`Agent`], [`User`], [`Dependency`] or [`Notification`]. A task's `claim`, `open_questions`, `last_handoff` and `last_review` are entities of their own.
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct Mirrored<T: Send + Sync + 'static>(pub T);
 
@@ -69,7 +74,13 @@ enum Record {
     User(User),
     Dependency(Dependency),
     Attachment(Attachment),
+    Notification(Notification),
 }
+
+/// A notification that arrived raised and unread off the event stream while the shell ran, and wasn't known before: the
+/// bell rings for it. One loaded with a snapshot (at launch, or after a long disconnect) is never one.
+#[derive(Message, Debug, Clone, PartialEq)]
+pub struct NotificationArrived(pub Notification);
 
 impl Record {
     fn read(kind: Kind, data: Value) -> serde_json::Result<Record> {
@@ -85,6 +96,7 @@ impl Record {
             Kind::User => Record::User(of(data)?),
             Kind::Dependency => Record::Dependency(of(data)?),
             Kind::Attachment => Record::Attachment(of(data)?),
+            Kind::Notification => Record::Notification(of(data)?),
         })
     }
 
@@ -98,6 +110,7 @@ impl Record {
             Record::User(u) => entity.insert(Mirrored(u)),
             Record::Dependency(d) => entity.insert(Mirrored(d)),
             Record::Attachment(a) => entity.insert(Mirrored(a)),
+            Record::Notification(n) => entity.insert(Mirrored(n)),
         };
     }
 }
@@ -128,21 +141,34 @@ impl Mirror {
     }
 
     /// Writes the entity if it is new or `rev` is newer than what is there (or `force`). Data that doesn't read as
-    /// its kind (from a newer server, say) is left out with a warning, and an older copy stays.
-    fn put(&mut self, commands: &mut Commands, kind: Kind, id: &str, rev: Rev, data: Value, force: bool) {
+    /// its kind (from a newer server, say) is left out with a warning, and an older copy stays. Returns the
+    /// notification written, when it is a notification the mirror didn't hold before.
+    fn put(
+        &mut self,
+        commands: &mut Commands,
+        kind: Kind,
+        id: &str,
+        rev: Rev,
+        data: Value,
+        force: bool,
+    ) -> Option<Notification> {
         let key = (kind, id.to_string());
         if let Some((_, have)) = self.index.get(&key)
             && !force
             && have.0 >= rev.0
         {
-            return;
+            return None;
         }
         let record = match Record::read(kind, data) {
             Ok(record) => record,
             Err(e) => {
                 warn!(?kind, id, error = %e, "left out of the mirror: it doesn't read as its kind");
-                return;
+                return None;
             }
+        };
+        let new = match &record {
+            Record::Notification(n) if !self.index.contains_key(&key) => Some(n.clone()),
+            _ => None,
         };
         match &record {
             Record::Comment(c) => self.owner.insert(key.clone(), c.task_id.to_string()),
@@ -164,6 +190,7 @@ impl Mirror {
                 self.index.insert(key, (entity.id(), rev));
             }
         }
+        new
     }
 
     fn remove(&mut self, commands: &mut Commands, kind: Kind, id: &str) {
@@ -195,6 +222,9 @@ impl Mirror {
         }
         for user in snapshot.users {
             self.put(commands, Kind::User, &str_of(&user, "id"), Rev(0), user, true);
+        }
+        for notification in snapshot.notifications {
+            self.put(commands, Kind::Notification, &str_of(&notification, "id"), Rev(0), notification, true);
         }
         for mut task in snapshot.tasks {
             let id = str_of(&task, "id");
@@ -254,11 +284,12 @@ impl Mirror {
         }
     }
 
-    fn apply_event(&mut self, commands: &mut Commands, event: trailhead_model::Event) {
+    /// Applies one event, returning the notification it raised when that is news to the mirror and unread.
+    fn apply_event(&mut self, commands: &mut Commands, event: trailhead_model::Event) -> Option<Notification> {
         let event_id = event.id;
         // The stream is in order, so anything at or before what's applied is a duplicate.
         if event_id <= self.last_event {
-            return;
+            return None;
         }
         self.last_event = event_id;
         let id = event.entity_id;
@@ -271,12 +302,15 @@ impl Mirror {
             trailhead_model::Entity::Agent => Kind::Agent,
             trailhead_model::Entity::Dependency => Kind::Dependency,
             trailhead_model::Entity::Attachment => Kind::Attachment,
+            trailhead_model::Entity::Notification => Kind::Notification,
         };
         if !after.is_object() || !after["deleted_at"].is_null() {
-            return self.remove(commands, kind, &id);
+            self.remove(commands, kind, &id);
+            return None;
         }
         let rev = if matches!(kind, Kind::Task | Kind::Project) { version(&after) } else { Rev(event_id) };
-        self.put(commands, kind, &id, rev, after, false);
+        let raised = event.kind == trailhead_model::RAISED;
+        self.put(commands, kind, &id, rev, after, false).filter(|n| raised && n.is_unread())
     }
 }
 
@@ -288,11 +322,20 @@ fn version(v: &Value) -> Rev {
     Rev(v["version"].as_i64().unwrap_or(0))
 }
 
-pub fn apply_sync(mut items: MessageReader<SyncItem>, mut mirror: ResMut<Mirror>, mut commands: Commands) {
+pub fn apply_sync(
+    mut items: MessageReader<SyncItem>,
+    mut mirror: ResMut<Mirror>,
+    mut arrived: MessageWriter<NotificationArrived>,
+    mut commands: Commands,
+) {
     for item in items.read() {
         match item.clone() {
             SyncItem::Snapshot(snapshot) => mirror.apply_snapshot(&mut commands, snapshot),
-            SyncItem::Event(event) => mirror.apply_event(&mut commands, event),
+            SyncItem::Event(event) => {
+                if let Some(notification) = mirror.apply_event(&mut commands, event) {
+                    arrived.write(NotificationArrived(notification));
+                }
+            }
         }
     }
 }
@@ -302,7 +345,10 @@ pub struct MirrorPlugin;
 
 impl Plugin for MirrorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Mirror>().add_message::<SyncItem>().add_systems(PreUpdate, apply_sync);
+        app.init_resource::<Mirror>()
+            .add_message::<SyncItem>()
+            .add_message::<NotificationArrived>()
+            .add_systems(PreUpdate, apply_sync);
     }
 }
 

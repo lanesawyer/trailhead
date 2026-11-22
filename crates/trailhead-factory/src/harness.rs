@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::{
-    CheckResult, CheckpointId, Commit, Endpoint, Grade, HumanContext, ModelId, Priority, Result, Role, TaskKey, Usage,
+    CheckResult, CheckpointId, Commit, Endpoint, Grade, HumanContext, ModelId, PlanContext, PlanTurn, Priority, Result,
+    Role, TaskKey, Usage,
 };
 
 /// What the agent is asked to do: the task's spec as Trailhead holds it.
@@ -52,6 +53,9 @@ pub struct RunContext {
     /// For reviewers: the pictures the worker took of what the change alters, as PNG files outside the checkout.
     #[serde(default)]
     pub shots: Vec<ShotFiles>,
+    /// For planners: the ask, the plan as it stands, and where the turn is written and the session kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PlanContext>,
 }
 
 /// One view the change alters, as files a reviewer can open: how it looked before, how it looks now, or only one of
@@ -125,6 +129,8 @@ pub enum RunOutcome {
     NeedsInput {
         question: String,
     },
+    /// A planner ended its turn: what it says to the person and the plan it proposes, for the control plane to act on.
+    PlanTurn(PlanTurn),
     Failed {
         reason: String,
     },

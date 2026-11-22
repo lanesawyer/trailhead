@@ -85,6 +85,20 @@ unused_must_use = "deny"
 dbg_macro = "deny"
 # The limit is in clippy.toml, and is only ever lowered.
 too_many_lines = "warn"
+# Each of these catches a slip that compiles: a suppression nothing needs any more (write `expect`, which fails when
+# its lint stops firing), an `async`, `&mut` or `clone` that is no longer needed, a fourth `bool` parameter.
+allow_attributes = "warn"
+fn_params_excessive_bools = "warn"
+implicit_clone = "warn"
+manual_let_else = "warn"
+# A `_` arm that stands for exactly one variant hides that variant when another is added: name it.
+match_wildcard_for_single_variants = "warn"
+needless_pass_by_ref_mut = "warn"
+redundant_clone = "warn"
+semicolon_if_nothing_returned = "warn"
+trivially_copy_pass_by_ref = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_async = "warn"
 
 [profile.dev]
 # Line tables only: backtraces keep file:line, but builds, links and target/ shrink a lot.

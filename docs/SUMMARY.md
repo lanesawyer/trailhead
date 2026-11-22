@@ -6,6 +6,7 @@
 
 - [Getting started](getting-started.md)
 - [Concepts](concepts.md)
+- [Writing a connector](connectors.md)
 - [OpenClaw](integrations/openclaw.md)
 
 # The factory

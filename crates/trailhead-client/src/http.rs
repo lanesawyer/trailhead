@@ -4,6 +4,7 @@
 //! It covers the endpoints the CLI and `RestTracker` (`trailhead-tracker-rest`) use; the rest follow as Lookout moves over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,10 +14,13 @@ use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use trailhead_model::app_data::{App, AppEvent, AppUndoReport, BatchWrite, BatchWritten, Record, Written};
+use trailhead_model::connector::{ConnectorInfo, ConnectorPatch, FeedRecord};
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
-    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit,
-    Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
+    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
+    NotificationSettings, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport,
+    Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -58,6 +62,7 @@ pub mod routes {
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
     pub const SET_ASIDE: Route = Route::new(Method::POST, "/v1/tasks/{task}/set-aside");
+    pub const APPROVE_PLAN: Route = Route::new(Method::POST, "/v1/tasks/{task}/plan/approve");
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
@@ -65,6 +70,15 @@ pub mod routes {
     pub const ADD_ATTACHMENT: Route = Route::new(Method::POST, "/v1/tasks/{task}/attachments");
     pub const READ_ATTACHMENT: Route = Route::new(Method::GET, "/v1/attachments/{id}");
     pub const REMOVE_ATTACHMENT: Route = Route::new(Method::DELETE, "/v1/attachments/{id}");
+    pub const LIST_NOTIFICATIONS: Route = Route::new(Method::GET, "/v1/notifications");
+    pub const RAISE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications");
+    pub const READ_ALL_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/read-all");
+    pub const RESOLVE_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/resolve");
+    pub const READ_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/read");
+    pub const UNREAD_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/unread");
+    pub const RESOLVE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/resolve");
+    pub const NOTIFICATION_SETTINGS: Route = Route::new(Method::GET, "/v1/notifications/settings");
+    pub const SET_NOTIFICATION_SETTINGS: Route = Route::new(Method::PUT, "/v1/notifications/settings");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
@@ -98,8 +112,31 @@ pub mod routes {
     pub const LIST_USERS: Route = Route::new(Method::GET, "/v1/users");
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
+    pub const LIST_APPS: Route = Route::new(Method::GET, "/v1/apps");
+    pub const SHOW_APP: Route = Route::new(Method::GET, "/v1/apps/{app}");
+    pub const DECLARE_APP: Route = Route::new(Method::PUT, "/v1/apps/{app}/declaration");
+    pub const LIST_RECORDS: Route = Route::new(Method::GET, "/v1/apps/{app}/records/{collection}");
+    pub const CREATE_RECORD: Route = Route::new(Method::POST, "/v1/apps/{app}/records/{collection}");
+    pub const PATCH_RECORD: Route = Route::new(Method::PATCH, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const REPLACE_RECORD: Route = Route::new(Method::PUT, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const DELETE_RECORD: Route = Route::new(Method::DELETE, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const PUT_RECORD: Route = Route::new(Method::PUT, "/v1/apps/{app}/keys/{collection}/{key}");
+    pub const APP_BATCH: Route = Route::new(Method::POST, "/v1/apps/{app}/batch");
+    pub const APP_EVENTS: Route = Route::new(Method::GET, "/v1/apps/{app}/events");
+    pub const APP_UNDO: Route = Route::new(Method::POST, "/v1/apps/{app}/undo");
+    /// No method on [`Client`]: a window follows it as it follows [`EVENT_STREAM`], from a page of records'
+    /// cursor (`super::app_event_stream_path`).
+    pub const APP_EVENT_STREAM: Route = Route::new(Method::GET, "/v1/apps/{app}/events/stream");
+
+    pub const LIST_CONNECTORS: Route = Route::new(Method::GET, "/v1/connectors");
+    pub const SHOW_CONNECTOR: Route = Route::new(Method::GET, "/v1/connectors/{id}");
+    pub const UPDATE_CONNECTOR: Route = Route::new(Method::PATCH, "/v1/connectors/{id}");
+    pub const RUN_CONNECTOR: Route = Route::new(Method::POST, "/v1/connectors/{id}/run");
+    /// A connector's run calls it, with the connector kit's own client; [`super::Call::HandOverFeed`] names it here.
+    pub const HAND_OVER_FEED: Route = Route::new(Method::PUT, "/v1/connectors/{id}/feeds/{feed}");
+
     /// All of them.
-    pub fn all() -> [Route; 46] {
+    pub fn all() -> [Route; 69] {
         [
             READY,
             LIST_TASKS,
@@ -111,6 +148,7 @@ pub mod routes {
             RENEW,
             RELEASE,
             SET_ASIDE,
+            APPROVE_PLAN,
             UNDO,
             REVERT,
             MY_CLAIMS,
@@ -147,8 +185,71 @@ pub mod routes {
             WEBHOOK_DELIVERIES,
             LIST_USERS,
             EVENT_STREAM,
+            RAISE_NOTIFICATION,
+            RESOLVE_NOTIFICATIONS,
+            NOTIFICATION_SETTINGS,
+            SET_NOTIFICATION_SETTINGS,
+            LIST_APPS,
+            SHOW_APP,
+            DECLARE_APP,
+            LIST_RECORDS,
+            CREATE_RECORD,
+            PATCH_RECORD,
+            REPLACE_RECORD,
+            DELETE_RECORD,
+            PUT_RECORD,
+            APP_BATCH,
+            APP_EVENTS,
+            APP_UNDO,
+            APP_EVENT_STREAM,
+            LIST_CONNECTORS,
+            SHOW_CONNECTOR,
+            UPDATE_CONNECTOR,
+            RUN_CONNECTOR,
+            HAND_OVER_FEED,
         ]
     }
+}
+
+/// `s` as one path segment: everything but ASCII letters, digits and `-._~` percent-encoded, so a record's key with
+/// `/` or `#` in it (`lanesawyer/trailhead#123`) stays one segment.
+pub fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The path of an app's event stream, resuming after `after` (a page of records' cursor, or the last event seen), or
+/// from the newest event without it.
+pub fn app_event_stream_path(app: &str, after: Option<i64>) -> String {
+    let path = routes::APP_EVENT_STREAM.path.replace("{app}", &path_segment(app));
+    match after {
+        Some(a) => format!("{path}?after={a}"),
+        None => path,
+    }
+}
+
+/// `GET /v1/apps/{app}/records/{collection}`: a page of records, and the app's newest event as it was read
+/// (`trailhead-event-cursor`): follow the app's stream after it to carry on from the page with nothing missed or
+/// repeated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordsPage {
+    pub records: Vec<Record>,
+    pub event_cursor: i64,
+}
+
+/// `POST /v1/apps/{app}/undo`: one event in the app, or a batch.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppUndo {
+    EventId(i64),
+    BatchId(Uuid),
 }
 
 /// Why a call failed.
@@ -228,92 +329,39 @@ pub struct NewAttachment {
     pub set: Option<String>,
 }
 
-/// `POST /v1/tasks`.
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct NewTask {
-    pub project: String,
-    pub title: String,
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    /// The key of the task this one goes under.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-    /// Only a human can create a task with a grade.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grade: Option<Grade>,
-    /// The day it's due, `YYYY-MM-DD`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_on: Option<String>,
-    /// A time it's due by, RFC 3339 with the offset it was set in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<String>,
-    /// The IANA zone the deadline was set in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_tz: Option<String>,
-    /// The day to work it, `YYYY-MM-DD`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_on: Option<String>,
-    /// A time on that day, RFC 3339 with the offset it was planned in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_at: Option<String>,
-    /// The IANA zone `scheduled_at` was planned in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_tz: Option<String>,
-    /// Keys of the tasks that must finish first, added with the task.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub blocked_by: Vec<String>,
-    /// Keys of the tasks this one blocks, added the same way.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<String>,
+/// `GET /v1/notifications`: a page of them, newest first, and how many are unread in all.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+pub struct NotificationList {
+    pub notifications: Vec<Notification>,
+    pub unread: i64,
 }
 
-/// `PATCH /v1/tasks/{task}`: only the fields set are sent.
+/// `POST /v1/notifications`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct TaskUpdate {
+pub struct NewNotification {
+    /// What raises it: an app's id, `factory` or `server`.
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// What it is about, as the raiser names it, to resolve by later.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub subject: Option<String>,
+    /// The key or id of the task it is about.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<Status>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    /// `Some(None)` sends `null`, which clears the grade.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grade: Option<Option<Grade>>,
-    /// Merged into the task's metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-    /// A handoff comment written with the update, or not at all if the update is refused.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<String>,
-    /// The key of the task this one duplicates, which needs `cancelled`. `Some(None)` clears it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duplicate_of: Option<Option<String>>,
-    /// `YYYY-MM-DD`. A new day without `due_at` drops the time; `Some(None)` removes the deadline.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_on: Option<Option<String>>,
-    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_tz: Option<Option<String>>,
-    /// `YYYY-MM-DD`. A new day without `scheduled_at` drops the time; `Some(None)` unschedules.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_on: Option<Option<String>>,
-    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_at: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_tz: Option<Option<String>>,
-    /// The key of the task to move this one under; `Some(None)` makes it top-level.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<Option<String>>,
-    /// Refuses the update if the task has changed since this version, like `If-Match`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<i64>,
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<NotificationAction>,
 }
+
+/// How many notifications a call changed.
+#[derive(Debug, Deserialize)]
+struct Count {
+    count: usize,
+}
+
+/// `POST /v1/tasks`' and `PATCH /v1/tasks/{task}`' bodies, the ones the server reads (`trailhead_model::wire`).
+pub use trailhead_model::wire::{CreateTask as NewTask, UpdateTask as TaskUpdate};
 
 /// `POST /v1/projects`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -407,6 +455,21 @@ pub enum Call {
         key: TaskKey,
         note: Option<String>,
     },
+    /// Approves the plan under the spec task `key`, grading each of its open, ungraded subtasks (by key).
+    ApprovePlan {
+        key: TaskKey,
+        grades: BTreeMap<String, Grade>,
+    },
+    /// `blocker` must finish before `blocked`.
+    AddBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
+    /// `blocked` no longer waits on `blocker`.
+    RemoveBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
     Undo(Undo),
     Revert(Revert),
     CreateProject(NewProject),
@@ -414,21 +477,126 @@ pub enum Call {
         key: String,
         update: ProjectUpdate,
     },
+    /// Marks the notification with this id read.
+    ReadNotification(String),
+    /// Marks the notification with this id unread.
+    UnreadNotification(String),
+    /// Marks every notification read.
+    ReadAllNotifications,
+    /// Raises a notification.
+    RaiseNotification(NewNotification),
+    /// Resolves every open notification `source` raised about `subject`.
+    ResolveNotifications {
+        source: String,
+        subject: String,
+    },
+    /// Replaces how the person wants to be told with these settings, whole. Only a person may.
+    SetNotificationSettings(NotificationSettings),
+    /// Creates a record in an app's collection, with a key unique in it, if any.
+    CreateRecord {
+        app: String,
+        collection: String,
+        key: Option<String>,
+        data: Value,
+    },
+    /// Merges `patch` (RFC 7396) into a record's fields. The version it expects goes in `If-Match`, as for a task.
+    PatchRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+        patch: Value,
+    },
+    /// Replaces a record's fields, whole; its key stays. The version it expects goes in `If-Match`.
+    ReplaceRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+        data: Value,
+    },
+    /// Removes a record.
+    DeleteRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+    },
+    /// Makes the record with this key look like `data`, creating it if there is none.
+    PutRecord {
+        app: String,
+        collection: String,
+        key: String,
+        data: Value,
+    },
+    /// Several writes to one app, all or none.
+    AppBatch {
+        app: String,
+        writes: Vec<BatchWrite>,
+    },
+    /// Undoes an event or a batch in one app.
+    UndoApp {
+        app: String,
+        undo: AppUndo,
+    },
+    /// Turns a connector on or off, or changes its settings. Only a person may.
+    UpdateConnector {
+        id: String,
+        patch: ConnectorPatch,
+    },
+    /// Runs a connector now. Only a person may.
+    RunConnector(String),
+    /// A feed's whole current set, from the connector's own run.
+    HandOverFeed {
+        connector: String,
+        feed: String,
+        records: Vec<FeedRecord>,
+    },
 }
 
 impl Call {
-    fn route(&self) -> (Route, Option<&str>) {
+    /// The endpoint, and the value of each of its path's parameters.
+    fn route(&self) -> (Route, Vec<(&'static str, String)>) {
+        let task = |k: &TaskKey| vec![("task", k.0.clone())];
+        let record = |app: &str, collection: &str, id: &Uuid| {
+            vec![("app", app.to_string()), ("collection", collection.to_string()), ("id", id.to_string())]
+        };
         match self {
-            Call::CreateTask(_) => (routes::CREATE_TASK, None),
-            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, Some(&key.0)),
-            Call::AddComment { key, .. } => (routes::ADD_COMMENT, Some(&key.0)),
-            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
-            Call::Release(key) => (routes::RELEASE, Some(&key.0)),
-            Call::SetAside { key, .. } => (routes::SET_ASIDE, Some(&key.0)),
-            Call::Undo(_) => (routes::UNDO, None),
-            Call::Revert(_) => (routes::REVERT, None),
-            Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
-            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, Some(key)),
+            Call::CreateTask(_) => (routes::CREATE_TASK, vec![]),
+            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, task(key)),
+            Call::AddComment { key, .. } => (routes::ADD_COMMENT, task(key)),
+            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, vec![("id", id.clone())]),
+            Call::Release(key) => (routes::RELEASE, task(key)),
+            Call::SetAside { key, .. } => (routes::SET_ASIDE, task(key)),
+            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, task(key)),
+            Call::AddBlocker { blocked, .. } => (routes::ADD_BLOCKER, task(blocked)),
+            Call::RemoveBlocker { blocked, blocker } => {
+                (routes::REMOVE_BLOCKER, vec![("task", blocked.0.clone()), ("blocker", blocker.0.clone())])
+            }
+            Call::Undo(_) => (routes::UNDO, vec![]),
+            Call::Revert(_) => (routes::REVERT, vec![]),
+            Call::CreateProject(_) => (routes::CREATE_PROJECT, vec![]),
+            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, vec![("project", key.clone())]),
+            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, vec![("id", id.clone())]),
+            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, vec![("id", id.clone())]),
+            Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, vec![]),
+            Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, vec![]),
+            Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, vec![]),
+            Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, vec![]),
+            Call::CreateRecord { app, collection, .. } => {
+                (routes::CREATE_RECORD, vec![("app", app.clone()), ("collection", collection.clone())])
+            }
+            Call::PatchRecord { app, collection, id, .. } => (routes::PATCH_RECORD, record(app, collection, id)),
+            Call::ReplaceRecord { app, collection, id, .. } => (routes::REPLACE_RECORD, record(app, collection, id)),
+            Call::DeleteRecord { app, collection, id, .. } => (routes::DELETE_RECORD, record(app, collection, id)),
+            Call::PutRecord { app, collection, key, .. } => (
+                routes::PUT_RECORD,
+                vec![("app", app.clone()), ("collection", collection.clone()), ("key", key.clone())],
+            ),
+            Call::AppBatch { app, .. } => (routes::APP_BATCH, vec![("app", app.clone())]),
+            Call::UndoApp { app, .. } => (routes::APP_UNDO, vec![("app", app.clone())]),
+            Call::UpdateConnector { id, .. } => (routes::UPDATE_CONNECTOR, vec![("id", id.clone())]),
+            Call::RunConnector(id) => (routes::RUN_CONNECTOR, vec![("id", id.clone())]),
+            Call::HandOverFeed { connector, feed, .. } => {
+                (routes::HAND_OVER_FEED, vec![("id", connector.clone()), ("feed", feed.clone())])
+            }
         }
     }
 
@@ -442,19 +610,43 @@ impl Call {
             Call::UpdateTask { update, .. } => Some(json(update)),
             Call::AddComment { comment, .. } => Some(json(comment)),
             Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
-            Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
+            Call::ResolveComment { answer: None, .. }
+            | Call::Release(_)
+            | Call::RemoveBlocker { .. }
+            | Call::ReadNotification(_)
+            | Call::UnreadNotification(_)
+            | Call::ReadAllNotifications => None,
+            Call::AddBlocker { blocker, .. } => Some(serde_json::json!({ "blocker": blocker })),
             Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
+            Call::ApprovePlan { grades, .. } => Some(serde_json::json!({ "grades": grades })),
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
             Call::CreateProject(b) => Some(json(b)),
             Call::UpdateProject { update, .. } => Some(json(update)),
+            Call::RaiseNotification(b) => Some(json(b)),
+            Call::ResolveNotifications { source, subject } => {
+                Some(serde_json::json!({ "source": source, "subject": subject }))
+            }
+            Call::SetNotificationSettings(b) => Some(json(b)),
+            Call::CreateRecord { key, data, .. } => Some(serde_json::json!({ "key": key, "data": data })),
+            Call::PatchRecord { patch, .. } => Some(patch.clone()),
+            Call::ReplaceRecord { data, .. } => Some(data.clone()),
+            Call::DeleteRecord { .. } => None,
+            Call::PutRecord { data, .. } => Some(data.clone()),
+            Call::AppBatch { writes, .. } => Some(serde_json::json!({ "writes": writes })),
+            Call::UndoApp { undo, .. } => Some(json(undo)),
+            Call::UpdateConnector { patch, .. } => Some(json(patch)),
+            Call::RunConnector(_) => None,
+            Call::HandOverFeed { records, .. } => Some(serde_json::json!({ "records": records })),
         }
     }
 
-    /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`.
+    /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`, each parameter one percent-encoded segment.
     pub fn path(&self) -> String {
-        let (route, param) = self.route();
-        route.url(param)
+        let (route, params) = self.route();
+        params.iter().fold(route.path.to_string(), |path, (name, value)| {
+            path.replace(&format!("{{{name}}}"), &path_segment(value))
+        })
     }
 
     /// The method this call uses.
@@ -523,6 +715,9 @@ pub struct NewAgent {
     /// Project keys or ids to limit the token to; empty for every project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// App ids whose data the token reaches; empty for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<i64>,
 }
@@ -538,6 +733,9 @@ pub struct NewToken {
     /// Project keys or ids to limit the token to; empty for every project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// App ids whose data it reaches; empty for the default: none for an agent's token, yours for your own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<i64>,
     /// Seconds until it stops working; unset for never.
@@ -554,6 +752,10 @@ pub struct TokenUpdate {
     /// Requests per minute. `Some(None)` removes the limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<Option<i64>>,
+    /// App ids whose data it reaches. `Some(None)` goes back to the default: none for an agent's token, every app for
+    /// a person's not limited to projects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Option<Vec<String>>>,
 }
 
 /// `POST /v1/undo` for a whole batch: everything one request did.
@@ -622,8 +824,7 @@ impl Client {
 
     /// The request for a [`Call`], with its body, ready for the caller to add headers to and send.
     pub fn request_for(&self, call: &Call) -> RequestBuilder {
-        let (route, param) = call.route();
-        let req = self.request(route, param);
+        let req = self.http.request(call.method(), format!("{}{}", self.base, call.path())).bearer_auth(&self.token);
         match call.body() {
             Some(body) => req.json(&body),
             None => req,
@@ -762,6 +963,50 @@ impl Client {
         self.send(self.request(routes::REMOVE_ATTACHMENT, Some(&id.to_string()))).await
     }
 
+    /// `GET /v1/notifications`: newest first, only the unread ones if asked, those raised before `before` to page back.
+    pub async fn list_notifications(&self, unread: bool, before: Option<Uuid>, limit: i64) -> Result<NotificationList> {
+        let mut query = vec![("unread", unread.to_string()), ("limit", limit.to_string())];
+        query.extend(before.map(|b| ("before", b.to_string())));
+        self.send(self.request(routes::LIST_NOTIFICATIONS, None).query(&query)).await
+    }
+
+    /// `POST /v1/notifications`.
+    pub async fn raise_notification(&self, new: &NewNotification) -> Result<Notification> {
+        self.send(self.request(routes::RAISE_NOTIFICATION, None).json(new)).await
+    }
+
+    /// `POST /v1/notifications/{id}/read` or `/unread`. Only a person may.
+    pub async fn mark_notification(&self, id: Uuid, read: bool) -> Result<Notification> {
+        let route = if read { routes::READ_NOTIFICATION } else { routes::UNREAD_NOTIFICATION };
+        self.send(self.request(route, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/read-all`: how many were unread. Only a person may.
+    pub async fn mark_all_notifications_read(&self) -> Result<usize> {
+        self.send::<Count>(self.request(routes::READ_ALL_NOTIFICATIONS, None)).await.map(|c| c.count)
+    }
+
+    /// `POST /v1/notifications/{id}/resolve`: what it is about no longer needs the person.
+    pub async fn resolve_notification(&self, id: Uuid) -> Result<Notification> {
+        self.send(self.request(routes::RESOLVE_NOTIFICATION, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/resolve`: resolves every open one `source` raised about `subject`.
+    pub async fn resolve_notifications_about(&self, source: &str, subject: &str) -> Result<usize> {
+        let body = serde_json::json!({ "source": source, "subject": subject });
+        self.send::<Count>(self.request(routes::RESOLVE_NOTIFICATIONS, None).json(&body)).await.map(|c| c.count)
+    }
+
+    /// `GET /v1/notifications/settings`: how the person wants to be told, the defaults until they set any.
+    pub async fn notification_settings(&self) -> Result<NotificationSettings> {
+        self.send(self.request(routes::NOTIFICATION_SETTINGS, None)).await
+    }
+
+    /// `PUT /v1/notifications/settings`: replaces them whole, and answers them as kept. Only a person may.
+    pub async fn set_notification_settings(&self, settings: &NotificationSettings) -> Result<NotificationSettings> {
+        self.send(self.request(routes::SET_NOTIFICATION_SETTINGS, None).json(settings)).await
+    }
+
     /// `POST /v1/comments/{id}/resolve`, optionally with an answer.
     pub async fn resolve_comment(&self, id: Uuid, answer: Option<&str>) -> Result<Comment> {
         let req = self.request(routes::RESOLVE_COMMENT, Some(&id.to_string()));
@@ -783,6 +1028,13 @@ impl Client {
         self.send(self.request(routes::RELEASE, Some(key.as_str())).json(&serde_json::json!({}))).await
     }
 
+    /// `POST /v1/tasks/{task}/plan/approve`, as a person: each of the spec task's open, ungraded subtasks gets its grade
+    /// from `grades` (by key, naming every one and nothing else), and the spec task comes back with its plan approved.
+    pub async fn approve_plan(&self, key: &TaskKey, grades: &BTreeMap<String, Grade>) -> Result<Task> {
+        let body = serde_json::json!({ "grades": grades });
+        self.send(self.request(routes::APPROVE_PLAN, Some(key.as_str())).json(&body)).await
+    }
+
     /// `POST /v1/tasks/{task}/set-aside`: the task, open and ungraded, its questions resolved with a note saying so.
     pub async fn set_aside(&self, key: &TaskKey, note: Option<&str>) -> Result<Task> {
         self.send(self.request(routes::SET_ASIDE, Some(key.as_str())).json(&serde_json::json!({ "note": note }))).await
@@ -800,7 +1052,7 @@ impl Client {
         let path = params
             .iter()
             .fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value));
-        self.http.request(route.method.clone(), format!("{}{path}", self.base)).bearer_auth(&self.token)
+        self.http.request(route.method, format!("{}{path}", self.base)).bearer_auth(&self.token)
     }
 
     /// Sends `req` to an endpoint that answers `204 No Content`.
@@ -983,6 +1235,156 @@ impl Client {
         self.send_empty(self.request(routes::DELETE_WEBHOOK, Some(id))).await
     }
 
+    /// The request for an app route, each `(name, value)` filling `{name}` as one percent-encoded segment.
+    fn app_request(&self, route: Route, params: &[(&str, &str)]) -> RequestBuilder {
+        let encoded: Vec<(&str, String)> = params.iter().map(|(n, v)| (*n, path_segment(v))).collect();
+        let encoded: Vec<(&str, &str)> = encoded.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        self.request_with(route, &encoded)
+    }
+
+    /// Sends a [`Call`], with `version` as `If-Match`, and decodes its answer.
+    async fn send_call<T: DeserializeOwned>(&self, call: &Call, version: Option<i64>) -> Result<T> {
+        let mut req = self.request_for(call);
+        if let Some(v) = version {
+            req = req.header(reqwest::header::IF_MATCH, format!("\"{v}\""));
+        }
+        self.send(req).await
+    }
+
+    /// `GET /v1/connectors`: every connector the server knows, with how it is set and its runs. Only a person may.
+    pub async fn list_connectors(&self) -> Result<Vec<ConnectorInfo>> {
+        self.send(self.request(routes::LIST_CONNECTORS, None)).await
+    }
+
+    /// `GET /v1/connectors/{id}`.
+    pub async fn show_connector(&self, id: &str) -> Result<ConnectorInfo> {
+        self.send(self.request_with(routes::SHOW_CONNECTOR, &[("id", &path_segment(id))])).await
+    }
+
+    /// `PATCH /v1/connectors/{id}`: turns it on or off and merges `settings` into what is set (`null` unsets one).
+    pub async fn update_connector(&self, id: &str, patch: ConnectorPatch) -> Result<ConnectorInfo> {
+        self.send_call(&Call::UpdateConnector { id: id.into(), patch }, None).await
+    }
+
+    /// `POST /v1/connectors/{id}/run`: starts a run now, and answers once it has started.
+    pub async fn run_connector(&self, id: &str) -> Result<ConnectorInfo> {
+        self.send_call(&Call::RunConnector(id.into()), None).await
+    }
+
+    /// `GET /v1/apps`: the apps with data the token reaches, each with its collections.
+    pub async fn list_apps(&self) -> Result<Vec<App>> {
+        self.send(self.request(routes::LIST_APPS, None)).await
+    }
+
+    /// `GET /v1/apps/{app}`: the app's collections as last declared.
+    pub async fn show_app(&self, app: &str) -> Result<App> {
+        self.send(self.app_request(routes::SHOW_APP, &[("app", app)])).await
+    }
+
+    /// `PUT /v1/apps/{app}/declaration`: registers the app's collections from its `collections.toml` text. Only a
+    /// person may.
+    pub async fn declare_app(&self, app: &str, collections_toml: &str) -> Result<App> {
+        let req = self.app_request(routes::DECLARE_APP, &[("app", app)]);
+        self.send(req.header(reqwest::header::CONTENT_TYPE, "application/toml").body(collections_toml.to_string()))
+            .await
+    }
+
+    /// `GET /v1/apps/{app}/records/{collection}`: a page of records after `after` (in the order they were made), at
+    /// most `limit` (the server's default 100 without one), and the event cursor it was read at.
+    pub async fn list_records(
+        &self,
+        app: &str,
+        collection: &str,
+        after: Option<Uuid>,
+        limit: Option<i64>,
+    ) -> Result<RecordsPage> {
+        let mut req = self.app_request(routes::LIST_RECORDS, &[("app", app), ("collection", collection)]);
+        if let Some(a) = after {
+            req = req.query(&[("after", a.to_string())]);
+        }
+        if let Some(l) = limit {
+            req = req.query(&[("limit", l)]);
+        }
+        let res = self.dispatch(req).await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(api_error(res).await);
+        }
+        let event_cursor = res
+            .headers()
+            .get("trailhead-event-cursor")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let records = match res.json().await {
+            Ok(v) => v,
+            Err(e) if e.is_decode() => return Err(Error::Decode { status: status.as_u16(), source: e }),
+            Err(e) => return Err(Error::Transport(e)),
+        };
+        Ok(RecordsPage { records, event_cursor })
+    }
+
+    /// `POST /v1/apps/{app}/records/{collection}`.
+    pub async fn create_record(&self, app: &str, collection: &str, key: Option<&str>, data: Value) -> Result<Record> {
+        let (app, collection, key) = (app.into(), collection.into(), key.map(String::from));
+        self.send_call(&Call::CreateRecord { app, collection, key, data }, None).await
+    }
+
+    /// `PATCH /v1/apps/{app}/records/{collection}/{id}`: merges `patch` into the record's fields.
+    pub async fn patch_record(
+        &self,
+        app: &str,
+        collection: &str,
+        id: Uuid,
+        patch: Value,
+        version: Option<i64>,
+    ) -> Result<Written> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::PatchRecord { app, collection, id, patch }, version).await
+    }
+
+    /// `PUT /v1/apps/{app}/records/{collection}/{id}`: the record's fields, whole; its key stays.
+    pub async fn replace_record(
+        &self,
+        app: &str,
+        collection: &str,
+        id: Uuid,
+        data: Value,
+        version: Option<i64>,
+    ) -> Result<Written> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::ReplaceRecord { app, collection, id, data }, version).await
+    }
+
+    /// `DELETE /v1/apps/{app}/records/{collection}/{id}`: the record as it was.
+    pub async fn delete_record(&self, app: &str, collection: &str, id: Uuid, version: Option<i64>) -> Result<Record> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::DeleteRecord { app, collection, id }, version).await
+    }
+
+    /// `PUT /v1/apps/{app}/keys/{collection}/{key}`: created, changed or unchanged.
+    pub async fn put_record(&self, app: &str, collection: &str, key: &str, data: Value) -> Result<Written> {
+        let (app, collection, key) = (app.into(), collection.into(), key.into());
+        self.send_call(&Call::PutRecord { app, collection, key, data }, None).await
+    }
+
+    /// `POST /v1/apps/{app}/batch`: every write or none.
+    pub async fn app_batch(&self, app: &str, writes: Vec<BatchWrite>) -> Result<BatchWritten> {
+        self.send_call(&Call::AppBatch { app: app.into(), writes }, None).await
+    }
+
+    /// `GET /v1/apps/{app}/events`: the app's events after `after`, oldest first, at most `limit`.
+    pub async fn app_events(&self, app: &str, after: Option<i64>, limit: Option<i64>) -> Result<Vec<AppEvent>> {
+        let query: Vec<(&str, i64)> =
+            [("after", after), ("limit", limit)].into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+        self.send(self.app_request(routes::APP_EVENTS, &[("app", app)]).query(&query)).await
+    }
+
+    /// `POST /v1/apps/{app}/undo`.
+    pub async fn undo_app(&self, app: &str, undo: AppUndo) -> Result<AppUndoReport> {
+        self.send_call(&Call::UndoApp { app: app.into(), undo }, None).await
+    }
+
     /// `GET /v1/webhooks/{id}/deliveries`: the latest `limit` delivery attempts, newest first.
     pub async fn webhook_deliveries(&self, id: &str, limit: usize) -> Result<Vec<WebhookDelivery>> {
         self.send(self.request(routes::WEBHOOK_DELIVERIES, Some(id)).query(&[("limit", limit)])).await
@@ -1051,5 +1453,89 @@ mod tests {
         let aside = Call::SetAside { key: TaskKey("TRAIL-2".into()), note: Some("later".into()) };
         assert_eq!((aside.method(), aside.path()), (Method::POST, "/v1/tasks/TRAIL-2/set-aside".to_string()));
         assert_eq!(aside.body(), Some(serde_json::json!({"note": "later"})));
+        let read = Call::ReadNotification("n1".into());
+        assert_eq!((read.method(), read.path(), read.body()), (Method::POST, "/v1/notifications/n1/read".into(), None));
+        assert_eq!(Call::UnreadNotification("n1".into()).path(), "/v1/notifications/n1/unread");
+        assert_eq!(Call::ReadAllNotifications.path(), "/v1/notifications/read-all");
+        let raise = Call::RaiseNotification(NewNotification {
+            source: "example".into(),
+            kind: "example.milestone".into(),
+            title: "Ten presses".into(),
+            subject: Some("count".into()),
+            ..Default::default()
+        });
+        assert_eq!((raise.method(), raise.path()), (Method::POST, "/v1/notifications".into()));
+        assert_eq!(
+            raise.body(),
+            Some(serde_json::json!({"source": "example", "kind": "example.milestone", "title": "Ten presses",
+                                    "body": "", "subject": "count"}))
+        );
+        let resolve = Call::ResolveNotifications { source: "example".into(), subject: "count".into() };
+        assert_eq!((resolve.method(), resolve.path()), (Method::POST, "/v1/notifications/resolve".into()));
+        assert_eq!(resolve.body(), Some(serde_json::json!({"source": "example", "subject": "count"})));
+        let settings = Call::SetNotificationSettings(NotificationSettings { sound: false, ..Default::default() });
+        assert_eq!((settings.method(), settings.path()), (Method::PUT, "/v1/notifications/settings".into()));
+        assert_eq!(settings.body().unwrap()["sound"], serde_json::json!(false));
+        let grades = BTreeMap::from([("TRAIL-3".to_string(), Grade::new(2).unwrap())]);
+        let approve = Call::ApprovePlan { key: TaskKey("TRAIL-2".into()), grades };
+        assert_eq!((approve.method(), approve.path()), (Method::POST, "/v1/tasks/TRAIL-2/plan/approve".to_string()));
+        assert_eq!(approve.body(), Some(serde_json::json!({"grades": {"TRAIL-3": 2}})));
+        let (blocked, blocker) = (TaskKey("TRAIL-3".into()), TaskKey("TRAIL-4".into()));
+        let add = Call::AddBlocker { blocked: blocked.clone(), blocker: blocker.clone() };
+        assert_eq!((add.method(), add.path()), (Method::POST, "/v1/tasks/TRAIL-3/blockers".to_string()));
+        assert_eq!(add.body(), Some(serde_json::json!({"blocker": "TRAIL-4"})));
+        let remove = Call::RemoveBlocker { blocked, blocker };
+        assert_eq!(
+            (remove.method(), remove.path()),
+            (Method::DELETE, "/v1/tasks/TRAIL-3/blockers/TRAIL-4".to_string())
+        );
+        assert_eq!(remove.body(), None);
+    }
+
+    #[test]
+    fn an_app_call_encodes_its_key_as_one_segment() {
+        let put = Call::PutRecord {
+            app: "cairn".into(),
+            collection: "pull_requests".into(),
+            key: "lanesawyer/trailhead#123".into(),
+            data: serde_json::json!({"title": "x"}),
+        };
+        assert_eq!(
+            (put.method(), put.path()),
+            (Method::PUT, "/v1/apps/cairn/keys/pull_requests/lanesawyer%2Ftrailhead%23123".to_string())
+        );
+        assert_eq!(put.body(), Some(serde_json::json!({"title": "x"})));
+        let id = Uuid::nil();
+        let patch =
+            Call::PatchRecord { app: "cairn".into(), collection: "snoozes".into(), id, patch: serde_json::json!({}) };
+        assert_eq!((patch.method(), patch.path()), (Method::PATCH, format!("/v1/apps/cairn/records/snoozes/{id}")));
+        let data = serde_json::json!({"item": "x"});
+        let replace = Call::ReplaceRecord { app: "cairn".into(), collection: "snoozes".into(), id, data: data.clone() };
+        assert_eq!((replace.method(), replace.path()), (Method::PUT, format!("/v1/apps/cairn/records/snoozes/{id}")));
+        assert_eq!(replace.body(), Some(data));
+        let undo = Call::UndoApp { app: "cairn".into(), undo: AppUndo::BatchId(id) };
+        assert_eq!(undo.body(), Some(serde_json::json!({"batch_id": id})));
+        let batch = Call::AppBatch { app: "cairn".into(), writes: vec![BatchWrite::Delete { id, version: None }] };
+        assert_eq!(batch.body(), Some(serde_json::json!({"writes": [{"op": "delete", "id": id}]})));
+        assert_eq!(app_event_stream_path("cairn", Some(7)), "/v1/apps/cairn/events/stream?after=7");
+        assert_eq!(path_segment("a b/c~d"), "a%20b%2Fc~d");
+    }
+
+    #[test]
+    fn connector_calls_name_their_connector() {
+        let patch = ConnectorPatch { enabled: Some(true), settings: None };
+        let update = Call::UpdateConnector { id: "github".into(), patch };
+        assert_eq!((update.method(), update.path()), (Method::PATCH, "/v1/connectors/github".to_string()));
+        assert_eq!(update.body(), Some(serde_json::json!({"enabled": true})));
+        let run = Call::RunConnector("github".into());
+        assert_eq!((run.method(), run.path(), run.body()), (Method::POST, "/v1/connectors/github/run".into(), None));
+        let data = serde_json::json!({"title": "x"}).as_object().unwrap().clone();
+        let feed = Call::HandOverFeed {
+            connector: "github".into(),
+            feed: "pull_requests".into(),
+            records: vec![FeedRecord::new("a/b#1", data)],
+        };
+        assert_eq!((feed.method(), feed.path()), (Method::PUT, "/v1/connectors/github/feeds/pull_requests".into()));
+        assert_eq!(feed.body(), Some(serde_json::json!({"records": [{"key": "a/b#1", "data": {"title": "x"}}]})));
     }
 }

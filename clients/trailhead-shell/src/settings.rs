@@ -1,7 +1,8 @@
 //! The window's settings: one modal, "Settings", with its pages listed down its side. The shell's own come first,
-//! under Trailhead: Appearance (the theme, the text size and how the window switches apps), Connection and Server (while the shell has a connection) and About. Then each
-//! app's, under the app's name, in the order the rail shows the apps, whichever app is shown: an app's settings are
-//! found in one place, and the list doesn't change under a person who switches apps.
+//! under Trailhead: Appearance (the theme, the text size and how the window switches apps), Notifications, Connection,
+//! Server and Connectors (while the shell has a connection) and About. Then each app's, under the app's name, in the
+//! order the rail shows the apps, whichever app is shown: an app's settings are found in one place, and the list
+//! doesn't change under a person who switches apps.
 //!
 //! An app adds a page with [`ShellApp::settings_pages`](crate::ShellApp::settings_pages): a [`SettingsPage`], whose
 //! fill is a system given the page's box when the page is shown. The page is spawned when it is picked and despawned
@@ -20,7 +21,9 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
-pub use crate::settings_modal::{SettingsModal, SettingsPane, SettingsStrip, SettingsTab, ShownPage};
+pub use crate::settings_modal::{
+    FoundPage, NoSettingMatches, SettingsModal, SettingsPane, SettingsSearch, SettingsStrip, SettingsTab, ShownPage,
+};
 pub use crate::settings_pages::{
     ConnectionAct, ShellDir, Shows, TextSizePick, ThemePick, apps_text, build_text, files_text, identity_text,
     state_text, update_text,
@@ -46,6 +49,12 @@ pub const APPEARANCE: PageId = PageId::new(SHELL, "appearance");
 pub const CONNECTION: PageId = PageId::new(SHELL, "connection");
 /// What the server's user config says, edited from the window. Listed only in a shell with a connection.
 pub const SERVER: PageId = PageId::new(SHELL, "server");
+/// The connectors the server runs for the apps: each one's settings, secrets, runs and Sync now. Listed only in a shell
+/// with a connection.
+pub const CONNECTORS: PageId = PageId::new(SHELL, "connectors");
+/// How the person wants to be told: a level per source, quiet hours, the sound and the counts. Listed only in a shell
+/// with a connection.
+pub const NOTIFICATIONS: PageId = PageId::new(SHELL, "notifications");
 /// The build, whether a newer one is ready, the apps and where the shell keeps its files.
 pub const ABOUT: PageId = PageId::new(SHELL, "about");
 
