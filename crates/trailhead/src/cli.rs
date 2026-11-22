@@ -486,6 +486,9 @@ pub(crate) enum AgentCmd {
         /// Limit the token to these projects (comma-separated keys).
         #[arg(long, value_delimiter = ',')]
         projects: Vec<String>,
+        /// Let the token reach these apps' data (comma-separated ids). Without, it reaches none.
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
@@ -537,6 +540,10 @@ pub(crate) enum TokenCmd {
         /// Limit the token to these projects (comma-separated keys).
         #[arg(long, value_delimiter = ',')]
         projects: Vec<String>,
+        /// Let it reach these apps' data (comma-separated ids). Without, an agent's token reaches none and yours
+        /// what you do.
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
         /// Requests per minute the token may make.
         #[arg(long)]
         rate_limit: Option<i64>,
@@ -553,6 +560,10 @@ pub(crate) enum TokenCmd {
         /// Comma-separated project keys; "all" opens it to every project.
         #[arg(long, value_delimiter = ',')]
         projects: Option<Vec<String>>,
+        /// Comma-separated app ids; "default" goes back to the token's default: none for an agent's, every app for
+        /// yours.
+        #[arg(long, value_delimiter = ',')]
+        apps: Option<Vec<String>>,
         /// Requests per minute, or "none" to remove the limit.
         #[arg(long)]
         rate_limit: Option<String>,
