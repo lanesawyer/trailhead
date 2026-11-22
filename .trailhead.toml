@@ -16,7 +16,8 @@ queue = ["TRAIL-102", "TRAIL-685", "TRAIL-888"]
 kind = "docker"
 
 [factory.stack]
-tools = { rust = "stable" }
+# Exact, and the same Rust as mise.toml (docs/factory/operating.md, "Tool versions" in the framework's docs).
+tools = { rust = "1.100.0" }
 
 [factory.checks]
 # Runs while install egress is open, so the warm checkpoint has every locked crate. Lookout is built too, though it

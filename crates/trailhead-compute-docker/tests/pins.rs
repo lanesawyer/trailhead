@@ -1,5 +1,5 @@
 //! The Rust version is written in several files that can't read each other: `mise.toml` for a person's machine, the
-//! sandbox image, and the workflows. They have to name the same exact version, so one commit moves them all
+//! sandbox image, `[factory.stack]` for the sandboxes, and the workflows. They have to name the same exact version, so one commit moves them all
 //! (`docs/factory/operating.md`, "Tool versions").
 
 use std::path::{Path, PathBuf};
@@ -41,6 +41,12 @@ fn mise_toml_names_no_moving_version() {
 fn the_sandbox_image_installs_the_rust_mise_toml_pins() {
     let dockerfile = read("crates/trailhead-compute-docker/image/Dockerfile");
     assert_eq!(value(&dockerfile, "ARG RUST_VERSION=", '\n'), Some(mise_rust().as_str()));
+}
+
+#[test]
+fn the_sandboxes_install_the_rust_mise_toml_pins() {
+    let stack = read(".trailhead.toml");
+    assert_eq!(value(&stack, "\ntools = { rust = \"", '"'), Some(mise_rust().as_str()));
 }
 
 #[test]
