@@ -374,6 +374,51 @@ async fn a_retry_the_server_already_applied_gets_the_same_answer_and_applies_not
     assert!(matches!(rig.run(&rig.token, &fresh).await.unwrap(), Outcome::Conflict { .. }));
 }
 
+impl Rig {
+    /// A request to the server as the person, returning the body.
+    async fn send(&self, method: reqwest::Method, path: &str, body: Value) -> Value {
+        let http = reqwest::Client::new();
+        let res = http.request(method, format!("http://{}{path}", self.server)).bearer_auth(&self.token).json(&body);
+        res.send().await.unwrap().json::<Value>().await.unwrap()
+    }
+
+    /// TRAIL-2, a spec task, with TRAIL-3 and TRAIL-4 under it: its plan.
+    async fn spec(&self) {
+        self.send(reqwest::Method::POST, "/v1/tasks", serde_json::json!({"project": "TRAIL", "title": "plan"})).await;
+        let spec = serde_json::json!({"metadata": {"plan": {"spec": {}}}});
+        self.send(reqwest::Method::PATCH, "/v1/tasks/TRAIL-2", spec).await;
+        for title in ["a part", "another"] {
+            let part = serde_json::json!({"project": "TRAIL", "title": title, "parent": "TRAIL-2"});
+            self.send(reqwest::Method::POST, "/v1/tasks", part).await;
+        }
+    }
+
+    async fn grade(&self, key: &str) -> Value {
+        self.send(reqwest::Method::GET, &format!("/v1/tasks/{key}"), Value::Null).await["task"]["grade"].clone()
+    }
+}
+
+fn approve(grades: &[(&str, u8)]) -> Request {
+    let grades = grades
+        .iter()
+        .map(|(key, g)| (key.to_string(), trailhead_model::Grade::new(*g).unwrap()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Request::new(Call::ApprovePlan { key: TaskKey("TRAIL-2".into()), grades }, None)
+}
+
+#[tokio::test]
+async fn approving_a_plan_grades_its_tasks_and_one_left_ungraded_is_refused_in_the_servers_words() {
+    let rig = Rig::new().await;
+    rig.spec().await;
+    let out = rig.run(&rig.token, &approve(&[("TRAIL-3", 2)])).await.unwrap();
+    let Outcome::Failed(why) = out else { panic!("{out:?}") };
+    assert!(why.contains("TRAIL-4"), "{why}");
+    assert_eq!(rig.grade("TRAIL-3").await, Value::Null, "nothing graded");
+    let out = rig.run(&rig.token, &approve(&[("TRAIL-3", 2), ("TRAIL-4", 1)])).await.unwrap();
+    assert!(matches!(out, Outcome::Ok { .. }), "{out:?}");
+    assert_eq!((rig.grade("TRAIL-3").await, rig.grade("TRAIL-4").await), (2.into(), 1.into()));
+}
+
 #[tokio::test]
 async fn a_connection_that_cannot_be_made_is_worth_retrying() {
     let rig = Rig::new().await;

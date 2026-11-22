@@ -11,14 +11,15 @@
 //! the pan and zoom.
 //!
 //! A spec task's graph is its plan, with its conversation beside the canvas ([`conversation`]): the thread with the
-//! planner as a chat, whose turn it is, and a reply box.
+//! planner as a chat, whose turn it is, and a reply box. Until the plan is approved, each task to grade has a grade
+//! dropdown in a bar at the foot of its card, and Approve in the header sends the grades ([`approve`]).
 
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, RequestClose};
 use jiff::Timestamp;
-use trailhead_model::{Grade, Status, key_number};
+use trailhead_model::{Grade, ProposedGrade, Status, TaskPlan, key_number};
 use trailhead_shell::connection::Api;
 
 use crate::board::{Badge, BadgeKind, BoardCard, Card, Filter, Input, Sources, View, build_with, next_expiry};
@@ -30,7 +31,11 @@ use crate::widgets::{
     text_dim, token, tool_button, width_of,
 };
 
+pub mod approve;
 pub mod conversation;
+
+use approve::{Approving, NodeBar};
+pub use approve::{GradeChoices, approval, approve_request, chosen};
 
 use conversation::{PlanDetail, Replying, ThreadRows};
 pub use conversation::{PlanView, Said, Thread, Turn, build_plan, reply_gate};
@@ -75,6 +80,10 @@ pub struct PlanNode {
     /// The keys of the tasks outside the parent it waits on, with whether each is finished; "a task out of view" when
     /// the token can't see it.
     pub needs: Vec<(String, bool)>,
+    /// The grade the planner proposes for it, and why.
+    pub proposed: Option<ProposedGrade>,
+    /// It is in a plan waiting for approval, open and ungraded: the person gives it a grade from its dropdown.
+    pub to_grade: bool,
     pub size: Vec2,
 }
 
@@ -90,6 +99,7 @@ const LINE_HEIGHT: f32 = 1.2;
 pub fn build_graph(input: Input, parent: &str, thread: Thread) -> GraphView {
     let Some(task) = input.tasks.iter().find(|t| t.id.to_string() == parent) else { return GraphView::default() };
     let plan = build_plan(&input, task, thread);
+    let awaiting = plan.as_ref().is_some_and(|p| !p.approved);
     let filter = Filter { parent: Some(task.key.0.clone()), closed: true, ..default() };
     let mut cards: Vec<Card> = build_with(input, &filter, false).columns.into_iter().flat_map(|c| c.cards).collect();
     cards.sort_by(|a, b| (key_number(&a.key), &a.key).cmp(&(key_number(&b.key), &b.key)));
@@ -121,7 +131,15 @@ pub fn build_graph(input: Input, parent: &str, thread: Thread) -> GraphView {
             let task = tasks.get(&card.id)?;
             let mut needs = needs.remove(&card.id).unwrap_or_default();
             needs.sort_by(|a, b| (key_number(&a.0), &a.0).cmp(&(key_number(&b.0), &b.0)));
-            Some(plan_node(card, task.status, task.grade, needs))
+            let proposed = TaskPlan::of(&task.metadata).and_then(|p| p.proposed);
+            let to_grade = awaiting && task.status == Status::Open && task.grade.is_none();
+            let node = plan_node(card, task.status, task.grade, needs);
+            Some(PlanNode {
+                proposed,
+                to_grade,
+                size: Vec2::new(NODE_WIDTH, node_height(&node.card, to_grade)),
+                ..node
+            })
         })
         .collect();
     GraphView { parent: Some((task.key.0.clone(), task.title.clone())), nodes, edges, plan }
@@ -157,13 +175,14 @@ fn plan_node(card: Card, status: Status, grade: Option<Grade>, needs: Vec<(Strin
     }
     let card =
         Card { badges, actions: Vec::new(), parent: None, depth: 0, found: None, pr: None, holder: None, ..card };
-    let size = Vec2::new(NODE_WIDTH, node_height(&card));
-    PlanNode { card, status, grade, needs, size }
+    let size = Vec2::new(NODE_WIDTH, node_height(&card, false));
+    PlanNode { card, status, grade, needs, proposed: None, to_grade: false, size }
 }
 
-/// How tall a node's card comes out at most: its key, a title of two lines, its badges wrapped to its width, and its
-/// tool, by the kit's estimate of a glyph's width. A card shorter than its box sits in the box's middle.
-fn node_height(card: &Card) -> f32 {
+/// How tall a node's card comes out at most: its key, a title of two lines, its badges wrapped to its width, its tool,
+/// and its bar of controls when it has one (`bar`), by the kit's estimate of a glyph's width. A card shorter than its
+/// box sits in the box's middle.
+fn node_height(card: &Card, bar: bool) -> f32 {
     let badge_height = size::SMALL.px() * LINE_HEIGHT + space::BADGE_INSET * 2.0;
     let room = NODE_WIDTH - (space::CONTROL_INSET + stroke::HAIRLINE) * 2.0;
     let mut rows = 1.0;
@@ -178,6 +197,7 @@ fn node_height(card: &Card) -> f32 {
         }
     }
     let tools = if card.graph { extent::CONTROL_HEIGHT } else { 0.0 };
+    let bar = if bar { extent::CONTROL_HEIGHT + space::STACKED } else { 0.0 };
     (space::CONTROL_INSET + stroke::HAIRLINE) * 2.0
         + badge_height
         + size::CARD_TITLE.px() * LINE_HEIGHT * TITLE_LINES
@@ -185,6 +205,7 @@ fn node_height(card: &Card) -> f32 {
         + space::CONTROLS * (rows - 1.0)
         + space::STACKED * 3.0
         + tools
+        + bar
 }
 
 /// Keeps the [`GraphView`] from the mirror. Needs the board's [`View`] state and
@@ -197,6 +218,9 @@ impl Plugin for GraphPlugin {
             .init_resource::<GraphPage>()
             .init_resource::<GraphView>()
             .init_resource::<Replying>()
+            .init_resource::<GradeChoices>()
+            .init_resource::<Approving>()
+            .add_observer(approve::on_pick)
             .add_observer(on_open)
             .add_observer(on_opens_graph)
             .add_systems(Update, rebuild_view);
@@ -265,13 +289,15 @@ impl Plugin for GraphUiPlugin {
             .add_observer(on_fit)
             .add_observer(conversation::on_reply)
             .add_observer(conversation::on_read_spec)
-            .add_systems(Update, conversation::finish_reply)
+            .add_observer(approve::on_approve)
+            .add_systems(Update, (conversation::finish_reply, approve::finish_approve, approve::tidy_choices))
             .add_systems(
                 Update,
                 (
                     (set_graph, update_title, dress_header, show_empty).before(UiPlace),
                     conversation::conversation_systems(),
-                    fill_nodes.after(UiPlace),
+                    (approve::sync_picks, approve::gate_approve).after(approve::tidy_choices).before(UiPlace),
+                    (fill_nodes, dress_bars).chain().after(UiPlace),
                 )
                     .after(rebuild_view)
                     .run_if(in_state(View::Graph)),
@@ -350,7 +376,7 @@ fn on_fit(activate: On<Activate>, fits: Query<(), With<FitGraph>>, mut canvases:
     }
 }
 
-/// Puts the Fit button before the header's X once the header has spawned.
+/// Puts Approve and the Fit button before the header's X once the header has spawned.
 fn dress_header(
     tools: Query<(Entity, &ChildOf), Added<PanelTools>>,
     parents: Query<&ChildOf>,
@@ -365,7 +391,8 @@ fn dress_header(
             .spawn_scene(tool_button(Icon::Fit, "Fit the whole graph in view", ButtonKind::Plain))
             .insert(FitGraph)
             .id();
-        commands.entity(row).insert_children(0, &[fit]);
+        let [note, why, approve] = approve::spawn_approve(&mut commands);
+        commands.entity(row).insert_children(0, &[note, why, approve, fit]);
     }
 }
 
@@ -438,6 +465,20 @@ fn fill_nodes(
             None => {
                 commands.spawn((BoardCard(wanted.card.clone()), ChildOf(entity)));
             }
+        }
+    }
+}
+
+/// Gives each card on the graph its bar of controls at its foot, once the card has its parts.
+fn dress_bars(
+    cards: Query<(Entity, &BoardCard, &ChildOf, &Children)>,
+    boxes: Query<(), With<GraphNodeBox>>,
+    bars: Query<(), With<NodeBar>>,
+    mut commands: Commands,
+) {
+    for (card, BoardCard(shown), parent, children) in &cards {
+        if boxes.contains(parent.parent()) && !children.iter().any(|c| bars.contains(c)) {
+            approve::spawn_bar(&mut commands, card, &shown.id);
         }
     }
 }

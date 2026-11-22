@@ -4,6 +4,7 @@
 //! It covers the endpoints the CLI and `RestTracker` (`trailhead-tracker-rest`) use; the rest follow as Lookout moves over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -59,6 +60,7 @@ pub mod routes {
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
     pub const SET_ASIDE: Route = Route::new(Method::POST, "/v1/tasks/{task}/set-aside");
+    pub const APPROVE_PLAN: Route = Route::new(Method::POST, "/v1/tasks/{task}/plan/approve");
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
@@ -109,7 +111,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 50] {
+    pub fn all() -> [Route; 51] {
         [
             READY,
             LIST_TASKS,
@@ -121,6 +123,7 @@ pub mod routes {
             RENEW,
             RELEASE,
             SET_ASIDE,
+            APPROVE_PLAN,
             UNDO,
             REVERT,
             MY_CLAIMS,
@@ -455,6 +458,12 @@ pub enum Call {
         key: TaskKey,
         note: Option<String>,
     },
+    /// Approves the plan under the spec task `key`, grading each of its open, ungraded subtasks (by key).
+    ApprovePlan {
+        key: TaskKey,
+        grades: BTreeMap<String, Grade>,
+    },
+
     Undo(Undo),
     Revert(Revert),
     CreateProject(NewProject),
@@ -488,6 +497,7 @@ impl Call {
             Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
             Call::Release(key) => (routes::RELEASE, Some(&key.0)),
             Call::SetAside { key, .. } => (routes::SET_ASIDE, Some(&key.0)),
+            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, Some(&key.0)),
             Call::Undo(_) => (routes::UNDO, None),
             Call::Revert(_) => (routes::REVERT, None),
             Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
@@ -517,6 +527,7 @@ impl Call {
             | Call::UnreadNotification(_)
             | Call::ReadAllNotifications => None,
             Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
+            Call::ApprovePlan { grades, .. } => Some(serde_json::json!({ "grades": grades })),
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
             Call::CreateProject(b) => Some(json(b)),
@@ -905,6 +916,13 @@ impl Client {
         self.send(self.request(routes::RELEASE, Some(key.as_str())).json(&serde_json::json!({}))).await
     }
 
+    /// `POST /v1/tasks/{task}/plan/approve`, as a person: each of the spec task's open, ungraded subtasks gets its grade
+    /// from `grades` (by key, naming every one and nothing else), and the spec task comes back with its plan approved.
+    pub async fn approve_plan(&self, key: &TaskKey, grades: &BTreeMap<String, Grade>) -> Result<Task> {
+        let body = serde_json::json!({ "grades": grades });
+        self.send(self.request(routes::APPROVE_PLAN, Some(key.as_str())).json(&body)).await
+    }
+
     /// `POST /v1/tasks/{task}/set-aside`: the task, open and ungraded, its questions resolved with a note saying so.
     pub async fn set_aside(&self, key: &TaskKey, note: Option<&str>) -> Result<Task> {
         self.send(self.request(routes::SET_ASIDE, Some(key.as_str())).json(&serde_json::json!({ "note": note }))).await
@@ -1196,5 +1214,9 @@ mod tests {
         let settings = Call::SetNotificationSettings(NotificationSettings { sound: false, ..Default::default() });
         assert_eq!((settings.method(), settings.path()), (Method::PUT, "/v1/notifications/settings".into()));
         assert_eq!(settings.body().unwrap()["sound"], serde_json::json!(false));
+        let grades = BTreeMap::from([("TRAIL-3".to_string(), Grade::new(2).unwrap())]);
+        let approve = Call::ApprovePlan { key: TaskKey("TRAIL-2".into()), grades };
+        assert_eq!((approve.method(), approve.path()), (Method::POST, "/v1/tasks/TRAIL-2/plan/approve".to_string()));
+        assert_eq!(approve.body(), Some(serde_json::json!({"grades": {"TRAIL-3": 2}})));
     }
 }

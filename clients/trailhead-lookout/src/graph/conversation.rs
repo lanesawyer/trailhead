@@ -230,7 +230,7 @@ pub(super) struct ThreadList;
 pub(super) struct ThreadBody;
 
 /// The button under the ask that opens the whole spec in the inspector.
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 pub(super) struct ReadSpec;
 
 /// The reply box's text entity.
@@ -365,9 +365,13 @@ fn spawn_said(commands: &mut Commands, said: &Said) -> Entity {
     let side = if said.mine { Side::Mine } else { Side::Theirs };
     let item = commands.spawn_scene(message(side, said.icon, said.head.clone(), said.body.clone(), tone_of(said))).id();
     if said.id == ASK {
-        let read = button("Read the whole spec", Some(Icon::Inspect), ButtonKind::Plain);
         let shown = crate::widgets::display(said.clamped);
-        commands.spawn_scene(read).insert((ReadSpec, Node { display: shown, ..default() }, ChildOf(item)));
+        let read = bsn! {
+            @button("Read the whole spec", Some(Icon::Inspect), ButtonKind::Plain)
+            Node { display: { shown } }
+            ReadSpec
+        };
+        commands.spawn_scene(read).insert(ChildOf(item));
     }
     item
 }
