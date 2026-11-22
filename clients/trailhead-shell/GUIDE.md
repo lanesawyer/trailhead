@@ -67,7 +67,8 @@ app decides is testable without a window, and only what draws needs one.
 
 The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
 from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme, the
-text size and how the window switches apps; Connection; Server, the server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
+text size and how the window switches apps; Notifications, how the person wants to be told; Connection; Server, the
+server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
 An app does not open a settings modal of its own; it adds pages to this one.
 
 ```rust
@@ -263,7 +264,7 @@ The other resources: `Api(ApiAccess { base, token, user, user_id })` once signed
 
 The shell keeps a mirror of the task engine's records as entities (`trailhead_shell::mirror`). Each holds its record
 as its `trailhead-model` type in a `Mirrored<T>` component (`Task`, `Project`, `Comment`, `Claim`, `Agent`, `User`,
-`Dependency`, and `Attachment`, a picture's metadata), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
+`Dependency`, `Attachment`, a picture's metadata, and `Notification`), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
 the lot, and an event replaces one entity only if it is newer. An app never writes to them.
 
 ```rust
@@ -405,6 +406,87 @@ fn describe(outcome: &Outcome) -> String {
 Lookout's fuller `describe` is in `author.rs`. Lookout keeps the edit in flight in a `Pending` on the control, which
 also lets it refuse a second edit while the first is unanswered.
 
+### Notifications
+
+The server keeps what a person is told (`docs/app-platform.md`, "Notifications"); the shell mirrors them as
+`Mirrored<Notification>` and shows them: the bell at the rail's foot with the count of unread ones, its panel, and on
+each app's button the count of the unread ones whose `source` is that app's id. An app draws none of it. What it can do
+(`trailhead_shell::notifications`):
+
+- **Hear one arrive.** `NotificationArrived(Notification)` is a message written when a notification arrives raised and
+  unread off the event stream while the shell runs, and wasn't held before: never for one loaded with a snapshot, at
+  launch or after a long disconnect, and never for a change to one (read, unread, resolved). Read it with a
+  `MessageReader` to do something of your own. It is written whatever the person's settings say; what the shell does
+  about it is theirs (below).
+- **Mark the ones about a task read** when the person opens the task: `commands.trigger(ReadNotificationsAbout {
+  task_id })` sends a read for each unread one about it. Lookout does this when its task modal opens a task
+  (`clients/trailhead-lookout/src/detail.rs`).
+- **Mark one read or unread yourself** with a command, `Call::ReadNotification(id)`, `Call::UnreadNotification(id)` or
+  `Call::ReadAllNotifications`; the stream brings the change back to the mirror, as for any write.
+- **Open the panel**: `commands.trigger(OpenNotifications)`.
+- **Hold a bell of your own** in a shell with one app, which has no rail: put a
+  `tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain)` with `NotificationBell` on it where the app keeps such
+  things (Lookout's sidebar footer, beside the gear) while `Apps::has_rail()` is false. The shell puts the count on it,
+  rings it and opens the panel when it is pressed.
+- `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps', and follows the person's
+  setting; `source_label` names a source as the panel does (an app's icon and name, Trailhead for `server`, Factory
+  for `factory`).
+
+**The person's settings** (`trailhead_shell::notification_settings`) decide what the shell does with each one. They are
+kept on the server and held in `NotificationPrefs { settings, answered, error }`, read when the connection goes live,
+every minute while it is, after a save and when the Notifications page opens; until the server has said them, the
+defaults hold (every source interrupts, the sound and the counts on). An arrival does what
+`settings.alert(source, now, minute of the day)` says, with the time and zone from the `Clock` resource (the
+machine's own; a test inserts `Clock::new(..)` to set it):
+
+| Alert | What the shell does |
+| --- | --- |
+| `None` (a silent source) | Listed in the panel only, and left out of every count, the bell's and the rail's. |
+| `Count` (quiet hours or focus) | Counted; no ring, no sound, no desktop notification. Held for the notice at their end. |
+| `Ring` (a bell source) | The bell rings (`RingBells`), with the sound if `settings.sound`; never the desktop. |
+| `Interrupt` | With window focus, the bell rings with the sound; without it, the desktop shows it, with its theme's sound if `settings.sound`. |
+
+When quiet hours or focus end, what arrived meanwhile and is still unread is said once: one ring with focus, one
+desktop notification ("3 things need you") for those from interrupting sources without. The sound inside the window
+is the desktop theme's own message sound, played by the desktop (`canberra-gtk-play`, through the `Sound` resource
+`Shell::run` inserts); the shell ships none. The person sets all of it on the Notifications page among the shell's own
+settings, and focus from the bell's panel; each saves the settings last read with only that part changed
+(`SaveNotificationSettings`, a `PUT` command). An app reads `NotificationPrefs` if it wants to, and changes nothing
+of it.
+
+The desktop's own notifications are the shell's too (`trailhead_shell::desktop`): one that arrives while the window
+has no focus is shown there, with its link buttons, and taken down once it is read or resolved; several arriving
+together are one. An app does nothing for it. A test that wants to see what would be shown inserts a `Desktop` holding
+its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there. The same goes for
+the sound: a `Sound` holding a `Speaker` of the test's own, as `src/notification_settings.rs`'s tests do.
+
+**Raising one of your own.** Trigger `Notify` from the app's code, and the shell sends it to the server as a command:
+
+```rust
+use trailhead_shell::notifications::{Notify, ResolveNotifications};
+
+commands.trigger(
+    Notify::new(MY_APP, "ticklist.due", "Three are due today")
+        .body("Pay the rent, call the vet, water the plants.")
+        .subject("due-today")
+        .link("Open the list", "https://example.com/list"),
+);
+// Later, when the thing no longer needs the person, wherever they dealt with it:
+commands.trigger(ResolveNotifications { source: MY_APP, subject: "due-today".into() });
+```
+
+- `source` is the app's own id: the panel names the app on it and the rail counts it on the app's button, and the
+  person's level for the app decides whether it rings or interrupts. `kind` is a short name of the sort of thing it is
+  (`<app>.<what>`). `.task(key)` ties it to a task, which resolves it when the task is finished.
+- It comes back on the event stream like any other, so do not show it yourself, and nothing is answered to the app.
+- Only while the connection is `Live`: raised otherwise it is dropped (the log says so). An app cannot raise one while
+  the window is closed.
+- The example app raises one every tenth press and resolves it when the count is reset (`count_press`,
+  `reset_count`); its test `every_tenth_press_raises_a_notification_and_a_reset_resolves_it` checks what is sent.
+
+To test them, give a snapshot notifications (`fixture::notification_json`) or feed an event with `"entity":
+"notification"` and a kind of `notification.raised`, as `src/notifications.rs`'s tests do.
+
 ### Work of your own on the net thread: `LinkJob`
 
 A `LinkJob` is work an app runs on the net thread for as long as a control plane is held, such as a stream of its own
@@ -492,6 +574,8 @@ What the example app's tests cover, and why each matters:
   the `LocalStore` is there for a second shell built on the same directory.
 - `switching_away_despawns_the_page_and_switching_back_shows_the_kept_count`: the page exists only while the app is
   shown, and the app's logic keeps running while it is not (a press while another app is shown still counts).
+- `every_tenth_press_raises_a_notification_and_a_reset_resolves_it`: what the app raises and resolves is sent as
+  commands, checked with `sent`, without a server.
 - `the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count`: the app's page is in the shell's
   settings under its name, filled when shown, and what its control does is kept.
 - `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`: a change is made in place. The count
@@ -550,6 +634,8 @@ parts below.
   - `Example`, the type given to the shell.
   - `COUNT_SETTINGS`, the `PageId` of its page in the shell's settings.
   - The logic's state and events: `Presses` (a resource), `Press` and `ResetCount` (events any caller can trigger).
+    `count_press` raises a notification every `MILESTONE` presses and `reset_count` resolves it (section 6,
+    "Notifications").
   - The markers: `ExamplePage` (the page's root, present only while the app is shown), `CountLine`, `PressButton`,
     `ResetButton` (on its settings page).
   - `impl ShellApp for Example`: `manifest` names it with `Icon::Flag`; `build` reads the kept count from the
@@ -590,7 +676,7 @@ The person's order is kept (`rail_order` in `shell.json`) and applied over the b
 longer given drops out of it, and a new one goes at the end, in the order given. Everything that follows the rail
 follows it too: which way a switch's cover travels, the apps' settings pages, the About page's list.
 `trailhead_shell::MoveApp { app, to }` moves an app as a drag does, and `Apps` is always in the rail's order. The
-rail's foot (Ask, the update notice, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
+rail's foot (Ask, the update notice, the bell, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
 theme picked, in `theme`, and each app's `LocalStore`, under `apps/`); `NetConfig::from_env` puts that under `shell` in
 Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `Shell::run` opens the window (titled Trailhead, with the app
 id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugin` with every app's `paint` applied and
@@ -602,11 +688,11 @@ whose Restart ends `Shell::run` with the restart code the launcher answers; a bi
 as long as it ends by calling `Shell::run`.
 
 While the connection is live and the server has an apps repo (`[shell] repo`), the foot of the rail also holds an Ask
-button, above the update notice, and under them all is the gear that opens the settings (section 2, "Settings
-pages"). Ask opens a form for asking for a change to one of the apps the server's factory
+button, above the update notice; under them is the bell (section 6, "Notifications"), in any shell with a connection,
+and under it all the gear that opens the settings (section 2, "Settings pages"). Ask opens a form for asking for a change to one of the apps the server's factory
 builds (the projects pointed at the apps repo) or for a new app, which the server turns into a graded task, or a new
 project and its first task (`docs/app-platform.md`, "Asking for an app"). Nothing of it is an app's: a shell with one
-app has no rail, and so no Ask and no update notice.
+app has no rail, and so no Ask and no update notice, and its bell and gear are the app's to place.
 
 ## 10. Views
 

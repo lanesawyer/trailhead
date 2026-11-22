@@ -169,7 +169,7 @@ fn share(wanted: &[f32], room: f32) -> Vec<f32> {
 
 /// Underline the tab picked and brighten its caption, and the caption of one hovered; the rest are dimmed. The theme
 /// components are immutable, so a change is an insert, which is what has feathers repaint them.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn style_tabs(
     tabs: Query<(Entity, &Hovered, Has<Selected>, Has<InteractionDisabled>, &BorderTone, &Children), With<Tab>>,
     captions: Query<Option<&TextTone>, With<TabCaption>>,

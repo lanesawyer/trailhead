@@ -77,6 +77,7 @@ fn request(key: TaskKey) -> RunRequest {
         env: Default::default(),
         credential: Credential { agent: "factory".into(), token: String::new() },
         shots: None,
+        plan: None,
     }
 }
 

@@ -12,16 +12,12 @@ use trailhead_model::{Entity, Event, Task};
 /// How long before a deadline a `task.due_soon` reminder fires.
 pub const DEFAULT_REMINDER_WINDOW: SignedDuration = SignedDuration::from_hours(24);
 
-pub const DUE_SOON: &str = "task.due_soon";
-pub const OVERDUE: &str = "task.overdue";
+pub use trailhead_model::{DUE_SOON, OVERDUE};
 
-/// Notifications about a task, not changes to it. Undo leaves them alone.
-pub(crate) fn is_notification(kind: &str) -> bool {
-    kind == DUE_SOON || kind == OVERDUE
-}
-
-/// SQL condition on `events.kind` that excludes notifications.
-pub(crate) const NOT_NOTIFICATION_SQL: &str = "kind NOT IN ('task.due_soon', 'task.overdue')";
+/// SQL condition on `events.kind` that excludes what [`trailhead_model::is_notification`] names: the reminders and
+/// a notification's own events, which change nothing undo could revert.
+pub(crate) const NOT_NOTIFICATION_SQL: &str =
+    "(kind NOT IN ('task.due_soon', 'task.overdue') AND kind NOT LIKE 'notification.%')";
 
 /// Open tasks whose reminder is due and hasn't fired for their current deadline,
 /// with that deadline and the reminder kind. Only `task.overdue` fires once the due date has passed,
@@ -107,12 +103,15 @@ impl Store {
                         libsql::params![task.id.to_string(), kind.as_str(), fmt_ts(*due_by), id, tx.now_str()],
                     )
                     .await?;
+                crate::notifications::on_reminder(tx, task, kind).await?;
                 ids.push(id);
             }
             let rows = tx
                 .conn
                 .query(
-                    &format!("SELECT {EVENT_COLS} FROM events WHERE batch_id = ?1 AND id >= ?2 ORDER BY id"),
+                    &format!("SELECT {EVENT_COLS} FROM events WHERE batch_id = ?1 AND id >= ?2
+                         AND kind IN ('{DUE_SOON}', '{OVERDUE}') ORDER BY id"
+                    ),
                     libsql::params![ctx.batch_id.to_string(), ids[0]],
                 )
                 .await?;

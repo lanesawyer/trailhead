@@ -383,7 +383,7 @@ fn on_jump(activate: On<Activate>, jump: Query<(), With<JumpToLatest>>, mut foll
 }
 
 /// Keeps the page's dropdowns, note and button current, in place.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn refresh_controls(
     state: Res<LogState>,
     filter: Res<LogFilter>,

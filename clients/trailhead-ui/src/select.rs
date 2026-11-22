@@ -7,7 +7,7 @@
 //! words, and before the caption the icon of the option chosen.
 //!
 //! The caption stays on one line, cut off with an ellipsis at the select's width, so a long option doesn't wrap the
-//! row it sits in.
+//! row it sits in. A select with a [`SelectHint`] beside it says the hint, dim, while none of its options is chosen.
 
 use bevy::ecs::system::SystemParam;
 use bevy::feathers::controls::{FeathersListRow, FeathersMenuButton, FeathersMenuPopup, FeathersSelect, OptionIndex};
@@ -128,6 +128,50 @@ fn icon_box(icon: Icon, tone: Token) -> impl Scene {
     }
 }
 
+/// Beside a [`select`] or [`select_toned`] (not a [`select_iconed`]), what its caption says, dim, while none of its
+/// options is chosen: a choice a person still has to make ("Grade…"). Spawn the select with `None` chosen; once a row
+/// is picked or set the caption is the row's, and showing none again brings the hint back.
+#[derive(Component, Clone, PartialEq, Debug, Default)]
+pub struct SelectHint(pub String);
+
+/// On a caption while it shows its select's [`SelectHint`].
+#[derive(Component)]
+pub(crate) struct HintShown;
+
+/// Shows each hinted select's hint while none of its rows is chosen, and hands the caption back when one is.
+pub(crate) fn show_select_hints(
+    selects: Query<(Entity, &SelectHint, &SelectTones)>,
+    children: Query<&Children>,
+    rows: Query<Has<Selected>, With<FeathersListRow>>,
+    buttons: Query<(), With<FeathersMenuButton>>,
+    mut texts: Query<(&mut Text, Option<&TextTone>, Has<HintShown>)>,
+    mut commands: Commands,
+) {
+    for (select, SelectHint(hint), tones) in &selects {
+        let Some(button) = children.iter_descendants(select).find(|e| buttons.contains(*e)) else { continue };
+        let Some(caption) = children.iter_descendants(button).find(|e| texts.contains(*e)) else { continue };
+        let chosen = children.iter_descendants(select).any(|e| rows.get(e).is_ok_and(|selected| selected));
+        let Ok((mut text, tone, shown)) = texts.get_mut(caption) else { continue };
+        if !chosen {
+            if text.0 != *hint {
+                text.0.clone_from(hint);
+            }
+            if tone.is_none_or(|t| t.0 != token::TEXT_DIM) {
+                commands.entity(caption).insert(TextTone(token::TEXT_DIM));
+            }
+            if !shown {
+                commands.entity(caption).insert(HintShown);
+            }
+        } else if shown {
+            commands.entity(caption).remove::<HintShown>();
+            // A toned select's caption takes its row's tone from `style_select_captions`; a plain one goes back to text.
+            if tones.0.is_empty() {
+                commands.entity(caption).insert(TextTone(token::TEXT));
+            }
+        }
+    }
+}
+
 /// The icons of a [`select_iconed`]'s options, empty for one without.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub struct SelectIcons(pub Vec<Icon>);
@@ -142,7 +186,7 @@ pub struct SelectTones(pub Vec<Option<Token>>);
 
 /// Keeps each select's caption on one line, and in the tone of the option it shows. Feathers copies the chosen row's
 /// words into the caption when a row is selected; this follows it with the row's color.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn style_select_captions(
     new_texts: Query<Entity, Added<Text>>,
     chosen_icons: Query<(), With<ChosenIcon>>,
@@ -226,7 +270,6 @@ fn margins(node: &Node) -> f32 {
 }
 
 /// Ends each select's caption with an ellipsis where the select's width cuts it off.
-#[allow(clippy::type_complexity)]
 pub(crate) fn fit_select_captions(
     mut captions: Query<(Entity, &mut CaptionFit, &mut Text, &TextLayoutInfo)>,
     parents: Query<&ChildOf>,
@@ -512,7 +555,10 @@ mod tests {
             .init_asset::<Image>()
             .init_resource::<InputFocus>()
             .insert_resource(crate::theme::Theme::new().resource())
-            .add_systems(Update, (style_select_captions, show_chosen_icons, fit_select_captions).chain());
+            .add_systems(
+                Update,
+                (style_select_captions, show_select_hints, show_chosen_icons, fit_select_captions).chain(),
+            );
         app
     }
 
@@ -546,6 +592,37 @@ mod tests {
         let area = world.query_filtered::<Entity, With<ScrollArea>>().single(world).unwrap();
         let kids: Vec<Entity> = world.get::<Children>(area).map_or(vec![], |c| c.iter().collect());
         kids.into_iter().map(|e| (e, world.get::<FeathersListRow>(e).is_some())).collect()
+    }
+
+    #[test]
+    fn a_hint_shows_dim_until_a_row_is_chosen_and_comes_back_when_none_is() {
+        let mut app = app();
+        let tones = vec![Some(token::STATUS_OK), Some(token::STATUS_WARN)];
+        let scene = bsn! { @select_toned(vec!["one".into(), "two".into()], tones, None, 8) SelectHint("Grade…") };
+        let select = app.world_mut().commands().spawn_scene(scene).id();
+        settle(&mut app);
+        assert_eq!(button_texts(&mut app), vec!["Grade…"]);
+        let tone = |app: &mut App| {
+            let world = app.world_mut();
+            let caption = world.query_filtered::<Entity, With<HintShown>>().iter(world).next();
+            caption.map(|c| world.get::<TextTone>(c).unwrap().0.clone())
+        };
+        assert_eq!(tone(&mut app), Some(token::TEXT_DIM));
+        let set = |app: &mut App, chosen: Option<usize>| {
+            app.world_mut()
+                .run_system_once(move |mut edit: SelectEdit| {
+                    let tones = vec![Some(token::STATUS_OK), Some(token::STATUS_WARN)];
+                    edit.set_toned(select, &["one".into(), "two".into()], &tones, chosen)
+                })
+                .unwrap()
+        };
+        assert!(set(&mut app, Some(1)));
+        settle(&mut app);
+        assert_eq!(button_texts(&mut app), vec!["two"]);
+        assert_eq!(tone(&mut app), None, "the caption is the row's again");
+        assert!(set(&mut app, None));
+        settle(&mut app);
+        assert_eq!(button_texts(&mut app), vec!["Grade…"]);
     }
 
     #[test]

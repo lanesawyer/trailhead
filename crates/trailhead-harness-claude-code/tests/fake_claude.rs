@@ -5,14 +5,14 @@ use std::process::Command;
 
 use tokio::sync::mpsc;
 use trailhead_factory::{
-    CheckResult, Endpoint, Feedback, FollowUp, Harness, ModelId, Role, RunContext, RunEvent, RunOutcome, ShotFiles,
-    TaskKey, TaskSpec, VerdictKind,
+    Answered, CheckResult, Endpoint, Feedback, FollowUp, Grade, Harness, ModelId, PlanContext, PlanFiles, PlanTask,
+    Planning, ProposedGrade, Role, RunContext, RunEvent, RunOutcome, ShotFiles, Status, TaskKey, TaskSpec, VerdictKind,
 };
 use trailhead_harness_claude_code::{ClaudeCode, PLACEHOLDER_KEY, prompt};
 
 /// Writes its arguments and environment to `$FAKE_LOG`, then plays the scenario in `$FAKE_SCENARIO`.
 const FAKE: &str = r#"#!/bin/sh
-{ printf '%s\n' "$@"; cat; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
+{ printf '%s\n' "$@"; cat; echo "TURN=$TRAILHEAD_PLAN_TURN"; echo "BASE=$ANTHROPIC_BASE_URL"; echo "KEY=$ANTHROPIC_API_KEY"; echo "OAUTH=$CLAUDE_CODE_OAUTH_TOKEN"; echo "FACTORY_TASK=$TRAILHEAD_FACTORY_TASK"; } > "$FAKE_LOG"
 asst() { echo "{\"type\":\"assistant\",\"message\":{\"id\":\"$1\",\"model\":\"claude-sonnet-x\",\"content\":[$2],\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"cache_read_input_tokens\":5,\"cache_creation_input_tokens\":1}}}"; }
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 case "$FAKE_SCENARIO" in
@@ -63,6 +63,24 @@ loop)
   ;;
 error)
   echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 403 forbidden"}'
+  ;;
+plan)
+  case " $* " in
+  *" --resume kept "*)
+    if [ -n "$FAKE_GONE" ]; then echo "No conversation found with session ID: kept" >&2; exit 1; fi
+    asst p2 '{"type":"text","text":"Again."}'
+    printf '%s' '{"message":"Resumed.","ready":true}' > "$TRAILHEAD_PLAN_TURN"
+    ;;
+  *)
+    asst p1 '{"type":"text","text":"Planning."}'
+    printf '%s' '{"message":"Which colours?","tasks":[{"id":"a","title":"A","grade":2,"why":"one app"}]}' > "$TRAILHEAD_PLAN_TURN"
+    ;;
+  esac
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"turn written"}'
+  ;;
+noturn)
+  asst p3 '{"type":"text","text":"Forgot."}'
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
   ;;
 flaky)
   case " $* " in
@@ -142,6 +160,7 @@ fn ctx(r: &Rig, role: Role, max_steps: u32) -> RunContext {
         base_branch: (role == Role::Reviewer).then(|| "main".into()),
         env: Default::default(),
         shots: Vec::new(),
+        plan: None,
     }
 }
 
@@ -178,6 +197,81 @@ async fn claude_code_sessions() {
     resume_carries_feedback().await;
     subscription_mode_uses_only_the_oauth_token().await;
     dropped_api_calls_resume_the_session().await;
+    planner_turns_keep_their_session().await;
+    a_planner_without_a_turn_file_fails().await;
+}
+
+fn planner_ctx(r: &Rig) -> RunContext {
+    let plan = vec![PlanTask {
+        key: TaskKey("TRAIL-2".into()),
+        title: "Store the lists".into(),
+        description: "Done when lists survive a restart.".into(),
+        status: Status::Open,
+        grade: None,
+        proposed: Some(ProposedGrade { grade: Grade::new(3).unwrap(), why: "stored data".into() }),
+        blocked_by: vec![TaskKey("TRAIL-3".into())],
+    }];
+    let files = PlanFiles::in_dir(&r.repo.with_file_name("repo.plan").join("TRAIL-1"));
+    let mut ctx = ctx(r, Role::Planner, 10);
+    ctx.task.context.answers.push(Answered {
+        question: "Which colours?".into(),
+        answer: "Blue.".into(),
+        by: "lane".into(),
+        date: "2026-11-21".into(),
+    });
+    ctx.plan = Some(PlanContext { planning: Planning { ask: "A todo app.".into(), plan }, files });
+    ctx
+}
+
+async fn planner_turns_keep_their_session() {
+    let r = rig();
+    let ctx = planner_ctx(&r);
+    let files = ctx.plan.clone().unwrap().files;
+
+    let (out, _) = play(&r, "plan", ctx.clone()).await;
+    let RunOutcome::PlanTurn(turn) = out else { panic!("{out:?}") };
+    assert_eq!(turn.message, "Which colours?");
+    assert_eq!(turn.tasks.unwrap()[0].why, "one app");
+    assert_eq!(std::fs::read_to_string(&files.session).unwrap(), "s1", "the session is kept for the next turn");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(!log.contains("--resume") && !log.contains("--json-schema"), "{log}");
+    assert!(log.contains(&format!("TURN={}", files.turn.display())), "the turn's path is in the environment");
+    for part in ["You are planning, not building", "The ask:\nA todo app.", "Blue.", "TRAIL-2: Store the lists"] {
+        assert!(log.contains(part), "the first turn's prompt has `{part}`: {log}");
+    }
+    assert!(log.contains("proposed grade 3 (stored data), blocked by TRAIL-3"), "{log}");
+    assert!(log.contains("A person may have changed it by hand"), "{log}");
+
+    std::fs::write(&files.session, "kept\n").unwrap();
+    let (out, _) = play(&r, "plan", ctx.clone()).await;
+    assert!(matches!(&out, RunOutcome::PlanTurn(t) if t.message == "Resumed." && t.ready), "{out:?}");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(log.contains("--resume\nkept\n"), "the kept session is resumed: {log}");
+    assert!(log.contains("The person replied to your last message:\nBlue."), "{log}");
+    assert!(!log.contains("You are planning"), "a resumed session isn't told the rules again: {log}");
+    assert!(log.contains("TRAIL-2: Store the lists"), "it is told the plan as it stands: {log}");
+
+    std::fs::write(&files.session, "kept").unwrap();
+    // SAFETY: the scenarios run one at a time in a single test.
+    unsafe { std::env::set_var("FAKE_GONE", "1") };
+    let (out, _) = play(&r, "plan", ctx).await;
+    // SAFETY: as when it was set.
+    unsafe { std::env::remove_var("FAKE_GONE") };
+    assert!(matches!(&out, RunOutcome::PlanTurn(t) if t.message == "Which colours?"), "a new session: {out:?}");
+    let log = std::fs::read_to_string(&r.log).unwrap();
+    assert!(!log.contains("--resume") && log.contains("You are planning"), "with the whole prompt: {log}");
+    assert_eq!(std::fs::read_to_string(&files.session).unwrap(), "s1", "and the new session is kept");
+}
+
+async fn a_planner_without_a_turn_file_fails() {
+    let r = rig();
+    let ctx = planner_ctx(&r);
+    let turn = ctx.plan.clone().unwrap().files.turn;
+    std::fs::create_dir_all(turn.parent().unwrap()).unwrap();
+    std::fs::write(&turn, r#"{"message": "from the last turn"}"#).unwrap();
+    let (out, _) = play(&r, "noturn", ctx).await;
+    let RunOutcome::Failed { reason } = out else { panic!("{out:?}") };
+    assert!(reason.contains("without a readable turn file"), "a turn file left from before doesn't count: {reason}");
 }
 
 async fn worker_changes_are_collected() {

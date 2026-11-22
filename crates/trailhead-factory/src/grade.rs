@@ -244,10 +244,10 @@ impl<'a> Grader<'a> {
             let lost_test = |p: &str| is_test_path(p);
             match (f.status, &f.previous_path) {
                 (FileStatus::Removed, _) if lost_test(&f.path) => {
-                    found.push((TEST_OR_CHECK_GRADE, format!("test {} deleted", f.path)))
+                    found.push((TEST_OR_CHECK_GRADE, format!("test {} deleted", f.path)));
                 }
                 (FileStatus::Renamed, Some(old)) if lost_test(old) => {
-                    found.push((TEST_OR_CHECK_GRADE, format!("test {old} renamed")))
+                    found.push((TEST_OR_CHECK_GRADE, format!("test {old} renamed")));
                 }
                 _ => {}
             }

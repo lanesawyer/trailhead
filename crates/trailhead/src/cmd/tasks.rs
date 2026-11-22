@@ -15,7 +15,7 @@ pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<Strin
     let q = ReadyQuery { project: project.or(cx.project.clone()), grade, limit: count(limit)? };
     let tasks = cx.c.api().ready(&q).await.map_err(api_err)?;
     if cx.json {
-        print_json(&to_json(&tasks))
+        print_json(&to_json(&tasks));
     } else {
         task_list(&tasks, "nothing ready");
         // People's claims don't expire, so a forgotten one would hide work for good.
@@ -27,7 +27,7 @@ pub(crate) async fn ready(cx: &Ctx, project: Option<String>, grade: Option<Strin
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn ls(
     cx: &Ctx,
     project: Option<String>,
@@ -57,7 +57,7 @@ pub(crate) async fn ls(
     };
     let tasks: Vec<Task> = cx.c.api().list_tasks(&q).await.map_err(api_err)?.into_iter().map(|t| t.task).collect();
     if cx.json {
-        print_json(&to_json(&tasks))
+        print_json(&to_json(&tasks));
     } else {
         let waiting = if tasks.iter().any(|t| t.status == Status::InReview) {
             // The server returns at most 100 a page by default, so page until a short one.
@@ -85,7 +85,7 @@ pub(crate) async fn ls(
         } else {
             Default::default()
         };
-        task_list_flagged(&tasks, "no tasks", &waiting)
+        task_list_flagged(&tasks, "no tasks", &waiting);
     }
     Ok(())
 }
@@ -440,10 +440,10 @@ pub(crate) async fn unblock(cx: &Ctx, blocker: &str, blocked: &str) -> Result<()
 pub(crate) async fn search(cx: &Ctx, query: &[String], limit: Option<i64>) -> Result<()> {
     let hits = cx.c.api().search(&query.join(" "), count(limit)?).await.map_err(api_err)?;
     if cx.json {
-        print_json(&to_json(&hits))
+        print_json(&to_json(&hits));
     } else {
         let tasks: Vec<Task> = hits.into_iter().map(|h| h.task).collect();
-        task_list(&tasks, "no matches")
+        task_list(&tasks, "no matches");
     }
     Ok(())
 }
@@ -463,7 +463,7 @@ mod tests {
                 Kind::Object | Kind::Array => unreachable!(),
             };
             assert!(kind.accepts(&sample), "{field}");
-            let run: trailhead_factory::RunRecord = serde_json::from_value(json!({ *field: sample.clone() })).unwrap();
+            let run: trailhead_factory::RunRecord = serde_json::from_value(json!({ *field: sample })).unwrap();
             let back = serde_json::to_value(&run).unwrap();
             assert_eq!(back, json!({ *field: sample }), "{field} isn't a {} on RunRecord", kind.name());
         }

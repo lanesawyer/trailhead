@@ -89,7 +89,7 @@ pub(crate) fn fill_initial_text(mut inputs: Query<(&InitialText, &mut EditableTe
 /// Colors the cursor and selection of each text input spawned after the theme was set, and of one moved onto another
 /// surface. Feathers colors them only when the theme changes (bevy_feathers 0.20's `update_text_cursor_color`), so
 /// any input but the ones there at startup kept bevy's dark default cursor, unseen on the field.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn color_new_cursors(
     theme: Res<UiTheme>,
     mut inputs: Query<

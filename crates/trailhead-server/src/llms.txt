@@ -37,6 +37,15 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 
 The `description` is the current spec and gets edited; comments are the append-only history.
 
+## Notifications
+
+What a person is told. The server raises one by rule (an agent's question that isn't put to another agent, a task sent for review where no agent may approve, a task due soon or overdue) and resolves it when the thing is dealt with. To ask a person something, ask a `question`; raise one yourself only for what no rule covers.
+
+- `POST /v1/notifications` with `{source, kind, title, body?, subject?, task?, actions?}` raises one. `source` names the raiser and `kind` the sort of thing, each 1 to 64 characters; `title` is one line; `subject` is your name for what it is about; `task` is a key, and finishing that task resolves it; `actions` are up to 4 `{label, url}` web links.
+- `GET /v1/notifications?unread=&before=&limit=` returns `{notifications, unread}`, newest first.
+- `POST /v1/notifications/{id}/resolve`, or `POST /v1/notifications/resolve` with `{source, subject}`, says the thing no longer needs the person. Marking one read (`/read`, `/unread`, `/read-all`) is the person's alone.
+- Each change is an event (`notification.raised`, `.read`, `.unread`, `.resolved`) on the stream; undo leaves them alone.
+
 ## Pictures
 
 A task can carry pictures, such as screenshots of a UI before and after a change. Whoever may comment on a task may attach one.

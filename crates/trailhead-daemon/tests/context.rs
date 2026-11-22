@@ -98,5 +98,6 @@ fn request(key: TaskKey, repo: Repo, role: Role, pr: Option<trailhead_factory::P
         env: Default::default(),
         credential: Credential { agent: "factory".into(), token: String::new() },
         shots: None,
+        plan: None,
     }
 }

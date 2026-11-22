@@ -87,7 +87,9 @@ pub(crate) async fn save_comment(tx: &Tx, c: &Comment) -> Result<Comment> {
             ],
         )
         .await?;
-    first(rows, comment_from_row).await?.ok_or_else(|| Error::NotFound(format!("comment {}", c.id)))
+    let saved = first(rows, comment_from_row).await?.ok_or_else(|| Error::NotFound(format!("comment {}", c.id)))?;
+    crate::notifications::on_comment_saved(tx, &saved).await?;
+    Ok(saved)
 }
 
 async fn principal_exists(conn: &Connection, ws: Uuid, id: Uuid) -> Result<bool> {
@@ -128,6 +130,10 @@ pub(crate) async fn insert_comment(tx: &Tx, task_id: Uuid, new: &NewComment, bod
         .await?;
     let comment = comment_from_row(&rows.next().await?.expect("RETURNING yields a row"))?;
     tx.emit_change(Entity::Comment, id.to_string(), Some(task_id), "comment.created", None, Some(&comment)).await?;
+    if comment.kind == CommentKind::Question {
+        let task = load_task(&tx.conn, comment.workspace_id, &task_id.to_string(), true).await?;
+        crate::notifications::on_comment_created(tx, &task, &comment).await?;
+    }
     Ok(comment)
 }
 

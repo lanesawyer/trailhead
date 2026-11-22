@@ -40,7 +40,7 @@ pub fn slider(value: f32, range: (f32, f32), decimals: i32) -> impl Scene {
 /// Feathers draws a slider's bar as a gradient it colors itself, and only when the slider is spawned, hovered, pressed
 /// or disabled, never when the theme changes. So a slider built before the theme settled stayed feathers' own blue
 /// until the pointer passed over it. The same tokens feathers would choose, chosen again.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn repaint_sliders(
     theme: Res<UiTheme>,
     mut sliders: Query<

@@ -118,6 +118,11 @@ pub struct TaskFacts {
     pub links: Vec<String>,
     /// The factory's run: attempt, sandbox, spend, review rounds.
     pub run: Vec<String>,
+    /// Its part in a plan (`docs/app-platform.md`, "Planning an ask"): where a spec task's plan stands, or the grade
+    /// the planner proposes for a task it made and why.
+    pub plan: Vec<String>,
+    /// A spec task, whose plan the graph shows even before it has subtasks.
+    pub spec: bool,
     /// Created, updated, version.
     pub details: Vec<String>,
     /// The version shown, which an edit's `If-Match` names.
@@ -164,6 +169,31 @@ pub struct Subtask {
     pub key: String,
     pub title: String,
     pub status: Status,
+}
+
+/// A task's part in a plan, as lines: where a spec task's plan stands and its planner's model, or the grade the planner
+/// proposes for a task it made and why.
+pub fn plan_lines(plan: &TaskPlan, text: &Wording) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(spec) = &plan.spec {
+        lines.push(match spec.approved.and_then(|s| jiff::Timestamp::from_second(s).ok()) {
+            Some(at) => format!("plan approved {}", text.time(at, None)),
+            None if spec.ready => "the planner says the plan is ready to approve".to_string(),
+            None => "a plan the planner draws up with you".to_string(),
+        });
+        if let Some(model) = &spec.model {
+            lines.push(format!("planner's model {model}"));
+        }
+    }
+    if let Some(proposed) = &plan.proposed {
+        let why = proposed.why.trim();
+        lines.push(if why.is_empty() {
+            format!("the planner proposes grade {}", proposed.grade)
+        } else {
+            format!("the planner proposes grade {}: {why}", proposed.grade)
+        });
+    }
+    lines
 }
 
 /// The PR panel from the task's run; none when it has no PR yet.
@@ -392,7 +422,7 @@ pub fn build(
 }
 
 /// How times read in the modal: the reader's zone, as the CLI shows them.
-pub(super) fn clock() -> &'static Wording {
+pub(crate) fn clock() -> &'static Wording {
     static WORDING: std::sync::OnceLock<Wording> = std::sync::OnceLock::new();
     WORDING.get_or_init(|| Wording::terminal(jiff::tz::TimeZone::system()))
 }
@@ -418,7 +448,7 @@ pub(super) fn facts(
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
     crumbs.extend(parent.map(|p| p.key.0.clone()));
     crumbs.push(task.key.0.clone());
-    let project = project_key.clone();
+    let project = project_key;
     let parent = parent.map(|p| Subtask {
         id: p.id.to_string(),
         key: p.key.0.clone(),
@@ -473,6 +503,10 @@ pub(super) fn facts(
         }
     }
 
+    let plan = TaskPlan::of(&task.metadata);
+    let spec = plan.as_ref().is_some_and(|p| p.spec.is_some());
+    let plan = plan.map(|p| plan_lines(&p, text)).unwrap_or_default();
+
     let mut comments: Vec<&Comment> = match detail {
         Some(d) => d.comments.iter().collect(),
         None => input.comments.iter().filter(|c| c.task_id == task.id).collect(),
@@ -520,6 +554,8 @@ pub(super) fn facts(
         dates,
         links,
         run: run_lines,
+        plan,
+        spec,
         details: vec![
             format!("created {}", text.time(task.created_at, None)),
             format!("updated {}", text.time(task.updated_at, None)),
