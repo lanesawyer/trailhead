@@ -6,6 +6,7 @@ pub(crate) mod attachments;
 pub(crate) mod claims;
 pub(crate) mod comments;
 pub(crate) mod config;
+pub(crate) mod connectors;
 pub(crate) mod dependencies;
 pub(crate) mod events;
 pub(crate) mod notifications;
@@ -100,6 +101,13 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/apps/{app}/events", get(apps::list_events))
         .route("/apps/{app}/events/stream", get(crate::stream::app_events))
         .route("/apps/{app}/undo", post(apps::undo))
+        .route("/connectors", get(connectors::list))
+        .route("/connectors/{id}", get(connectors::show).patch(connectors::change))
+        .route("/connectors/{id}/run", post(connectors::run))
+        .route(
+            "/connectors/{id}/feeds/{feed}",
+            put(connectors::hand_over).layer(DefaultBodyLimit::max(connectors::MAX_FEED_BYTES)),
+        )
 }
 
 // Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`): the one the task bodies use.

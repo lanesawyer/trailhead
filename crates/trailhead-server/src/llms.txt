@@ -69,6 +69,15 @@ Each app in the window keeps its own records, in collections its `collections.to
 - Every change is an event in the app's own log, numbered per app: `{id, batch_id, actor_id, on_behalf_of, collection, record_id, kind, before, after, undoes, at}`, `kind` being `record.created|updated|deleted|reverted`. `GET /v1/apps/{app}/events?after=&collection=&record=&limit=` lists them; `GET /v1/apps/{app}/events/stream?after=&collection=&record=` streams them as the task stream does (`Last-Event-ID` resumes). To mirror a collection, read its pages, then stream from the first page's `trailhead-event-cursor`: one page misses and repeats nothing, and across pages apply an event only when its `after.version` is newer than the record you hold.
 - `POST /v1/apps/{app}/undo` with `{"event_id"}` or `{"batch_id"}` (the `trailhead-batch` header of the write) undoes it, as for tasks; a collection filled from a feed is left for its next run to set.
 
+## Connectors
+
+A connector is a small program in the apps repo (`connectors/<id>/`) that the server builds and runs on a schedule; each run hands over feeds of records, which the server writes into every app collection that says `from = "<id>.<feed>"`. Only a person reads or changes them here.
+
+- `GET /v1/connectors` lists every connector the last build of the apps repo holds; `GET /v1/connectors/{id}` is one: `{id, name, error?, every_secs, timeout_secs, hosts, settings: [{name, kind, label, help?, required, value?}], secrets: [{name, set}], feeds: [{name, fields, collections}], enabled, missing, running, last_run?, next_run?}`. `missing` says in words what it needs before it can run (a setting, a secret, a build); `last_run` is `{started_at, duration_ms, ok, error?, feeds: {<feed>: {records, created, changed, removed, unchanged, errors?}}}`. A secret's value is never shown.
+- `PATCH /v1/connectors/{id}` with `{"enabled"?, "settings"?}` turns it on or off and merges `settings` into what is set (`null` unsets one); a setting it doesn't declare, or of the wrong kind (`string`, `list`, `boolean`, `integer`), is `400 invalid`. Turning it on makes its agent, `connector/<id>`. Its secrets are given only on the server's machine: `trailhead connector login <id>`.
+- `POST /v1/connectors/{id}/run` starts a run now and answers `202` once it has started (`409 already_exists` while one runs; `400 invalid` when it is off or still needs something).
+- `PUT /v1/connectors/{id}/feeds/{feed}` with `{"records": [{"key", "data"}]}` is how a run hands a feed's whole current set over (at most 64 MB of JSON). Only the connector's own agent may (`403` for anyone else, a person too); its token reaches nothing else. A record that doesn't match the feed's fields is `400 invalid`, naming the feed, the key and the field. The answer is `{feed, records, apps: [{app, collection, created, changed, removed, unchanged, error?}]}`: one app failing stops none of the others, and a set that matches what an app holds writes nothing there.
+
 ## Statuses
 
 `open`, `in_progress`, `needs_input`, `in_review`, `approved`, `done`, `cancelled`. Allowed moves (anything else is `409 invalid_transition` with `from` and `to`):

@@ -50,7 +50,11 @@ pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, Loca
 /// Authenticates `/mcp` requests with the same bearer tokens as REST. The context
 /// rides along in the request extensions, which rmcp hands to each tool.
 pub async fn auth(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
-    match crate::auth::authenticate(&state, req.headers()).await {
+    let authed = match crate::auth::authenticate(&state, req.headers()).await {
+        Ok((ctx, token)) => crate::auth::refuse_connectors(&state, &ctx, None).await.map(|()| (ctx, token)),
+        Err(e) => Err(e),
+    };
+    match authed {
         Ok((ctx, token)) => {
             req.extensions_mut().insert(ctx);
             req.extensions_mut().insert(TokenId(token.id));

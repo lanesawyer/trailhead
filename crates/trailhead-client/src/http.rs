@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::app_data::{App, AppEvent, AppUndoReport, BatchWrite, BatchWritten, Record, Written};
+use trailhead_model::connector::{ConnectorInfo, ConnectorPatch, FeedRecord};
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
     CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
@@ -127,8 +128,15 @@ pub mod routes {
     /// cursor (`super::app_event_stream_path`).
     pub const APP_EVENT_STREAM: Route = Route::new(Method::GET, "/v1/apps/{app}/events/stream");
 
+    pub const LIST_CONNECTORS: Route = Route::new(Method::GET, "/v1/connectors");
+    pub const SHOW_CONNECTOR: Route = Route::new(Method::GET, "/v1/connectors/{id}");
+    pub const UPDATE_CONNECTOR: Route = Route::new(Method::PATCH, "/v1/connectors/{id}");
+    pub const RUN_CONNECTOR: Route = Route::new(Method::POST, "/v1/connectors/{id}/run");
+    /// A connector's run calls it, with the connector kit's own client; [`super::Call::HandOverFeed`] names it here.
+    pub const HAND_OVER_FEED: Route = Route::new(Method::PUT, "/v1/connectors/{id}/feeds/{feed}");
+
     /// All of them.
-    pub fn all() -> [Route; 64] {
+    pub fn all() -> [Route; 69] {
         [
             READY,
             LIST_TASKS,
@@ -194,6 +202,11 @@ pub mod routes {
             APP_EVENTS,
             APP_UNDO,
             APP_EVENT_STREAM,
+            LIST_CONNECTORS,
+            SHOW_CONNECTOR,
+            UPDATE_CONNECTOR,
+            RUN_CONNECTOR,
+            HAND_OVER_FEED,
         ]
     }
 }
@@ -523,6 +536,19 @@ pub enum Call {
         app: String,
         undo: AppUndo,
     },
+    /// Turns a connector on or off, or changes its settings. Only a person may.
+    UpdateConnector {
+        id: String,
+        patch: ConnectorPatch,
+    },
+    /// Runs a connector now. Only a person may.
+    RunConnector(String),
+    /// A feed's whole current set, from the connector's own run.
+    HandOverFeed {
+        connector: String,
+        feed: String,
+        records: Vec<FeedRecord>,
+    },
 }
 
 impl Call {
@@ -566,6 +592,11 @@ impl Call {
             ),
             Call::AppBatch { app, .. } => (routes::APP_BATCH, vec![("app", app.clone())]),
             Call::UndoApp { app, .. } => (routes::APP_UNDO, vec![("app", app.clone())]),
+            Call::UpdateConnector { id, .. } => (routes::UPDATE_CONNECTOR, vec![("id", id.clone())]),
+            Call::RunConnector(id) => (routes::RUN_CONNECTOR, vec![("id", id.clone())]),
+            Call::HandOverFeed { connector, feed, .. } => {
+                (routes::HAND_OVER_FEED, vec![("id", connector.clone()), ("feed", feed.clone())])
+            }
         }
     }
 
@@ -604,6 +635,9 @@ impl Call {
             Call::PutRecord { data, .. } => Some(data.clone()),
             Call::AppBatch { writes, .. } => Some(serde_json::json!({ "writes": writes })),
             Call::UndoApp { undo, .. } => Some(json(undo)),
+            Call::UpdateConnector { patch, .. } => Some(json(patch)),
+            Call::RunConnector(_) => None,
+            Call::HandOverFeed { records, .. } => Some(serde_json::json!({ "records": records })),
         }
     }
 
@@ -1217,6 +1251,26 @@ impl Client {
         self.send(req).await
     }
 
+    /// `GET /v1/connectors`: every connector the server knows, with how it is set and its runs. Only a person may.
+    pub async fn list_connectors(&self) -> Result<Vec<ConnectorInfo>> {
+        self.send(self.request(routes::LIST_CONNECTORS, None)).await
+    }
+
+    /// `GET /v1/connectors/{id}`.
+    pub async fn show_connector(&self, id: &str) -> Result<ConnectorInfo> {
+        self.send(self.request_with(routes::SHOW_CONNECTOR, &[("id", &path_segment(id))])).await
+    }
+
+    /// `PATCH /v1/connectors/{id}`: turns it on or off and merges `settings` into what is set (`null` unsets one).
+    pub async fn update_connector(&self, id: &str, patch: ConnectorPatch) -> Result<ConnectorInfo> {
+        self.send_call(&Call::UpdateConnector { id: id.into(), patch }, None).await
+    }
+
+    /// `POST /v1/connectors/{id}/run`: starts a run now, and answers once it has started.
+    pub async fn run_connector(&self, id: &str) -> Result<ConnectorInfo> {
+        self.send_call(&Call::RunConnector(id.into()), None).await
+    }
+
     /// `GET /v1/apps`: the apps with data the token reaches, each with its collections.
     pub async fn list_apps(&self) -> Result<Vec<App>> {
         self.send(self.request(routes::LIST_APPS, None)).await
@@ -1465,5 +1519,23 @@ mod tests {
         assert_eq!(batch.body(), Some(serde_json::json!({"writes": [{"op": "delete", "id": id}]})));
         assert_eq!(app_event_stream_path("cairn", Some(7)), "/v1/apps/cairn/events/stream?after=7");
         assert_eq!(path_segment("a b/c~d"), "a%20b%2Fc~d");
+    }
+
+    #[test]
+    fn connector_calls_name_their_connector() {
+        let patch = ConnectorPatch { enabled: Some(true), settings: None };
+        let update = Call::UpdateConnector { id: "github".into(), patch };
+        assert_eq!((update.method(), update.path()), (Method::PATCH, "/v1/connectors/github".to_string()));
+        assert_eq!(update.body(), Some(serde_json::json!({"enabled": true})));
+        let run = Call::RunConnector("github".into());
+        assert_eq!((run.method(), run.path(), run.body()), (Method::POST, "/v1/connectors/github/run".into(), None));
+        let data = serde_json::json!({"title": "x"}).as_object().unwrap().clone();
+        let feed = Call::HandOverFeed {
+            connector: "github".into(),
+            feed: "pull_requests".into(),
+            records: vec![FeedRecord::new("a/b#1", data)],
+        };
+        assert_eq!((feed.method(), feed.path()), (Method::PUT, "/v1/connectors/github/feeds/pull_requests".into()));
+        assert_eq!(feed.body(), Some(serde_json::json!({"records": [{"key": "a/b#1", "data": {"title": "x"}}]})));
     }
 }

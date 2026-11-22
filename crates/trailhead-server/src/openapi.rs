@@ -338,6 +338,11 @@ impl Modify for Common {
         routes::apps::list_events,
         crate::stream::app_events,
         routes::apps::undo,
+        routes::connectors::list,
+        routes::connectors::show,
+        routes::connectors::change,
+        routes::connectors::run,
+        routes::connectors::hand_over,
     ),
     components(schemas(ErrorBody, ErrorDetail))
 )]

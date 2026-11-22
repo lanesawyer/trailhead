@@ -88,6 +88,11 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/apps/{app}/events"),
     ("get", "/v1/apps/{app}/events/stream"),
     ("post", "/v1/apps/{app}/undo"),
+    ("get", "/v1/connectors"),
+    ("get", "/v1/connectors/{id}"),
+    ("patch", "/v1/connectors/{id}"),
+    ("post", "/v1/connectors/{id}/run"),
+    ("put", "/v1/connectors/{id}/feeds/{feed}"),
 ];
 
 async fn fetch_doc() -> Value {
