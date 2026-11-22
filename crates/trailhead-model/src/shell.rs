@@ -46,6 +46,11 @@ pub struct ShellBuild {
     /// How many commits there are after `since` in all, of which `changes` lists the newest.
     #[serde(default)]
     pub changes_total: usize,
+    /// The apps repo as `owner/name` on GitHub, from its checkout's `origin`, so a shell can link a build to its
+    /// commit. `None` before the builder's first look, for an `origin` that isn't on GitHub, and when there is no
+    /// builder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 impl ShellBuild {

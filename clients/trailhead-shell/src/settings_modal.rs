@@ -444,6 +444,31 @@ mod tests {
         assert_eq!(tabs(&mut app), before, "every tab is the entity it was");
     }
 
+    /// Where the About page's commit link goes, while it shows.
+    fn commit_link(app: &mut App) -> Option<String> {
+        let world = app.world_mut();
+        let (link, node) = world
+            .query_filtered::<(&trailhead_ui::ExternalLink, &Node), With<crate::settings_pages::CommitLink>>()
+            .single(world)
+            .unwrap();
+        (node.display != Display::None).then(|| link.url.clone())
+    }
+
+    #[test]
+    fn the_about_page_links_the_build_to_its_commit_once_the_server_says_whose_it_is() {
+        use crate::update::{BuildRepo, ThisBuild};
+        let mut app = app();
+        app.insert_resource(ThisBuild("0123abc".into())).init_resource::<BuildRepo>();
+        open(&mut app, Some(ABOUT));
+        assert_eq!(commit_link(&mut app), None, "not before the repo is known");
+        let link = one::<With<crate::settings_pages::CommitLink>>(&mut app);
+        app.world_mut().insert_resource(BuildRepo(Some("lane/trailhead-apps".into())));
+        settle(&mut app);
+        let url = "https://github.com/lane/trailhead-apps/commit/0123abc";
+        assert_eq!(commit_link(&mut app).as_deref(), Some(url));
+        assert_eq!(one::<With<crate::settings_pages::CommitLink>>(&mut app), link, "shown in place");
+    }
+
     #[test]
     fn it_opens_at_the_page_asked_for_with_that_tab_picked_and_one_modal() {
         let mut app = app();
@@ -453,6 +478,7 @@ mod tests {
         assert_eq!(picked(&mut app), Some(ABOUT));
         assert_eq!(text_of(&mut app, Shows::Build), "Run directly, not by the launcher");
         assert_eq!(text_of(&mut app, Shows::Apps), "Notes (notes)\nOther (other)");
+        assert_eq!(commit_link(&mut app), None, "a shell run directly is of no commit to link");
         open(&mut app, Some(CONNECTION));
         assert_eq!((count::<With<SettingsModal>>(&mut app), shown(&mut app)), (1, vec![CONNECTION]), "no second modal");
     }

@@ -395,6 +395,7 @@ fn live_with_news(shot: &mut ShotApp) {
     ]
     .map(String::from);
     shot.world_mut().insert_resource(UpdateReady(Some(Newer::new("4567def", &subjects, 6))));
+    shot.world_mut().insert_resource(trailhead_shell::update::BuildRepo(Some("someone/apps".into())));
     settle(shot);
 }
 

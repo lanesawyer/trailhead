@@ -11,7 +11,8 @@
 //!   only in a shell with a connection.
 //! - **Server**: what the server's user config says, edited from the window ([`crate::server_page`]). Listed only in
 //!   a shell with a connection.
-//! - **About**: the build the launcher started (or that the shell was run directly), whether a newer one is ready,
+//! - **About**: the build the launcher started (or that the shell was run directly), with a link to its commit on
+//!   GitHub once the server has said which repo it is of ([`BuildRepo`]), whether a newer one is ready,
 //!   the apps the window holds, and where the shell keeps its files. Read-only.
 //!
 //! Each page's texts are spawned empty and kept current in place by `refresh_*`, so a page shows what is true now
@@ -24,8 +25,9 @@ use bevy::prelude::*;
 use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use trailhead_ui::{
-    Appearance, ButtonGroup, ButtonKind, ChangeTextSize, Icon, Picked, TextSize, ThemeChoice, UiPlace, button,
-    button_group, copy_block, row, set_text, setting, size, spawn_settings_section, text,
+    Appearance, ButtonGroup, ButtonKind, ChangeTextSize, ExternalLink, Icon, Picked, TextSize, ThemeChoice, UiPlace,
+    button, button_group, copy_block, link_button, row, set_display, set_text, setting, size, spawn_settings_section,
+    text,
 };
 
 use crate::connect::allow_command;
@@ -33,7 +35,7 @@ use crate::connection::{Api, Connection, ConnectionStatus, Dialed, LocalEndpoint
 use crate::net::NetCommand;
 use crate::previews::transition_setting;
 use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, NOTIFICATIONS, SERVER, SHELL_GROUP, SettingsPage};
-use crate::update::{ThisBuild, UpdateReady};
+use crate::update::{BuildRepo, ThisBuild, UpdateReady};
 use crate::{AppId, Apps, SHELL};
 
 /// The shell's directory, where it keeps the theme, the window's place and each app's `LocalStore`. Set by
@@ -170,8 +172,20 @@ fn connection_page(In(page): In<Entity>, mut commands: Commands) {
     commands.spawn_scene(allow).insert(ChildOf(window.rows));
 }
 
+/// The About page's link to the commit this build is of.
+#[derive(Component, Clone, Copy, Default, Debug)]
+pub struct CommitLink;
+
 fn about_page(In(page): In<Entity>, mut commands: Commands) {
-    commands.spawn_scene(value(Shows::Build, "Build", "")).insert(ChildOf(page));
+    // Hidden until the server has said which repo the build is of: `refresh_about` gives it its address.
+    let build = bsn_list! {
+        @row()
+        Children [
+            @text("", size::BODY) Shows::Build
+            -- @link_button(Icon::ExternalLink, "View the commit", "", ButtonKind::Plain) CommitLink Node { display: Display::None }
+        ]
+    };
+    commands.spawn_scene(setting("Build", "", build)).insert(ChildOf(page));
     commands.spawn_scene(value(Shows::Update, "Updates", "")).insert(ChildOf(page));
     commands
         .spawn_scene(value(Shows::Apps, "Apps in this window", "Each app's name, and its id."))
@@ -272,6 +286,23 @@ fn refresh_connection(
         } else if !off && disabled {
             commands.entity(button).remove::<InteractionDisabled>();
         }
+    }
+}
+
+/// Keeps the About page's link to the build's commit: shown once the server has said which repo the build is of,
+/// hidden in a shell run directly.
+fn show_commit_link(
+    mut links: Query<(Entity, &mut ExternalLink), With<CommitLink>>,
+    mut nodes: Query<&mut Node>,
+    this: Option<Res<ThisBuild>>,
+    repo: Option<Res<BuildRepo>>,
+) {
+    let commit = this.as_deref().zip(repo.as_deref()).and_then(|(build, repo)| repo.commit_url(&build.0));
+    for (link, mut to) in &mut links {
+        if let Some(url) = commit.as_ref().filter(|url| **url != to.url) {
+            to.url = url.clone();
+        }
+        set_display(&mut nodes, link, commit.is_some());
     }
 }
 
@@ -376,7 +407,7 @@ impl Plugin for SettingsPagesUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_theme_pick)
             .add_observer(on_text_size_pick)
-            .add_systems(Update, (refresh_about, show_theme, show_text_size).before(UiPlace));
+            .add_systems(Update, (refresh_about, show_commit_link, show_theme, show_text_size).before(UiPlace));
         if app.world().contains_resource::<State<Connection>>() {
             app.add_observer(on_connection_act)
                 .add_observer(on_copy)
