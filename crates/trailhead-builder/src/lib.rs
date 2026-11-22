@@ -49,11 +49,21 @@ pub struct Builder<T> {
     checkout: Arc<RwLock<()>>,
     /// The checkout's `origin` URL as last read, which [`Builds::repo`] answers from without asking git.
     origin: Arc<std::sync::RwLock<Option<String>>>,
+    /// Counts the builds finished, for [`Builds::built`].
+    built: Arc<watch::Sender<u64>>,
 }
 
 impl<T: Tools> Builder<T> {
     pub fn new(tools: T, config: ShellConfig, repo: PathBuf, layout: Layout) -> Self {
-        Builder { tools: Arc::new(tools), config, repo, layout, checkout: Arc::default(), origin: Arc::default() }
+        Builder {
+            tools: Arc::new(tools),
+            config,
+            repo,
+            layout,
+            checkout: Arc::default(),
+            origin: Arc::default(),
+            built: Arc::new(watch::Sender::new(0)),
+        }
     }
 
     /// What this builder has built, for the server to answer from.
@@ -63,6 +73,7 @@ impl<T: Tools> Builder<T> {
             tools: self.tools.clone(),
             checkout: self.checkout.clone(),
             origin: self.origin.clone(),
+            built: self.built.clone(),
         }
     }
 
@@ -107,6 +118,9 @@ impl<T: Tools> Builder<T> {
         };
         self.save(&state);
         self.prune(&state);
+        if matches!(step, Step::Built(_)) {
+            self.built.send_modify(|n| *n += 1);
+        }
         Ok(step)
     }
 
@@ -166,7 +180,6 @@ impl<T: Tools> Builder<T> {
 
     /// Looks every `poll_secs` until stopped. A build in progress when it stops is killed, and `building` cleared.
     async fn run(self, mut stop: watch::Receiver<bool>) {
-        self.clear_building();
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.poll_secs));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_error: Option<String> = None;
@@ -200,6 +213,8 @@ impl<T: Tools> Builder<T> {
 
     /// Runs the builder on its own task until [`Running::stop`].
     pub fn spawn(self) -> Running {
+        // Before it returns, so a reader of the checkout never sees a build a stopped builder left in progress.
+        self.clear_building();
         let (stop, stopped) = watch::channel(false);
         let builds = self.builds();
         Running { stop, builds, task: tokio::spawn(self.run(stopped)) }
@@ -213,13 +228,20 @@ pub struct Builds {
     tools: Arc<dyn Tools>,
     checkout: Arc<RwLock<()>>,
     origin: Arc<std::sync::RwLock<Option<String>>>,
+    built: Arc<watch::Sender<u64>>,
 }
 
 impl Builds {
     /// Builds kept in `layout`, their history read with `tools`. A builder's own is [`Builder::builds`], which
     /// never reads the history while it checks the clone out; this one has no builder to wait for.
     pub fn new(layout: Layout, tools: impl Tools) -> Builds {
-        Builds { layout, tools: Arc::new(tools), checkout: Arc::default(), origin: Arc::default() }
+        Builds {
+            layout,
+            tools: Arc::new(tools),
+            checkout: Arc::default(),
+            origin: Arc::default(),
+            built: Arc::new(watch::Sender::new(0)),
+        }
     }
 
     /// These builds, from an apps repo whose `origin` is `url`, which a builder otherwise learns on its first look.
@@ -262,6 +284,22 @@ impl Builds {
 }
 
 impl Builds {
+    /// Changes each time a build finishes, after its state is saved: the moment to read [`Builds::with_built_checkout`]
+    /// again.
+    pub fn built(&self) -> watch::Receiver<u64> {
+        self.built.subscribe()
+    }
+
+    /// Runs `f` on the builder's clone while it holds the newest build's source, and keeps it from being checked out
+    /// meanwhile. `None`, without running `f`, while nothing is built, while a build is in progress (the clone then
+    /// holds a commit not yet built) and after a build failed (it holds the commit that failed).
+    pub async fn with_built_checkout<R>(&self, f: impl FnOnce(&Path) -> R) -> Option<R> {
+        let _reading = self.checkout.read().await;
+        let state = self.layout.load();
+        let built = state.current.is_some() && state.building.is_none() && state.error.is_none();
+        built.then(|| f(&self.layout.src()))
+    }
+
     /// The source of the build `rev`, as a gzipped tar, for a launcher on another machine to build itself
     /// (`docs/app-platform.md`, "The window on another machine"). Only the builds kept: the newest and the one
     /// before it. `None` for anything else.

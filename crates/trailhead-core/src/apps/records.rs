@@ -9,7 +9,9 @@ use super::AppTx;
 use crate::db::{collect, first, get_json, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store};
-use trailhead_model::app_data::{Collection, Declaration, Outcome, Record, ReplaceCounts, Written, check_key};
+use trailhead_model::app_data::{
+    BatchWrite, Collection, Declaration, Outcome, Record, ReplaceCounts, Written, check_key,
+};
 
 /// A record to create.
 #[derive(Debug, Clone)]
@@ -61,6 +63,22 @@ pub enum AppWrite {
         key: String,
         data: Value,
     },
+}
+
+impl From<BatchWrite> for AppWrite {
+    fn from(w: BatchWrite) -> AppWrite {
+        match w {
+            BatchWrite::Create { collection, key, data } => AppWrite::Create(NewRecord { collection, key, data }),
+            BatchWrite::Patch { id, data, version } => {
+                AppWrite::Update { id, change: RecordChange::Merge(data), expected_version: version }
+            }
+            BatchWrite::Replace { id, data, version } => {
+                AppWrite::Update { id, change: RecordChange::Replace(data), expected_version: version }
+            }
+            BatchWrite::Delete { id, version } => AppWrite::Delete { id, expected_version: version },
+            BatchWrite::Put { collection, key, data } => AppWrite::Put { collection, key, data },
+        }
+    }
 }
 
 const RECORD_COLS: &str = "id, collection, key, data, version, created_at, updated_at, created_by";
@@ -355,10 +373,23 @@ impl Store {
 
     /// A page of a declared collection's records.
     pub async fn list_records(&self, ctx: &Ctx, app: &str, name: &str, page: RecordPage) -> Result<Vec<Record>> {
+        Ok(self.list_records_at(ctx, app, name, page).await?.0)
+    }
+
+    /// [`Store::list_records`], with the id of the app's newest event as the page was read, in one read: the page
+    /// holds every change up to that event and none after it, so a stream resumed after it misses and repeats nothing.
+    pub async fn list_records_at(
+        &self,
+        ctx: &Ctx,
+        app: &str,
+        name: &str,
+        page: RecordPage,
+    ) -> Result<(Vec<Record>, i64)> {
         let db = self.app(ctx, app).await?;
         collection(&db.declaration(), name)?;
         let conn = db.reader()?;
-        let rows = conn
+        let tx = conn.transaction_with_behavior(libsql::TransactionBehavior::Deferred).await?;
+        let rows = tx
             .query(
                 &format!(
                     "SELECT {RECORD_COLS} FROM records WHERE collection = ?1 AND (?2 IS NULL OR id > ?2) ORDER BY id LIMIT ?3"
@@ -366,7 +397,12 @@ impl Store {
                 libsql::params![name, page.after.map(|a| a.to_string()), page.limit.unwrap_or(100).clamp(1, MAX_PAGE)],
             )
             .await?;
-        collect(rows, record_from_row).await
+        let records = collect(rows, record_from_row).await?;
+        let mut rows = tx.query("SELECT coalesce(max(id), 0) FROM events", ()).await?;
+        let event_id = rows.next().await?.map(|r| r.get(0)).transpose()?.unwrap_or(0);
+        drop(rows);
+        tx.commit().await?;
+        Ok((records, event_id))
     }
 
     /// Changes a record's data; with `expected_version`, only if the record is still at it (`version_conflict`

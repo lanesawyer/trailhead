@@ -260,8 +260,12 @@ impl From<FieldType> for String {
 pub type Fields = BTreeMap<String, FieldType>;
 
 /// One collection: its fields, and for one filled from a connector's feed, which feed (`github.pull_requests`).
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Collection {
+    /// Each field's type: `string`, `integer`, `number`, `boolean`, `timestamp`, `day`, `url` or `json`, then `[]` for a
+    /// list of them, then `?` for optional, like `string[]?`.
+    #[cfg_attr(feature = "openapi", schema(value_type = BTreeMap<String, String>))]
     pub fields: Fields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -293,6 +297,7 @@ impl Collection {
 
 /// An app's collections, as its `collections.toml` declares them. A fed collection's fields are its feed's, which
 /// [`Declaration::with_feeds`] fills in.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Declaration {
     pub collections: BTreeMap<String, Collection>,
@@ -439,6 +444,7 @@ fn parse_collection(name: &str, body: &toml::Value) -> Result<Collection, ParseE
 }
 
 /// One record in an app's collection.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Record {
     pub id: Uuid,
@@ -446,6 +452,8 @@ pub struct Record {
     /// The name something outside gave it, unique in its collection.
     #[serde(default)]
     pub key: Option<String>,
+    /// Its fields, as the collection declares them.
+    #[cfg_attr(feature = "openapi", schema(value_type = Object))]
     pub data: Map<String, Value>,
     /// 1 when created, and one more each change.
     pub version: i64,
@@ -456,6 +464,7 @@ pub struct Record {
 }
 
 /// What a write did to its record.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -467,10 +476,73 @@ pub enum Outcome {
 }
 
 /// A record and what a write did to it; for [`Outcome::Deleted`], the record as it was.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Written {
     pub outcome: Outcome,
     pub record: Record,
+}
+
+/// An app with data, and its collections as last declared: `GET /v1/apps/{app}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct App {
+    pub id: String,
+    #[serde(flatten)]
+    pub declaration: Declaration,
+}
+
+/// One write in `POST /v1/apps/{app}/batch`, named by `op`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub enum BatchWrite {
+    /// A new record; a key already in the collection is refused.
+    Create {
+        collection: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+        data: Value,
+    },
+    /// A JSON merge patch (RFC 7396) of a record's fields; with `version`, only if the record is still at it.
+    Patch {
+        id: Uuid,
+        #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+        data: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<i64>,
+    },
+    /// A record's fields, whole; its key stays.
+    Replace {
+        id: Uuid,
+        #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+        data: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<i64>,
+    },
+    Delete {
+        id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<i64>,
+    },
+    /// Makes the record with this key look like `data`, creating it if there is none.
+    Put {
+        collection: String,
+        key: String,
+        #[cfg_attr(feature = "openapi", schema(value_type = Object))]
+        data: Value,
+    },
+}
+
+/// What `POST /v1/apps/{app}/batch` did.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BatchWritten {
+    /// The batch every write is in, to undo them together.
+    pub batch_id: Uuid,
+    /// What each write did, in order.
+    pub results: Vec<Written>,
 }
 
 /// What replacing a collection's set did.
@@ -484,6 +556,7 @@ pub struct ReplaceCounts {
 
 /// One change in an app's own log. Shaped like the task log's [`crate::Event`], with the collection as the entity and
 /// the record's id as the entity id; each app's file numbers its own events.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppEvent {
     pub id: i64,
@@ -501,6 +574,7 @@ pub struct AppEvent {
 }
 
 /// What an undo or revert in one app's file did.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppUndoReport {
     pub batch_id: Uuid,
@@ -508,6 +582,7 @@ pub struct AppUndoReport {
     pub skipped: Vec<AppSkipped>,
 }
 
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppReverted {
     pub collection: String,
@@ -516,6 +591,7 @@ pub struct AppReverted {
     pub event_id: Option<i64>,
 }
 
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSkipped {
     pub collection: String,

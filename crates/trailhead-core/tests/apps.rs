@@ -506,3 +506,24 @@ async fn records_page_in_the_order_they_were_made() {
     assert_eq!(rest, ids[2..]);
     assert!(matches!(s.list_records(h, "cairn", "nope", RecordPage::default()).await, Err(Error::NotFound(_))));
 }
+
+#[tokio::test]
+async fn a_page_says_which_event_it_was_read_at_and_apps_are_listed_by_reach() {
+    let env = env().await;
+    let (s, h) = (&env.store, &env.human);
+    s.register_app(h, "notes", declaration("[collections.notes]\nfields = { text = \"string\" }")).await.unwrap();
+    let (records, at) = s.list_records_at(h, "cairn", "snoozes", RecordPage::default()).await.unwrap();
+    assert_eq!((records.len(), at), (0, 0));
+    s.create_record(h, "cairn", new("a")).await.unwrap();
+    s.create_record(h, "cairn", new("b")).await.unwrap();
+    let (records, at) = s.list_records_at(h, "cairn", "snoozes", RecordPage::default()).await.unwrap();
+    assert_eq!((records.len(), at), (2, 2));
+
+    let ids = |apps: Vec<(String, Declaration)>| apps.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(ids(s.list_apps(h).await.unwrap()), ["cairn", "notes"]);
+    let bot = env.agent("bot").await;
+    assert!(s.list_apps(&bot).await.unwrap().is_empty());
+    assert_eq!(ids(s.list_apps(&bot.with_apps(vec!["notes".into()])).await.unwrap()), ["notes"]);
+    let elsewhere = Ctx::user(uuid::Uuid::now_v7(), h.user_id);
+    assert!(s.list_apps(&elsewhere).await.unwrap().is_empty());
+}

@@ -73,6 +73,21 @@ const ROUTES: &[(&str, &str)] = &[
     ("get", "/v1/webhooks/{id}/deliveries"),
     ("delete", "/v1/tokens/{id}"),
     ("patch", "/v1/tokens/{id}"),
+    ("get", "/v1/apps"),
+    ("get", "/v1/apps/{app}"),
+    ("put", "/v1/apps/{app}/declaration"),
+    ("get", "/v1/apps/{app}/records/{collection}"),
+    ("post", "/v1/apps/{app}/records/{collection}"),
+    ("get", "/v1/apps/{app}/records/{collection}/{id}"),
+    ("patch", "/v1/apps/{app}/records/{collection}/{id}"),
+    ("put", "/v1/apps/{app}/records/{collection}/{id}"),
+    ("delete", "/v1/apps/{app}/records/{collection}/{id}"),
+    ("get", "/v1/apps/{app}/keys/{collection}/{key}"),
+    ("put", "/v1/apps/{app}/keys/{collection}/{key}"),
+    ("post", "/v1/apps/{app}/batch"),
+    ("get", "/v1/apps/{app}/events"),
+    ("get", "/v1/apps/{app}/events/stream"),
+    ("post", "/v1/apps/{app}/undo"),
 ];
 
 async fn fetch_doc() -> Value {

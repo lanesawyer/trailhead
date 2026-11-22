@@ -1,6 +1,7 @@
 //! The REST API under `/v1`, one module per resource.
 
 pub(crate) mod access;
+pub(crate) mod apps;
 pub(crate) mod attachments;
 pub(crate) mod claims;
 pub(crate) mod comments;
@@ -19,7 +20,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use utoipa::IntoParams;
@@ -86,6 +87,19 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/webhooks", get(webhooks::list_webhooks).post(webhooks::create_webhook))
         .route("/webhooks/{id}", delete(webhooks::delete_webhook))
         .route("/webhooks/{id}/deliveries", get(webhooks::webhook_deliveries))
+        .route("/apps", get(apps::list_apps))
+        .route("/apps/{app}", get(apps::get_app))
+        .route("/apps/{app}/declaration", put(apps::put_declaration))
+        .route("/apps/{app}/records/{collection}", get(apps::list_records).post(apps::create_record))
+        .route(
+            "/apps/{app}/records/{collection}/{id}",
+            get(apps::get_record).patch(apps::patch_record).put(apps::replace_record).delete(apps::delete_record),
+        )
+        .route("/apps/{app}/keys/{collection}/{key}", get(apps::get_by_key).put(apps::put_by_key))
+        .route("/apps/{app}/batch", post(apps::batch))
+        .route("/apps/{app}/events", get(apps::list_events))
+        .route("/apps/{app}/events/stream", get(crate::stream::app_events))
+        .route("/apps/{app}/undo", post(apps::undo))
 }
 
 /// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
@@ -126,7 +140,7 @@ fn if_match(headers: &HeaderMap) -> ApiResult<Option<i64>> {
     if s == "*" {
         return Ok(None);
     }
-    s.parse().map(Some).map_err(|_| invalid("If-Match must be a task version"))
+    s.parse().map(Some).map_err(|_| invalid("If-Match must be a version, like \"3\""))
 }
 
 fn with_etag(version: i64, body: impl Serialize) -> Response {

@@ -245,6 +245,24 @@ impl Store {
         .await
     }
 
+    /// The apps with a data file in the context's workspace that it reaches, by id, with their collections as last
+    /// registered.
+    pub async fn list_apps(&self, ctx: &Ctx) -> Result<Vec<(String, Declaration)>> {
+        let mut out = Vec::new();
+        for app in self.apps.app_ids()? {
+            if !ctx.reaches_app(&app) {
+                continue;
+            }
+            match self.apps.get(&app, ctx.workspace_id, false).await {
+                Ok(db) => out.push((app, db.declaration())),
+                // Another workspace's app.
+                Err(Error::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
     /// The app's collections as last registered.
     pub async fn app_declaration(&self, ctx: &Ctx, app: &str) -> Result<Declaration> {
         Ok(self.app(ctx, app).await?.declaration())

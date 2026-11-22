@@ -340,6 +340,28 @@ async fn the_history_is_never_read_while_the_clone_is_checked_out() {
     assert!(rig.builder.checkout.try_write().is_ok(), "and let go after");
 }
 
+#[tokio::test]
+async fn the_built_checkout_is_read_only_while_it_holds_the_newest_build() {
+    let rig = rig();
+    let builds = rig.builder.builds();
+    let mut built = builds.built();
+    let src = |p: &Path| p.to_path_buf();
+    assert_eq!(builds.with_built_checkout(src).await, None, "nothing is built yet");
+    rig.step_at("a").await;
+    assert!(built.has_changed().unwrap(), "a build wakes a reader");
+    built.mark_unchanged();
+    assert_eq!(builds.with_built_checkout(src).await, Some(rig.layout.src()));
+
+    rig.layout.save(&State { building: some("b"), ..rig.layout.load() }).unwrap();
+    assert_eq!(builds.with_built_checkout(src).await, None, "the clone holds a commit not yet built");
+    rig.layout.save(&State { building: None, ..rig.layout.load() }).unwrap();
+
+    rig.fake.failing.lock().unwrap().insert("c".into());
+    assert_eq!(rig.step_at("c").await, Step::Failed("c".into()));
+    assert!(!built.has_changed().unwrap(), "a failure is no build");
+    assert_eq!(builds.with_built_checkout(src).await, None, "the clone holds the commit that failed");
+}
+
 #[test]
 fn a_tail_is_the_last_lines() {
     let dir = tempfile::tempdir().unwrap();

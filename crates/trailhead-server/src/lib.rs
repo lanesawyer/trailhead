@@ -3,6 +3,7 @@
 
 mod ask;
 mod auth;
+pub mod declarations;
 mod error;
 mod idempotency;
 mod llms;
@@ -253,7 +254,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     spawn_archiver(state.clone());
     spawn_heap_trim();
     webhooks::spawn(state.clone());
-    spawn_reminders(state.clone(), ctx);
+    spawn_reminders(state.clone(), ctx.clone());
     if let Some(paths) = cfg.factory.as_ref().or(cfg.shell.as_ref()) {
         let _ = state.config.set(user_config::ConfigFile::open(user_config::path(paths)));
     }
@@ -282,6 +283,9 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     #[cfg(not(feature = "factory"))]
     let _ = &cfg.factory;
     let builder = cfg.shell.as_ref().and_then(|paths| start_builder(&state, paths));
+    if let Some(builds) = state.shell.get() {
+        spawn_declarations(state.clone(), builds.clone(), ctx);
+    }
     if let Some(pid_file) = &cfg.pid_file {
         write_pid_file(pid_file)?;
     }
@@ -423,6 +427,25 @@ fn start_builder(state: &AppState, paths: &Paths) -> Option<trailhead_builder::R
             None
         }
     }
+}
+
+/// Registers the apps' declarations from the builder's checkout now and after each build it finishes, as the local
+/// user, until the server stops.
+fn spawn_declarations(state: Arc<AppState>, builds: trailhead_builder::Builds, ctx: Ctx) {
+    let mut built = builds.built();
+    let mut stopping = state.shutdown.subscribe();
+    tokio::spawn(async move {
+        loop {
+            built.mark_unchanged();
+            if declarations::register_built(&state.store, &ctx.next_batch(), &builds).await.is_none() {
+                tracing::info!(target: "shell", "no built apps repo to read the apps' collections from yet");
+            }
+            tokio::select! {
+                changed = built.changed() => if changed.is_err() { break },
+                _ = stopping.wait_for(|s| *s) => break,
+            }
+        }
+    });
 }
 
 /// Why [`serve_local`] returned.
