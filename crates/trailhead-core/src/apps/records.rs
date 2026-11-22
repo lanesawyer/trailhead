@@ -10,7 +10,7 @@ use crate::db::{collect, first, get_json, get_ts, get_uuid};
 use crate::error::{Error, Result};
 use crate::store::{Ctx, Store};
 use trailhead_model::app_data::{
-    BatchWrite, Collection, Declaration, Outcome, Record, ReplaceCounts, Written, check_key,
+    BatchWrite, Collection, Declaration, Outcome, Record, ReplaceCounts, Written, check_app_id, check_key,
 };
 
 /// A record to create.
@@ -459,9 +459,10 @@ impl Store {
         db.write(ctx, self.now(), async |tx| replace_set(tx, collection, set, false).await).await
     }
 
-    /// [`Store::replace_set`] for a collection filled from a feed, the only way one is written. Connectors don't
-    /// exist yet: until they do, nothing outside the engine's callers reaches this, and a connector's run will be
-    /// checked here to be the feed's own connector (`connector/<id>`) before it may call it.
+    /// [`Store::replace_set`] for a collection filled from a feed, the only way one is written, and only by the feed's
+    /// own connector: the context must be the agent `connector/<id>` of the connector the collection's `from` names.
+    /// A connector knows nothing of apps, so its token names none; being the feed's connector is what lets it reach
+    /// the app.
     pub async fn replace_feed_set(
         &self,
         ctx: &Ctx,
@@ -469,7 +470,20 @@ impl Store {
         collection: &str,
         set: Vec<(String, Value)>,
     ) -> Result<ReplaceCounts> {
-        let db = self.app(ctx, app).await?;
-        db.write(ctx, self.now(), async |tx| replace_set(tx, collection, set, true).await).await
+        check_app_id(app)?;
+        let Some(connector) = self.connector_of(ctx).await? else {
+            return Err(Error::Forbidden("only a feed's connector writes a collection filled from it".into()));
+        };
+        let db = self.apps.get(app, ctx.workspace_id, false).await?;
+        db.write(ctx, self.now(), async |tx| {
+            let from = self::collection(&tx.decl, collection)?.from.clone().unwrap_or_default();
+            if from.split_once('.').map(|(c, _)| c) != Some(connector.as_str()) {
+                return Err(Error::Forbidden(format!(
+                    "collection `{collection}` of app {app} isn't filled from a feed of connector {connector}"
+                )));
+            }
+            replace_set(tx, collection, set, true).await
+        })
+        .await
     }
 }

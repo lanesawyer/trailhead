@@ -5,6 +5,7 @@ mod apps;
 mod attachments;
 mod claims;
 mod comments;
+mod connectors;
 mod db;
 mod deps;
 mod error;

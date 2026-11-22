@@ -431,12 +431,17 @@ async fn a_fed_collection_is_written_only_from_its_feed() {
     forbidden(s.create_record(h, "cairn", fed).await);
     forbidden(s.put_record(h, "cairn", "pull_requests", "a", pr("x")).await);
     forbidden(s.replace_set(h, "cairn", "pull_requests", vec![("a".into(), pr("x"))]).await);
-    invalid(
-        s.replace_feed_set(h, "cairn", "snoozes", vec![("a".into(), snooze("x"))]).await,
-        "isn't filled from a feed",
-    );
+    forbidden(s.replace_feed_set(h, "cairn", "pull_requests", vec![("a".into(), pr("x"))]).await);
 
-    let c = s.replace_feed_set(h, "cairn", "pull_requests", vec![("a".into(), pr("x"))]).await.unwrap();
+    let github = s.connector_agent(h, "github").await.unwrap();
+    let github = Ctx { agent_id: Some(github.id), apps: Some(Vec::new()), ..h.clone() };
+    forbidden(s.replace_feed_set(&github, "cairn", "snoozes", vec![("a".into(), snooze("x"))]).await);
+    let jira = s.connector_agent(h, "jira").await.unwrap();
+    let jira = Ctx { agent_id: Some(jira.id), ..github.clone() };
+    forbidden(s.replace_feed_set(&jira, "cairn", "pull_requests", vec![("a".into(), pr("x"))]).await);
+    forbidden(s.get_record_by_key(&github, "cairn", "pull_requests", "a").await);
+
+    let c = s.replace_feed_set(&github, "cairn", "pull_requests", vec![("a".into(), pr("x"))]).await.unwrap();
     assert_eq!(c.created, 1);
     let r = s.get_record_by_key(h, "cairn", "pull_requests", "a").await.unwrap();
     forbidden(s.update_record(h, "cairn", r.id, RecordChange::Replace(pr("y")), None).await);
@@ -526,4 +531,24 @@ async fn a_page_says_which_event_it_was_read_at_and_apps_are_listed_by_reach() {
     assert_eq!(ids(s.list_apps(&bot.with_apps(vec!["notes".into()])).await.unwrap()), ["notes"]);
     let elsewhere = Ctx::user(uuid::Uuid::now_v7(), h.user_id);
     assert!(s.list_apps(&elsewhere).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_connectors_agent_is_made_once_with_no_parent_and_its_name_is_kept() {
+    let env = env().await;
+    let (s, h) = (&env.store, &env.human);
+    let made = s.connector_agent(h, "github").await.unwrap();
+    assert_eq!((made.name.as_str(), made.parent_agent_id), ("connector/github", None));
+    assert_eq!(s.connector_agent(h, "github").await.unwrap().id, made.id);
+    invalid(s.create_agent(h, "connector").await, "kept for connectors");
+    let as_it = Ctx { agent_id: Some(made.id), ..h.clone() };
+    assert_eq!(s.connector_of(&as_it).await.unwrap().as_deref(), Some("github"));
+    assert_eq!(s.connector_of(h).await.unwrap(), None);
+    forbidden(s.connector_agent(&as_it, "jira").await);
+    invalid(s.connector_agent(h, "Not An Id").await, "connector's id");
+
+    assert_eq!(s.setting(h, "connector.github").await.unwrap(), None);
+    s.set_setting(h, "connector.github", &json!({"enabled": true})).await.unwrap();
+    assert_eq!(s.setting(h, "connector.github").await.unwrap(), Some(json!({"enabled": true})));
+    forbidden(s.set_setting(&as_it, "connector.github", &json!({})).await);
 }
