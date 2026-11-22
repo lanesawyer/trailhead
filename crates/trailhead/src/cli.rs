@@ -171,6 +171,21 @@ pub(crate) enum Cmd {
     Attachments {
         task: String,
     },
+    /// What you've been told: the unread notifications, newest first.
+    Inbox {
+        /// Also those read or resolved.
+        #[arg(long)]
+        all: bool,
+        /// At most this many.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Mark this one read, by id.
+        #[arg(long, value_name = "ID", conflicts_with = "read_all")]
+        read: Option<uuid::Uuid>,
+        /// Mark every one read.
+        #[arg(long)]
+        read_all: bool,
+    },
     /// Record a review verdict on a task: approve or request-changes. Doesn't move the task.
     Verdict {
         task: String,
@@ -434,7 +449,11 @@ pub(crate) enum AppCmd {
     /// at this iroh endpoint id, which `trailhead factory check` prints there as `endpoint`. Saved
     /// as `[shell] from` in the user config; `trailhead app` then builds each of that server's builds here and
     /// restarts onto them. Needs cargo on this machine, and no Trailhead server.
+    #[cfg(feature = "factory")]
     From { endpoint: String },
+    /// On a Mac: put the window in `~/Applications` as Trailhead.app, with its icon, so it starts from Spotlight,
+    /// Launchpad or the Dock. The app runs `trailhead app` with this terminal's PATH. Run it again after the CLI moves.
+    Install,
 }
 
 #[derive(Subcommand)]

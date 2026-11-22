@@ -257,6 +257,7 @@ mod tests {
             listed,
             [
                 ("Trailhead", "Appearance"),
+                ("Trailhead", "Notifications"),
                 ("Trailhead", "Connection"),
                 ("Trailhead", "Server"),
                 ("Trailhead", "About"),
@@ -281,7 +282,16 @@ mod tests {
             .collect();
         assert_eq!(
             words,
-            ["Trailhead", "tab appearance", "tab connection", "tab server", "tab about", "Notes", "tab tidy"]
+            [
+                "Trailhead",
+                "tab appearance",
+                "tab notifications",
+                "tab connection",
+                "tab server",
+                "tab about",
+                "Notes",
+                "tab tidy"
+            ]
         );
     }
 

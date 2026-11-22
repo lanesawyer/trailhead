@@ -49,19 +49,7 @@ impl Store {
             let answer =
                 NewComment { addressed_to: newest.map(|q| q.author_id), ..NewComment::new(CommentKind::Note, &body) };
             insert_comment(tx, before.id, &answer, &body).await?;
-            for q in &questions {
-                let after =
-                    save_comment(tx, &trailhead_model::Comment { resolved_at: Some(tx.now), ..q.clone() }).await?;
-                tx.emit_change(
-                    Entity::Comment,
-                    after.id.to_string(),
-                    Some(after.task_id),
-                    "comment.resolved",
-                    Some(q),
-                    Some(&after),
-                )
-                .await?;
-            }
+            resolve(tx, &questions).await?;
             let marker =
                 SetAside { by, at: tx.now.as_second(), question: newest.map(|q| q.body.clone()), note: note.clone() };
             let patch = json!({ TASK_FACTORY_KEY: { "set_aside": marker } });
@@ -78,8 +66,25 @@ impl Store {
     }
 }
 
+/// Marks `questions` resolved, each with its event.
+pub(crate) async fn resolve(tx: &Tx, questions: &[trailhead_model::Comment]) -> Result<()> {
+    for q in questions {
+        let after = save_comment(tx, &trailhead_model::Comment { resolved_at: Some(tx.now), ..q.clone() }).await?;
+        tx.emit_change(
+            Entity::Comment,
+            after.id.to_string(),
+            Some(after.task_id),
+            "comment.resolved",
+            Some(q),
+            Some(&after),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// The acting person's name.
-async fn user_name(tx: &Tx) -> Result<String> {
+pub(crate) async fn user_name(tx: &Tx) -> Result<String> {
     let rows = tx
         .conn
         .query("SELECT name FROM users WHERE id = ?1 AND workspace_id = ?2", [tx.ctx.user_id.to_string(), tx.ws()])
@@ -90,7 +95,7 @@ async fn user_name(tx: &Tx) -> Result<String> {
 }
 
 /// The task's unresolved questions, oldest first.
-async fn open_questions(tx: &Tx, task: &Task) -> Result<Vec<trailhead_model::Comment>> {
+pub(crate) async fn open_questions(tx: &Tx, task: &Task) -> Result<Vec<trailhead_model::Comment>> {
     let rows = tx
         .conn
         .query(

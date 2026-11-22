@@ -690,6 +690,7 @@ mod tests {
             env: Default::default(),
             credential: Credential { agent: "factory".into(), token: String::new() },
             shots: None,
+            plan: None,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 

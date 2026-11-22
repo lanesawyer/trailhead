@@ -274,7 +274,7 @@ fn cells(row: &ProjectRow) -> Vec<Box<dyn SceneList>> {
 }
 
 /// One row per project the filter lets through, following the mirror, updated in place.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_rows(
     filter: Res<ProjectsFilter>,
     projects: Query<&Mirrored<Project>>,

@@ -293,7 +293,7 @@ async fn two_runs_starting_together_never_take_the_same_idle_sandbox() {
     assert_eq!(r.tracker.task(&a).status, Status::InReview);
     assert_eq!(r.tracker.task(&b).status, Status::InReview);
 
-    let hosts = [r.tracker.task(&a).run.host.clone().unwrap(), r.tracker.task(&b).run.host.clone().unwrap()];
+    let hosts = [r.tracker.task(&a).run.host.unwrap(), r.tracker.task(&b).run.host.unwrap()];
     assert_ne!(hosts[0], hosts[1], "each run gets its own sandbox");
     let mut names: Vec<_> = r.compute.sandboxes().into_iter().map(|s| s.name).filter(|n| n.contains("-w")).collect();
     names.sort();

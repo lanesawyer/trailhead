@@ -11,6 +11,9 @@
 //! Shift is what a browser and a spreadsheet use, and the only way across for a wheel with no sideways axis of its
 //! own, which is most of them.
 //!
+//! A [`Canvas`](crate::Canvas) takes the wheel too, to zoom: whichever of a canvas and the two areas is nearest the
+//! pointer takes the whole turn, so a list inside a canvas scrolls and a canvas inside a page zooms (TRAIL-1668).
+//!
 //! Not `bevy_ui_widgets`' `ScrollArea`, which scrolls only down and would move the area before Shift was noticed.
 //!
 //! Give a node the marker and the matching `overflow` (`Overflow::scroll()` or `scroll_x()` for [`ScrollBoth`],
@@ -25,6 +28,7 @@ use bevy::picking::events::PointerScroll;
 use bevy::prelude::*;
 
 use super::space;
+use crate::canvas::{Canvas, wheel_canvas};
 
 /// The node that holds a panel's scrolling body and its scrollbar, so the bar runs along the body only. It takes the
 /// height the panel has left and may shrink below its content, so the body scrolls (TRAIL-836).
@@ -67,25 +71,50 @@ pub struct ScrollBoth;
 #[require(ScrollPosition)]
 pub struct ScrollDown;
 
+/// What a wheel turn may move above what the pointer is over: areas that scroll, and canvases, which zoom.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct Wheeled<'w, 's> {
+    parents: Query<'w, 's, &'static ChildOf>,
+    kinds: Query<'w, 's, (Has<ScrollDown>, Has<ScrollBoth>)>,
+    canvases: Query<'w, 's, (&'static mut Canvas, &'static ComputedNode, &'static UiGlobalTransform)>,
+}
+
 pub(super) fn on_scroll(
     mut scroll: On<PointerScroll>,
     keys: Res<ButtonInput<KeyCode>>,
     per_line: Res<MouseScrollPixelsPerLine>,
     ui_scale: Option<Res<UiScale>>,
-    parents: Query<&ChildOf>,
-    kinds: Query<(Has<ScrollDown>, Has<ScrollBoth>)>,
+    mut wheeled: Wheeled,
     mut areas: Query<(&ComputedNode, &mut ScrollPosition)>,
 ) {
     let start = scroll.entity;
+    let Wheeled { parents, kinds, canvases } = &mut wheeled;
     let lineage = || std::iter::once(start).chain(parents.iter_ancestors(start));
-    let down = lineage().find(|e| kinds.get(*e).is_ok_and(|(down, _)| down));
-    let both = lineage().find(|e| kinds.get(*e).is_ok_and(|(_, both)| both));
+    let down = lineage().position(|e| kinds.get(e).is_ok_and(|(down, _)| down));
+    let both = lineage().position(|e| kinds.get(e).is_ok_and(|(_, both)| both));
+    let canvas = lineage().position(|e| canvases.contains(e));
+    let scale = ui_scale.map_or(1.0, |s| s.0);
+    let pixels = scroll.to_pixels(&per_line);
+    let wheel = in_ui_pixels(Vec2::new(pixels.x, pixels.y), scale);
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    if let Some(at) = canvas.filter(|at| canvas_is_nearest(*at, down, both)) {
+        let Some(root) = lineage().nth(at) else { return };
+        if let Ok((mut canvas, computed, place)) = canvases.get_mut(root) {
+            let inverse = computed.inverse_scale_factor();
+            let top_left = (place.translation - computed.size() / 2.0) * inverse;
+            let pointer = scroll.pointer.position / scale.max(f32::EPSILON) - top_left;
+            // With Shift held a turn pans across, as it scrolls an area across.
+            let wheel = if shift && wheel.x == 0.0 { Vec2::new(wheel.y, 0.0) } else { wheel };
+            wheel_canvas(&mut canvas, wheel, pointer);
+        }
+        scroll.propagate(false);
+        return;
+    }
+    let down = down.and_then(|at| lineage().nth(at));
+    let both = both.and_then(|at| lineage().nth(at));
     if down.is_none() && both.is_none() {
         return;
     }
-    let pixels = scroll.to_pixels(&per_line);
-    let wheel = in_ui_pixels(Vec2::new(pixels.x, pixels.y), ui_scale.map_or(1.0, |s| s.0));
-    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
     let route = route(shift, wheel, down.is_some());
     if let (Some(down), Some(dy)) = (down, route.down) {
         move_by(&mut areas, down, Vec2::new(0.0, dy));
@@ -95,6 +124,12 @@ pub(super) fn on_scroll(
     }
     // Handled here, all of it, so nothing above scrolls it a second time.
     scroll.propagate(false);
+}
+
+/// Whether a canvas `at` steps above what the pointer is over is nearer than the nearest area that scrolls each way,
+/// and so takes the wheel turn.
+fn canvas_is_nearest(at: usize, down: Option<usize>, both: Option<usize>) -> bool {
+    [down, both].into_iter().flatten().all(|other| at < other)
 }
 
 /// A wheel turn or a touchpad swipe of `logical` pixels on screen, in the UI pixels a [`ScrollPosition`] is in: under a
@@ -156,7 +191,7 @@ pub(crate) fn scroll_range(computed: &ComputedNode) -> Vec2 {
 /// Brings an area's [`ScrollPosition`] back within its range once layout has found it shorter: content that shrank
 /// to fit leaves no position behind for the next growth to jump to. Layout draws within the range anyway; this keeps
 /// the position the wheel starts from honest.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(super) fn clamp_scroll_positions(
     mut areas: Query<
         (&ComputedNode, &mut ScrollPosition),
@@ -201,6 +236,14 @@ mod tests {
         // A touchpad's sideways swipe goes to the board, and a diagonal one is split.
         assert_eq!(route(false, Vec2::new(-5.0, 0.0), true), Route { down: None, both: Vec2::new(-5.0, 0.0) });
         assert_eq!(route(false, Vec2::new(-5.0, -2.0), true), Route { down: Some(-2.0), both: Vec2::new(-5.0, 0.0) });
+    }
+
+    #[test]
+    fn the_nearest_of_a_canvas_and_the_areas_takes_the_wheel() {
+        assert!(canvas_is_nearest(2, None, None), "a canvas on its own zooms");
+        assert!(canvas_is_nearest(1, None, Some(4)), "a canvas inside a page that scrolls zooms");
+        assert!(!canvas_is_nearest(3, Some(0), None), "a list that scrolls inside a canvas scrolls");
+        assert!(!canvas_is_nearest(3, Some(5), Some(1)));
     }
 
     #[test]

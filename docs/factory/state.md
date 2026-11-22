@@ -10,6 +10,8 @@ Decided: the control plane keeps no database of its own. Run state lives in Trai
 | --- | --- |
 | Task status, ownership, lease | Trailhead claims and statuses |
 | Sandbox name, PR URL, profile, grade, attempt and escalation count, spend so far | Trailhead task `metadata` |
+| A plan: the spec task's ask, chosen model, whether the plan is ready and when it was approved; each subtask's proposed grade | Trailhead task `metadata.plan` (TRAIL-1669) |
+| A planner's Claude Code session, between turns | The sandbox's disk, beside the checkout, while the spec task holds the sandbox; lost with it, after which the next turn starts a new session from the thread |
 | Live sandboxes, per-repo concurrency count (and the host-wide `max_sandboxes` across repos, which counts worker sandboxes only, not reviewers) | Sprites API, by labels (`repo`, `task`, `role`) |
 | Pooled worker Sprites and their warm checkpoints | Sprites API, labels (`pool`, `state`, `warm`) |
 | Spend within the current step | The daemon, re-reported on reconnect |

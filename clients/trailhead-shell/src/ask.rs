@@ -1,22 +1,26 @@
-//! Asking for a change or a new app from the window (`docs/app-platform.md`, "Asking for an app"). The rail's Ask
-//! button ([`crate::rail::AskButton`]) opens a form ([`crate::ask_panel`]) whose ask becomes a task the factory
-//! builds: a change to one of the apps the server can be asked about ([`Askable`]), or a new app.
+//! Asking for a change or a new app from the window (`docs/app-platform.md`, "Planning an ask"). The rail has two
+//! ways in: its Ask button ([`crate::rail::AskButton`]) asks for a change to one of the apps the server can be asked
+//! about ([`Askable`]), the app shown first, and the plus under the apps ([`crate::rail::NewAppButton`]) asks for a new
+//! app. Both open a form ([`crate::ask_panel`]) whose ask becomes a task. A change goes straight to a worker unless the
+//! person asks for it to be planned first; a new app is always planned. A planned ask is a spec task the planner talks
+//! over with the person, by the model they chose or the repo's default.
 //!
 //! This is the form's logic, headless: what the server says can be asked about, read with `GET /v1/shell/ask` when
 //! the connection goes live and each time the form opens; the draft ([`AskForm`]); whether it can be sent and why not
-//! ([`AskForm::gate`]); and sending it, `POST /v1/shell/ask` over the shell's connection as a [`Fetch`], since its
-//! answer (the task and project made) is what the form shows. Each distinct ask carries an idempotency key of its own,
-//! so asking again after an answer was lost replays the first instead of making a second task.
+//! ([`AskForm::gate`]); sending it, `POST /v1/shell/ask` over the shell's connection as a [`Fetch`], since its answer
+//! (the task and project made) is what the form shows; and what the form says of that answer ([`confirmation`]). Each
+//! distinct ask carries an idempotency key of its own, so asking again after an answer was lost replays the first
+//! instead of making a second task.
 
 use bevy::prelude::*;
-use trailhead_model::shell::{Ask, AskTarget, AskTargets, Asked, MAX_ASK_CHARS};
+use trailhead_model::shell::{Ask, AskTarget, AskTargets, Asked, MAX_ASK_CHARS, PLANNER_MODELS, chosen_key, key_from};
 
 use crate::connection::{Connection, ConnectionStatus, SendNet};
 use crate::net::{Fetch, NetCommand};
 use crate::{ActiveApp, AppId};
 
-/// The last choice in the form's "about" dropdown, after every app.
-pub const NEW_APP: &str = "A new app";
+/// The first choice in the planner's model dropdown, which sends no model.
+pub const REPO_DEFAULT: &str = "The repo's default";
 
 /// What the server last said can be asked about; `None` until it has answered.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
@@ -33,44 +37,79 @@ impl Askable {
     }
 }
 
-/// What an ask is about.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum About {
-    /// A change to the app whose project has this key.
-    Project(String),
+/// Which of the rail's buttons opened the form.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AskFor {
+    /// The Ask button: a change to an app.
     #[default]
+    Change,
+    /// The plus under the apps: a new app.
     NewApp,
 }
 
-impl About {
-    /// The default for a form opened over the app `active`: the project building `apps/<active>`, else the first
-    /// app, else a new one.
-    pub fn default_for(targets: &[AskTarget], active: AppId) -> About {
-        let path = format!("apps/{}", active.0);
-        targets
-            .iter()
-            .find(|t| t.path.as_deref() == Some(path.as_str()))
-            .or(targets.first())
-            .map_or(About::NewApp, |t| About::Project(t.project.clone()))
-    }
+/// What an ask is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum About {
+    /// A change to the app whose project has this key; `None` while there is none to choose.
+    Change(Option<String>),
+    NewApp,
+}
 
-    /// Its row in [`options`].
-    pub fn index(&self, targets: &[AskTarget]) -> usize {
-        match self {
-            About::Project(key) => targets.iter().position(|t| t.project == *key).unwrap_or(targets.len()),
-            About::NewApp => targets.len(),
-        }
-    }
-
-    /// The choice in row `index` of [`options`].
-    pub fn at(index: usize, targets: &[AskTarget]) -> About {
-        targets.get(index).map_or(About::NewApp, |t| About::Project(t.project.clone()))
+impl Default for About {
+    fn default() -> About {
+        About::Change(None)
     }
 }
 
-/// The dropdown's rows: each app by name, then [`NEW_APP`].
+impl About {
+    /// The default for a change asked over the app `active`: the project building `apps/<active>`, else the first
+    /// app.
+    pub fn default_for(targets: &[AskTarget], active: AppId) -> About {
+        let path = format!("apps/{}", active.0);
+        let shown = targets.iter().find(|t| t.path.as_deref() == Some(path.as_str()));
+        About::Change(shown.or(targets.first()).map(|t| t.project.clone()))
+    }
+
+    /// Its row in [`options`], for a change to an app that is there.
+    pub fn index(&self, targets: &[AskTarget]) -> Option<usize> {
+        match self {
+            About::Change(Some(key)) => targets.iter().position(|t| t.project == *key),
+            _ => None,
+        }
+    }
+
+    /// A change to the app in row `index` of [`options`].
+    pub fn at(index: usize, targets: &[AskTarget]) -> About {
+        About::Change(targets.get(index).map(|t| t.project.clone()))
+    }
+
+    pub fn asks_for(&self) -> AskFor {
+        match self {
+            About::Change(_) => AskFor::Change,
+            About::NewApp => AskFor::NewApp,
+        }
+    }
+}
+
+/// The app dropdown's rows: each app by name.
 pub fn options(targets: &[AskTarget]) -> Vec<String> {
-    targets.iter().map(|t| t.name.clone()).chain([NEW_APP.to_string()]).collect()
+    targets.iter().map(|t| t.name.clone()).collect()
+}
+
+/// The planner's model dropdown's rows: [`REPO_DEFAULT`], then each of [`PLANNER_MODELS`] with a capital.
+pub fn model_options() -> Vec<String> {
+    let capital = |m: &str| m.chars().take(1).flat_map(char::to_uppercase).chain(m.chars().skip(1)).collect();
+    [REPO_DEFAULT.to_string()].into_iter().chain(PLANNER_MODELS.iter().map(|m| capital(m))).collect()
+}
+
+/// The row of [`model_options`] showing `model`.
+pub fn model_index(model: Option<&str>) -> usize {
+    model.and_then(|m| PLANNER_MODELS.iter().position(|p| *p == m)).map_or(0, |i| i + 1)
+}
+
+/// The model in row `index` of [`model_options`]: none for the repo's default.
+pub fn model_at(index: usize) -> Option<&'static str> {
+    index.checked_sub(1).and_then(|i| PLANNER_MODELS.get(i)).copied()
 }
 
 /// Where the form is.
@@ -100,7 +139,13 @@ pub struct AskForm {
     pub about: About,
     /// A new app's name.
     pub name: String,
+    /// A new app's project's key, as typed; empty leaves it to the name ([`key_from`]).
+    pub key: String,
     pub text: String,
+    /// Whether a change is planned first. A new app always is, whatever this says.
+    pub plan: bool,
+    /// The planner's model, one of [`PLANNER_MODELS`]; `None` leaves it to the repo. Sent only when planned.
+    pub model: Option<&'static str>,
     pub phase: Phase,
     /// What the server said when the last ask failed.
     pub error: Option<String>,
@@ -110,6 +155,11 @@ pub struct AskForm {
 }
 
 impl AskForm {
+    /// Whether the ask goes to the planner first: a new app always, a change when asked to.
+    pub fn planned(&self) -> bool {
+        self.about == About::NewApp || self.plan
+    }
+
     /// Whether Ask can be pressed now, and why not.
     pub fn gate(&self, live: bool, offline: Option<String>) -> Gate {
         if !live {
@@ -120,6 +170,9 @@ impl AskForm {
         if self.phase == Phase::Sending {
             return Gate::Sending;
         }
+        if self.about == About::Change(None) {
+            return Gate::Blocked("There is no app to ask about yet.".into());
+        }
         if self.text.trim().is_empty() {
             return Gate::Blocked("Say what you want first.".into());
         }
@@ -129,15 +182,41 @@ impl AskForm {
         if self.about == About::NewApp && self.name.trim().is_empty() {
             return Gate::Blocked("Give the new app a name.".into());
         }
+        if self.about == About::NewApp
+            && !self.key.trim().is_empty()
+            && let Err(why) = chosen_key(&self.key)
+        {
+            return Gate::Blocked(why);
+        }
         Gate::Ready
     }
 
-    /// The request the form would send.
-    pub fn ask(&self) -> Ask {
+    /// The request the form would send, once it says what it is about.
+    pub fn ask(&self) -> Option<Ask> {
         let text = self.text.trim();
-        match &self.about {
-            About::Project(key) => Ask::change(text, key.clone()),
-            About::NewApp => Ask::new_app(text, self.name.trim()),
+        let ask = match &self.about {
+            About::Change(key) => Ask::change(text, key.clone()?),
+            About::NewApp => match chosen_key(&self.key) {
+                Ok(key) => Ask::new_app(text, self.name.trim()).keyed(key),
+                Err(_) => Ask::new_app(text, self.name.trim()),
+            },
+        };
+        Some(if self.planned() { ask.planned(self.model) } else { ask })
+    }
+
+    /// What the form says under a new app's key: the key its tasks will carry, typed or made from the name.
+    pub fn key_note(&self) -> String {
+        let key = match self.key.trim() {
+            "" if self.name.trim().is_empty() => return "Left empty, it is made from the name.".into(),
+            "" => match key_from(&self.name) {
+                Ok(key) => return format!("Left empty, it is {key}, made from the name: tasks are {key}-1, {key}-2…"),
+                Err(_) => return "The name makes no key: choose one.".into(),
+            },
+            typed => chosen_key(typed),
+        };
+        match key {
+            Ok(key) => format!("Tasks are {key}-1, {key}-2… It can't be changed later."),
+            Err(why) => why,
         }
     }
 
@@ -154,9 +233,46 @@ impl AskForm {
     }
 }
 
-/// Opens the form: the rail's Ask button triggers it.
+/// What the form says once the server has answered: each line empty when there is nothing to say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Confirmation {
+    /// "Asked: TICK-17", or for a planned ask "Sent to the planner: TICK-17".
+    pub heading: String,
+    /// The task's title.
+    pub title: String,
+    /// "Made the project TN, Trail Notes", for a new app.
+    pub project: String,
+    /// For a planned ask, what happens next and where the person will see it.
+    pub next: String,
+}
+
+/// What the form says of `asked`.
+pub fn confirmation(asked: &Asked) -> Confirmation {
+    let task = asked.task.as_ref();
+    let heading = task
+        .map(|t| if asked.planned { format!("Sent to the planner: {}", t.key) } else { format!("Asked: {}", t.key) });
+    let next = task.filter(|_| asked.planned).map(|t| {
+        format!(
+            "The planner reads the ask and comes back with questions, or with a plan of tasks for you to approve. \
+             You'll find them on {} in Lookout, as a question waiting on you. Nothing is built until you approve.",
+            t.key
+        )
+    });
+    Confirmation {
+        heading: heading.unwrap_or_default(),
+        title: task.map(|t| t.title.clone()).unwrap_or_default(),
+        project: if asked.project.created {
+            format!("Made the project {}, {}", asked.project.key, asked.project.name)
+        } else {
+            String::new()
+        },
+        next: next.unwrap_or_default(),
+    }
+}
+
+/// Opens the form for a change or a new app: the rail's buttons trigger it.
 #[derive(Event, Debug, Clone, Copy)]
-pub struct OpenAsk;
+pub struct OpenAsk(pub AskFor);
 
 /// Sends the form's ask, if [`AskForm::gate`] lets it.
 #[derive(Event, Debug, Clone, Copy)]
@@ -212,10 +328,10 @@ fn said(e: &trailhead_client::http::Error) -> String {
     }
 }
 
-/// Starts the form afresh after an ask was made, picks what it is about from the app shown, and asks the server
-/// again what can be asked about.
+/// Starts the form afresh after an ask was made, sets it to a new app or to a change to the app shown, and asks the
+/// server again what can be asked about.
 fn open(
-    _: On<OpenAsk>,
+    opened: On<OpenAsk>,
     askable: Res<Askable>,
     active: Res<State<ActiveApp>>,
     connection: Option<Res<State<Connection>>>,
@@ -226,7 +342,10 @@ fn open(
         *form = AskForm { last: form.last.take(), seq: form.seq, ..AskForm::default() };
     }
     form.error = None;
-    form.about = About::default_for(askable.targets(), active.get().0);
+    form.about = match opened.0 {
+        AskFor::Change => About::default_for(askable.targets(), active.get().0),
+        AskFor::NewApp => About::NewApp,
+    };
     if connection.is_some_and(|c| *c.get() == Connection::Live) {
         net.write(SendNet(NetCommand::Fetch(read_targets())));
     }
@@ -242,7 +361,7 @@ fn send(
     if form.gate(live, None) != Gate::Ready {
         return;
     }
-    let ask = form.ask();
+    let Some(ask) = form.ask() else { return };
     let key = form.key_for(&ask);
     form.seq += 1;
     form.phase = Phase::Sending;
@@ -269,9 +388,9 @@ fn hear_targets(mut replies: MessageReader<TargetsReply>, mut askable: ResMut<As
         match reply {
             Ok(targets) => {
                 askable.set_if_neq(Askable(Some(targets.clone())));
-                let gone =
-                    matches!(&form.about, About::Project(key) if !targets.targets.iter().any(|t| t.project == *key));
-                if gone {
+                let gone = matches!(&form.about, About::Change(key)
+                    if !key.as_ref().is_some_and(|key| targets.targets.iter().any(|t| t.project == *key)));
+                if gone && form.about != About::at(0, &targets.targets) {
                     form.about = About::at(0, &targets.targets);
                 }
             }
@@ -291,6 +410,7 @@ fn hear_ask(mut replies: MessageReader<AskReply>, mut form: ResMut<AskForm>) {
                 form.phase = Phase::Asked(asked.clone());
                 form.text.clear();
                 form.name.clear();
+                form.key.clear();
                 form.last = None;
             }
             Err(e) => {
@@ -417,37 +537,52 @@ mod tests {
         request.lines().find_map(|l| l.split_once(": ").filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v))
     }
 
+    fn tick() -> About {
+        About::Change(Some("TICK".into()))
+    }
+
     #[test]
     fn the_targets_fill_the_choices_and_the_default_is_the_app_shown() {
         let t = targets().targets;
-        assert_eq!(options(&t), ["Atlas", "Ticklist", NEW_APP]);
-        assert_eq!(About::default_for(&t, TICKLIST), About::Project("TICK".into()));
-        assert_eq!(About::default_for(&t, AppId("lookout")), About::Project("ATLAS".into()), "else the first");
-        assert_eq!(About::default_for(&[], TICKLIST), About::NewApp);
-        assert_eq!((About::Project("TICK".into()).index(&t), About::NewApp.index(&t)), (1, 2));
-        assert_eq!((About::at(0, &t), About::at(2, &t)), (About::Project("ATLAS".into()), About::NewApp));
+        assert_eq!(options(&t), ["Atlas", "Ticklist"], "a change offers only the apps");
+        assert_eq!(About::default_for(&t, TICKLIST), tick());
+        assert_eq!(About::default_for(&t, AppId("lookout")), About::Change(Some("ATLAS".into())), "else the first");
+        assert_eq!(About::default_for(&[], TICKLIST), About::Change(None));
+        assert_eq!((tick().index(&t), About::NewApp.index(&t), About::Change(None).index(&t)), (Some(1), None, None));
+        assert_eq!((About::at(0, &t), About::at(2, &t)), (About::Change(Some("ATLAS".into())), About::Change(None)));
 
         let mut app = shell();
         set_connection(&mut app, Connection::Live);
-        assert_eq!(sent(&mut app).len(), 1, "read when the connection goes live");
+        assert_eq!(sent(&mut app).len(), 2, "read when the connection goes live, beside the notification settings");
         reply(&mut app, targets());
         assert!(app.world().resource::<Askable>().configured());
         show(&mut app, TICKLIST);
-        app.world_mut().trigger(OpenAsk);
+        app.world_mut().trigger(OpenAsk(AskFor::Change));
         app.update();
-        assert_eq!(form(&app).about, About::Project("TICK".into()));
+        assert_eq!(form(&app).about, tick());
         assert_eq!(sent(&mut app).len(), 1, "and again each time the form opens");
+        app.world_mut().trigger(OpenAsk(AskFor::NewApp));
+        app.update();
+        assert_eq!(form(&app).about, About::NewApp, "the plus asks for a new app");
+        app.world_mut().trigger(OpenAsk(AskFor::Change));
+        app.update();
 
         let mut fewer = targets();
         fewer.targets.retain(|t| t.project != "TICK");
         reply(&mut app, fewer);
-        assert_eq!(form(&app).about, About::Project("ATLAS".into()), "an app that went is left for one still there");
+        assert_eq!(
+            form(&app).about,
+            About::Change(Some("ATLAS".into())),
+            "an app that went is left for one still there"
+        );
+        reply(&mut app, AskTargets { targets: Vec::new(), ..targets() });
+        assert_eq!(form(&app).about, About::Change(None), "and none, when none is");
     }
 
     #[test]
     fn ask_is_enabled_only_with_something_to_send_and_says_why_not() {
         let blocked = |words: &str| Gate::Blocked(words.into());
-        let mut form = AskForm { about: About::Project("TICK".into()), ..AskForm::default() };
+        let mut form = AskForm { about: tick(), ..AskForm::default() };
         assert_eq!(
             form.gate(false, Some("the server isn't answering".into())),
             blocked("Not connected: the server isn't answering.")
@@ -460,6 +595,9 @@ mod tests {
         assert_eq!(form.gate(true, None), blocked("An ask is at most 8000 characters."));
         form.text = "A Completed view".into();
         assert_eq!(form.gate(true, None), Gate::Ready);
+        form.about = About::Change(None);
+        assert_eq!(form.gate(true, None), blocked("There is no app to ask about yet."));
+        assert_eq!(form.ask(), None);
         form.about = About::NewApp;
         assert_eq!(form.gate(true, None), blocked("Give the new app a name."));
         form.name = "Trail Notes".into();
@@ -469,13 +607,82 @@ mod tests {
     }
 
     #[test]
+    fn the_planners_models_are_the_repos_default_then_each_by_name() {
+        assert_eq!(model_options(), [REPO_DEFAULT, "Fable", "Opus", "Sonnet", "Haiku"]);
+        assert_eq!((model_at(0), model_at(2), model_at(5)), (None, Some("opus"), None));
+        assert_eq!((model_index(None), model_index(Some("haiku")), model_index(Some("gpt"))), (0, 4, 0));
+    }
+
+    #[test]
+    fn a_new_apps_key_is_the_one_typed_or_left_to_the_name() {
+        let mut form = AskForm { about: About::NewApp, name: "Cairn".into(), text: "next".into(), ..default() };
+        assert_eq!(form.ask(), Some(Ask::new_app("next", "Cairn").planned(None)), "none typed, none sent");
+        assert!(form.key_note().contains("it is CAIRN") && form.key_note().contains("CAIRN-1"), "{}", form.key_note());
+        form.key = " crn ".into();
+        assert_eq!(form.ask(), Some(Ask::new_app("next", "Cairn").keyed("CRN").planned(None)));
+        assert!(form.key_note().starts_with("Tasks are CRN-1"), "{}", form.key_note());
+        assert_eq!(form.gate(true, None), Gate::Ready);
+        form.key = "2 bad".into();
+        assert!(matches!(form.gate(true, None), Gate::Blocked(why) if why == form.key_note()));
+        form.about = About::Change(Some("TICK".into()));
+        assert_eq!(form.gate(true, None), Gate::Ready, "a change has no key to get wrong");
+    }
+
+    #[test]
+    fn a_new_app_is_always_planned_with_the_model_chosen_or_none() {
+        let mut form = AskForm { about: About::NewApp, name: " Notes ".into(), text: "notes".into(), ..default() };
+        assert!(form.planned());
+        assert_eq!(form.ask(), Some(Ask::new_app("notes", "Notes").planned(None)));
+        form.model = Some("sonnet");
+        assert_eq!(form.ask(), Some(Ask::new_app("notes", "Notes").planned(Some("sonnet"))));
+    }
+
+    #[test]
+    fn a_change_is_planned_only_when_asked_and_turning_it_off_keeps_what_was_typed() {
+        let mut form = AskForm { about: tick(), text: "A Completed view".into(), ..AskForm::default() };
+        assert!(!form.planned());
+        assert_eq!(form.ask(), Some(Ask::change("A Completed view", "TICK")));
+        form.plan = true;
+        form.model = Some("opus");
+        assert_eq!(form.ask(), Some(Ask::change("A Completed view", "TICK").planned(Some("opus"))));
+        form.plan = false;
+        assert_eq!(form.ask(), Some(Ask::change("A Completed view", "TICK")), "no model without a plan");
+        assert_eq!((form.text.as_str(), form.model), ("A Completed view", Some("opus")), "nothing typed is cleared");
+    }
+
+    fn asked(planned: bool, created: bool) -> Asked {
+        Asked {
+            project: AskedProject { key: "TN".into(), name: "Trail Notes".into(), created },
+            task: Some(AskedTask { key: "TN-1".into(), title: "Trail Notes".into() }),
+            planned,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_answer_says_what_was_made_and_a_planned_one_where_the_planner_answers() {
+        let plain = confirmation(&asked(false, false));
+        assert_eq!((plain.heading.as_str(), plain.title.as_str()), ("Asked: TN-1", "Trail Notes"));
+        assert_eq!((plain.project.as_str(), plain.next.as_str()), ("", ""));
+
+        let planned = confirmation(&asked(true, true));
+        assert_eq!(planned.heading, "Sent to the planner: TN-1");
+        assert_eq!(planned.project, "Made the project TN, Trail Notes");
+        assert!(planned.next.contains("questions, or with a plan"), "{}", planned.next);
+        assert!(planned.next.contains("on TN-1 in Lookout, as a question waiting on you"), "{}", planned.next);
+
+        let untasked = confirmation(&Asked { task: None, ..asked(true, true) });
+        assert_eq!((untasked.heading, untasked.next), (String::new(), String::new()), "the notes say why");
+    }
+
+    #[test]
     fn sending_posts_a_change_or_a_new_app_once_and_a_failure_keeps_the_text() {
         let mut app = shell();
         set_connection(&mut app, Connection::Live);
         reply(&mut app, targets());
         sent(&mut app);
         edit(&mut app, |f| {
-            f.about = About::Project("TICK".into());
+            f.about = tick();
             f.text = "  A Completed view\nnewest first ".into();
         });
         app.world_mut().trigger(SendAsk);
@@ -502,27 +709,30 @@ mod tests {
         edit(&mut app, |f| {
             f.about = About::NewApp;
             f.name = " Trail Notes ".into();
+            f.model = Some("fable");
         });
         app.world_mut().trigger(SendAsk);
         app.update();
         let asked = r#"{"project": {"key": "TN", "name": "Trail Notes", "created": true},
-                        "task": {"key": "TN-1", "title": "Create the Trail Notes app"}, "notes": []}"#;
+                        "task": {"key": "TN-1", "title": "Trail Notes"}, "planned": true, "notes": []}"#;
         let fetch = sent(&mut app).remove(0);
         let new = run(&mut app, &fetch, "201 Created", asked);
         assert_eq!(
             body_of(&new),
-            serde_json::json!({"text": "A Completed view\nnewest first", "new_app": {"name": "Trail Notes"}})
+            serde_json::json!({"text": "A Completed view\nnewest first", "new_app": {"name": "Trail Notes"},
+                               "plan": true, "model": "fable"})
         );
         assert_ne!(header(&new, "idempotency-key"), Some(key.as_str()), "another ask, another key");
         let done = form(&app);
         let made = Asked {
             project: AskedProject { key: "TN".into(), name: "Trail Notes".into(), created: true },
-            task: Some(AskedTask { key: "TN-1".into(), title: "Create the Trail Notes app".into() }),
+            task: Some(AskedTask { key: "TN-1".into(), title: "Trail Notes".into() }),
+            planned: true,
             notes: Vec::new(),
         };
         assert_eq!((done.phase, done.text.as_str(), done.error), (Phase::Asked(made), "", None));
 
-        app.world_mut().trigger(OpenAsk);
+        app.world_mut().trigger(OpenAsk(AskFor::NewApp));
         app.update();
         assert_eq!(form(&app).phase, Phase::Editing, "opening again starts afresh");
     }

@@ -17,7 +17,7 @@ pub struct HoverTone {
 }
 
 /// Paint each surface whose hover changed in its tone. A disabled one stays at rest.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn paint_hover_tones(
     surfaces: Query<
         (Entity, &HoverTone, &Hovered, Has<InteractionDisabled>, Option<&BackgroundTone>),

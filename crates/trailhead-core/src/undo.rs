@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::events::{EVENT_COLS, UNDO_WINDOW, event_from_row, scope_sql};
 use crate::identity::is_descendant;
 use crate::projects::{check_review_settings, load_project, save_project};
-use crate::reminders::{NOT_NOTIFICATION_SQL, is_notification};
+use crate::reminders::NOT_NOTIFICATION_SQL;
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::{check_claim_access, check_no_parent_cycle, check_review, load_task, save_task};
 use trailhead_model::{
@@ -132,6 +132,7 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
             (Some(blocked), cur.map(serde_json::to_value).transpose()?, want.map(serde_json::to_value).transpose()?)
         }
         Entity::Agent => return Err(Error::Invalid("agents can't be undone; revoke them instead".into())),
+        Entity::Notification => return Err(Error::Invalid("a notification isn't a change to undo".into())),
         Entity::Claim => {
             let task_id = parse_uuid(entity_id)?;
             let cur = any_claim(&tx.conn, task_id).await?;
@@ -178,8 +179,10 @@ async fn restore(tx: &Tx, entity: Entity, entity_id: &str, target: Option<Value>
 /// is skipped the same way (and fails the undo in `strict`). Reminders changed
 /// nothing, so they are neither reverted nor count as conflicts. Creating an agent isn't undone either (revoke it).
 async fn apply(tx: &Tx, events: Vec<Event>, strict: bool) -> Result<UndoReport> {
-    let events: Vec<Event> =
-        events.into_iter().filter(|e| !is_notification(&e.kind) && e.entity != Entity::Agent).collect();
+    let events: Vec<Event> = events
+        .into_iter()
+        .filter(|e| !trailhead_model::is_notification(&e.kind) && e.entity != Entity::Agent)
+        .collect();
     let ids: HashSet<i64> = events.iter().map(|e| e.id).collect();
     let mut groups: BTreeMap<(String, String), Vec<Event>> = BTreeMap::new();
     for e in events {

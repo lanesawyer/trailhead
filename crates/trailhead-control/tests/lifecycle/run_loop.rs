@@ -1054,3 +1054,34 @@ async fn a_task_holding_two_sandboxes_is_looked_up_once_per_starvation_check() {
     assert_eq!(r.tracker.shows(&parked), before + 1, "one lookup for the task, not one per sandbox");
     assert!(logs.text().contains("held by parked tasks"), "both parked sandboxes still count: {}", logs.text());
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_usage_pause_is_told_once_and_resolved_when_runs_start_again() {
+    let r = pausing_rig();
+    report_usage(&r, 95, 1).await;
+    r.tracker.add_task("TRAIL", "Second", "");
+    r.harness.push(Role::Worker, Script::new(changes()));
+    r.harness.push(Role::Reviewer, Script::new(approve()));
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    assert!(r.factory.tick().await.unwrap().is_empty());
+    let open = r.tracker.open_notices();
+    assert_eq!(open.len(), 1, "once per pause: {open:?}");
+    assert_eq!(open[0].kind, trailhead_factory::NOTICE_PAUSED);
+    assert_eq!(open[0].task, None);
+    assert!(open[0].title.contains("five_hour") && open[0].title.contains("95%"), "{}", open[0].title);
+
+    tokio::time::advance(std::time::Duration::from_millis(2100)).await;
+    assert_eq!(r.factory.tick().await.unwrap().len(), 1);
+    assert!(r.tracker.open_notices().is_empty(), "resolved when it resumes");
+    assert_eq!(r.tracker.notices().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failed_raise_of_the_pause_still_pauses() {
+    let r = pausing_rig();
+    report_usage(&r, 85, 3600).await;
+    r.tracker.fail_next("factory", TrackerOp::Notify, 1);
+    r.tracker.add_task("TRAIL", "Second", "");
+    assert!(r.factory.tick().await.unwrap().is_empty(), "paused all the same");
+    assert!(r.tracker.notices().is_empty());
+}

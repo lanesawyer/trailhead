@@ -456,7 +456,7 @@ fn show_notes(
 }
 
 /// Each section's notice and its Save: enabled only with something to save over a live connection.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn show_sections(
     settings: Res<ServerSettings>,
     connection: Option<Res<State<Connection>>>,

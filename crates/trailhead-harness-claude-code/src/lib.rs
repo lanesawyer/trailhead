@@ -18,8 +18,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use trailhead_factory::{
-    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FileMode, FollowUp, Harness, ModelId, Priority,
-    RaiseGrade, Result, Role, RunContext, RunEvent, RunOutcome, ShotFiles, Usage, VerdictKind, conventional_title,
+    CheckResult, Commit, Error, EventSink, Feedback, FileChange, FileMode, FollowUp, Harness, ModelId, PlanContext,
+    PlanTask, PlanTurn, Priority, RaiseGrade, Result, Role, RunContext, RunEvent, RunOutcome, ShotFiles, Usage,
+    VerdictKind, conventional_title,
 };
 
 /// The `adapter` name profiles use for this harness.
@@ -75,35 +76,93 @@ impl ClaudeCode {
     async fn session(&self, ctx: RunContext, prompt: String, events: EventSink) -> Result<RunOutcome> {
         let start = git_head(&ctx.workdir).await?;
         let mut stream = Stream::new(ctx.model.clone(), ctx.max_steps);
-        let mut resume: Option<String> = None;
+        match self.converse(&ctx, prompt, None, &mut stream, &events).await? {
+            Invocation::StepLimit => Ok(step_limit(&ctx)),
+            Invocation::NoResult(why) => Ok(RunOutcome::Failed { reason: why }),
+            Invocation::Result(result) => outcome(&ctx, &start, &result).await,
+        }
+    }
+
+    /// Runs Claude Code on `prompt`, resuming the session `resume` when given, until it ends. A dropped or failed API
+    /// call ends Claude Code's session, but the session itself is saved, so the agent picks up where it was instead of
+    /// the whole attempt starting over.
+    async fn converse(
+        &self,
+        ctx: &RunContext,
+        prompt: String,
+        mut resume: Option<String>,
+        stream: &mut Stream,
+        events: &EventSink,
+    ) -> Result<Invocation> {
+        let mut prompt = prompt;
         let mut resumes = 0;
         loop {
-            let prompt = match &resume {
-                None => prompt.clone(),
-                Some(_) => RESUME_PROMPT.to_string(),
-            };
-            match self.invoke(&ctx, &prompt, resume.as_deref(), &mut stream, &events).await? {
-                Invocation::StepLimit => {
-                    return Ok(RunOutcome::Failed { reason: format!("hit the step limit of {}", ctx.max_steps) });
-                }
-                Invocation::NoResult(why) => return Ok(RunOutcome::Failed { reason: why }),
-                Invocation::Result(result) => {
-                    // A dropped or failed API call ends Claude Code's session, but the session itself is saved, so the
-                    // agent can pick up where it was instead of the whole attempt starting over.
-                    if is_transient_api_error(&result)
-                        && resumes < MAX_RESUMES
-                        && let Some(id) = stream.session_id.clone()
-                    {
-                        resumes += 1;
-                        tracing::warn!(error = %result["result"], resumes, "claude's API call failed; resuming the session");
-                        tokio::time::sleep(Duration::from_secs(5 * resumes as u64)).await;
-                        resume = Some(id);
-                        stream.result = None;
-                        continue;
-                    }
-                    return outcome(&ctx, &start, &result).await;
+            let ended = self.invoke(ctx, &prompt, resume.as_deref(), stream, events).await?;
+            if let Invocation::Result(result) = &ended
+                && is_transient_api_error(result)
+                && resumes < MAX_RESUMES
+                && let Some(id) = stream.session_id.clone()
+            {
+                resumes += 1;
+                tracing::warn!(error = %result["result"], resumes, "claude's API call failed; resuming the session");
+                tokio::time::sleep(Duration::from_secs(5 * resumes as u64)).await;
+                resume = Some(id);
+                prompt = if ctx.plan.is_some() { PLAN_RESUME_PROMPT } else { RESUME_PROMPT }.to_string();
+                stream.result = None;
+                continue;
+            }
+            return Ok(ended);
+        }
+    }
+
+    /// A planner's turn (`docs/app-platform.md`, "Planning an ask"). The session the last turn kept is resumed with
+    /// only what is new; without one, or when it is gone (a fresh sandbox), a new session gets the whole prompt. The
+    /// turn is the file the agent writes; a missing or unreadable one fails the run.
+    async fn plan_turn(&self, ctx: RunContext, events: EventSink) -> Result<RunOutcome> {
+        let Some(plan) = ctx.plan.clone() else {
+            return Ok(RunOutcome::Failed { reason: "a planner run without its plan".into() });
+        };
+        let files = &plan.files;
+        if let Some(dir) = files.turn.parent() {
+            tokio::fs::create_dir_all(dir).await.map_err(|e| Error::Other(format!("{}: {e}", dir.display())))?;
+        }
+        match tokio::fs::remove_file(&files.turn).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(Error::Other(format!("{}: {e}", files.turn.display())));
+            }
+            _ => {}
+        }
+        let mut stream = Stream::new(ctx.model.clone(), ctx.max_steps);
+        let mut ended = None;
+        if let Some(id) = kept_session(&files.session).await {
+            let next = planner_prompt(&ctx, &plan, true);
+            match self.converse(&ctx, next, Some(id.clone()), &mut stream, &events).await? {
+                Invocation::Result(result) if !session_gone(&result) => ended = Some(Invocation::Result(result)),
+                Invocation::StepLimit => ended = Some(Invocation::StepLimit),
+                gone => {
+                    tracing::info!(session = %id, ended = ?gone, "the planner's session couldn't be resumed; starting a new one");
+                    stream.result = None;
+                    stream.session_id = None;
                 }
             }
+        }
+        let ended = match ended {
+            Some(ended) => ended,
+            None => self.converse(&ctx, planner_prompt(&ctx, &plan, false), None, &mut stream, &events).await?,
+        };
+        if let Some(id) = &stream.session_id
+            && let Err(e) = tokio::fs::write(&files.session, id).await
+        {
+            tracing::warn!(error = %e, "couldn't keep the planner's session; the next turn starts a new one");
+        }
+        match ended {
+            Invocation::StepLimit => Ok(step_limit(&ctx)),
+            Invocation::NoResult(why) => Ok(RunOutcome::Failed { reason: why }),
+            Invocation::Result(result) if result["is_error"] == true => {
+                let why = result["result"].as_str().unwrap_or("unknown error");
+                Ok(RunOutcome::Failed { reason: format!("claude: {why}") })
+            }
+            Invocation::Result(_) => Ok(read_turn(&files.turn).await),
         }
     }
 
@@ -135,9 +194,16 @@ impl ClaudeCode {
             .arg("--strict-mcp-config")
             .env("TRAILHEAD_FACTORY_TASK", &ctx.task.key.0)
             .arg("--model")
-            .arg(&ctx.model.0)
-            .arg("--json-schema")
-            .arg(schema(ctx.role).to_string());
+            .arg(&ctx.model.0);
+        // A planner's answer is the turn file it writes, not a structured result.
+        match &ctx.plan {
+            Some(plan) => {
+                cmd.env(PLAN_TURN_ENV, &plan.files.turn);
+            }
+            None => {
+                cmd.arg("--json-schema").arg(schema(ctx.role).to_string());
+            }
+        }
         if let Some(id) = resume {
             cmd.arg("--resume").arg(id);
         }
@@ -198,14 +264,48 @@ impl ClaudeCode {
     }
 }
 
+#[derive(Debug)]
 enum Invocation {
     Result(Value),
     StepLimit,
     NoResult(String),
 }
 
+/// The environment variable that names the file a planner writes its turn to.
+pub const PLAN_TURN_ENV: &str = "TRAILHEAD_PLAN_TURN";
+
+fn step_limit(ctx: &RunContext) -> RunOutcome {
+    RunOutcome::Failed { reason: format!("hit the step limit of {}", ctx.max_steps) }
+}
+
+/// The session id the last planner turn kept, if it kept one.
+async fn kept_session(path: &Path) -> Option<String> {
+    let id = tokio::fs::read_to_string(path).await.ok()?;
+    Some(id.trim().to_string()).filter(|id| !id.is_empty())
+}
+
+/// Whether Claude Code refused to resume because it no longer has the session.
+fn session_gone(result: &Value) -> bool {
+    result["is_error"] == true && result["result"].as_str().is_some_and(|r| r.contains("No conversation found"))
+}
+
+/// The turn a planner wrote, or its failure.
+async fn read_turn(path: &Path) -> RunOutcome {
+    let read = match tokio::fs::read_to_string(path).await {
+        Ok(text) => PlanTurn::parse(&text),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    };
+    match read {
+        Ok(turn) => RunOutcome::PlanTurn(turn),
+        Err(why) => RunOutcome::Failed { reason: trailhead_factory::messages::no_plan_turn(&why) },
+    }
+}
+
 /// How many times one attempt resumes Claude Code after a failed API call before giving up.
 pub const MAX_RESUMES: usize = 3;
+
+const PLAN_RESUME_PROMPT: &str = "Your previous request failed with a network or API error. Carry on with the turn \
+from where you left off, then end it by writing the turn file as before.";
 
 const RESUME_PROMPT: &str = "Your previous request failed with a network or API error. Carry on with the task from \
 where you left off, then finish with the structured answer as before.";
@@ -220,6 +320,9 @@ fn is_transient_api_error(result: &Value) -> bool {
 #[async_trait]
 impl Harness for ClaudeCode {
     async fn run(&self, ctx: RunContext, events: EventSink) -> Result<RunOutcome> {
+        if ctx.role == Role::Planner {
+            return self.plan_turn(ctx, events).await;
+        }
         let prompt = prompt(&ctx, None);
         self.session(ctx, prompt, events).await
     }
@@ -307,6 +410,9 @@ fn follow_ups_section(task: &trailhead_factory::TaskSpec) -> String {
 const HUMAN_CONTEXT_CAP: usize = 6000;
 /// The most the answers may take of the human-context section, so notes keep the rest.
 const ANSWERS_CAP: usize = 4000;
+/// A planner's conversation is its answered questions, and a turn that starts a new session needs all of it it can get.
+const PLANNER_CONTEXT_CAP: usize = 40_000;
+const PLANNER_ANSWERS_CAP: usize = 32_000;
 
 /// Where the task's project builds, when it builds in one directory of the repo: the change stays inside it. Empty for
 /// a project that builds in the whole repo.
@@ -316,6 +422,7 @@ fn path_section(task: &trailhead_factory::TaskSpec, role: Role) -> String {
         Role::Reviewer => {
             "A change to any file outside it needs the task to ask for it; if the task doesn't, request changes."
         }
+        Role::Planner => "Plan work inside it unless the ask says otherwise.",
         _ => "Keep the change inside it unless the task says otherwise.",
     };
     format!("\n\nThis task's project builds in `{path}/`. {rule}")
@@ -325,14 +432,25 @@ fn path_section(task: &trailhead_factory::TaskSpec, role: Role) -> String {
 /// the caps the oldest answers and notes are dropped; each entry is cut short if very long, and the newest answer
 /// is always kept.
 fn human_section(task: &trailhead_factory::TaskSpec) -> String {
+    human_section_within(task, HUMAN_CONTEXT_CAP, ANSWERS_CAP, 1000)
+}
+
+/// [`human_section`] within `cap` bytes, `answers_cap` of them for the answers, each question cut at `cut_at` bytes
+/// and each answer at twice that.
+fn human_section_within(task: &trailhead_factory::TaskSpec, cap: usize, answers_cap: usize, cut_at: usize) -> String {
     let ctx = &task.context;
-    let mut budget = HUMAN_CONTEXT_CAP;
+    let mut budget = cap;
     let mut out = String::new();
     let mut answers = Vec::new();
-    let mut answers_budget = ANSWERS_CAP;
+    let mut answers_budget = answers_cap;
     for a in ctx.answers.iter().rev() {
-        let entry =
-            format!("\n- Q: {}\n  A ({}, {}): {}", clip(&a.question, 1000), a.by, a.date, clip(&a.answer, 2000));
+        let entry = format!(
+            "\n- Q: {}\n  A ({}, {}): {}",
+            clip(&a.question, cut_at),
+            a.by,
+            a.date,
+            clip(&a.answer, 2 * cut_at)
+        );
         if entry.len() > answers_budget && !answers.is_empty() {
             break;
         }
@@ -473,6 +591,100 @@ fn pr_title_section(title: Option<&str>, key: &str) -> String {
          requires) that fits the change: a fix titled feat, or a wrong scope, is a reason to request changes. The \
          task key comes last in square brackets (`... [{key}]`), not parentheses."
     )
+}
+
+/// What a planner does, every turn: the factory's rules for a plan.
+const PLANNER_RULES: &str = "You are planning, not building. Read the repo first: its AGENTS.md, the code the ask \
+touches and, for an app, the guides the repo points to for the UI kit and the shell (their GUIDE.md files). Make no \
+commits and change no files in the checkout.\n\n\
+If something only the person can answer would change the plan, ask, all your questions in one message, and only \
+those whose answers change the plan. Otherwise write the spec and the plan.\n\n\
+The spec is markdown: what is wanted and why, what it does and doesn't do, and what done looks like. It replaces the \
+task's description, so keep the ask in it.\n\n\
+The plan is the tasks that build it. Each is one PR a worker can finish in one run, with acceptance criteria in its \
+description, listed in dependency order, and none has tasks of its own. Give each the grade you propose, by how far \
+the damage reaches if it is wrong: 1 for docs and tests; 2 for ordinary code in one module or app; 3 for shared \
+code, a public API, the shape of stored data, manifests, or a change across modules; 4 for credentials, CI, lockfile \
+packages or agent instructions. Say why in one line. A person approves the plan by grading the tasks; nothing \
+starts before that. The first task of a new app writes the app's README.md (what it does and why) from the spec, and \
+every task that changes what the app does keeps it up, as one of its acceptance criteria.";
+
+/// How a planner ends a turn.
+fn turn_section(path: &std::path::Path) -> String {
+    format!(
+        "\n\nEnd the turn by writing one JSON file to `{path}` (also in ${PLAN_TURN_ENV}), outside the checkout, then \
+         stop:\n```json\n{{\"message\": \"what the person reads: your questions, or a summary of the plan\",\n \
+         \"spec\": \"optional: the spec, in markdown\",\n \
+         \"tasks\": [{{\"id\": \"a\", \"key\": null, \"title\": \"...\", \"description\": \"... with acceptance criteria\", \
+         \"blocked_by\": [\"b\", \"TRAIL-3\"], \"grade\": 2, \"why\": \"one line\"}}],\n \
+         \"ready\": false}}\n```\n`tasks`, when present, is the whole plan: a task of the plan you leave out is \
+         cancelled, and leaving `tasks` out keeps the plan as it is. Give a new task an `id` of your own and no `key`; \
+         give a task that exists its `key`. `blocked_by` names ids or keys. Set `ready` when the plan is ready to \
+         approve. Without the file the turn fails.",
+        path = path.display(),
+    )
+}
+
+/// The plan as the engine holds it, which a person may have changed by hand since the last turn.
+fn plan_section(plan: &[PlanTask]) -> String {
+    if plan.is_empty() {
+        return "\n\nThe plan has no tasks yet.".to_string();
+    }
+    let mut out = String::from(
+        "\n\nThe plan as it stands in Trailhead. A person may have changed it by hand since your last turn: this, \
+         not your memory, is the plan. Only the open, ungraded tasks are yours to change; a graded or started one is \
+         a person's.",
+    );
+    for t in plan {
+        let grade = match (&t.grade, &t.proposed) {
+            (Some(g), _) => format!("grade {g}"),
+            (None, Some(p)) => format!("proposed grade {} ({})", p.grade, clip(&p.why, 200)),
+            (None, None) => "ungraded".into(),
+        };
+        let blocked = if t.blocked_by.is_empty() {
+            String::new()
+        } else {
+            format!(", blocked by {}", t.blocked_by.iter().map(|k| k.0.as_str()).collect::<Vec<_>>().join(", "))
+        };
+        out.push_str(&format!("\n\n### {}: {}\n{}, {grade}{blocked}", t.key.0, t.title, t.status));
+        if !t.description.trim().is_empty() {
+            out.push_str(&format!("\n{}", clip(t.description.trim(), 3000)));
+        }
+    }
+    out
+}
+
+/// A planner's prompt. A turn that resumes its session is told only what is new: the person's reply and the plan as
+/// it stands.
+pub fn planner_prompt(ctx: &RunContext, plan: &PlanContext, resumed: bool) -> String {
+    let task = &ctx.task;
+    let mut p = if resumed {
+        let reply = task.context.answers.last().map_or_else(
+            || "(no reply; the task was reopened)".to_string(),
+            |a| format!("{} ({}, {})", clip(&a.answer, 4000), a.by, a.date),
+        );
+        format!("The person replied to your last message:\n{reply}")
+    } else {
+        let spec = if task.description.trim() != plan.planning.ask.trim() && !task.description.trim().is_empty() {
+            format!("\n\nThe spec as it stands:\n{}", task.description)
+        } else {
+            String::new()
+        };
+        format!(
+            "Plan task {key}: {title}.\n\n{PLANNER_RULES}\n\nThe ask:\n{ask}{spec}{path}{human}",
+            key = task.key.0,
+            title = task.title,
+            ask = plan.planning.ask,
+            path = path_section(task, ctx.role),
+            human = human_section_within(task, PLANNER_CONTEXT_CAP, PLANNER_ANSWERS_CAP, 6000),
+        )
+    };
+    p.push_str(&plan_section(&plan.planning.plan));
+    if let Some(failure) = &task.previous_failure {
+        p.push_str(&format!("\n\nThe last turn failed:\n{failure}"));
+    }
+    p.push_str(&turn_section(&plan.files.turn));
+    p
 }
 
 pub fn prompt(ctx: &RunContext, feedback: Option<&Feedback>) -> String {
@@ -798,7 +1010,7 @@ async fn unnest_pass(dir: &Path) -> usize {
         match removed {
             Ok(()) => {
                 count += 1;
-                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit")
+                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit");
             }
             Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
         }

@@ -300,7 +300,7 @@ impl Drop for Cleanup {
         let env = self.0.clone();
         // Its own thread and runtime: this also runs while a failed assertion unwinds.
         let _ = std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(cleanup(&env))
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(cleanup(&env));
         })
         .join();
     }

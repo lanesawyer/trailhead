@@ -191,7 +191,7 @@ fn close_on_escape(
 }
 
 /// Finds a new modal's body and footer, gives the body its scrollbar and the dialog a panel's inset for it to sit in.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn link_slots(
     bodies: Query<Entity, Added<ModalBody>>,
     parents: Query<&ChildOf>,

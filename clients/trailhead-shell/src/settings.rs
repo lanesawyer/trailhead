@@ -46,6 +46,9 @@ pub const APPEARANCE: PageId = PageId::new(SHELL, "appearance");
 pub const CONNECTION: PageId = PageId::new(SHELL, "connection");
 /// What the server's user config says, edited from the window. Listed only in a shell with a connection.
 pub const SERVER: PageId = PageId::new(SHELL, "server");
+/// How the person wants to be told: a level per source, quiet hours, the sound and the counts. Listed only in a shell
+/// with a connection.
+pub const NOTIFICATIONS: PageId = PageId::new(SHELL, "notifications");
 /// The build, whether a newer one is ready, the apps and where the shell keeps its files.
 pub const ABOUT: PageId = PageId::new(SHELL, "about");
 

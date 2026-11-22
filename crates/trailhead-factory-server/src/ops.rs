@@ -544,6 +544,7 @@ mod tests {
             holder: None,
             changes_requested: false,
             run,
+            plan: Default::default(),
         }
     }
 

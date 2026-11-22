@@ -467,7 +467,7 @@ async fn wire(
         match &opts.github_token {
             Some(token) => {
                 factory = factory
-                    .with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))))
+                    .with_codehost(Arc::new(GitHub::new(trailhead_codehost_github::API_URL, Some(token.clone()))));
             }
             None => tracing::warn!(
                 repo = %slug,
@@ -550,7 +550,7 @@ fn computes(
 }
 
 /// The sandboxes' `Compute`, and where the daemon lives in them.
-#[cfg_attr(not(feature = "docker"), allow(unused_variables))]
+#[cfg_attr(not(feature = "docker"), expect(unused_variables))]
 /// `read_only` is for `status` and `logs`, which list sandboxes beside a running factory: a Docker compute made for
 /// it never starts, replaces or syncs the gateway.
 fn compute(

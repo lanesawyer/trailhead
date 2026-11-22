@@ -2,15 +2,19 @@
 # The engine `mise run docker-up` starts.
 docker_host = "unix://{{env.HOME}}/.lima/trailhead/sock/docker.sock"
 
+# Every version here is exact, and nothing moves one but a commit (docs/factory/operating.md, "Tool versions"): a
+# "latest" Rust that moved under the factory took it down for a day (TRAIL-1483).
 [tools]
-docker-cli = "latest"
-fnox = { version = "latest", workflow = "release.yml" }
-lima = "latest"
+docker-cli = "29.9.2"
+fnox = { version = "1.42.1", workflow = "release.yml" }
+lima = "2.2.1"
 mdbook = "0.5.4"
 # Pinned exactly, and upgraded together with mdbook above: a newer mdbook-mermaid built for a newer mdBook could break the docs build unseen.
 # Not in the mise registry; the preprocessor ships prebuilt binaries on GitHub (0.16 can't act as an mdBook 0.5 preprocessor, so only its bundled mermaid.min.js is used; see the docs tasks).
 "github:badboy/mdbook-mermaid" = "0.16.2"
-rust = "latest"
+# The one Rust version: [factory.stack] in .trailhead.toml, the sandbox image's RUST_VERSION and the workflows'
+# toolchain steps name the same one, and crates/trailhead-compute-docker/tests/pins.rs fails when they differ.
+rust = { version = "1.100.0", components = "clippy,rustfmt" }
 
 [tasks.test-live-sprites]
 description = "Run the Sprites Compute test against the real API (creates and destroys one Sprite)"
@@ -58,7 +62,7 @@ run = "limactl stop trailhead"
 [tasks.docker-image]
 description = "Build the sandbox image the Docker Compute starts by default (trailhead-sandbox:latest)"
 env = { DOCKER_HOST = "{{vars.docker_host}}" }
-run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"
+run = "docker build -t trailhead-sandbox:latest crates/trailhead-compute-docker/image"  # RUST_VERSION is an ARG in the Dockerfile, so a new pin rebuilds the toolchain layer
 
 [tasks.test-live-mise]
 description = "Install a [stack] with mise in a real Sprite and check a repo asking for node 26 gets it (creates and destroys one Sprite)"

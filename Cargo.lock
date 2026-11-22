@@ -8420,6 +8420,7 @@ dependencies = [
  "bevy",
  "directories",
  "iroh",
+ "jiff",
  "png",
  "reqwest",
  "serde",
@@ -8436,6 +8437,7 @@ dependencies = [
  "trailhead-wire",
  "uuid",
  "winit",
+ "zbus",
 ]
 
 [[package]]
@@ -8443,6 +8445,7 @@ name = "trailhead-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tokio",
  "trailhead-daemon",
  "trailhead-factory",

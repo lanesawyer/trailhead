@@ -17,6 +17,10 @@ USER trailhead
 WORKDIR /home/trailhead
 ENV PATH=/home/trailhead/.local/bin:/home/trailhead/.cargo/bin:$PATH
 
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy,rustfmt \
+# The Rust mise.toml pins (tests/pins.rs holds the two together), installed under its exact name: a sandbox asks for
+# that version, and a later pin installs beside it instead of updating a toolchain in this layer in place, which
+# overlayfs refuses (TRAIL-1483).
+ARG RUST_VERSION=1.100.0
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" --component clippy,rustfmt \
  && curl -fsSL https://claude.ai/install.sh | bash \
  && claude --version

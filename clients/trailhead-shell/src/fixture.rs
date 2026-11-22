@@ -3,7 +3,7 @@
 //! ([`id`]), so a test can write `"parent_id": "t7"` and find the task by `id("t7")`.
 
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Attachment, Claim, Comment, Project, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, Notification, Project, Task, User};
 
 use crate::sync::SyncItem;
 use uuid::Uuid;
@@ -25,7 +25,7 @@ pub fn sid(name: &str) -> String {
     id(name).to_string()
 }
 
-const IDS: [&str; 12] = [
+const IDS: [&str; 13] = [
     "id",
     "workspace_id",
     "project_id",
@@ -38,6 +38,7 @@ const IDS: [&str; 12] = [
     "created_by",
     "owner_user_id",
     "duplicate_of",
+    "raised_by",
 ];
 
 /// `defaults` with `fields` over them, each id field's short name turned into its UUID.
@@ -155,6 +156,19 @@ pub fn user_json(fields: Value) -> Value {
 
 pub fn user(fields: Value) -> User {
     serde_json::from_value(user_json(fields)).expect("a whole user")
+}
+
+/// A notification's JSON as the API sends it: raised by the server, unread.
+pub fn notification_json(fields: Value) -> Value {
+    let defaults = json!({
+        "id": "n0", "workspace_id": "w", "source": "server", "kind": "task.question", "title": "", "body": "",
+        "actions": [], "raised_by": "u", "created_at": AT, "read_at": null, "resolved_at": null,
+    });
+    whole(defaults, fields)
+}
+
+pub fn notification(fields: Value) -> Notification {
+    serde_json::from_value(notification_json(fields)).expect("a whole notification")
 }
 
 /// A `created_at` from a small number (0 to 59), for tests that order comments: `1` is a second after [`AT`].

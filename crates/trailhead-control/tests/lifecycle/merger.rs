@@ -1440,3 +1440,81 @@ async fn a_status_comment_posted_anew_when_the_merge_is_announced_is_the_one_rec
     assert_ne!(new, id, "the comment posted after the merge is recorded");
     assert_eq!(said(&r).last().unwrap(), "Grade 1: checks, CI and review passed; merged.");
 }
+
+#[tokio::test]
+async fn a_pr_waiting_on_a_person_alone_tells_them_once_and_their_approval_resolves_it() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    assert!(r.tracker.notices().is_empty(), "CI is still running: not yet the person's turn");
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.factory.reconcile().await.unwrap();
+    let open = r.tracker.open_notices();
+    assert_eq!(open.len(), 1, "told once, not on every pass: {open:?}");
+    let notice = &open[0];
+    assert_eq!(notice.kind, trailhead_factory::NOTICE_REVIEW);
+    assert_eq!(notice.task.as_ref(), Some(&key));
+    assert!(notice.title.starts_with(&format!("{key} ")), "{}", notice.title);
+    assert!(notice.body.contains("grade 3"), "{}", notice.body);
+    assert_eq!(notice.actions.len(), 1);
+    assert_eq!(
+        (notice.actions[0].label.as_str(), notice.actions[0].url.as_str()),
+        ("Open the pull request", pr.url.as_str())
+    );
+    assert!(r.tracker.task(&key).run.merge.unwrap().notified);
+
+    r.tracker.approve_as_human(&key);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.open_notices().is_empty(), "approved: it no longer waits on them");
+    assert_eq!(r.tracker.notices().len(), 1, "nothing new raised");
+    assert!(!r.tracker.task(&key).run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_rework_takes_back_the_review_notice_and_the_next_wait_is_told_afresh() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1);
+
+    r.codehost.set_ci(&pr, CiState::Failed { checks: vec!["test".into()] });
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert!(task.changes_requested, "sent for a rework");
+    assert!(r.tracker.open_notices().is_empty(), "a rework is the factory's to do, not the person's");
+    assert!(!task.run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_failed_raise_leaves_the_merger_as_it_was_and_is_tried_again() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.tracker.fail_next("factory", TrackerOp::Notify, 1);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::InReview);
+    let decision = task.run.merge.expect("the decision is recorded all the same");
+    assert!(!decision.notified, "not told, so not marked");
+    assert_eq!(said(&r), ["Grade 3 (task was 1; Cargo.toml changed): waiting for a person."]);
+    assert!(r.tracker.notices().is_empty());
+
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1, "the next pass tells them");
+    assert!(r.tracker.task(&key).run.merge.unwrap().notified);
+}
+
+#[tokio::test]
+async fn a_task_a_person_takes_out_of_review_has_its_review_notice_resolved() {
+    let (r, queue) = queued_rig_with(SHADOW);
+    let (key, pr) = reviewed(&r, &queue, 1, "Cargo.toml").await;
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.open_notices().len(), 1);
+
+    r.tracker.set_status(&key, Status::Open);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.tracker.open_notices().is_empty());
+    assert!(!r.tracker.task(&key).run.merge.unwrap().notified);
+}

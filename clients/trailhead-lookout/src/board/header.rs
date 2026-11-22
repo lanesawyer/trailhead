@@ -98,7 +98,7 @@ pub(super) struct HeaderDrawn {
 
 /// Brings the header's widgets up to date in place: each select's rows and chosen row, and the toggles' captions. Nothing is despawned, so a dropdown just used stays the same entity. A
 /// select whose popup is open is left alone and tried again once it has closed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn update_header(
     view: Res<BoardView>,
     filter: Res<Filter>,

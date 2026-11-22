@@ -106,7 +106,7 @@ fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>) {
 }
 
 // A Bevy system takes what it reads and writes as parameters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn apply_events(
     net: Res<Net>,
     mut commands: Commands,

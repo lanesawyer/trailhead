@@ -13,8 +13,8 @@ use trailhead_compute_sprites::SpritesCompute;
 use trailhead_control::CoreTracker;
 use trailhead_core::{Ctx, EventFilter, NewProject, NewTask, Store};
 use trailhead_factory::{
-    Check, Compute, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrRef, PrepareRequest,
-    Repo, Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
+    Check, Compute, Credential, Daemon, Egress, Endpoint as ModelEndpoint, IROH_DOMAINS, Labels, ModelId, PrRef,
+    PrepareRequest, Repo, Role, RunRequest, RunResult, SandboxSpec, TaskKey, TaskSpec, Tracker,
 };
 use trailhead_plugins::CLAUDE_CODE;
 use trailhead_wire::API_ALPN;
@@ -72,6 +72,57 @@ fn domains(extra: &[&str]) -> Egress {
     Egress { domains: IROH_DOMAINS.iter().chain(extra).map(|d| d.to_string()).collect() }
 }
 
+/// This repo's `main`, with a `setup` that only checks the checkout is there.
+fn prepare_request() -> PrepareRequest {
+    PrepareRequest {
+        repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
+        base_branch: "main".into(),
+        merge_base: false,
+        branch_if_present: false,
+        trim: None,
+        disk_warn_bytes: None,
+        disk_limit_bytes: None,
+        branch: None,
+        setup: Some(Check::new("setup", "test -f Cargo.toml")),
+        tools: Default::default(),
+        tool_hosts: Default::default(),
+        env: Default::default(),
+    }
+}
+
+/// One step of a worker on `key`, with GitHub blocked and only the model's API allowed.
+fn worker_request(key: TaskKey, credential: Credential) -> RunRequest {
+    RunRequest {
+        grade: None,
+        run: "live-a1".into(),
+        role: Role::Worker,
+        task: TaskSpec {
+            key,
+            title: "Live run".into(),
+            description: worker_task(),
+            previous_failure: None,
+            context: Default::default(),
+            path: None,
+        },
+        repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
+        base_branch: "main".into(),
+        branch: "factory/live-1".into(),
+        pr: None,
+        feedback: None,
+        model: ModelId("claude-sonnet-4-5".into()),
+        endpoint: ModelEndpoint { base_url: worker_model() },
+        max_steps: 1,
+        required_checks: Vec::new(),
+        worker_checks: Vec::new(),
+        blocked_hosts: vec!["github.com".into()],
+        allowed_hosts: vec!["api.anthropic.com".into()],
+        env: Default::default(),
+        credential,
+        shots: None,
+        plan: None,
+    }
+}
+
 #[tokio::test]
 #[ignore = "needs SPRITES_TOKEN and TRAILHEAD_DAEMON_BIN, and creates a real Sprite"]
 async fn daemon_in_a_sprite() {
@@ -110,20 +161,7 @@ async fn daemon_in_a_sprite() {
     let result = tokio::spawn({
         let (remote, compute, sandbox) = (remote.clone(), compute.clone(), sandbox.clone());
         async move {
-            let prepare = PrepareRequest {
-                repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
-                base_branch: "main".into(),
-                merge_base: false,
-                branch_if_present: false,
-                trim: None,
-                disk_warn_bytes: None,
-                disk_limit_bytes: None,
-                branch: None,
-                setup: Some(Check::new("setup", "test -f Cargo.toml")),
-                tools: Default::default(),
-                tool_hosts: Default::default(),
-                env: Default::default(),
-            };
+            let prepare = prepare_request();
             let t = Instant::now();
             remote.prepare(&sandbox.id, prepare.clone()).await.expect("first prepare");
             eprintln!("start + connect + clone + setup: {:.1}s", t.elapsed().as_secs_f64());
@@ -148,34 +186,7 @@ async fn daemon_in_a_sprite() {
             // A worker run: the daemon claims the task in Trailhead through the API tunnel as its sub-agent, Claude
             // Code can't reach a model (no Anthropic connector here), and the daemon releases the task again.
             let cred = tracker.create_sub_agent("live-a1", "LIVE", Duration::from_secs(900)).await.unwrap();
-            let req = RunRequest {
-                grade: None,
-                run: "live-a1".into(),
-                role: Role::Worker,
-                task: TaskSpec {
-                    key: key.clone(),
-                    title: "Live run".into(),
-                    description: worker_task(),
-                    previous_failure: None,
-                    context: Default::default(),
-                    path: None,
-                },
-                repo: Repo { owner: "lanesawyer".into(), name: "trailhead".into() },
-                base_branch: "main".into(),
-                branch: "factory/live-1".into(),
-                pr: None,
-                feedback: None,
-                model: ModelId("claude-sonnet-4-5".into()),
-                endpoint: ModelEndpoint { base_url: worker_model() },
-                max_steps: 1,
-                required_checks: Vec::new(),
-                worker_checks: Vec::new(),
-                blocked_hosts: vec!["github.com".into()],
-                allowed_hosts: vec!["api.anthropic.com".into()],
-                env: Default::default(),
-                credential: cred,
-                shots: None,
-            };
+            let req = worker_request(key.clone(), cred);
             let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
             let t = Instant::now();
             let worker = req.clone();

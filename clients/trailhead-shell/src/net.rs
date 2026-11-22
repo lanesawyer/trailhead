@@ -263,7 +263,7 @@ impl NetConfig {
         let trailhead_config_dir = pick("TRAILHEAD_CONFIG_DIR", trailhead.as_ref().map(|d| d.config_dir()))?;
         Some(NetConfig {
             config_dir: pick("TRAILHEAD_SHELL_DIR", shell.as_deref())?,
-            trailhead_config_dir: trailhead_config_dir.clone(),
+            trailhead_config_dir,
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
@@ -566,12 +566,9 @@ impl Net {
     }
 
     async fn connect(&mut self, text: &str) {
-        let id = match parse_endpoint_id(text) {
-            Ok(id) => id,
-            Err(_) => {
-                self.drop_target();
-                return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string())));
-            }
+        let Ok(id) = parse_endpoint_id(text) else {
+            self.drop_target();
+            return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string())));
         };
         if self.target.as_ref().is_none_or(|t| t.id != id) {
             match open_ui_tunnel(self.endpoint.clone(), id).await {

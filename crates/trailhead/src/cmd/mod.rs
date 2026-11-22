@@ -2,6 +2,10 @@
 
 pub(crate) mod access;
 pub(crate) mod app;
+mod app_install;
+mod app_lock;
+mod app_notice;
+#[cfg(feature = "factory")]
 mod app_remote;
 pub(crate) mod attachments;
 pub(crate) mod claims;
@@ -10,6 +14,7 @@ pub(crate) mod events;
 #[cfg(feature = "factory")]
 pub(crate) mod factory;
 pub(crate) mod mcp;
+pub(crate) mod notifications;
 pub(crate) mod projects;
 pub(crate) mod server;
 pub(crate) mod tasks;

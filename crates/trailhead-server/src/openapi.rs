@@ -40,7 +40,6 @@ pub const ERROR_CODES: &[&str] = &[
 
 /// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `attachments` are present only when named in `include`; `blocked_by_hidden` comes with `blocked_by`.
 #[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
     #[serde(flatten)]
     task: trailhead_core::Task,
@@ -67,7 +66,7 @@ pub struct ListedTask {
 /// Path and header parameters many routes share, declared once for the docs.
 #[derive(IntoParams)]
 #[into_params(parameter_in = Path)]
-#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+#[expect(dead_code, reason = "schema only; handlers take Path<String>")]
 pub struct TaskParam {
     /// Task key, e.g. `AUTH-42`, or id
     task: String,
@@ -75,7 +74,7 @@ pub struct TaskParam {
 
 #[derive(IntoParams)]
 #[into_params(parameter_in = Path)]
-#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+#[expect(dead_code, reason = "schema only; handlers take Path<String>")]
 pub struct ProjectParam {
     /// Project key, e.g. `AUTH`, or id
     project: String,
@@ -83,7 +82,7 @@ pub struct ProjectParam {
 
 #[derive(IntoParams)]
 #[into_params(parameter_in = Header, names("If-Match"))]
-#[allow(dead_code, reason = "schema only; handlers read the header with if_match")]
+#[expect(dead_code, reason = "schema only; handlers read the header with if_match")]
 pub struct IfMatch(
     /// Expected version, e.g. `"3"`. A stale version gets 412 `version_conflict`.
     Option<String>,
@@ -283,12 +282,22 @@ impl Modify for Common {
         routes::claims::renew,
         routes::claims::release,
         routes::tasks::set_aside,
+        routes::tasks::approve_plan,
         routes::comments::list_comments,
         routes::comments::add_comment,
         routes::attachments::list_attachments,
         routes::attachments::add_attachment,
         routes::attachments::read_attachment,
         routes::attachments::remove_attachment,
+        routes::notifications::list,
+        routes::notifications::raise,
+        routes::notifications::settings,
+        routes::notifications::set_settings,
+        routes::notifications::read_all,
+        routes::notifications::resolve_about,
+        routes::notifications::read,
+        routes::notifications::unread,
+        routes::notifications::resolve,
         routes::dependencies::list_blockers,
         routes::dependencies::add_blocker,
         routes::dependencies::remove_blocker,
@@ -341,7 +350,7 @@ pub(crate) mod tests {
 
     /// Adding an `Error` variant breaks this match until the list below and
     /// `ERROR_CODES` are updated too.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn every_variant_is_listed(e: &Error) {
         match e {
             Error::NotFound(_)

@@ -177,25 +177,7 @@ pub(super) fn layout(
     }
 
     if view.pr.is_some() || view.merge_note.is_some() {
-        let mut items = Vec::new();
-        if let Some(pr) = &view.pr {
-            let link = Block::Link { caption: pr.label.clone(), url: pr.url.clone() };
-            items.push((format!("pr/link/{}/{}", pr.label, pr.url), link));
-            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
-            if let Some(g) = pr.grade {
-                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
-            }
-            if !gates(pr).is_empty() {
-                items.push(("pr/gates".to_string(), Block::Gates));
-            }
-            if let Some(problem) = &pr.problem {
-                items.push(("pr/problem".to_string(), text_block(problem, size::BODY, Tone::Warn)));
-            }
-        }
-        if let Some(merge_note) = &view.merge_note {
-            items.push(("pr/note".to_string(), text_block(merge_note, size::SECONDARY, Tone::Dim)));
-        }
-        section("pr", "Pull request", items);
+        section("pr", "Pull request", pr_items(view));
     }
 
     if !live {
@@ -285,25 +267,7 @@ pub(super) fn layout_task(
         add(&mut main, "m/pictures", "Pictures", picture_items(&facts.pictures));
     }
     if view.pr.is_some() || view.merge_note.is_some() {
-        let mut items = Vec::new();
-        if let Some(pr) = &view.pr {
-            let link = Block::Link { caption: pr.label.clone(), url: pr.url.clone() };
-            items.push((format!("pr/link/{}/{}", pr.label, pr.url), link));
-            items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
-            if let Some(g) = pr.grade {
-                items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
-            }
-            if !gates(pr).is_empty() {
-                items.push(("pr/gates".to_string(), Block::Gates));
-            }
-            if let Some(problem) = &pr.problem {
-                items.push(("pr/problem".to_string(), text_block(problem, size::BODY, Tone::Warn)));
-            }
-        }
-        if let Some(merge_note) = &view.merge_note {
-            items.push(("pr/note".to_string(), text_block(merge_note, size::SECONDARY, Tone::Dim)));
-        }
-        add(&mut main, "m/pr", "Pull request", items);
+        add(&mut main, "m/pr", "Pull request", pr_items(view));
     }
     let mut activity: Vec<(String, Block)> = facts
         .activity
@@ -345,8 +309,54 @@ pub(super) fn layout_task(
         add(&mut side, "s/parent", "Parent", vec![row]);
     }
     if !key.is_empty() {
-        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key.clone()))]);
+        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key))]);
     }
+    add(&mut side, "s/fields", "", field_items(view, live, human));
+    let claim = match &facts.claim {
+        Some(line) => vec![("s/claim/text".to_string(), text_block(line, size::BODY, Tone::Body))],
+        None => vec![("s/claim/none".to_string(), text_block("Nobody holds it", size::BODY, Tone::Dim))],
+    };
+    add(&mut side, "s/claim", "Claim", claim);
+    for (key, heading, rows) in [
+        ("s/dates", "Dates", &facts.dates),
+        ("s/links", "Dependencies", &facts.links),
+        ("s/run", "Factory run", &facts.run),
+        ("s/plan", "Plan", &facts.plan),
+        ("s/details", "Details", &facts.details),
+    ] {
+        if !rows.is_empty() {
+            add(&mut side, key, heading, lines(key, rows));
+        }
+    }
+    (main, side)
+}
+
+/// The pull request's section: its link, state, grade, gates and what is wrong with it, then the merger's note.
+fn pr_items(view: &InspectorView) -> Vec<(String, Block)> {
+    let mut items = Vec::new();
+    if let Some(pr) = &view.pr {
+        let link = Block::Link { caption: pr.label.clone(), url: pr.url.clone() };
+        items.push((format!("pr/link/{}/{}", pr.label, pr.url), link));
+        items.push(("pr/state".to_string(), text_block(&pr.state, size::SECONDARY, Tone::Dim)));
+        if let Some(g) = pr.grade {
+            items.push((format!("pr/grade/{g}"), Block::GradeBadge(g)));
+        }
+        if !gates(pr).is_empty() {
+            items.push(("pr/gates".to_string(), Block::Gates));
+        }
+        if let Some(problem) = &pr.problem {
+            items.push(("pr/problem".to_string(), text_block(problem, size::BODY, Tone::Warn)));
+        }
+    }
+    if let Some(merge_note) = &view.merge_note {
+        items.push(("pr/note".to_string(), text_block(merge_note, size::SECONDARY, Tone::Dim)));
+    }
+    items
+}
+
+/// The sidebar's status, priority and grade: dropdowns while `live`, else what they are, then which side of the
+/// treeline the grade is on.
+fn field_items(view: &InspectorView, live: bool, human: &[Grade]) -> Vec<(String, Block)> {
     let status = view.status.unwrap_or(Status::Open);
     let mut fields = Vec::new();
     if live {
@@ -402,23 +412,7 @@ pub(super) fn layout_task(
         };
         fields.push(("s/fields/treeline".to_string(), text_block(words, size::SECONDARY, Tone::Dim)));
     }
-    add(&mut side, "s/fields", "", fields);
-    let claim = match &facts.claim {
-        Some(line) => vec![("s/claim/text".to_string(), text_block(line, size::BODY, Tone::Body))],
-        None => vec![("s/claim/none".to_string(), text_block("Nobody holds it", size::BODY, Tone::Dim))],
-    };
-    add(&mut side, "s/claim", "Claim", claim);
-    for (key, heading, rows) in [
-        ("s/dates", "Dates", &facts.dates),
-        ("s/links", "Dependencies", &facts.links),
-        ("s/run", "Factory run", &facts.run),
-        ("s/details", "Details", &facts.details),
-    ] {
-        if !rows.is_empty() {
-            add(&mut side, key, heading, lines(key, rows));
-        }
-    }
-    (main, side)
+    fields
 }
 
 /// The task's key, the last part of the view's breadcrumb.
@@ -532,6 +526,85 @@ fn spawn_composer(
     item
 }
 
+/// An open question's two buttons on `line`: Answer, which opens the form the board opens (it saves even after the
+/// inspector moves on), and Resolve without an answer. Both are off while not `live`.
+fn spawn_answer_buttons(
+    commands: &mut Commands,
+    controls: &mut Controls,
+    subject: &Subject,
+    line: Entity,
+    act: Act,
+    resolve_action: Action,
+    live: bool,
+) -> (Entity, Entity) {
+    let answer = commands
+        .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
+        .insert((act, ChildOf(line)))
+        .id();
+    let source = control(controls, commands, subject, &resolve_action);
+    let resolve = commands
+        .spawn_scene(bsn! {
+            @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
+            @sends(source, subject.clone(), resolve_action.clone())
+        })
+        .insert(ChildOf(line))
+        .id();
+    gate_button(commands, answer, live);
+    gate_button(commands, resolve, live);
+    (answer, resolve)
+}
+
+/// An action's button on a line of its own, with the window's dropdown beside a revert.
+fn spawn_act(
+    commands: &mut Commands,
+    controls: &mut Controls,
+    subject: &Subject,
+    action: &Action,
+    window: &Option<i64>,
+    note: &Option<Control>,
+) -> Entity {
+    let line = commands.spawn_scene(bsn! { @row() }).id();
+    let source = control(controls, commands, subject, action);
+    let press = sends(source, subject.clone(), action.clone());
+    match action {
+        Action::Release => {
+            commands.spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} })
+        }
+        Action::Undo => {
+            commands.spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} })
+        }
+        Action::Cancel => {
+            commands.spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} })
+        }
+        Action::Revert(_) => {
+            commands.spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} })
+        }
+        Action::SetAside => commands.spawn_scene(bsn! {
+            @button(action.label(), Some(Icon::Archive), ButtonKind::Normal)
+            Hint({ SET_ASIDE_HINT.to_string() })
+            @{press}
+        }),
+        // Not drawn as an action block: they have their own controls, or none.
+        Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
+            commands.spawn_empty()
+        }
+    }
+    .insert(ChildOf(line));
+    let mut parts = Parts::default();
+    if let Some(hours) = window {
+        let selected = WINDOWS.iter().position(|h| h == hours);
+        parts.select = Some(
+            commands
+                .spawn_scene(select(window_labels(), selected, WINDOWS.len()))
+                .insert((WindowChoice, ChildOf(line)))
+                .id(),
+        );
+    }
+    parts.note = Some(spawn_note(commands, line, note));
+    commands.entity(line).insert(parts);
+    line
+}
+
 /// Makes the entity for a new block, not yet parented.
 pub(super) fn spawn_block(
     commands: &mut Commands,
@@ -564,23 +637,9 @@ pub(super) fn spawn_block(
                 )
                 .insert(ChildOf(line))
                 .id();
-            // The same form the board opens; it saves even after the inspector moves on.
             let act = Act::Answer { key: key.clone(), comment_id: id.clone(), question: body.clone() };
-            let answer = commands
-                .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
-                .insert((act, ChildOf(line)))
-                .id();
-            let resolve_action = Action::Resolve(id.clone());
-            let source = control(controls, commands, subject, &resolve_action);
-            let resolve = commands
-                .spawn_scene(bsn! {
-                    @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
-                    @sends(source, subject.clone(), resolve_action.clone())
-                })
-                .insert(ChildOf(line))
-                .id();
-            gate_button(commands, answer, *live);
-            gate_button(commands, resolve, *live);
+            let resolve = Action::Resolve(id.clone());
+            let (answer, resolve) = spawn_answer_buttons(commands, controls, subject, line, act, resolve, *live);
             let note = spawn_note(commands, item, note);
             commands.entity(item).insert(Parts {
                 text: Some(words),
@@ -620,30 +679,16 @@ pub(super) fn spawn_block(
         }
         Block::Entry { key, entry, live, note } => {
             let side = if entry.mine { Side::Mine } else { Side::Theirs };
-            let item = commands.spawn_scene(bubble(side)).id();
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
-            commands.spawn_scene(bubble_head(comment_icon(entry.kind), head.join(" · "))).insert(ChildOf(item));
             let tone = if entry.open_question { token::STATUS_WARN } else { token::TEXT };
-            commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
+            let said = message(side, comment_icon(entry.kind), head.join(" · "), entry.body.clone(), tone);
+            let item = commands.spawn_scene(said).id();
             if entry.open_question {
                 let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
                 let act = Act::Answer { key: key.clone(), comment_id: entry.id.clone(), question: entry.body.clone() };
-                let answer = commands
-                    .spawn_scene(bsn! { @tool_button(Icon::Comment, "Answer", ButtonKind::Normal) })
-                    .insert((act, ChildOf(line)))
-                    .id();
-                let resolve_action = Action::Resolve(entry.id.clone());
-                let source = control(controls, commands, subject, &resolve_action);
-                let resolve = commands
-                    .spawn_scene(bsn! {
-                        @tool_button(Icon::Check, "Resolve without an answer", ButtonKind::Normal)
-                        @sends(source, subject.clone(), resolve_action.clone())
-                    })
-                    .insert(ChildOf(line))
-                    .id();
-                gate_button(commands, answer, *live);
-                gate_button(commands, resolve, *live);
+                let resolve = Action::Resolve(entry.id.clone());
+                let (answer, resolve) = spawn_answer_buttons(commands, controls, subject, line, act, resolve, *live);
                 let note = spawn_note(commands, item, note);
                 commands.entity(item).insert(Parts {
                     answer: Some(answer),
@@ -704,44 +749,7 @@ pub(super) fn spawn_block(
             commands.spawn_scene(text_dim(status_label(sub.status), size::SECONDARY)).insert(ChildOf(line));
             line
         }
-        Block::Act { action, window, note } => {
-            let line = commands.spawn_scene(bsn! { @row() }).id();
-            let source = control(controls, commands, subject, action);
-            let press = sends(source, subject.clone(), action.clone());
-            match action {
-                Action::Release => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Release), ButtonKind::Normal) @{press} }),
-                Action::Undo => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Undo), ButtonKind::Normal) @{press} }),
-                Action::Cancel => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::Stop), ButtonKind::Danger) @{press} }),
-                Action::Revert(_) => commands
-                    .spawn_scene(bsn! { @button(action.label(), Some(Icon::History), ButtonKind::Danger) @{press} }),
-                Action::SetAside => commands.spawn_scene(bsn! {
-                    @button(action.label(), Some(Icon::Archive), ButtonKind::Normal)
-                    Hint({ SET_ASIDE_HINT.to_string() })
-                    @{press}
-                }),
-                // Not drawn as an action block: they have their own controls, or none.
-                Action::Status(_) | Action::Resolve(_) | Action::Grade(_) | Action::Comment | Action::Menu => {
-                    commands.spawn_empty()
-                }
-            }
-            .insert(ChildOf(line));
-            let mut parts = Parts::default();
-            if let Some(hours) = window {
-                let selected = WINDOWS.iter().position(|h| h == hours);
-                parts.select = Some(
-                    commands
-                        .spawn_scene(select(window_labels(), selected, WINDOWS.len()))
-                        .insert((WindowChoice, ChildOf(line)))
-                        .id(),
-                );
-            }
-            parts.note = Some(spawn_note(commands, line, note));
-            commands.entity(line).insert(parts);
-            line
-        }
+        Block::Act { action, window, note } => spawn_act(commands, controls, subject, action, window, note),
     };
     commands.entity(item).insert(Shown(block.clone()));
     item
@@ -771,7 +779,7 @@ pub(super) fn dress_note(
 }
 
 /// Brings the parts of changed blocks in line with them: words, notes, disabled buttons, dropdown rows.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
     changed: Query<Entity, Changed<Shown>>,
