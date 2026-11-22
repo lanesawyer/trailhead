@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::app_notice::LOG_ENV;
+
 /// Made by `cargo run -p trailhead-shell --example make_icon`, whose test fails when it drifts from the drawing.
 const ICON: &[u8] = include_bytes!("../../assets/trailhead.icns");
 const BUNDLE: &str = "Trailhead.app";
@@ -25,7 +27,7 @@ pub(crate) fn install() -> Result<()> {
     let path = std::env::var("PATH").unwrap_or_default();
     let app = bundle(&home.join("Applications"), &cli, &path)?;
     println!(
-        "installed {}\nIt runs `{} app` with this terminal's PATH, and writes what that prints to ~/{LOG}.\nStart the window once from a terminal first: signing in and the lines to allow this machine need one.",
+        "installed {}\nIt runs `{} app` with this terminal's PATH, and writes what that prints to ~/{LOG}.\nStart the window once from a terminal first: signing in needs one. When the app can't start the window it says why in a dialog.",
         app.display(),
         cli.display()
     );
@@ -68,7 +70,7 @@ fn script(cli: &Path, path: &str) -> Result<String> {
         }
     }
     Ok(format!(
-        "#!/bin/sh\n# Written by `trailhead app install`; run it again after moving the CLI.\nexport PATH='{path}'\nlog=\"$HOME/{LOG}\"\nmkdir -p \"$(dirname \"$log\")\"\nexec '{cli}' app >>\"$log\" 2>&1\n"
+        "#!/bin/sh\n# Written by `trailhead app install`; run it again after moving the CLI.\nexport PATH='{path}'\nlog=\"$HOME/{LOG}\"\nmkdir -p \"$(dirname \"$log\")\"\nexport {LOG_ENV}=\"$log\"\nexec '{cli}' app >>\"$log\" 2>&1\n"
     ))
 }
 
@@ -115,6 +117,7 @@ mod tests {
         assert!(script.starts_with("#!/bin/sh\n"));
         assert!(script.contains("export PATH='/Users/me/.cargo/bin:/usr/bin'\n"));
         assert!(script.contains("exec '/Users/me/.cargo/bin/trailhead' app >>\"$log\" 2>&1\n"));
+        assert!(script.contains("export TRAILHEAD_APP_LOG=\"$log\"\n"), "the launcher learns nobody reads its output");
         let info = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
         assert!(info.contains(&format!("<string>{EXECUTABLE}</string>")), "the plist names the script");
         assert!(!info.contains("LSUIElement"), "an agent app's window gets no Dock tile or menu bar");

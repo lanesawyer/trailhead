@@ -12,6 +12,7 @@ use trailhead_builder::{Layout, ShellConfig};
 use trailhead_core::shell::{BUILD_ENV, LOCAL_STATE_ENV, RESTART_CODE, ShellBuild};
 use trailhead_server::Paths;
 
+use super::app_notice::Notice;
 use super::app_remote::{FromServer, Link, only_launcher, shell_dir};
 use super::print_json;
 use crate::cli::AppCmd;
@@ -21,6 +22,15 @@ use crate::client;
 const STARTUP: Duration = Duration::from_secs(10);
 
 pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[OsString], json: bool) -> Result<()> {
+    let done = start(paths, url, cmd, args, json).await;
+    // Started from Trailhead.app, the error below goes to a log nobody is reading.
+    if let (None, Err(e), Some(mut notice)) = (cmd, &done, Notice::from_env()) {
+        notice.failed(&format!("Trailhead couldn't start: {e:#}"));
+    }
+    done
+}
+
+async fn start(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[OsString], json: bool) -> Result<()> {
     let config = ShellConfig::read(&paths.config_dir).map_err(anyhow::Error::msg)?;
     let remote = ShellConfig::read_remote(&paths.config_dir).map_err(anyhow::Error::msg)?;
     let layout = Layout::new(&paths.data_dir);

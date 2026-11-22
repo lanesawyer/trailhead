@@ -3,6 +3,7 @@
 pub(crate) mod access;
 pub(crate) mod app;
 mod app_install;
+mod app_notice;
 mod app_remote;
 pub(crate) mod attachments;
 pub(crate) mod claims;

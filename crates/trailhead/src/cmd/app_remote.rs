@@ -11,14 +11,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::presets;
-use iroh::{Endpoint, SecretKey};
+use iroh::{Endpoint, EndpointId, SecretKey};
 use trailhead_builder::{Boxed, Job, Origin, System, Tools};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_core::shell::ShellBuild;
 use trailhead_server::Paths;
-use trailhead_wire::ui::{UiTunnel, open_ui_tunnel};
+use trailhead_wire::ui::{UiTunnel, dial_ui, open_ui_tunnel, refused};
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
+
+use super::app_notice::Notice;
 
 /// The environment variable a pasted user token is read from, as the window reads it.
 const TOKEN_ENV: &str = "TRAILHEAD_SHELL_TOKEN";
@@ -95,9 +97,56 @@ fn allow_lines(launcher: &SecretKey, window: &SecretKey) -> String {
     )
 }
 
+/// Why the server hasn't answered the launcher yet.
+#[derive(Debug)]
+enum Trouble {
+    /// It answered, to say this endpoint isn't one it allows.
+    Refused,
+    /// It didn't answer, or its API didn't. Allowing this machine again changes nothing.
+    Unreachable(String),
+}
+
+impl Trouble {
+    /// What `trailhead app` prints: `allow` is the lines to run on the server, said only when it refused.
+    fn in_a_terminal(&self, from: &str, allow: &str) -> String {
+        let retry = RETRY.as_secs();
+        match self {
+            Trouble::Refused => format!(
+                "trailhead app: the server at {from} doesn't allow this machine yet. Run both of these on the server's machine (two, because two programs here connect to it):\n\n{allow}\n\nTrying again every {retry} s, so this carries on by itself once they are run; Ctrl-C to stop."
+            ),
+            Trouble::Unreachable(why) => format!(
+                "trailhead app: can't reach the server at {from} ({why}). Is it running, and is this machine online? Nothing needs allowing for this: a server that refuses this machine says so.\nTrying again every {retry} s, so this carries on by itself once it answers; Ctrl-C to stop."
+            ),
+        }
+    }
+
+    /// The same for Trailhead.app's dialog, which has the log to point at for the lines to run.
+    fn in_a_dialog(&self) -> String {
+        match self {
+            Trouble::Refused => "Your Trailhead server doesn't allow this Mac yet. The two commands to run on the server's machine are in the log.\n\nTrailhead keeps trying, and opens by itself once they are run.".into(),
+            Trouble::Unreachable(why) => format!(
+                "Trailhead can't reach its server ({why}). Is the server running, and is this Mac online?\n\nTrailhead keeps trying, and opens by itself when the server answers."
+            ),
+        }
+    }
+}
+
+/// Dials the server's endpoint itself, which is what tells a refusal from silence: `None` when it took the dial and
+/// kept it, so its API is worth asking.
+async fn dial(endpoint: &Endpoint, server: EndpointId) -> Option<Trouble> {
+    match dial_ui(endpoint, server).await {
+        Err(e) => Some(Trouble::Unreachable(e.to_string())),
+        Ok(conn) if refused(&conn).await => Some(Trouble::Refused),
+        Ok(conn) => {
+            conn.close(0u32.into(), b"only asking");
+            None
+        }
+    }
+}
+
 impl Link {
-    /// Dials the server at `from`, waits until it answers (saying how to allow this machine while it doesn't), and
-    /// signs in with the token saved for it, `TRAILHEAD_SHELL_TOKEN`, or one pasted at the prompt.
+    /// Dials the server at `from`, waits until it answers (saying why it doesn't while it doesn't), and signs in
+    /// with the token saved for it, `TRAILHEAD_SHELL_TOKEN`, or one pasted at the prompt.
     pub(crate) async fn open(paths: &Paths, from: &str) -> Result<Link> {
         let server = parse_endpoint_id(from).map_err(|e| anyhow::anyhow!("[shell] from: {e}"))?;
         let dir = shell_dir(paths);
@@ -109,30 +158,35 @@ impl Link {
             .bind()
             .await
             .map_err(|e| anyhow::anyhow!("opening an iroh endpoint: {e}"))?;
-        let tunnel = open_ui_tunnel(endpoint, server).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let tunnel = open_ui_tunnel(endpoint.clone(), server).await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let http = reqwest::Client::builder().timeout(REQUEST).no_proxy().build()?;
         let base = format!("http://{}", tunnel.addr());
-        let mut said = false;
+        let mut notice = Notice::from_env();
+        let mut said = None;
         let health: Health = loop {
-            match http.get(format!("{base}/v1/health")).send().await {
-                Ok(r) if r.status().is_success() => break r.json().await.unwrap_or_default(),
-                answer => {
-                    if !said {
-                        let why = match answer {
-                            Ok(r) => format!("it answered {}", r.status()),
-                            Err(e) => e.to_string(),
-                        };
-                        eprintln!(
-                            "trailhead app: the server at {from} doesn't answer yet ({why}).\nA server answers only the machines it has been told to allow. If this one hasn't been, run both of these on the server's machine (two, because two programs here connect to it):\n\n{}\n\nTrying again every {} s, so this carries on by itself once they are run; Ctrl-C to stop.",
-                            allow_lines(&launcher, &window),
-                            RETRY.as_secs()
-                        );
-                        said = true;
-                    }
-                    tokio::time::sleep(RETRY).await;
+            let trouble = match dial(&endpoint, server).await {
+                Some(trouble) => trouble,
+                None => match http.get(format!("{base}/v1/health")).send().await {
+                    Ok(r) if r.status().is_success() => break r.json().await.unwrap_or_default(),
+                    Ok(r) => Trouble::Unreachable(format!("it answered {}", r.status())),
+                    Err(e) => Trouble::Unreachable(e.to_string()),
+                },
+            };
+            // Said once per kind of trouble: a server that comes back and then refuses this machine is news.
+            if said != Some(std::mem::discriminant(&trouble)) {
+                eprintln!("{}", trouble.in_a_terminal(from, &allow_lines(&launcher, &window)));
+                if let Some(notice) = &mut notice {
+                    notice.waiting(&trouble.in_a_dialog());
                 }
+                said = Some(std::mem::discriminant(&trouble));
             }
+            if notice.as_mut().is_some_and(Notice::quit) {
+                eprintln!("trailhead app: asked to quit while waiting for the server");
+                std::process::exit(0);
+            }
+            tokio::time::sleep(RETRY).await;
         };
+        drop(notice);
         let token = sign_in(paths, &http, &base, health.instance.as_deref()).await?;
         Ok(Link { _tunnel: Some(tunnel), http, base, token })
     }
@@ -190,6 +244,9 @@ async fn sign_in(paths: &Paths, http: &reqwest::Client, base: &str, instance: Op
     let given = std::env::var(TOKEN_ENV).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     let token = match given {
         Some(token) => token,
+        None if Notice::from_env().is_some() => bail!(
+            "this Mac has no token for the server yet, and the app has nowhere to paste one. Run `trailhead app` once in a terminal, which asks for it and saves it"
+        ),
         None => {
             eprintln!(
                 "trailhead app: this machine has no token for the server. On the server's machine, run\n\n  trailhead --as-me token add laptop\n\nand paste what it prints here:"
@@ -386,6 +443,17 @@ mod tests {
         let none = br#"{"configured": true, "current": null, "previous": null, "building": "c0ffee1", "error": null, "bad": []}"#;
         let tools_none = tools(serve(vec![("/v1/shell/build", none.to_vec())]).await);
         assert!(tools_none.head(&origin).await.unwrap_err().contains("hasn't built a shell yet"));
+    }
+
+    #[test]
+    fn the_allow_lines_are_said_only_when_the_server_refused_this_machine() {
+        let refused = Trouble::Refused.in_a_terminal("abc", "  trailhead factory allow 123");
+        assert!(refused.contains("doesn't allow this machine") && refused.contains("trailhead factory allow 123"));
+        let silent = Trouble::Unreachable("timed out".into()).in_a_terminal("abc", "  trailhead factory allow 123");
+        assert!(silent.contains("can't reach the server at abc (timed out)"), "{silent}");
+        assert!(!silent.contains("factory allow"), "{silent}");
+        assert!(Trouble::Unreachable("timed out".into()).in_a_dialog().contains("timed out"));
+        assert!(Trouble::Refused.in_a_dialog().contains("in the log"));
     }
 
     #[test]

@@ -243,8 +243,10 @@ build of it there, kept current.
   build's source unpacked, and cargo builds it into the same layout (`<data dir>/shell`), which the launcher starts
   from as it always has. It needs cargo, and no Trailhead server on that machine.
 - **Two endpoints to allow.** The launcher has its own iroh identity (`launcher.key` beside the window's
-  `endpoint.key`), since it keeps building while the window runs and two processes can't share one. Until the server
-  answers, `trailhead app` prints both `trailhead factory allow` lines to run there. It signs in with the token saved
+  `endpoint.key`), since it keeps building while the window runs and two processes can't share one. While the server
+  hasn't answered, `trailhead app` dials its endpoint to learn which it is: refused (the dial is taken, then closed
+  as not allowed), and it prints both `trailhead factory allow` lines to run there; or not reached, and it says so
+  and prints no lines, since allowing the machine again changes nothing (TRAIL-1667). It signs in with the token saved
   for that server, else `TRAILHEAD_SHELL_TOKEN`, else one pasted at its prompt (`trailhead --as-me token add laptop`
   on the server), and saves it where the window looks, so it is asked for once.
 - **An update is offered when this machine has built it.** The launcher names its builder's state file to the window
@@ -260,8 +262,12 @@ build of it there, kept current.
   that runs `trailhead app` with the PATH of the terminal that installed it, since an app started from the Dock has
   no cargo on its PATH. What the launcher prints goes to `~/Library/Logs/Trailhead/launcher.log`. The window the
   launcher starts takes the bundle's identity, so it is "Trailhead" with the icon in the Dock and the menu bar (which
-  is why the bundle isn't an `LSUIElement` agent: the window then had neither). Signing in and allowing the machine
-  still need one start from a terminal.
+  is why the bundle isn't an `LSUIElement` agent: the window then had neither). The script sets `TRAILHEAD_APP_LOG`,
+  which tells the launcher nobody reads what it prints, so it says in a dialog (`osascript`,
+  `crates/trailhead/src/cmd/app_notice.rs`) why there is no window: while it waits for the server, with Quit, Show
+  Log and Keep Waiting, taken down when the server answers; and when it gives up (another launcher holds the lock, a
+  build failed, no token). Signing in still needs one start from a terminal, for the prompt. The dialogs have not
+  been seen on a Mac yet (TRAIL-1666).
 - **Not built:** the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from
   there.
 - **Verified on Lane's Mac (2026-11-21):** the first build, the window signing in, an update arriving and being
