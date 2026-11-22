@@ -8183,6 +8183,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "trailhead-connector"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "trailhead-control"
 version = "0.1.0"
 dependencies = [
