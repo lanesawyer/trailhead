@@ -10,7 +10,8 @@ use std::ops::RangeInclusive;
 
 use serde_json::json;
 use trailhead_core::shell::{
-    Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS, PLANNER_MODELS,
+    Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS, NewApp, PLANNER_MODELS, chosen_key,
+    key_from, words,
 };
 use trailhead_core::{
     Ctx, Error, FACTORY_AGENT, Grade, NewProject, NewTask, PROJECT_REPO_KEY, Priority, ProjectPatch, Result, Spec,
@@ -88,9 +89,6 @@ const NOT_A_CRATE: &[&str] = &[
 /// How long an app's id may be.
 const ID_CHARS: RangeInclusive<usize> = 2..=32;
 
-/// How long a project key made from a name may be, before a digit is added to make it unique.
-const KEY_CHARS: RangeInclusive<usize> = 2..=6;
-
 /// The longest task title an ask's first line makes; a longer line is cut at a word.
 const TITLE_CHARS: usize = 80;
 
@@ -161,7 +159,7 @@ pub async fn ask(store: &Store, ctx: &Ctx, configured: bool, repo: Option<&str>,
             let planner = ask.plan.then_some(Planner { model });
             change(store, ctx, repo, &project, text, today, planner).await
         }
-        (None, Some(app)) => new_app(store, ctx, repo, app.name.trim(), text, today, Planner { model }).await,
+        (None, Some(app)) => new_app(store, ctx, repo, &app, text, today, Planner { model }).await,
         _ => Err(Error::Invalid("ask about one thing: a `project` or a `new_app`".into())),
     }
 }
@@ -209,11 +207,12 @@ async fn new_app(
     store: &Store,
     ctx: &Ctx,
     repo: &str,
-    name: &str,
+    app: &NewApp,
     text: &str,
     today: jiff::civil::Date,
     planner: Planner,
 ) -> Result<Asked> {
+    let name = app.name.trim();
     if name.is_empty() {
         return Err(Error::Invalid("a new app needs a name".into()));
     }
@@ -228,9 +227,17 @@ async fn new_app(
             t.name, t.project
         )));
     }
+    let chosen =
+        app.key.as_deref().filter(|k| !k.trim().is_empty()).map(chosen_key).transpose().map_err(Error::Invalid)?;
     let mut taken: Vec<String> = store.list_projects(ctx, true).await?.into_iter().map(|p| p.key).collect();
     let project = loop {
-        let key = project_key(name, &taken).map_err(Error::Invalid)?;
+        let key = match &chosen {
+            Some(key) if taken.iter().any(|t| t.eq_ignore_ascii_case(key)) => {
+                return Err(Error::Invalid(format!("the key {key} is another project's: choose another")));
+            }
+            Some(key) => key.clone(),
+            None => project_key(name, &taken).map_err(Error::Invalid)?,
+        };
         let new = NewProject {
             key: key.clone(),
             name: name.to_string(),
@@ -346,56 +353,6 @@ pub(crate) fn title_of(text: &str) -> String {
     format!("{}…", head[..at].trim_end())
 }
 
-/// A name's words: its letters and digits, accented Latin letters taken as their plain ones, everything else a break.
-fn words(name: &str) -> Vec<String> {
-    let mut words = vec![String::new()];
-    for c in name.chars() {
-        let plain = fold(c);
-        match plain {
-            Some(p) => words.last_mut().expect("never empty").push_str(p),
-            None if c.is_ascii_alphanumeric() => words.last_mut().expect("never empty").push(c),
-            None if c == '\'' || c == '\u{2019}' => {}
-            None => words.push(String::new()),
-        }
-    }
-    words.retain(|w| !w.is_empty());
-    words
-}
-
-/// The plain letters an accented Latin one is written with.
-fn fold(c: char) -> Option<&'static str> {
-    Some(match c {
-        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => "a",
-        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' => "A",
-        'æ' => "ae",
-        'Æ' => "AE",
-        'ç' | 'č' | 'ć' => "c",
-        'Ç' | 'Č' | 'Ć' => "C",
-        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' => "e",
-        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ę' => "E",
-        'ì' | 'í' | 'î' | 'ï' | 'ī' => "i",
-        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' => "I",
-        'ł' => "l",
-        'Ł' => "L",
-        'ñ' | 'ń' => "n",
-        'Ñ' | 'Ń' => "N",
-        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => "o",
-        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' => "O",
-        'œ' => "oe",
-        'Œ' => "OE",
-        'š' | 'ś' => "s",
-        'Š' | 'Ś' => "S",
-        'ß' => "ss",
-        'ù' | 'ú' | 'û' | 'ü' | 'ū' => "u",
-        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' => "U",
-        'ý' | 'ÿ' => "y",
-        'Ý' | 'Ÿ' => "Y",
-        'ž' | 'ź' | 'ż' => "z",
-        'Ž' | 'Ź' | 'Ż' => "Z",
-        _ => return None,
-    })
-}
-
 /// An app's id from its name: its words in lowercase joined by `-`, starting with a letter, [`ID_CHARS`] long, and a
 /// name cargo takes for a crate once `-` is `_`. `Err` says why a name makes no id.
 pub(crate) fn app_id(name: &str) -> std::result::Result<String, String> {
@@ -419,32 +376,10 @@ pub(crate) fn app_id(name: &str) -> std::result::Result<String, String> {
     Ok(id)
 }
 
-/// A project key from a name, not one of `taken` (compared ignoring case): the first four letters of a name of one
-/// word, the initials of a name of several, padded from the first word to at least two, at most six; then a digit
-/// added (2 to 9) until it is unique.
+/// A project key from a name ([`key_from`]), not one of `taken` (compared ignoring case): a digit is added (2 to 9)
+/// until it is unique.
 pub(crate) fn project_key(name: &str, taken: &[String]) -> std::result::Result<String, String> {
-    let lettered: Vec<String> = words(name)
-        .iter()
-        .map(|w| w.chars().filter(char::is_ascii_alphabetic).collect::<String>().to_ascii_uppercase())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let Some(first) = lettered.first() else {
-        return Err(format!("{name:?} has no letters to make a project key from"));
-    };
-    let mut base: String = if lettered.len() == 1 {
-        first.chars().take(4).collect()
-    } else {
-        lettered.iter().take(*KEY_CHARS.end()).filter_map(|w| w.chars().next()).collect()
-    };
-    for c in first.chars().skip(1) {
-        if base.len() >= *KEY_CHARS.start() {
-            break;
-        }
-        base.push(c);
-    }
-    if base.len() < *KEY_CHARS.start() {
-        return Err(format!("{name:?} is too short to make a project key from: give it at least two letters"));
-    }
+    let base = key_from(name)?;
     let free = |key: &String| !taken.iter().any(|t| t.eq_ignore_ascii_case(key));
     std::iter::once(base.clone())
         .chain((2..=9).map(|n| format!("{base}{n}")))
@@ -625,8 +560,7 @@ mod tests {
         let rig = rig().await;
         rig.apps().await;
         let long = "x".repeat(MAX_ASK_CHARS + 1);
-        let both =
-            Ask { new_app: Some(trailhead_core::shell::NewApp { name: "A b".into() }), ..Ask::change("x", "TICK") };
+        let both = Ask { new_app: Some(NewApp { name: "A b".into(), key: None }), ..Ask::change("x", "TICK") };
         for bad in [
             Ask::change("   \n ", "TICK"),
             Ask::change(long, "TICK"),
@@ -646,25 +580,45 @@ mod tests {
         assert!(matches!(err, Error::Invalid(_)), "{err}");
     }
 
+    #[tokio::test]
+    async fn a_new_app_takes_the_key_the_person_chose_or_says_why_not() {
+        let rig = rig().await;
+        let asked = rig.ask(&rig.human, Ask::new_app("a trail of what's next", "Cairn").keyed(" crn ")).await.unwrap();
+        assert_eq!(asked.project, AskedProject { key: "CRN".into(), name: "Cairn".into(), created: true });
+        assert_eq!(asked.task.map(|t| t.key).as_deref(), Some("CRN-1"));
+        let project = rig.store.get_project(&rig.human, "CRN").await.unwrap();
+        assert!(project.brief.contains("[CRN-n]"), "{}", project.brief);
+
+        for (name, key) in [("Stones", "crn"), ("Stones", "2x"), ("Stones", "far-too-long")] {
+            let err = rig.ask(&rig.human, Ask::new_app("x", name).keyed(key)).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{key:?}: {err}");
+        }
+        assert!(rig.store.get_project(&rig.human, "STONES").await.is_err(), "a refused key makes no project");
+        let blank = rig.ask(&rig.human, Ask::new_app("x", "Stones").keyed("  ")).await.unwrap();
+        assert_eq!(blank.project.key, "STONES", "a blank key is none");
+    }
+
     #[test]
     fn a_name_makes_an_id_and_a_key() {
         let none: &[String] = &[];
         let cases: &[(&str, Result2, Result2)] = &[
             ("Trail Notes", Ok("trail-notes"), Ok("TN")),
             ("Recipes", Ok("recipes"), Ok("RECI")),
+            ("Cairn", Ok("cairn"), Ok("CAIRN")),
+            ("Ticker", Ok("ticker"), Ok("TICKER")),
             ("Go", Ok("go"), Ok("GO")),
             ("My  climbing-log!", Ok("my-climbing-log"), Ok("MCL")),
             ("Bob's Boulders", Ok("bobs-boulders"), Ok("BB")),
             ("Café Crème", Ok("cafe-creme"), Ok("CC")),
             ("Ångström Notes 2", Ok("angstrom-notes-2"), Ok("AN")),
-            ("Notes 2", Ok("notes-2"), Ok("NOTE")),
+            ("Notes 2", Ok("notes-2"), Ok("NOTES")),
             ("Top 10 Crags", Ok("top-10-crags"), Ok("TC")),
             ("a b c d e f g h", Ok("a-b-c-d-e-f-g-h"), Ok("ABCDEF")),
             ("日記", Err(()), Err(())),
             ("X", Err(()), Err(())),
             ("2048", Err(()), Err(())),
             ("10 Pitches", Err(()), Ok("PITC")),
-            ("Shell", Err(()), Ok("SHEL")),
+            ("Shell", Err(()), Ok("SHELL")),
             ("Lookout", Err(()), Ok("LOOK")),
             ("example", Err(()), Ok("EXAM")),
             ("Type", Err(()), Ok("TYPE")),

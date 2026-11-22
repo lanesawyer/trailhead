@@ -1,8 +1,9 @@
 //! The Ask form, in two kinds. The rail's Ask button ([`crate::rail::AskButton`]) opens "Ask for a change": a dropdown
 //! of the app it is about (each app the server can be asked about, the app shown first), the ask under a dim line
 //! saying what becomes of it, a "Plan this first" switch, off at first, and the planner's model while it is on. The
-//! plus under the apps ([`crate::rail::NewAppButton`]) opens "Ask for a new app": its name, the ask, and the planner's
-//! model, since a new app is always planned. Under them a notice says why Ask can't be pressed yet or what the server
+//! plus under the apps ([`crate::rail::NewAppButton`]) opens "Ask for a new app": its name, its project's key (empty
+//! leaves it to the name, and a line under it says which key its tasks will carry), the ask, and the planner's model,
+//! since a new app is always planned. Under them a notice says why Ask can't be pressed yet or what the server
 //! said when it refused. Ask and Cancel are in the footer. Once the server has made what was asked, the form is
 //! hidden and a confirmation shown in its place, with Done.
 //!
@@ -44,6 +45,9 @@ pub const HINT: &str = "Say what you want. It becomes a task the factory builds.
 pub const NEW_APP_HINT: &str =
     "Say what the app is for and what it should do. The planner talks it over with you first.";
 
+/// The label over a new app's project's key.
+pub const KEY: &str = "Its project's key (optional)";
+
 /// The "Plan this first" switch's label and the note under it.
 pub const PLAN: &str = "Plan this first";
 pub const PLAN_NOTE: &str =
@@ -65,6 +69,10 @@ pub enum AskPart {
     About,
     /// A new app's name's text entity.
     Name,
+    /// A new app's project's key's text entity.
+    Key,
+    /// The line under the key saying which key the tasks will carry.
+    KeyNote,
     /// The ask's text entity.
     Text,
     /// The "Plan this first" switch, for a change.
@@ -105,7 +113,7 @@ impl Plugin for AskPanelUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_observer(on_ask_button).add_observer(on_act).add_observer(on_pick).add_observer(on_plan).add_systems(
             Update,
-            (fill_panel, read_inputs, show_choice, show_phase, show_notice, show_buttons, show_asked).chain(),
+            (fill_panel, read_inputs, show_key, show_choice, show_phase, show_notice, show_buttons, show_asked).chain(),
         );
     }
 }
@@ -203,10 +211,16 @@ fn fill_change(commands: &mut Commands, body: Entity, form: &AskForm, askable: &
     spawn_model(commands, body, form);
 }
 
-/// A new app's rows: its name, the ask and the planner's model.
+/// A new app's rows: its name, its project's key, the ask and the planner's model.
 fn fill_new_app(commands: &mut Commands, body: Entity, form: &AskForm) {
     let name = bsn_list! { @text_input(1.0, bsn! { AskPart::Name InitialText({ form.name.clone() }) }) };
     commands.spawn_scene(field("The new app's name", name)).insert(ChildOf(body));
+    let note = form.key_note();
+    let key = bsn_list! {
+        @text_input(1.0, bsn! { AskPart::Key InitialText({ form.key.clone() }) })
+        -- @text_dim(note, size::SECONDARY) AskPart::KeyNote
+    };
+    commands.spawn_scene(field(KEY, key)).insert(ChildOf(body));
     spawn_text(commands, body, NEW_APP_HINT, form);
     spawn_model(commands, body, form);
 }
@@ -249,8 +263,21 @@ fn read_inputs(fields: Query<(&AskPart, Ref<EditableText>)>, mut form: ResMut<As
         let value = typed.value().to_string();
         match part {
             AskPart::Name if form.name != value => form.name = value,
+            AskPart::Key if form.key != value => form.key = value,
             AskPart::Text if form.text != value => form.text = value,
             _ => {}
+        }
+    }
+}
+
+/// Says under a new app's key which key its tasks will carry.
+fn show_key(form: Res<AskForm>, mut notes: Query<(&AskPart, &mut Text)>) {
+    if !form.is_changed() {
+        return;
+    }
+    for (part, text) in &mut notes {
+        if *part == AskPart::KeyNote {
+            set_text(text, &form.key_note());
         }
     }
 }
@@ -606,7 +633,7 @@ mod tests {
         assert_eq!(app.world().resource::<AskForm>().about, About::NewApp);
         assert!(!has(&app, AskPart::About) && !has(&app, AskPart::Plan), "no app to choose and no switch");
         let rows: Vec<Entity> = app.world().get::<Children>(part(&app, AskPart::Form)).unwrap().iter().collect();
-        assert_eq!(rows.len(), 4, "the name, the ask, the model and the notice");
+        assert_eq!(rows.len(), 5, "the name, the key, the ask, the model and the notice");
         assert!(shown(&app, part(&app, AskPart::ModelRow)), "a new app is always planned");
         let hint = app.world_mut().query::<&Text>().iter(app.world()).any(|t| t.0 == NEW_APP_HINT);
         assert!(hint);
@@ -621,6 +648,21 @@ mod tests {
             app.world().resource::<AskForm>().ask(),
             Some(Ask::new_app("Notes on routes", "Trail Notes").planned(None))
         );
+
+        let note = part(&app, AskPart::KeyNote);
+        assert!(words(&app, note).contains("it is TN, made from the name"), "{}", words(&app, note));
+        let before = entities(&mut app);
+        type_into(&mut app, AskPart::Key, "2x");
+        assert!(!enabled(&app, ask), "a key that can't be one");
+        assert_eq!(notice(&app, part(&app, AskPart::Notice)).1, words(&app, note));
+        type_into(&mut app, AskPart::Key, "trailn");
+        assert!(enabled(&app, ask));
+        assert!(words(&app, note).starts_with("Tasks are TRAILN-1"), "{}", words(&app, note));
+        assert_eq!(
+            app.world().resource::<AskForm>().ask(),
+            Some(Ask::new_app("Notes on routes", "Trail Notes").keyed("TRAILN").planned(None))
+        );
+        assert_eq!(entities(&mut app), before, "the note changes in place");
 
         set_connection(&mut app, Connection::Offline);
         assert!(!enabled(&app, ask));

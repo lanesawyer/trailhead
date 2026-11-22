@@ -13,7 +13,7 @@
 //! instead of making a second task.
 
 use bevy::prelude::*;
-use trailhead_model::shell::{Ask, AskTarget, AskTargets, Asked, MAX_ASK_CHARS, PLANNER_MODELS};
+use trailhead_model::shell::{Ask, AskTarget, AskTargets, Asked, MAX_ASK_CHARS, PLANNER_MODELS, chosen_key, key_from};
 
 use crate::connection::{Connection, ConnectionStatus, SendNet};
 use crate::net::{Fetch, NetCommand};
@@ -139,6 +139,8 @@ pub struct AskForm {
     pub about: About,
     /// A new app's name.
     pub name: String,
+    /// A new app's project's key, as typed; empty leaves it to the name ([`key_from`]).
+    pub key: String,
     pub text: String,
     /// Whether a change is planned first. A new app always is, whatever this says.
     pub plan: bool,
@@ -180,6 +182,12 @@ impl AskForm {
         if self.about == About::NewApp && self.name.trim().is_empty() {
             return Gate::Blocked("Give the new app a name.".into());
         }
+        if self.about == About::NewApp
+            && !self.key.trim().is_empty()
+            && let Err(why) = chosen_key(&self.key)
+        {
+            return Gate::Blocked(why);
+        }
         Gate::Ready
     }
 
@@ -188,9 +196,28 @@ impl AskForm {
         let text = self.text.trim();
         let ask = match &self.about {
             About::Change(key) => Ask::change(text, key.clone()?),
-            About::NewApp => Ask::new_app(text, self.name.trim()),
+            About::NewApp => match chosen_key(&self.key) {
+                Ok(key) => Ask::new_app(text, self.name.trim()).keyed(key),
+                Err(_) => Ask::new_app(text, self.name.trim()),
+            },
         };
         Some(if self.planned() { ask.planned(self.model) } else { ask })
+    }
+
+    /// What the form says under a new app's key: the key its tasks will carry, typed or made from the name.
+    pub fn key_note(&self) -> String {
+        let key = match self.key.trim() {
+            "" if self.name.trim().is_empty() => return "Left empty, it is made from the name.".into(),
+            "" => match key_from(&self.name) {
+                Ok(key) => return format!("Left empty, it is {key}, made from the name: tasks are {key}-1, {key}-2…"),
+                Err(_) => return "The name makes no key: choose one.".into(),
+            },
+            typed => chosen_key(typed),
+        };
+        match key {
+            Ok(key) => format!("Tasks are {key}-1, {key}-2… It can't be changed later."),
+            Err(why) => why,
+        }
     }
 
     /// The idempotency key for `ask`: the last one's when it is the same ask, else a new one.
@@ -383,6 +410,7 @@ fn hear_ask(mut replies: MessageReader<AskReply>, mut form: ResMut<AskForm>) {
                 form.phase = Phase::Asked(asked.clone());
                 form.text.clear();
                 form.name.clear();
+                form.key.clear();
                 form.last = None;
             }
             Err(e) => {
@@ -583,6 +611,21 @@ mod tests {
         assert_eq!(model_options(), [REPO_DEFAULT, "Fable", "Opus", "Sonnet", "Haiku"]);
         assert_eq!((model_at(0), model_at(2), model_at(5)), (None, Some("opus"), None));
         assert_eq!((model_index(None), model_index(Some("haiku")), model_index(Some("gpt"))), (0, 4, 0));
+    }
+
+    #[test]
+    fn a_new_apps_key_is_the_one_typed_or_left_to_the_name() {
+        let mut form = AskForm { about: About::NewApp, name: "Cairn".into(), text: "next".into(), ..default() };
+        assert_eq!(form.ask(), Some(Ask::new_app("next", "Cairn").planned(None)), "none typed, none sent");
+        assert!(form.key_note().contains("it is CAIRN") && form.key_note().contains("CAIRN-1"), "{}", form.key_note());
+        form.key = " crn ".into();
+        assert_eq!(form.ask(), Some(Ask::new_app("next", "Cairn").keyed("CRN").planned(None)));
+        assert!(form.key_note().starts_with("Tasks are CRN-1"), "{}", form.key_note());
+        assert_eq!(form.gate(true, None), Gate::Ready);
+        form.key = "2 bad".into();
+        assert!(matches!(form.gate(true, None), Gate::Blocked(why) if why == form.key_note()));
+        form.about = About::Change(Some("TICK".into()));
+        assert_eq!(form.gate(true, None), Gate::Ready, "a change has no key to get wrong");
     }
 
     #[test]
