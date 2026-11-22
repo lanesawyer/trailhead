@@ -110,6 +110,9 @@ pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String
 pub struct SettingsTabs {
     /// The whole: tabs and pane side by side.
     pub root: Entity,
+    /// The column the strip is in, [`extent::SETTINGS_TABS_WIDTH`] wide. What goes over the tabs (a search field that
+    /// narrows them) is put in as its first child.
+    pub side: Entity,
     /// A [`tab_strip`] down the side: fill it with [`crate::tab`]s, a [`crate::tab_heading`] over each group of them,
     /// and answer its `ValueChange<Option<Entity>>` by setting its `SelectedTab` and showing that tab's page.
     pub strip: Entity,
@@ -128,12 +131,22 @@ pub fn spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsT
             ChildOf(parent),
         ))
         .id();
+    let side = commands
+        .spawn((
+            Name::new("settings side"),
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: px(space::ROWS),
+                width: px(extent::SETTINGS_TABS_WIDTH),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            ChildOf(root),
+        ))
+        .id();
     let strip = commands
-        .spawn_scene(bsn! {
-            @tab_strip(ControlOrientation::Vertical)
-            Node { width: { px(extent::SETTINGS_TABS_WIDTH) }, flex_shrink: 0.0 }
-        })
-        .insert(ChildOf(root))
+        .spawn_scene(bsn! { @tab_strip(ControlOrientation::Vertical) Node { flex_grow: 1.0 } })
+        .insert(ChildOf(side))
         .id();
     let pane = commands
         .spawn((
@@ -148,7 +161,7 @@ pub fn spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsT
             ChildOf(root),
         ))
         .id();
-    SettingsTabs { root, strip, pane }
+    SettingsTabs { root, side, strip, pane }
 }
 
 #[cfg(test)]
@@ -242,11 +255,14 @@ mod tests {
         app.update();
         let world = app.world();
         let children: Vec<Entity> = world.get::<Children>(parts.root).unwrap().iter().collect();
-        assert_eq!(children, [parts.strip, parts.pane]);
+        assert_eq!(children, [parts.side, parts.pane]);
+        let in_side: Vec<Entity> = world.get::<Children>(parts.side).unwrap().iter().collect();
+        assert_eq!(in_side, [parts.strip], "what goes over the tabs is the caller's to put first");
         let list = world.get::<bevy::ui_widgets::TabList>(parts.strip).unwrap();
         assert_eq!(list.orientation, ControlOrientation::Vertical);
-        let strip = world.get::<Node>(parts.strip).unwrap();
-        assert_eq!((strip.width, strip.flex_shrink), (px(extent::SETTINGS_TABS_WIDTH), 0.0));
+        let side = world.get::<Node>(parts.side).unwrap();
+        assert_eq!((side.width, side.flex_shrink), (px(extent::SETTINGS_TABS_WIDTH), 0.0));
+        assert_eq!(world.get::<Node>(parts.strip).unwrap().flex_grow, 1.0, "the rule runs the side's whole height");
         let pane = world.get::<Node>(parts.pane).unwrap();
         assert_eq!((pane.flex_grow, pane.min_width, pane.min_height), (1.0, px(0), px(0)));
         assert_eq!(world.get::<Node>(parts.root).unwrap().flex_grow, 1.0, "fills a tall modal's body");

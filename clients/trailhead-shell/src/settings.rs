@@ -20,7 +20,9 @@ use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
-pub use crate::settings_modal::{SettingsModal, SettingsPane, SettingsStrip, SettingsTab, ShownPage};
+pub use crate::settings_modal::{
+    NoPageMatches, SettingsGroup, SettingsModal, SettingsPane, SettingsSearch, SettingsStrip, SettingsTab, ShownPage,
+};
 pub use crate::settings_pages::{
     ConnectionAct, ShellDir, Shows, TextSizePick, ThemePick, apps_text, build_text, files_text, identity_text,
     state_text, update_text,
@@ -59,6 +61,7 @@ pub const SHELL_GROUP: &str = "Trailhead";
 pub struct SettingsPage {
     key: &'static str,
     title: &'static str,
+    keywords: &'static [&'static str],
     fill: BoxedSystem<In<Entity>>,
 }
 
@@ -68,7 +71,14 @@ impl SettingsPage {
     /// page's settings and sections under it, reading what it needs to show as any system does. The page is despawned
     /// when another is picked or the modal closes; keep what it shows current from the app's own systems, in place.
     pub fn new<M>(key: &'static str, title: &'static str, fill: impl IntoSystem<In<Entity>, (), M>) -> Self {
-        SettingsPage { key, title, fill: Box::new(IntoSystem::into_system(fill)) }
+        SettingsPage { key, title, keywords: &[], fill: Box::new(IntoSystem::into_system(fill)) }
+    }
+
+    /// Words the settings' search finds this page by, besides its title and its app's name: what its settings are
+    /// called, and what a person might call them.
+    pub fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
+        self.keywords = keywords;
+        self
     }
 }
 
@@ -94,7 +104,18 @@ pub struct PageEntry {
     pub title: &'static str,
     /// What it is listed under: [`SHELL_GROUP`], or its app's name.
     pub group: &'static str,
+    /// What the search finds it by, besides its title and group.
+    pub keywords: &'static [&'static str],
     pub(crate) fill: SystemId<In<Entity>>,
+}
+
+impl PageEntry {
+    /// Whether every word of `query` is somewhere in the page's title, group or keywords. An empty query matches.
+    pub fn matches(&self, query: &str) -> bool {
+        let mut fields = vec![self.title, self.group];
+        fields.extend(self.keywords);
+        trailhead_ui::matches_search(query, &fields)
+    }
 }
 
 /// Every page, in the order the modal lists them.
@@ -137,7 +158,7 @@ pub(crate) fn register(app: &mut App, pages: Vec<(AppId, &'static str, SettingsP
         let id = PageId::new(owner, page.key);
         assert!(listed.iter().all(|p| p.id != id), "`{}` has two settings pages called `{}`", owner.0, page.key);
         let fill = app.world_mut().register_boxed_system(page.fill);
-        listed.push(PageEntry { id, title: page.title, group, fill });
+        listed.push(PageEntry { id, title: page.title, group, keywords: page.keywords, fill });
     }
     app.insert_resource(SettingsPages(listed));
 }

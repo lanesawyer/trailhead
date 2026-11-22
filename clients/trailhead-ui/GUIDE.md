@@ -265,7 +265,7 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 | `setting_toggle` | `setting_toggle(label: Into<String>, note: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off: a `toggle_switch` with its label after it, and the note under it. `own` goes on the switch, which sends `ValueChange<bool>`. | The switch keeps its own state. |
 | `SettingNote` | component | A setting's note. | |
 | `spawn_settings_tabs` | `spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsTabs` | A settings modal with pages: a vertical `tab_strip` `extent::SETTINGS_TABS_WIDTH` wide down the side, and a pane beside it for the page shown, spawned under `parent` (a modal's body). It grows into a tall modal's height, so a page can fill what is left. | |
-| `SettingsTabs` | `SettingsTabs { root: Entity, strip: Entity, pane: Entity }` | Fill `strip` with `tab`s (a `tab_heading` over each group); spawn the page shown as a `settings_page()` in `pane` when its tab is picked, and despawn it when another is. | The strip's `SelectedTab`. |
+| `SettingsTabs` | `SettingsTabs { root: Entity, side: Entity, strip: Entity, pane: Entity }` | `side` is the column the strip is in: what goes over the tabs (a search field that narrows them) is inserted as its first child. Fill `strip` with `tab`s (a `tab_heading` over each group); spawn the page shown as a `settings_page()` in `pane` when its tab is picked, and despawn it when another is. | The strip's `SelectedTab`. |
 
 Every settings surface is built from these, Lookout's settings modal included, so settings look alike in every app.
 Never stack `toggle_switch`es or `field`s in a modal body by hand: bare, with no gap, a list of toggles reads as one

@@ -367,6 +367,12 @@ fn settings(shot: &mut ShotApp) {
     save(shot, "settings-about");
     open_settings(shot, NOTES_SETTINGS);
     save(shot, "settings-app");
+    let world = shot.world_mut();
+    let search =
+        world.query_filtered::<Entity, With<trailhead_shell::settings::SettingsSearch>>().single(world).unwrap();
+    world.entity_mut(search).insert(bevy::text::EditableText::new("size"));
+    settle(shot);
+    save(shot, "settings-search");
     close_modals(shot);
 }
 

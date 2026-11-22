@@ -101,6 +101,9 @@ fn count_settings(In(page): In<Entity>, mut commands: Commands) {
   its tab, and `fill` is any system taking `In<Entity>`, so it reads what it needs (`Res<..>`, the `LocalStore`) to
   spawn the page as it is now. Fill the page with the kit's settings widgets only (`setting`, `setting_toggle`,
   `spawn_settings_section`), never bare toggles or fields.
+- The modal's search field narrows the tabs to the pages whose title, app name or keywords hold every word typed.
+  Give a page the words its settings go by with `.keywords(&["pinned", "archived", "drafts"])`, so a person who
+  types what they want to change finds the page it is on.
 - The page is spawned when it is shown and despawned when another is picked or the modal closes, so keep what it shows
   current from a system of the app's (in `build_ui`) that finds the page's controls by the app's markers and updates
   them in place; it does nothing while the page isn't there. What a control does is an observer of the app's, checking
