@@ -12,7 +12,7 @@ use trailhead_builder::{Layout, ShellConfig};
 use trailhead_core::shell::{BUILD_ENV, LOCAL_STATE_ENV, RESTART_CODE, ShellBuild};
 use trailhead_server::Paths;
 
-use super::app_remote::{FromServer, Link};
+use super::app_remote::{FromServer, Link, only_launcher, shell_dir};
 use super::print_json;
 use crate::cli::AppCmd;
 use crate::client;
@@ -29,6 +29,7 @@ pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[
         Some(AppCmd::From { endpoint }) => build_from(paths, endpoint),
         Some(AppCmd::Install) => super::app_install::install(),
         None if remote.is_some() => {
+            let _only = only_launcher(&shell_dir(paths))?;
             let (from, config) = remote.expect("checked");
             let code = launch_remote(paths, &from, config, &layout, args).await?;
             if code != 0 {
@@ -45,6 +46,7 @@ pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[
             Ok(())
         }
         None => {
+            let _only = only_launcher(&shell_dir(paths))?;
             ensure_server(url).await?;
             let code = launch(&layout, read, |binary, rev| run(binary, rev, args, None), &paths.config_dir)?;
             if code != 0 {

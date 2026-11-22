@@ -251,6 +251,10 @@ build of it there, kept current.
   (`TRAILHEAD_SHELL_LOCAL_STATE`), and the window's notice reads the newest build from there instead of from the
   server: the server's newest isn't one this machine can start until it has compiled it, a minute or two later. What
   the update brings is still the server's list of commits.
+- **One launcher at a time.** `trailhead app` holds `launcher.lock` in the shell's directory while it runs, and a
+  second one is refused. Two would dial the server as the same two endpoints, and the relay sends the server's
+  answers to whichever dialed last, so the other's dials time out for as long as both run (TRAIL-1665: seen on the
+  Mac, reproduced with two relay-only clients on one key).
 - **A macOS app.** `trailhead app install` there writes `~/Applications/Trailhead.app`: Trailhead's icon
   (`crates/trailhead/assets/trailhead.icns`, drawn by the shell's `icon` module with macOS's margin) and a script
   that runs `trailhead app` with the PATH of the terminal that installed it, since an app started from the Dock has
