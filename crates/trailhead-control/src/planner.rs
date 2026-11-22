@@ -30,9 +30,8 @@ impl Factory {
         let name = worker_name(&task.key, attempt, task.run.retries.unwrap_or(0));
         let credential = self.new_sub_agent(task, &name, &profile).await?;
         let sub = self.tracker.sub_agent(&name);
-        let infra_prior = task.run.infra_failures;
         if let Err(e) = sub.claim(&task.key).await {
-            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await);
+            return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await);
         }
         let started = RunPatch {
             attempt: Patch::Set(attempt),
@@ -43,7 +42,7 @@ impl Factory {
             ..RunPatch::default()
         };
         if let Err(e) = sub.report(&task.key, started).await {
-            return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await);
+            return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await);
         }
         let _run = self.status.begin(&task.key, RunPhase::Preparing { cold: false });
         tracing::info!(task = %task.key, run = %name, "preparing a planner sandbox");
@@ -61,7 +60,7 @@ impl Factory {
         };
         let (sandbox, context, plan) = match prepared.await {
             Ok(prepared) => prepared,
-            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, infra_prior, Patch::Keep).await),
+            Err(e) => return Err(self.infra_failed(task, &sub, &name, e, Patch::Keep).await),
         };
         tracing::info!(task = %task.key, run = %name, sandbox = %sandbox.name, "starting planner");
         self.status.phase(&task.key, RunPhase::Agent, Some(&sandbox.name));
@@ -91,7 +90,7 @@ impl Factory {
         let prior = task.run.spend.unwrap_or_default();
         let run =
             self.run_metered(&sandbox, Begin::Start(Box::new(req)), &task.key, &profile, prior, Duration::ZERO).await;
-        self.conclude(task, &sub, &sandbox, &name, attempt, run, Some(place)).await
+        self.conclude(task, &sandbox, &name, attempt, run, Some(place)).await
     }
 
     /// A spec task in a repo with no planner profile: parked, as the factory's own identity, with a question saying
@@ -149,7 +148,7 @@ impl Factory {
             false => format!("{}{}", turn.message.trim_end(), messages::plan_not_saved(&problems)),
         };
         if let Err(e) = sub.ask(&task.key, &question).await {
-            return Err(self.infra_failed(task, sub, name, e, task.run.infra_failures, Patch::Keep).await);
+            return Err(self.infra_failed(task, sub, name, e, Patch::Keep).await);
         }
         self.status.paused(&sandbox.name);
         Ok(Outcome::Parked { reason: turn.message })
