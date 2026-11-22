@@ -436,6 +436,8 @@ impl Factory {
         };
         p.compute.set_labels(&sandbox.id, &labels).await?;
         self.status.sandbox(&Sandbox { labels, ..sandbox.clone() });
+        // Idle again: a failure count left by an earlier reconcile mustn't back off or abandon it later.
+        self.pool.troubled.lock().unwrap().remove(&sandbox.name);
         Ok(())
     }
 
@@ -492,6 +494,8 @@ impl Factory {
         p.compute.destroy(&sandbox.id).await?;
         self.forget_sandbox(&sandbox.id);
         self.pool.refresh.lock().unwrap().remove(&sandbox.name);
+        // The failure count belongs to the sandbox: the next one built under this name mustn't inherit it.
+        self.pool.troubled.lock().unwrap().remove(&sandbox.name);
         self.status.sandbox_gone(&sandbox.name);
         Ok(())
     }
