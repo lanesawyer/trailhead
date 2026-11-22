@@ -130,6 +130,13 @@ pub struct Badge {
     pub hint: Option<String>,
 }
 
+impl Badge {
+    /// A badge with no hover of its own.
+    pub fn new(kind: BadgeKind, label: impl Into<String>, tone: Option<Token>) -> Badge {
+        Badge { kind, label: label.into(), tone, hint: None }
+    }
+}
+
 /// A tool button on a card. What each does is [`CardAction::act`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardAction {
@@ -315,73 +322,31 @@ pub(crate) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         let mut open: Vec<&Comment> = questions.get(&t.id).cloned().unwrap_or_default();
         open.sort_by_key(|c| c.created_at);
         let p = t.priority;
-        let mut badges =
-            vec![Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)), hint: None }];
+        let mut badges = vec![Badge::new(BadgeKind::Priority, format!("P{p}"), Some(priority_tone(p)))];
         if is_factory(t) {
-            badges.push(Badge {
-                kind: BadgeKind::Factory,
-                label: "factory".into(),
-                tone: Some(token::FACTORY),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Factory, "factory", Some(token::FACTORY)));
         }
         if let Some(grade) = t.grade {
-            badges.push(Badge {
-                kind: BadgeKind::Grade,
-                label: format!("G{grade}"),
-                tone: Some(grade_tone(grade)),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Grade, format!("G{grade}"), Some(grade_tone(grade))));
         } else if !t.status.is_closed() && in_queue(t) {
-            badges.push(Badge {
-                kind: BadgeKind::NeedsGrade,
-                label: "needs grade".into(),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::NeedsGrade, "needs grade", Some(token::STATUS_WARN)));
         }
         if let Some(holder) = holder_of.get(&t.id) {
-            badges.push(Badge {
-                kind: BadgeKind::Holder,
-                label: holder_badge(&holder_label(*holder)),
-                tone: None,
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Holder, holder_badge(&holder_label(*holder)), None));
         }
         if trailhead_model::changes_requested(t.status, reviews.get(&t.id).into_iter().flatten().copied()).is_some() {
-            badges.push(Badge {
-                kind: BadgeKind::ChangesRequested,
-                label: "changes requested".into(),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::ChangesRequested, "changes requested", Some(token::STATUS_WARN)));
         }
         let out_of_view = hidden.get(&t.id).copied().unwrap_or(0);
-        let mut keys = unfinished.get(&t.id).cloned().unwrap_or_default();
+        let keys = unfinished.get(&t.id).cloned().unwrap_or_default();
         if !t.status.is_closed() && (!keys.is_empty() || out_of_view > 0) {
-            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
-            let mut named = keys.join(", ");
-            if out_of_view > 0 {
-                let more = format!("{out_of_view} outside this token's view");
-                named = if named.is_empty() { more } else { format!("{named} and {more}") };
-            }
-            badges.push(Badge {
-                kind: BadgeKind::Blocked,
-                label: format!("blocked · {}", keys.len() + out_of_view),
-                tone: Some(token::STATUS_WARN),
-                hint: Some(format!("Blocked by {named}")),
-            });
+            badges.push(blocked_badge(keys, out_of_view));
         }
         if !open.is_empty() {
-            badges.push(Badge {
-                kind: BadgeKind::Questions,
-                label: format!("? {}", open.len()),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Questions, format!("? {}", open.len()), Some(token::STATUS_WARN)));
         }
         if let Some(&n) = pictures.get(&t.id) {
-            badges.push(Badge { kind: BadgeKind::Pictures, label: format!("pictures · {n}"), tone: None, hint: None });
+            badges.push(Badge::new(BadgeKind::Pictures, format!("pictures · {n}"), None));
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
         if let Some(q) = open.first() {
@@ -455,6 +420,23 @@ pub(crate) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
+}
+
+/// The badge of a task with unfinished blockers: how many, and on a hover which, `out_of_view` of them being
+/// outside the token's scope and so nameless.
+fn blocked_badge(mut keys: Vec<&str>, out_of_view: usize) -> Badge {
+    keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
+    let mut named = keys.join(", ");
+    if out_of_view > 0 {
+        let more = format!("{out_of_view} outside this token's view");
+        named = if named.is_empty() { more } else { format!("{named} and {more}") };
+    }
+    Badge {
+        kind: BadgeKind::Blocked,
+        label: format!("blocked · {}", keys.len() + out_of_view),
+        tone: Some(token::STATUS_WARN),
+        hint: Some(format!("Blocked by {named}")),
+    }
 }
 
 /// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
