@@ -15,9 +15,11 @@ mod infra;
 mod lifecycle;
 pub mod logs;
 mod merger;
+mod notify;
 mod person;
 mod phase;
 mod place;
+mod planner;
 mod pool;
 mod reconcile;
 mod review;
@@ -88,6 +90,10 @@ pub struct Host {
     usage_file: Option<std::path::PathBuf>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Whether any repo has looked for a pause yet, so the first look resolves a notice a restart left open.
+    pause_looked: std::sync::atomic::AtomicBool,
+    /// A pause that started or ended and that no repo's pass has told the person about yet.
+    pause_change: Mutex<Option<notify::PauseChange>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
@@ -236,6 +242,9 @@ struct Backoff {
 struct MergerState {
     /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
     merge_mode: Mutex<MergeMode>,
+    /// Why the merge mode last couldn't be re-read, while it still can't: said once, not on every merge decision
+    /// (TRAIL-1691: a file an older server couldn't parse logged the same line 450 times in a few minutes).
+    merge_mode_unread: Mutex<Option<String>>,
     /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
     /// unchanged grades from them instead of asking the host again (TRAIL-266).
     listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
@@ -329,6 +338,8 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
     /// In-progress tasks left alone because the target they ran on didn't answer.
     pub unknown: Vec<String>,
+    /// Spec tasks closed because every task of their approved plan is finished.
+    pub finished: Vec<String>,
 }
 
 impl Factory {
@@ -449,14 +460,22 @@ impl Factory {
     fn merge_mode(&self) -> MergeMode {
         let mut mode = self.merger.merge_mode.lock().unwrap();
         if let Some(source) = &self.merge_mode_source {
+            let mut unread = self.merger.merge_mode_unread.lock().unwrap();
             match source() {
                 Ok(read) => {
+                    if unread.take().is_some() {
+                        tracing::info!(mode = ?read, "the merge mode can be read again");
+                    }
                     if read != *mode {
                         tracing::info!(from = ?*mode, to = ?read, "merge mode changed");
                     }
                     *mode = read;
                 }
-                Err(why) => tracing::warn!(%why, mode = ?*mode, "can't re-read the merge mode; keeping the last one"),
+                Err(why) if unread.as_ref() != Some(&why) => {
+                    tracing::warn!(%why, mode = ?*mode, "can't re-read the merge mode; keeping the last one until it reads");
+                    *unread = Some(why);
+                }
+                Err(_) => {}
             }
         }
         *mode

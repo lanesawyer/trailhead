@@ -34,7 +34,7 @@
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Something pressable that isn't a button (a card, a row) answering the pointer: a [`HoverTone`] on it.
 //! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
-//!   [`bubble_head`].
+//!   [`bubble_head`]; or a whole one, head and words, kept in step in place: [`message`] and [`MessageEdit`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
 //!   [`NavItem`], and change a [`nav_item_noted`] with [`NavEdit`]. Pages fill [`beside_sidebar`].
@@ -47,6 +47,9 @@
 //!   inside it: [`ScrollDown`].
 //! - A scrollbar for a scrolling area: [`scrollbar`], vertical or horizontal; it hides when the area fits.
 //! - Children that follow a list of keyed view models without respawning: [`Keyed`].
+//! - Content of any size that a drag pans and the wheel zooms: [`spawn_canvas`], its view a [`Canvas`]. Nodes and the
+//!   edges between them laid out in layers on one: [`spawn_graph`], given a [`Graph`], each node's [`GraphNodeBox`]
+//!   for the caller to draw in.
 //! - A list a person puts in their own order by dragging (or Alt and an arrow): [`ReorderList`] on it,
 //!   [`ReorderItem`] on each item, and observe [`Reordered`].
 //! - Gaps, padding, margins: [`space`]. Corners: [`radius`]. Borders: [`stroke`]. Panel widths and offsets: [`extent`].
@@ -100,13 +103,17 @@ mod badge;
 mod bubble;
 mod button_group;
 mod buttons;
+mod canvas;
 mod check_circle;
 mod chip;
 mod choice_tile;
 mod containers;
+mod copy_block;
+mod count;
 mod desktop;
 mod detail;
 mod field_well;
+mod graph;
 mod hint;
 mod hover;
 mod icons;
@@ -153,15 +160,24 @@ pub use accordion::{
 };
 pub use appearance::{Appearance, ThemeChoice, ThemeColors, ThemePlugin};
 pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
-pub use bubble::{Side, bubble, bubble_head};
+pub use bubble::{MessageEdit, MessagePart, Side, bubble, bubble_head, message};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
+pub use canvas::{
+    CANVAS_MAX_ZOOM, CANVAS_MIN_ZOOM, Canvas, CanvasContent, CanvasExtent, CanvasParts, CanvasPlugin, spawn_canvas,
+};
 pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use choice_tile::{ChoiceCaption, ChoicePicture, ChoiceTile, ChoiceTileParts, spawn_choice_tile};
-pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
+pub use containers::{dropdown_item, dropdown_list, field, list_card, panel, row, section, section_frame};
+pub use copy_block::copy_block;
+pub use count::{CountBadge, CountWords, MOST_COUNTED, count_badge, count_words};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
+pub use graph::{
+    EdgeRoute, Graph, GraphEdge, GraphEdgeLine, GraphLayout, GraphNode, GraphNodeBox, GraphParts, lay_out_graph,
+    spawn_graph,
+};
 pub use hint::{Hint, HintBounds};
 pub use hover::HoverTone;
 pub use icons::{Icon, button_icon, icon_text};
@@ -171,13 +187,13 @@ pub use inline::{
 };
 pub use input::{InitialText, TextEntered, text_input, text_input_sized};
 pub use keyed::Keyed;
-pub use link::{ExternalLink, link_button, link_tool_button};
+pub use link::{ExternalLink, link_button, link_tool_button, open_link};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
 };
-pub use motion::{BackgroundFade, ease_in, ease_out};
+pub use motion::{BackgroundFade, RING_TIME, Ring, ease_in, ease_out, ring_pose};
 pub use nav::{
     BesideRail, BesideSidebar, NavEdit, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar,
     nav_heading, nav_heading_action, nav_item, nav_item_noted, rail, rail_foot, rail_item, sidebar, sidebar_card,
@@ -197,7 +213,9 @@ pub use scrollbar::{SCROLLBAR_GAP, SCROLLBAR_INSET, SCROLLBAR_WIDTH, has_room as
 pub use search::{
     ClearSearch, SearchField, SearchHint, matches_search, spawn_search_field, spawn_search_field_filling,
 };
-pub use select::{Picked, SelectEdit, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned};
+pub use select::{
+    Picked, SelectEdit, SelectHint, SelectIcons, SelectOptions, SelectTones, select, select_iconed, select_toned,
+};
 pub use settings::{
     SettingNote, SettingsSection, SettingsTabs, setting, setting_toggle, settings_page, spawn_settings_section,
     spawn_settings_tabs,
@@ -230,7 +248,7 @@ impl Plugin for UiPlugin {
         if !app.is_plugin_added::<TextSizePlugin>() {
             app.add_plugins(TextSizePlugin);
         }
-        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin, ReorderPlugin))
+        app.add_plugins((icons::IconsPlugin, hint::HintPlugin, ModalPlugin, InlinePlugin, ReorderPlugin, CanvasPlugin))
             .init_resource::<nav::SidebarWidth>()
             .add_observer(nav::start_edge_drag)
             .add_observer(nav::drag_edge)
@@ -240,6 +258,7 @@ impl Plugin for UiPlugin {
             .add_observer(picture::on_view_pick)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
+            .add_systems(Update, (count::show_counts, motion::ring_rings).in_set(UiPlace))
             .add_systems(
                 Update,
                 (picture::fill_picture_views, picture::show_pictures, picture::fit_pictures).chain().in_set(UiPlace),
@@ -247,7 +266,8 @@ impl Plugin for UiPlugin {
             .add_systems(Update, select::fit_select_captions.in_set(UiPlace).after(select::show_chosen_icons))
             .add_systems(
                 PostUpdate,
-                (scroll::clamp_scroll_positions, scrollbar::show_scrollbars).after(bevy::ui::UiSystems::Layout),
+                (scroll::clamp_scroll_positions, scrollbar::show_scrollbars, button_group::round_group_rows)
+                    .after(bevy::ui::UiSystems::Layout),
             )
             .add_systems(PostUpdate, motion::fade_backgrounds.after(bevy::ui::UiSystems::Prepare))
             .add_systems(
@@ -271,7 +291,7 @@ impl Plugin for UiPlugin {
                     button_group::paint_groups,
                     (hover::paint_hover_tones, check_circle::paint_check_circles, choice_tile::paint_choice_tiles),
                     buttons::dim_disabled_captions,
-                    select::style_select_captions,
+                    (select::style_select_captions, select::show_select_hints).chain(),
                     select::show_chosen_icons,
                 )
                     .chain()

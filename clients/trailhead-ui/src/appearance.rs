@@ -85,6 +85,14 @@ impl Appearance {
         self.reduce_motion
     }
 
+    /// The same, with the desktop saying it asks for less motion or not: what the kit reads from the desktop itself,
+    /// set by hand where there is no desktop to ask (a test, a shot).
+    #[must_use]
+    pub fn with_reduce_motion(mut self, reduce: bool) -> Self {
+        self.reduce_motion = reduce;
+        self
+    }
+
     /// `theme` as it is worn now.
     pub fn wear(&self, theme: &Theme) -> Theme {
         let theme = if self.is_dark() { theme.clone() } else { theme.light() };

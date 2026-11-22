@@ -106,10 +106,17 @@ impl Shell {
         if let Some(kept) = place.kept() {
             kept.apply(&mut window);
         }
-        let exit = App::new()
+        let mut app = App::new();
+        if let Some(desktop) = crate::desktop::Desktop::of_this_machine() {
+            app.insert_resource(desktop);
+        }
+        if let Some(sound) = crate::sound::Sound::of_this_machine() {
+            app.insert_resource(sound);
+        }
+        let exit = app
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
             .insert_resource(place)
-            .insert_resource(ShellDir(self.dir.clone()))
+            .insert_resource(ShellDir(self.dir))
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
             .insert_resource(WinitSettings {

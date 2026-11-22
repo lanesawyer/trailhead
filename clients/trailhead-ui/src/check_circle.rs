@@ -94,6 +94,7 @@ struct Look {
 }
 
 /// How a check that is `checked`, under the pointer (`hovered`), held down (`pressed`) or `disabled` is drawn.
+#[expect(clippy::fn_params_excessive_bools, reason = "the four states a check is drawn from, each its own flag")]
 fn look(checked: bool, hovered: bool, pressed: bool, disabled: bool) -> Look {
     if disabled {
         return Look {
@@ -114,7 +115,7 @@ fn look(checked: bool, hovered: bool, pressed: bool, disabled: bool) -> Look {
 }
 
 /// Paints each check as its state, the pointer and `InteractionDisabled` say, writing only what differs.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn paint_check_circles(
     checks: Query<(Entity, &CheckCircle, &Hovered, Has<Pressed>, Has<InteractionDisabled>)>,
     children: Query<&Children>,

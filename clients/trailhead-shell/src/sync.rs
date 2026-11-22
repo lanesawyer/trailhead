@@ -2,7 +2,7 @@
 //!
 //! 1. Note the newest event id.
 //! 2. Load the snapshot: projects, agents, users, and tasks with their claims, open questions, last handoff and
-//!    pictures, paged.
+//!    pictures, paged; and the newest notifications, read or not ([`NOTIFICATIONS`] of them).
 //! 3. Open `/v1/events/stream` with `Last-Event-ID` set to the id from step 1. Whatever was written during step 2
 //!    arrives again, and the mirror ignores it by version.
 //!
@@ -48,6 +48,8 @@ pub struct Snapshot {
     pub users: Vec<Value>,
     /// Tasks with `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `attachments` on each.
     pub tasks: Vec<Value>,
+    /// The newest notifications, read or not, newest first: at most [`NOTIFICATIONS`].
+    pub notifications: Vec<Value>,
 }
 
 /// Where the sync is, for the connection state.
@@ -86,6 +88,9 @@ const TASK_INCLUDES: &str = "claim,open_questions,last_handoff,last_review,block
 /// The same with its pictures, which a server older than they are refuses.
 const TASK_INCLUDES_PICTURES: &str = "claim,open_questions,last_handoff,last_review,blocked_by,attachments";
 const PAGE: usize = 100;
+/// How many notifications the snapshot loads: the newest, read or not. Older ones are read a page at a time when the
+/// bell's panel asks for them.
+pub const NOTIFICATIONS: usize = 200;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The API as the sync reads it: a base URL and the user's token.
@@ -151,7 +156,33 @@ impl Remote {
                 break tasks;
             }
         };
-        Ok(Snapshot { at, projects, agents, users, tasks })
+        let notifications = self.load_notifications().await?;
+        Ok(Snapshot { at, projects, agents, users, tasks, notifications })
+    }
+
+    /// The newest notifications. A server from before them has none to give, which is no reason to go without the
+    /// rest of the snapshot.
+    async fn load_notifications(&self) -> Result<Vec<Value>, String> {
+        let path = format!("{}?limit={NOTIFICATIONS}", routes::LIST_NOTIFICATIONS.path);
+        let res = self
+            .http
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
+        if !res.status().is_success() {
+            return Err(format!("{path}: the server answered {}", res.status()));
+        }
+        let list: Value = res.json().await.map_err(|e| format!("{path}: {e}"))?;
+        match list.get("notifications") {
+            Some(Value::Array(notifications)) => Ok(notifications.clone()),
+            _ => Err(format!("{path}: expected a list of notifications")),
+        }
     }
 
     async fn load_tasks(&self) -> Result<Vec<Value>, String> {

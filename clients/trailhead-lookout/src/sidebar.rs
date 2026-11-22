@@ -1,7 +1,7 @@
 //! The sidebar down the left of the window, the same in every view: Lookout's name, New task, the search box, the places to go
 //! (Switchbacks, which is the board, the trail map, then each project's page), the subscription usage card
-//! ([`crate::usage`]), and a footer with the connection chip and, in a shell with no rail to hold it, the gear that
-//! opens the shell's settings. The places scroll between the search box
+//! ([`crate::usage`]), and a footer with the connection chip and, in a shell with no rail to hold them, the bell that
+//! opens the shell's notifications and the gear that opens its settings. The places scroll between the search box
 //! and the usage card, which stays put with the footer.
 //!
 //! It is spawned when Lookout becomes the app the shell shows, torn down when another app does, and in between
@@ -18,6 +18,7 @@ use trailhead_factory::FactoryState;
 use trailhead_model::{Project, ProjectStatus, Task};
 use trailhead_shell::connection::{Connection, ConnectionStatus};
 use trailhead_shell::mirror::Mirrored;
+use trailhead_shell::notifications::{BELL_HINT, NotificationBell};
 use trailhead_shell::settings::SettingsGear;
 use trailhead_shell::{ActiveApp, Apps};
 use uuid::Uuid;
@@ -32,7 +33,7 @@ use crate::search::Deep;
 use crate::usage::{UsageMeterEntities, spawn_usage_card, sync_usage};
 use crate::widgets::{
     ButtonKind, ChipEdit, Icon, Keyed, NavEdit, NavItem, Token, button, chip, nav_heading_action, nav_item,
-    nav_item_noted, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
+    nav_item_noted, row, scroll_body, scroll_frame, scrollbar, set_text, sidebar, sidebar_footer, size,
     spawn_search_field_filling, text, text_toned, token, tool_button,
 };
 
@@ -168,11 +169,15 @@ fn spawn_sidebar(mut commands: Commands, apps: Res<Apps>) {
     let (tone, words, hint) =
         connection_chip(Connection::default(), &ConnectionStatus::default(), &FactoryLink::Unknown);
     commands.queue_spawn_scene(chip(tone, words, hint)).insert((ConnectionChip, ChildOf(footer)));
-    // With several apps the gear is at the rail's foot, the window's own place for it.
+    // With several apps the bell and the gear are at the rail's foot, the window's own place for them.
     if !apps.has_rail() {
+        let tools = commands.queue_spawn_scene(row()).insert(ChildOf(footer)).id();
+        commands
+            .queue_spawn_scene(tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain))
+            .insert((NotificationBell, ChildOf(tools)));
         commands
             .queue_spawn_scene(tool_button(Icon::Settings, "Settings", ButtonKind::Plain))
-            .insert((SettingsGear, ChildOf(footer)));
+            .insert((SettingsGear, ChildOf(tools)));
     }
 }
 
@@ -234,7 +239,7 @@ fn note_failed_search(deep: Option<Res<Deep>>, mut notes: Query<(&mut Node, &mut
 }
 
 /// One entry per project, by key, following the mirror's projects and their tasks.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_projects(
     projects: Query<&Mirrored<Project>>,
     tasks: Query<&Mirrored<Task>>,
@@ -505,6 +510,7 @@ mod tests {
         one::<ConnectionChip>(&mut app);
         let world = app.world_mut();
         assert_eq!(world.query::<&SettingsGear>().iter(world).count(), 0);
+        assert_eq!(world.query::<&NotificationBell>().iter(world).count(), 0);
     }
 
     #[test]
@@ -513,6 +519,7 @@ mod tests {
         one::<SearchBox>(&mut app);
         one::<ConnectionChip>(&mut app);
         one::<SettingsGear>(&mut app);
+        one::<NotificationBell>(&mut app);
         assert_eq!(
             entries(&mut app),
             [

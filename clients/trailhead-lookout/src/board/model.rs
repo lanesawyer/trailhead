@@ -114,6 +114,10 @@ pub enum BadgeKind {
     Blocked,
     /// Pictures attached to the task (screenshots before and after a change), with their count.
     Pictures,
+    /// The task's status, on a card that doesn't sit in its status's column (a node of the graph).
+    Status,
+    /// A task outside the graph's parent that this one waits on, by key.
+    Needs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +128,13 @@ pub struct Badge {
     pub tone: Option<Token>,
     /// What a hover says, for a badge whose label is short for something longer.
     pub hint: Option<String>,
+}
+
+impl Badge {
+    /// A badge with no hover of its own.
+    pub fn new(kind: BadgeKind, label: impl Into<String>, tone: Option<Token>) -> Badge {
+        Badge { kind, label: label.into(), tone, hint: None }
+    }
 }
 
 /// A tool button on a card. What each does is [`CardAction::act`].
@@ -172,6 +183,8 @@ pub struct Card {
     pub pr: Option<PrLink>,
     /// The agent holding it, whom a tool button opens in the inspector. A person holding it has no such view.
     pub holder: Option<HolderLink>,
+    /// Whether it has subtasks or is a spec task, so a tool button opens the graph of them.
+    pub graph: bool,
 }
 
 /// An agent holding a task: its id (what `Subject::Agent` carries) and its name.
@@ -215,6 +228,12 @@ pub struct Input<'a> {
     pub now: Timestamp,
 }
 
+/// Whether `task` is a spec task (`docs/app-platform.md`, "Planning an ask"), whose plan the graph shows even before
+/// it has subtasks.
+pub fn is_spec(task: &Task) -> bool {
+    trailhead_model::TaskPlan::of(&task.metadata).is_some_and(|p| p.spec.is_some())
+}
+
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
 /// only when `closed`), with subtasks under their parent, and works out
 /// what each filter can offer.
@@ -230,7 +249,7 @@ pub fn grid(input: Input, project: &str) -> Vec<Card> {
 }
 
 /// [`build`], with subtasks under their parent in a column when `nest`, else each a top-level card naming its parent.
-pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
+pub(crate) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView {
     let project_key: HashMap<Uuid, &str> = input.projects.iter().map(|p| (p.id, p.key.as_str())).collect();
     let task_key: HashMap<Uuid, &str> = input.tasks.iter().map(|t| (t.id, t.key.as_str())).collect();
     // Holders are agents or, for a claim a person made, users.
@@ -294,6 +313,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
     let found = |t: &Task| if query.is_empty() || local(t) { None } else { deep_hit(t).map(found_hint) };
     let searched = |t: &Task| query.is_empty() || local(t) || deep_hit(t).is_some();
 
+    let parents: HashSet<Uuid> = input.tasks.iter().filter_map(|t| t.parent_id).collect();
     let mut pictures: HashMap<Uuid, usize> = HashMap::new();
     for a in input.attachments.iter().filter(|a| a.deleted_at.is_none()) {
         *pictures.entry(a.task_id).or_default() += 1;
@@ -302,73 +322,31 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         let mut open: Vec<&Comment> = questions.get(&t.id).cloned().unwrap_or_default();
         open.sort_by_key(|c| c.created_at);
         let p = t.priority;
-        let mut badges =
-            vec![Badge { kind: BadgeKind::Priority, label: format!("P{p}"), tone: Some(priority_tone(p)), hint: None }];
+        let mut badges = vec![Badge::new(BadgeKind::Priority, format!("P{p}"), Some(priority_tone(p)))];
         if is_factory(t) {
-            badges.push(Badge {
-                kind: BadgeKind::Factory,
-                label: "factory".into(),
-                tone: Some(token::FACTORY),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Factory, "factory", Some(token::FACTORY)));
         }
         if let Some(grade) = t.grade {
-            badges.push(Badge {
-                kind: BadgeKind::Grade,
-                label: format!("G{grade}"),
-                tone: Some(grade_tone(grade)),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Grade, format!("G{grade}"), Some(grade_tone(grade))));
         } else if !t.status.is_closed() && in_queue(t) {
-            badges.push(Badge {
-                kind: BadgeKind::NeedsGrade,
-                label: "needs grade".into(),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::NeedsGrade, "needs grade", Some(token::STATUS_WARN)));
         }
         if let Some(holder) = holder_of.get(&t.id) {
-            badges.push(Badge {
-                kind: BadgeKind::Holder,
-                label: holder_badge(&holder_label(*holder)),
-                tone: None,
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Holder, holder_badge(&holder_label(*holder)), None));
         }
         if trailhead_model::changes_requested(t.status, reviews.get(&t.id).into_iter().flatten().copied()).is_some() {
-            badges.push(Badge {
-                kind: BadgeKind::ChangesRequested,
-                label: "changes requested".into(),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::ChangesRequested, "changes requested", Some(token::STATUS_WARN)));
         }
         let out_of_view = hidden.get(&t.id).copied().unwrap_or(0);
-        let mut keys = unfinished.get(&t.id).cloned().unwrap_or_default();
+        let keys = unfinished.get(&t.id).cloned().unwrap_or_default();
         if !t.status.is_closed() && (!keys.is_empty() || out_of_view > 0) {
-            keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
-            let mut named = keys.join(", ");
-            if out_of_view > 0 {
-                let more = format!("{out_of_view} outside this token's view");
-                named = if named.is_empty() { more } else { format!("{named} and {more}") };
-            }
-            badges.push(Badge {
-                kind: BadgeKind::Blocked,
-                label: format!("blocked · {}", keys.len() + out_of_view),
-                tone: Some(token::STATUS_WARN),
-                hint: Some(format!("Blocked by {named}")),
-            });
+            badges.push(blocked_badge(keys, out_of_view));
         }
         if !open.is_empty() {
-            badges.push(Badge {
-                kind: BadgeKind::Questions,
-                label: format!("? {}", open.len()),
-                tone: Some(token::STATUS_WARN),
-                hint: None,
-            });
+            badges.push(Badge::new(BadgeKind::Questions, format!("? {}", open.len()), Some(token::STATUS_WARN)));
         }
         if let Some(&n) = pictures.get(&t.id) {
-            badges.push(Badge { kind: BadgeKind::Pictures, label: format!("pictures · {n}"), tone: None, hint: None });
+            badges.push(Badge::new(BadgeKind::Pictures, format!("pictures · {n}"), None));
         }
         let mut actions = vec![CardAction::Edit, CardAction::Comment];
         if let Some(q) = open.first() {
@@ -391,6 +369,7 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                     .find(|a| a.id == *id)
                     .map(|a| HolderLink { id: id.to_string(), name: a.name.clone() })
             }),
+            graph: parents.contains(&t.id) || is_spec(t),
         }
     };
 
@@ -441,6 +420,23 @@ pub(super) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
         v
     };
     BoardView { columns, options: Options { projects, parents, holders } }
+}
+
+/// The badge of a task with unfinished blockers: how many, and on a hover which, `out_of_view` of them being
+/// outside the token's scope and so nameless.
+fn blocked_badge(mut keys: Vec<&str>, out_of_view: usize) -> Badge {
+    keys.sort_unstable_by(|a, b| trailhead_model::cmp_keys(a, b));
+    let mut named = keys.join(", ");
+    if out_of_view > 0 {
+        let more = format!("{out_of_view} outside this token's view");
+        named = if named.is_empty() { more } else { format!("{named} and {more}") };
+    }
+    Badge {
+        kind: BadgeKind::Blocked,
+        label: format!("blocked · {}", keys.len() + out_of_view),
+        tone: Some(token::STATUS_WARN),
+        hint: Some(format!("Blocked by {named}")),
+    }
 }
 
 /// Whether every word of `query` matches the task's key or title, ignoring case. A word matches the key when it starts
@@ -842,6 +838,7 @@ mod tests {
                 found: None,
                 pr: None,
                 holder: None,
+                graph: false,
             })
             .collect()
     }

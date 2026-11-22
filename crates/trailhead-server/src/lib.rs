@@ -249,32 +249,11 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
         webhook_targets: webhooks::Targets::Any,
         ..AppState::new(store)
     });
-    let reaper = state.clone();
-    let reminder_ctx = ctx.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(15));
-        loop {
-            tick.tick().await;
-            if let Err(e) = reaper.store.reap_expired_claims(&ctx.next_batch()).await {
-                tracing::warn!(error = %e, "reaping expired claims failed");
-            }
-        }
-    });
+    spawn_reaper(state.clone(), ctx.clone());
     spawn_archiver(state.clone());
     spawn_heap_trim();
     webhooks::spawn(state.clone());
-    let reminders = state.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tick.tick().await;
-            if let Err(e) =
-                reminders.store.emit_due_reminders(&reminder_ctx.next_batch(), DEFAULT_REMINDER_WINDOW).await
-            {
-                tracing::warn!(error = %e, "emitting due reminders failed");
-            }
-        }
-    });
+    spawn_reminders(state.clone(), ctx);
     if let Some(paths) = cfg.factory.as_ref().or(cfg.shell.as_ref()) {
         let _ = state.config.set(user_config::ConfigFile::open(user_config::path(paths)));
     }
@@ -304,10 +283,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     let _ = &cfg.factory;
     let builder = cfg.shell.as_ref().and_then(|paths| start_builder(&state, paths));
     if let Some(pid_file) = &cfg.pid_file {
-        if let Some(dir) = pid_file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(pid_file, format!("{}\n", std::process::id()))?;
+        write_pid_file(pid_file)?;
     }
     tracing::info!(addr = %cfg.bind, db = %cfg.db.display(), "trailhead listening");
     let stopping = state.shutdown.clone();
@@ -326,7 +302,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     };
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         use std::sync::atomic::Ordering::SeqCst;
-        #[cfg_attr(not(feature = "factory"), allow(unused_mut))]
+        #[cfg_attr(not(feature = "factory"), expect(unused_mut))]
         let mut upgrade = signals.first().await;
         if upgrade {
             tracing::info!("a newer trailhead is installed; restarting onto it once the factory's runs finish");
@@ -339,7 +315,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
             match factory.runs_in_flight() {
                 0 => tracing::info!("stopping the factory; no runs in flight"),
                 runs => {
-                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight")
+                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight");
                 }
             }
             factory.drain();
@@ -398,6 +374,39 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     }
     tracing::info!("trailhead stopped");
     Ok(Exit::Stopped)
+}
+
+/// Releases claims whose lease ran out, every 15 seconds.
+fn spawn_reaper(state: Arc<AppState>, ctx: Ctx) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            tick.tick().await;
+            if let Err(e) = state.store.reap_expired_claims(&ctx.next_batch()).await {
+                tracing::warn!(error = %e, "reaping expired claims failed");
+            }
+        }
+    });
+}
+
+/// Emits the reminders that have come due, every minute.
+fn spawn_reminders(state: Arc<AppState>, ctx: Ctx) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) = state.store.emit_due_reminders(&ctx.next_batch(), DEFAULT_REMINDER_WINDOW).await {
+                tracing::warn!(error = %e, "emitting due reminders failed");
+            }
+        }
+    });
+}
+
+fn write_pid_file(pid_file: &Path) -> std::io::Result<()> {
+    if let Some(dir) = pid_file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(pid_file, format!("{}\n", std::process::id()))
 }
 
 /// Starts the shell's builder when the user config asks for one. A broken `[shell]` table is logged, and the server
@@ -508,7 +517,7 @@ impl Signals {
         false
     }
 
-    #[cfg_attr(not(feature = "factory"), allow(dead_code))]
+    #[cfg_attr(not(feature = "factory"), expect(dead_code))]
     async fn next(&mut self) {
         tokio::select! {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),

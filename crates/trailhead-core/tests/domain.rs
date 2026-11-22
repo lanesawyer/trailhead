@@ -1,5 +1,7 @@
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::Env;
 use jiff::SignedDuration;
 use jiff::civil::date;
@@ -7,7 +9,7 @@ use serde_json::json;
 use trailhead_core::parse_at;
 use trailhead_core::{
     CommentKind, Error, EventFilter, Grade, GradeFilter, MatchField, NewComment, NewProject, NewTask, Priority,
-    ProjectPatch, ProjectStatus, SearchFilter, Status, TaskFilter, TaskPatch, TaskSort, Verdict,
+    ProjectPatch, ProjectStatus, SearchFilter, Status, TaskFilter, TaskKey, TaskPatch, TaskPlan, TaskSort, Verdict,
 };
 
 fn gr(n: u8) -> Grade {
@@ -236,6 +238,44 @@ async fn review_requires_a_human() {
 }
 
 #[tokio::test]
+async fn work_sent_for_review_keeps_needing_it_whatever_an_agent_moves_it_through() {
+    let env = Env::new().await;
+    let t = env.task("sent for review").await;
+    let (a, b) = (env.agent("a").await, env.agent("b").await);
+    env.store.claim(&a, &t.key, None).await.unwrap();
+    env.store.update_task(&a, &t.key, status(Status::InReview), None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&a, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "in review, as before"
+    );
+
+    // Reopening and claiming takes the work over; it doesn't excuse it from review, for the agent or another.
+    env.store.update_task(&a, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&a, &t.key, None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&a, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "reopened and claimed by the agent that sent it"
+    );
+    env.store.release(&a, &t.key).await.unwrap();
+    env.store.claim(&b, &t.key, None).await.unwrap();
+    assert!(
+        matches!(env.store.update_task(&b, &t.key, status(Status::Done), None).await, Err(Error::ReviewRequired)),
+        "or taken over by another"
+    );
+    env.store.update_task(&b, &t.key, status(Status::InReview), None).await.unwrap();
+
+    // A person finishing it settles the review; work on it after that is new work.
+    env.store.update_task(&env.human, &t.key, status(Status::Done), None).await.unwrap();
+    env.store.update_task(&env.human, &t.key, status(Status::Open), None).await.unwrap();
+    env.store.claim(&b, &t.key, None).await.unwrap();
+    assert_eq!(
+        env.store.update_task(&b, &t.key, status(Status::Done), None).await.unwrap().status,
+        Status::Done,
+        "this project doesn't require review of new work"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_cannot_undo_its_way_past_review() {
     let env = Env::new().await;
     env.store
@@ -457,7 +497,7 @@ async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
     // `tokio::time::timeout` fire. Run the update on its own thread and wait with a deadline.
     let env = std::sync::Arc::new(env);
     let (tx, rx) = std::sync::mpsc::channel();
-    let worker = env.clone();
+    let worker = env;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let res = rt.block_on(worker.store.update_task(&worker.human, &c.key, under_a, None));
@@ -1841,4 +1881,95 @@ async fn a_task_in_progress_or_closed_cant_be_set_aside() {
     assert_eq!(after.metadata["factory"]["set_aside"]["question"], json!(null));
     let notes = env.store.list_comments(&env.human, &r.key).await.unwrap();
     assert_eq!(notes.iter().filter(|c| c.kind == CommentKind::Note && c.addressed_to.is_none()).count(), 1);
+}
+
+#[tokio::test]
+async fn approving_a_plan_grades_its_open_ungraded_subtasks_and_marks_the_spec_task() {
+    let env = Env::new().await;
+    let spec = env
+        .task_with(NewTask {
+            title: "spec".into(),
+            metadata: Some(json!({"plan": {"spec": {}}})),
+            ..Default::default()
+        })
+        .await;
+    let child = |title: &str, grade: Option<Grade>| NewTask {
+        title: title.into(),
+        parent: Some(spec.key.clone()),
+        grade,
+        ..Default::default()
+    };
+    let a = env.task_with(child("a", None)).await;
+    let b = env.task_with(child("b", None)).await;
+    let mine = env.task_with(child("already graded", Some(gr(3)))).await;
+    let agent = env.agent("factory").await;
+    env.store.claim(&agent, &spec.key, None).await.unwrap();
+    let both = BTreeMap::from([(a.key.0.clone(), gr(1)), (b.key.0.to_lowercase(), gr(2))]);
+    let busy = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(&busy, Error::Invalid(why) if why.contains("planner is working")), "{busy:?}");
+    let ask = NewComment::new(CommentKind::Question, "Here is the plan");
+    env.store.add_comment(&agent, &spec.key, ask).await.unwrap();
+    assert_eq!(env.store.get_task(&env.human, &spec.key).await.unwrap().status, Status::NeedsInput);
+
+    let forbidden = env.store.approve_plan(&agent, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(forbidden, Error::Forbidden(_)), "{forbidden:?}");
+    let one = BTreeMap::from([(a.key.0.clone(), gr(1))]);
+    let missing = env.store.approve_plan(&env.human, &spec.key, &one).await.unwrap_err();
+    assert!(matches!(&missing, Error::Invalid(why) if why.contains(&b.key.0)), "{missing:?}");
+    let mut stray = both.clone();
+    stray.insert(mine.key.0.clone(), gr(1));
+    let refused = env.store.approve_plan(&env.human, &spec.key, &stray).await.unwrap_err();
+    assert!(matches!(&refused, Error::Invalid(why) if why.contains(&mine.key.0)), "{refused:?}");
+    assert_eq!(env.store.get_task(&env.human, &a.key).await.unwrap().grade, None, "a refusal grades nothing");
+
+    let after = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap();
+    assert_eq!((after.status, after.grade), (Status::Open, None));
+    let plan = TaskPlan::of(&after.metadata).unwrap();
+    assert!(plan.spec.unwrap().approved.is_some() && !TaskPlan::of(&after.metadata).unwrap().awaits_planner());
+    let grade = async |key: &TaskKey| env.store.get_task(&env.human, key).await.unwrap().grade;
+    assert_eq!(
+        (grade(&a.key).await, grade(&b.key).await, grade(&mine.key).await),
+        (Some(gr(1)), Some(gr(2)), Some(gr(3)))
+    );
+    let comments = env.store.list_comments(&env.human, &spec.key).await.unwrap();
+    assert!(comments.iter().all(|c| c.kind != CommentKind::Question || c.resolved_at.is_some()));
+    assert!(comments.iter().any(|c| c.kind == CommentKind::Note && c.body.contains("Plan approved by")));
+
+    let twice = env.store.approve_plan(&env.human, &spec.key, &both).await.unwrap_err();
+    assert!(matches!(&twice, Error::Invalid(why) if why.contains("already approved")), "{twice:?}");
+    let plain = env.task("plain").await;
+    assert!(matches!(env.store.approve_plan(&env.human, &plain.key, &both).await, Err(Error::Invalid(_))));
+}
+
+#[tokio::test]
+async fn a_reviewer_finishes_a_parent_whose_subtasks_are_all_finished_without_a_review_of_its_own() {
+    let env = Env::new().await;
+    let reviewer = env.agent("factory").await;
+    let project = env.store.get_project(&env.human, "AUTH").await.unwrap();
+    let patch =
+        ProjectPatch { require_review: Some(true), reviewers: Some(vec!["factory".into()]), ..ProjectPatch::default() };
+    env.store.update_project(&env.human, &project.key, patch, None).await.unwrap();
+    let parent = env.task("parent").await;
+    let child = |title: &str| NewTask { title: title.into(), parent: Some(parent.key.clone()), ..Default::default() };
+    let (a, b) = (env.task_with(child("a")).await, env.task_with(child("b")).await);
+    let finish = async || env.store.update_task(&reviewer, &parent.key, status(Status::Done), None).await;
+
+    assert!(matches!(finish().await, Err(Error::ReviewRequired)), "its subtasks are unfinished");
+    env.store.update_task(&env.human, &a.key, status(Status::Cancelled), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, status(Status::Cancelled), None).await.unwrap();
+    assert!(matches!(finish().await, Err(Error::ReviewRequired)), "all cancelled is dropped, not finished");
+    env.store.update_task(&env.human, &b.key, status(Status::Open), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(finish().await.unwrap().status, Status::Done);
+
+    let alone = env.task("no subtasks").await;
+    let refused = env.store.update_task(&reviewer, &alone.key, status(Status::Done), None).await;
+    assert!(matches!(refused, Err(Error::ReviewRequired)), "{refused:?}");
+    let other = env.agent("worker").await;
+    let again = env.task("another parent").await;
+    let kid = NewTask { title: "kid".into(), parent: Some(again.key.clone()), ..Default::default() };
+    let kid = env.task_with(kid).await;
+    env.store.update_task(&env.human, &kid.key, status(Status::Done), None).await.unwrap();
+    let refused = env.store.update_task(&other, &again.key, status(Status::Done), None).await;
+    assert!(matches!(refused, Err(Error::ReviewRequired)), "only a reviewer closes a finished parent: {refused:?}");
 }

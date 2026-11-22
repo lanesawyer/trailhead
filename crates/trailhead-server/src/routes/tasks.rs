@@ -405,3 +405,34 @@ pub(crate) async fn set_aside(
     let task = s.store.set_aside(&ctx, &t, body.note).await?;
     Ok(with_etag(task.version, task))
 }
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ApprovePlanBody {
+    /// The grade for each task in the plan, by key (`{"TICK-12": 2}`): every open, ungraded subtask of the spec task,
+    /// and nothing else.
+    #[schema(value_type = std::collections::BTreeMap<String, i64>)]
+    grades: std::collections::BTreeMap<String, trailhead_core::Grade>,
+}
+
+/// Approves the plan under a spec task, as a person (`docs/app-platform.md`, "Planning an ask"): in one write each
+/// of its open, ungraded subtasks gets the grade given for it, which is what lets the factory start on them, the
+/// spec task's open questions are resolved with a note saying who approved, and its plan is marked approved, so no
+/// planner runs on it again.
+#[utoipa::path(
+    post, path = "/v1/tasks/{task}/plan/approve", tag = "tasks", params(TaskParam), request_body = ApprovePlanBody,
+    responses(
+        (status = 200, description = "Approved: the spec task, open, its plan marked approved", body = Task),
+        (status = 400, description = "`invalid`: not a spec task, already approved, a planner's run is in progress on it, it has no open ungraded subtasks, or the grades don't name exactly those subtasks", body = ErrorBody),
+        (status = 403, description = "`forbidden`: only a person can approve a plan", body = ErrorBody),
+        (status = 404, description = "`not_found`", body = ErrorBody),
+    )
+)]
+pub(crate) async fn approve_plan(
+    State(s): S,
+    Auth(ctx): Auth,
+    Path(t): Path<String>,
+    Json(b): Json<ApprovePlanBody>,
+) -> ApiResult<Response> {
+    let task = s.store.approve_plan(&ctx, &t, &b.grades).await?;
+    Ok(with_etag(task.version, task))
+}

@@ -384,7 +384,7 @@ impl CodeHost for FakeCodeHost {
                 for change in c.changes {
                     match change.contents {
                         Some(body) => {
-                            out.push_str(&format!("+++ {}\n{}\n", change.path, String::from_utf8_lossy(&body)))
+                            out.push_str(&format!("+++ {}\n{}\n", change.path, String::from_utf8_lossy(&body)));
                         }
                         None => out.push_str(&format!("--- {} (deleted)\n", change.path)),
                     }

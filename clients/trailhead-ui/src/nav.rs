@@ -202,7 +202,7 @@ pub(crate) fn show_edge_lines(
 /// beside the sidebar while there is none (one the window shows whatever app is shown, under an app with no sidebar)
 /// starts where the rail ends. It compares every time it runs, since a rail or a sidebar coming or going moves the
 /// others; a node already in place is left untouched.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn fit_to_sidebar(
     width: Res<SidebarWidth>,
     rails: Query<(), With<RailFrame>>,
@@ -460,7 +460,7 @@ pub struct NavItem {
 
 /// Give each nav item whose `current` changed the background that says so. One lifted to be reordered keeps its lifted
 /// look, and is painted when it is set down.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn paint_nav_items(
     mut items: Query<(&NavItem, &mut ButtonVariant), (Changed<NavItem>, Without<crate::Lifted>)>,
 ) {
@@ -673,7 +673,7 @@ mod tests {
         let hit = HitData::new(Entity::PLACEHOLDER, 0.0, None, None);
         let world = app.world_mut();
         let button = PointerButton::Primary;
-        world.trigger(PointerDragStart { entity: edge, pointer: at(start), button, hit: hit.clone() });
+        world.trigger(PointerDragStart { entity: edge, pointer: at(start), button, hit });
         world.flush();
         let (distance, delta) = (Vec2::new(distance, 0.0), Vec2::new(distance, 0.0));
         world.trigger(PointerDrag { entity: edge, pointer: at(start + distance.x), button, distance, delta });
