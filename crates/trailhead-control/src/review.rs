@@ -203,6 +203,7 @@ impl Factory {
                         kind: RequestKind::Review,
                         head: round.head.clone(),
                         settled: false,
+                        answered: false,
                     };
                     let rounds = before + 1;
                     // While the task is still in review, so the PR says the review asked for changes at any grade.

@@ -809,6 +809,7 @@ impl Factory {
                 kind: RequestKind::Review,
                 head,
                 settled: false,
+                answered: false,
             };
             let round = task.run.review_rounds.unwrap_or(0) + 1;
             self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;

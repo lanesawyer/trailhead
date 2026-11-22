@@ -367,6 +367,12 @@ pub struct ChangesRequested {
     /// for the record but is no longer pending.
     #[serde(default)]
     pub settled: bool,
+    /// The factory answered this request's verdict as stale, with a handoff, because the PR had moved on since
+    /// (reconcile's stale request). A request for changes that stands after that is a new one, however alike its
+    /// words: without this a person asking twice in the same words was answered as stale again, and the task sat
+    /// in review with nobody owing it a move (TRAIL-1705).
+    #[serde(default)]
+    pub answered: bool,
 }
 
 /// A request as task metadata holds it. Records from before `kind` say a conflict with a flag, and CI by the
@@ -385,6 +391,8 @@ struct StoredRequest {
     head: Option<String>,
     #[serde(default)]
     settled: bool,
+    #[serde(default)]
+    answered: bool,
 }
 
 impl From<StoredRequest> for ChangesRequested {
@@ -401,6 +409,7 @@ impl From<StoredRequest> for ChangesRequested {
             kind,
             head: stored.head,
             settled: stored.settled,
+            answered: stored.answered,
         }
     }
 }
@@ -805,6 +814,7 @@ mod tests {
             kind: RequestKind::Ci,
             head: None,
             settled: false,
+            answered: false,
         };
         let written = serde_json::to_value(&request).unwrap();
         assert_eq!(written["kind"], "ci");

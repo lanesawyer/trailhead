@@ -2012,6 +2012,7 @@ async fn a_record_written_over_an_older_one_keeps_none_of_its_fields() {
     let key = r.task("Add a greeting").await;
     let pr = PrRef { repo: Repo { owner: "o".into(), name: "r".into() }, number: 4, url: "https://host/o/r/4".into() };
     let request = |settled: bool, head: Option<&str>| ChangesRequested {
+        answered: false,
         reviewer: "factory/trail-1-a1-r1".into(),
         body: "Add a test.".into(),
         attempt: 1,
