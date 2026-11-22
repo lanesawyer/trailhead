@@ -460,7 +460,29 @@ together are one. An app does nothing for it. A test that wants to see what woul
 its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there. The same goes for
 the sound: a `Sound` holding a `Speaker` of the test's own, as `src/notification_settings.rs`'s tests do.
 
-An app raising one of its own (a `Notify` command) is not built yet.
+**Raising one of your own.** Trigger `Notify` from the app's code, and the shell sends it to the server as a command:
+
+```rust
+use trailhead_shell::notifications::{Notify, ResolveNotifications};
+
+commands.trigger(
+    Notify::new(MY_APP, "ticklist.due", "Three are due today")
+        .body("Pay the rent, call the vet, water the plants.")
+        .subject("due-today")
+        .link("Open the list", "https://example.com/list"),
+);
+// Later, when the thing no longer needs the person, wherever they dealt with it:
+commands.trigger(ResolveNotifications { source: MY_APP, subject: "due-today".into() });
+```
+
+- `source` is the app's own id: the panel names the app on it and the rail counts it on the app's button, and the
+  person's level for the app decides whether it rings or interrupts. `kind` is a short name of the sort of thing it is
+  (`<app>.<what>`). `.task(key)` ties it to a task, which resolves it when the task is finished.
+- It comes back on the event stream like any other, so do not show it yourself, and nothing is answered to the app.
+- Only while the connection is `Live`: raised otherwise it is dropped (the log says so). An app cannot raise one while
+  the window is closed.
+- The example app raises one every tenth press and resolves it when the count is reset (`count_press`,
+  `reset_count`); its test `every_tenth_press_raises_a_notification_and_a_reset_resolves_it` checks what is sent.
 
 To test them, give a snapshot notifications (`fixture::notification_json`) or feed an event with `"entity":
 "notification"` and a kind of `notification.raised`, as `src/notifications.rs`'s tests do.
@@ -552,6 +574,8 @@ What the example app's tests cover, and why each matters:
   the `LocalStore` is there for a second shell built on the same directory.
 - `switching_away_despawns_the_page_and_switching_back_shows_the_kept_count`: the page exists only while the app is
   shown, and the app's logic keeps running while it is not (a press while another app is shown still counts).
+- `every_tenth_press_raises_a_notification_and_a_reset_resolves_it`: what the app raises and resolves is sent as
+  commands, checked with `sent`, without a server.
 - `the_settings_page_is_listed_under_the_app_and_its_button_resets_the_count`: the app's page is in the shell's
   settings under its name, filled when shown, and what its control does is kept.
 - `pressing_the_button_changes_the_count_line_and_nothing_else_is_respawned`: a change is made in place. The count
@@ -610,6 +634,8 @@ parts below.
   - `Example`, the type given to the shell.
   - `COUNT_SETTINGS`, the `PageId` of its page in the shell's settings.
   - The logic's state and events: `Presses` (a resource), `Press` and `ResetCount` (events any caller can trigger).
+    `count_press` raises a notification every `MILESTONE` presses and `reset_count` resolves it (section 6,
+    "Notifications").
   - The markers: `ExamplePage` (the page's root, present only while the app is shown), `CountLine`, `PressButton`,
     `ResetButton` (on its settings page).
   - `impl ShellApp for Example`: `manifest` names it with `Icon::Flag`; `build` reads the kept count from the

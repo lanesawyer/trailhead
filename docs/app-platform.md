@@ -232,6 +232,10 @@ One way for the server, the factory and any app to tell a person something needs
 - **The factory,** for what the engine cannot see: a run that failed, a task it parked, a budget breach, the factory paused. This takes TRAIL-111's place.
   **Built (TRAIL-1682):** through the `Tracker` trait, the factory raises `factory.review` when a PR waits on a person alone (every other gate passed), with a link to the pull request, and `factory.paused` once per usage pause; it resolves each when that stops. A failed run it gives up on, a park and a budget breach are each a question the factory asks on the task, which the first rule above already raises, so the factory raises nothing more for them ([operating.md](factory/operating.md#notifications)).
 - **An app, while the window runs,** with a `Notify` command the shell sends to the server. An app cannot raise one while the window is closed; rules over an app's own data wait on the app data store.
+  **Built (TRAIL-1681):** `trailhead_shell::notifications::Notify` (source, kind, title, body, subject, task, links),
+  triggered from an app's code and sent as `POST /v1/notifications` while the connection is live, and
+  `ResolveNotifications { source, subject }` as `POST /v1/notifications/resolve`. The example app raises one every tenth
+  press and resolves it when the count is reset.
 - An agent already has `ask`, which raises one by the first rule.
 
 **Trust.** No rate limits and no guard against an app that raises too many. Lane asks for the apps; one that misbehaves gets changed. The shell does say which app raised each one.

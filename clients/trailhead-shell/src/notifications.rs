@@ -8,6 +8,9 @@
 //! ones a page at a time ([`ShowOlder`]), kept in [`NotificationHistory`] beside the mirror. Marking one read or unread
 //! is a command; its event brings the change back to the mirror.
 //!
+//! An app raises one of its own with [`Notify`] and resolves what it raised about a subject with
+//! [`ResolveNotifications`], each sent to the server as a command while the connection is live.
+//!
 //! A shell with one app has no rail: an app with a place for a bell (Lookout's sidebar footer) puts a button there with
 //! [`NotificationBell`] on it while [`Apps::has_rail`](crate::Apps::has_rail) is false, and the shell gives it its count,
 //! rings it and opens the panel when it is pressed, as it does the rail's.
@@ -16,8 +19,8 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
-use trailhead_client::http::{Call, NotificationList};
-use trailhead_model::{Notification, SOURCE_FACTORY, SOURCE_SERVER};
+use trailhead_client::http::{Call, NewNotification, NotificationList};
+use trailhead_model::{Notification, NotificationAction, SOURCE_FACTORY, SOURCE_SERVER};
 use trailhead_ui::Icon;
 use uuid::Uuid;
 
@@ -58,6 +61,86 @@ pub struct NotificationBell;
 #[derive(Event, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadNotificationsAbout {
     pub task_id: Uuid,
+}
+
+/// Raises a notification from an app: `commands.trigger(Notify::new(MY_APP, "ticklist.due", "Three are due today"))`,
+/// with `.body(..)`, `.subject(..)`, `.task(..)` and `.link(label, url)` as it needs. It is sent to the server as a
+/// command and comes back on the event stream like any other, so the person's settings say what it does. Only while
+/// the connection is live: raised otherwise it is dropped, with a warning in the log.
+#[derive(Event, Clone, Debug, PartialEq, Eq)]
+pub struct Notify {
+    /// The app raising it, which names it in the panel and counts it on its button.
+    pub source: AppId,
+    /// The sort of thing it is, as a short name: `ticklist.due`.
+    pub kind: String,
+    pub title: String,
+    /// Plain text, empty for none.
+    pub body: String,
+    /// What it is about, in the app's own words, to resolve it by later with [`ResolveNotifications`].
+    pub subject: Option<String>,
+    /// The key or id of the task it is about, if any: it is resolved when the task is finished.
+    pub task: Option<String>,
+    /// Its link buttons, at most four.
+    pub actions: Vec<NotificationAction>,
+}
+
+impl Notify {
+    pub fn new(source: AppId, kind: impl Into<String>, title: impl Into<String>) -> Self {
+        Notify {
+            source,
+            kind: kind.into(),
+            title: title.into(),
+            body: String::new(),
+            subject: None,
+            task: None,
+            actions: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    #[must_use]
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    #[must_use]
+    pub fn task(mut self, task: impl Into<String>) -> Self {
+        self.task = Some(task.into());
+        self
+    }
+
+    /// Adds a button that opens `url` in the desktop's browser.
+    #[must_use]
+    pub fn link(mut self, label: impl Into<String>, url: impl Into<String>) -> Self {
+        self.actions.push(NotificationAction { label: label.into(), url: url.into() });
+        self
+    }
+
+    fn call(&self) -> Call {
+        Call::RaiseNotification(NewNotification {
+            source: self.source.0.to_string(),
+            kind: self.kind.clone(),
+            title: self.title.clone(),
+            body: self.body.clone(),
+            subject: self.subject.clone(),
+            task: self.task.clone(),
+            actions: self.actions.clone(),
+        })
+    }
+}
+
+/// Resolves every open notification the app `source` raised about `subject`: the thing no longer needs the person.
+/// Sent as a command, only while the connection is live.
+#[derive(Event, Clone, Debug, PartialEq, Eq)]
+pub struct ResolveNotifications {
+    pub source: AppId,
+    pub subject: String,
 }
 
 /// Reads the page of notifications older than any the shell holds, into [`NotificationHistory`].
@@ -171,6 +254,8 @@ impl Plugin for NotificationsPlugin {
             .add_message::<SendNet>()
             .add_observer(on_show_older)
             .add_observer(on_read_about)
+            .add_observer(on_notify)
+            .add_observer(on_resolve)
             .add_systems(PreUpdate, forget_older.before(crate::mirror::apply_sync))
             .add_systems(Update, hear_older);
     }
@@ -250,6 +335,28 @@ fn on_read_about(
         let request = Request::new(Call::ReadNotification(n.id.to_string()), None);
         submit.write(Submit { source: Entity::PLACEHOLDER, request });
     }
+}
+
+/// Sends a command no control waits on, while live.
+fn send_while_live(connection: &State<Connection>, submit: &mut MessageWriter<Submit>, call: Call, what: &str) {
+    if *connection.get() != Connection::Live {
+        warn!(what, "not connected to the server, so it is dropped");
+        return;
+    }
+    submit.write(Submit { source: Entity::PLACEHOLDER, request: Request::new(call, None) });
+}
+
+fn on_notify(notify: On<Notify>, connection: Res<State<Connection>>, mut submit: MessageWriter<Submit>) {
+    send_while_live(&connection, &mut submit, notify.call(), "an app's notification");
+}
+
+fn on_resolve(
+    resolve: On<ResolveNotifications>,
+    connection: Res<State<Connection>>,
+    mut submit: MessageWriter<Submit>,
+) {
+    let call = Call::ResolveNotifications { source: resolve.source.0.to_string(), subject: resolve.subject.clone() };
+    send_while_live(&connection, &mut submit, call, "an app's resolve");
 }
 
 #[cfg(test)]
@@ -357,6 +464,37 @@ mod tests {
         let history = app.world().resource::<NotificationHistory>();
         assert_eq!(history.older().len(), 2);
         assert!(history.at_end() && !history.reading(), "a short page is the last");
+    }
+
+    #[test]
+    fn an_app_raises_and_resolves_its_own_as_commands_while_live() {
+        let mut app = headless(ShellPlugin::new().with(Notes).with(Other));
+        let notify = Notify::new(NOTES, "notes.due", "Three notes are due")
+            .body("Today")
+            .subject("due")
+            .link("Open", "https://example.com/notes");
+        app.world_mut().trigger(notify.clone());
+        app.update();
+        assert!(sent(&mut app).is_empty(), "not while offline");
+        set_connection(&mut app, Connection::Live);
+        app.world_mut().trigger(notify);
+        app.world_mut().trigger(ResolveNotifications { source: NOTES, subject: "due".into() });
+        app.update();
+        let out = sent(&mut app);
+        let calls: Vec<(String, Option<serde_json::Value>)> =
+            out.iter().map(|s| (s.request.call.path(), s.request.call.body())).collect();
+        assert_eq!(
+            calls,
+            [
+                (
+                    "/v1/notifications".into(),
+                    Some(json!({"source": "notes", "kind": "notes.due", "title": "Three notes are due",
+                                "body": "Today", "subject": "due",
+                                "actions": [{"label": "Open", "url": "https://example.com/notes"}]}))
+                ),
+                ("/v1/notifications/resolve".into(), Some(json!({"source": "notes", "subject": "due"}))),
+            ]
+        );
     }
 
     #[test]
