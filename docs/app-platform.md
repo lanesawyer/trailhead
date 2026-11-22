@@ -213,7 +213,7 @@ Decided with Lane, 2026-11-21. Built so far (TRAIL-1609's subtasks have the rest
 
 ## Notifications
 
-Talked through with Lane, 2026-11-21 (TRAIL-1671). Nothing is built. What is not marked **Proposal** or **Open** he agreed to.
+Decided with Lane, 2026-11-21 (TRAIL-1671), except what is marked **Open**. Nothing is built.
 
 One way for the server, the factory and any app to tell a person something needs them. The shell shows them, in the window and on the desktop.
 
@@ -234,25 +234,26 @@ One way for the server, the factory and any app to tell a person something needs
 
 **Trust.** No rate limits and no guard against an app that raises too many. Lane asks for the apps; one that misbehaves gets changed. The shell does say which app raised each one.
 
-**Kinds. Open: now, or after the first version.** A kind is the sort of thing a notification is, as a short name: `lookout.question`, `lookout.review`, `factory.run_failed`, `task.due_soon`. Every notification has one either way. "Kinds in the manifest" means an app lists the kinds it raises in its manifest, each with the name a person reads ("A question for you") and a level it starts at. That buys one thing: the settings page can show a row for every kind before any has been raised, so a person can turn "a task is due soon" down and leave "a question for you" up. Without it, levels are per app only (all of Lookout's or none). The cheaper start is a level per source, with the kind a free string, and the manifest list added when one app's notifications want different treatment.
+**Kinds.** A kind is the sort of thing a notification is, as a short name: `lookout.question`, `lookout.review`, `factory.run_failed`, `task.due_soon`. Every notification has one. At first a kind is only that name, and levels are set per source (all of an app's, or the factory's). Later, when one app's notifications want different treatment, an app lists the kinds it raises in its manifest, each with the name a person reads ("A question for you") and the level it starts at, and the settings page shows a row for each before any has been raised.
 
-**Levels. Proposal.** Three: *silent* (in the list only), *bell* (the count and the ring) and *interrupt* (a desktop notification too). Every one is recorded whatever its level.
+**Levels.** Three: *silent* (in the list only), *bell* (the count, the ring and the sound) and *interrupt* (a desktop notification too). Every one is recorded whatever its level.
 
 **In the window.**
 
 - **A bell at the rail's foot,** with the count unread. When one arrives while the window has focus the bell rings: it swings, grows a little and shrinks back. A desktop that asks for less motion sees only the count change.
 - **Its panel** lists them, newest first, each with its source's icon and name, title, body, age and action buttons; the unread ones marked. Each can be marked read or unread, and all read at once. A switch between Unread and All; All pages back through everything the server keeps.
 - They are listed one by one. Nothing is folded together in the list.
-- **A count on an app's rail icon. Proposal:** its unread ones.
-- **Pressing one marks it read.** It does not go anywhere yet (below).
+- **A count on an app's rail icon:** its unread ones. A setting hides the counts, the bell's too.
+- **Pressing one in the list does nothing.** What can be done with it is its buttons: Mark read, and its actions.
 
-**Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. **Proposal:** the same buttons on the desktop notification, which Ubuntu draws; a link needs no window focus, so it works with none of click-through's trouble. Later: buttons that act (Approve, Answer).
+**Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. The desktop notification has the same buttons, which Ubuntu draws; a link needs no window focus. Later: buttons that act (Approve, Answer).
 
 **On the desktop.**
 
 - The shell sends them while it runs, on Ubuntu (GNOME), over the desktop's notification service on D-Bus, under the desktop entry `mise run shell-install` writes so they carry Trailhead's name and icon. The Mac and Windows are later.
 - **Only when the window does not have focus.** With focus, the bell's ring is the notice.
 - **A burst is one notification.** Several at once, those raised during quiet hours, and those raised while the window was not running become one: "10 things need you". The shell keeps the last one it announced in its `LocalStore` entry, per machine, to know what a launch missed.
+- **Pressing one brings the window forward with the bell's panel open.** It goes no further than that (phase 2). To check on Ubuntu: that GNOME on Wayland lets the window come forward from the press; if it does not, the panel is still open when the person gets there.
 - One read or resolved elsewhere is taken down.
 - The D-Bus client is a new package, so a `Cargo.lock` change at grade 4.
 
@@ -261,10 +262,12 @@ One way for the server, the factory and any app to tell a person something needs
 - They gate the interruption, never the record: no desktop notification and no ring, while the list and the count carry on.
 - Quiet hours are a daily span. Focus is switched on by hand, until a time or until switched off, from the bell's panel.
 - When either ends, one desktop notification says what arrived.
-- **Proposal:** the settings (levels, quiet hours) are kept on the server, so every machine agrees, on a Notifications page among the shell's own in Settings.
-- **Open:** whether anything breaks through (the factory stopped, a budget breach). Ubuntu's own Do Not Disturb hides ours with no work here.
+- The settings (levels, quiet hours, the sound, the counts) are kept on the server, so every machine agrees, on a Notifications page among the shell's own in Settings.
+- **Low priority:** a level above interrupt that breaks through both (the factory stopped, a budget breach). Lane may never use it, so it is built last if at all. Ubuntu's own Do Not Disturb hides ours with no work here.
 
-**How long they are kept. Open.** "Retention" is that question: the table grows forever unless something prunes it. The rows are small (a few hundred bytes), so the choices are keep everything, or drop those both read and resolved after some months. Proposal: keep everything, and prune when the list is ever slow.
+**A sound.** One plays with the ring and with a desktop notification, never during quiet hours or focus, and a setting turns it off. It has to be made by a person, not generated, under an open licence, with its author, source and licence recorded beside the file. **Open: which one.** To look at first: the freedesktop sound theme and Ubuntu's own (Yaru), which the desktop can also play itself when a notification names a theme sound, so only the ring in a focused window would need a file of ours.
+
+**How long they are kept.** Everything, forever. The rows are small (a few hundred bytes); pruning is dealt with if the table ever gets too big.
 
 **Phase 2: going to the thing.** Pressing a notification, in the window or on the desktop, opens what it is about. Put off because each part is hard:
 
@@ -273,7 +276,7 @@ One way for the server, the factory and any app to tell a person something needs
 - A stored route outlives the build that wrote it, so an app has to cope with one it does not know, and with a thing since deleted.
 - A settings modal or an unsent draft may be in the way.
 - Raising the window from the desktop's notification needs an activation token on Wayland; whether winit passes one through is not checked.
-- **Open, for phase 1:** the easy part alone, pressing one switches to the app that raised it with no route, is a line of code. Until then a notification's text has to say where to look (the task's key) and its link does the rest.
+- Until then a notification's text has to say where to look (the task's key), and its link does the rest.
 
 **Also phase 2 or later:** a tray icon, so notifications arrive with the window closed (likely an effort of its own); snoozing one; hiding the text on a locked screen; the Mac. **Not planned:** email or a push to a phone.
 
@@ -287,9 +290,10 @@ One way for the server, the factory and any app to tell a person something needs
 | `trailhead-control` | Raising what the engine cannot see, probably through the `Tracker` trait |
 | `trailhead-shell` | The mirror's records and the `Notify` command, the bell and its panel, the settings page, the desktop notifier behind a trait (so tests use a fake), quiet hours and the burst rule as plain logic |
 | `trailhead-ui` | The ring, and a count badge if the kit lacks one |
+| `trailhead-shell`'s assets | The sound, with its author, source and licence |
 | Lookout | Its link actions; marking a task's notifications read when the task is opened |
 
-**Order:** the table and API with the question and review rules; the bell and its panel; Ubuntu's desktop notifications; levels, quiet hours and focus; apps raising their own. The first two are enough to say the planner has replied.
+**Order:** the table and API with the question and review rules; the bell and its panel; Ubuntu's desktop notifications; levels, quiet hours, focus and the sound; apps raising their own; kinds in the manifest and breaking through quiet hours, if wanted. The first two are enough to say the planner has replied.
 
 ## Trust, grades and undo
 
