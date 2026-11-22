@@ -131,7 +131,7 @@ How the store and connectors work is settled in the next section.
 
 ## The app data store and connectors
 
-**Decided (2026-11-22, with Lane), not built.** The first app to need it is Cairn (CAIRN-1), which ranks a person's work from GitHub pull requests and Jira tickets. Phase 6 is the store (TRAIL-1581), phase 7 connectors (TRAIL-1582).
+**Decided (2026-11-22, with Lane) and built the same day, through item 6 of the order of work below; none of it has yet run on a live server or been used in a real window.** The first app to need it is Cairn (CAIRN-1), which ranks a person's work from GitHub pull requests and Jira tickets. Phase 6 is the store (TRAIL-1581), phase 7 connectors (TRAIL-1582).
 
 ### The store
 
@@ -202,7 +202,7 @@ How the store and connectors work is settled in the next section.
    - A switch for on/off is part of the connector's Save, as the factory's is on the Server page, not a request of its own. A required setting is marked "(required)" after its label; a string or integer field emptied, or a list emptied, unsets the setting (`null`); a boolean never set reads as off.
    - A connector whose declared shape changes (its settings, secrets, schedule, or whether its manifest reads) is keyed anew and its section replaced; anything else is updated in place. A server with no apps repo is told from one with no connectors by `GET /v1/shell/build`'s `configured`.
    - Not yet: the page doesn't say how many runs in a row failed, since `ConnectorInfo` doesn't carry the count; and the `connector.failing` notification doesn't open the page, since the bell's panel has no way to route a kind to a place (a card's actions are links opened in the browser).
-6. The builder builds connectors and hands the server the declarations; the apps repo's pin, path rules and guides.
+6. The builder builds connectors and hands the server the declarations; the apps repo's pin, path rules and guides. **Built** (the builder and the declarations with items 2 and 4; the apps repo with APPS-11: `connectors/README.md` there, and its first connector adds `connectors/*` to the workspace's members, since cargo refuses a glob that matches nothing). No lint yet holds a connector crate to the kit's `Http` (TRAIL-1709).
 7. Cairn: a GitHub connector, a Jira connector and the app, planned and built by the factory.
 
 **Left for later:** backups; writing back to a service; push; migrations beyond addition; sharing a collection between apps; giving a secret from the window.
@@ -227,8 +227,8 @@ Before any of it: the Lookout and factory changes now in review are merged, grad
    - **A new app** gets an id from its name (lowercase words joined by `-`, starting with a letter, 2 to 32 characters, a name cargo takes for a crate, not `shell`, `lookout` or `example`, and not an app's that exists) and a project key: the one the person typed in the form (`new_app.key`, 2 to 10 letters or digits starting with a letter, refused when another project has it), else one made from the name (one word of up to six letters whole, so Cairn is CAIRN, a longer one its first four; the initials of several; a digit added until unique). The form's key field is optional, and a line under it says which key the tasks will carry (TRAIL-1688). Its project is named for it, pointed at `apps/<id>`, requires review, has the `factory` agent as reviewer when the factory has run here (the reply says so when it hasn't), and has a brief naming the path, the kit and the commit subjects. Its first task, at grade 2, is to scaffold the crate, register it in the shell and build a first version of what was asked; adding a crate touches `Cargo.toml` and `shell/`, so the PR is graded 3 and a person approves the new app.
    - **Built (TRAIL-1673): the window's two ways in.** A plus under the apps on the rail ("Ask for a new app") opens "Ask for a new app": its name, the ask, and a dropdown of the planner's model ("The repo's default", which sends none, then Fable, Opus, Sonnet and Haiku); a new app is always planned. The Ask button at the rail's foot is now a pencil ("Ask for a change to this app"), shown once the apps repo has an app to ask about, and opens "Ask for a change": the app (the app shown first, else the first app; "A new app" is no longer among them), the ask, and a "Plan this first" switch, off at first, with a note saying a planner talks the ask over and proposes tasks to approve before any work starts; on, the planner's model shows under it. The form sends `Ask::change` or `Ask::new_app`, with `.planned(model)` when planned. For a planned ask the answer says "Sent to the planner: TN-1" and that the planner comes back with questions or a plan to approve, on that task in Lookout as a question waiting on the person.
    - **The planner run is built** (TRAIL-1669), designed in [Planning an ask](#planning-an-ask). **Not offered:** asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
-6. **The app data store.** Designed in [The app data store and connectors](#the-app-data-store-and-connectors).
-7. **Connectors.** Designed there too.
+6. **The app data store.** Built (TRAIL-1581): [The app data store and connectors](#the-app-data-store-and-connectors).
+7. **Connectors.** Built (TRAIL-1582), there too; the first real connectors are Cairn's.
 
 Later: Android (the only phone target for now; desktop is where this is mostly used), loading views from `bsn` files, the shell on a different machine from the server (the builder then ships binaries over iroh), a local code host. A possible second app for Lane: planning a work day and reviewing code.
 
