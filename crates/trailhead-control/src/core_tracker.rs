@@ -696,6 +696,7 @@ impl Tracker for CoreTracker {
             projects: Some(vec![project.to_string()]),
             rate_limit_per_minute: None,
             expires_in: Some(expires_in),
+            apps: None,
         };
         let (_, secret) =
             self.store.create_token_with(&ctx, Principal::Agent(agent.id), name, opts).await.map_err(map_err)?;

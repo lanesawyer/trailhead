@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod app_data;
 mod attachment;
 pub mod config;
 mod notification;
@@ -755,6 +756,10 @@ pub struct Token {
     pub rate_limit_per_minute: Option<i64>,
     /// When it stops working. `None` means never.
     pub expires_at: Option<Timestamp>,
+    /// The apps whose data it reaches, by id. `None`: a person's token not limited to projects reaches every app;
+    /// any other token reaches none.
+    #[serde(default)]
+    pub apps: Option<Vec<String>>,
 }
 
 /// `GET /v1/me`: the caller.

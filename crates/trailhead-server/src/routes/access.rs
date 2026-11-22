@@ -46,6 +46,7 @@ impl From<TokenLimits> for TokenOptions {
             projects: l.projects,
             rate_limit_per_minute: l.rate_limit_per_minute,
             expires_in: l.expires_in_seconds.map(jiff::SignedDuration::from_secs),
+            apps: None,
         }
     }
 }
@@ -155,7 +156,7 @@ pub(crate) async fn update_token(
     Path(id): Path<Uuid>,
     Json(b): Json<UpdateToken>,
 ) -> ApiResult<Json<Value>> {
-    let patch = TokenPatch { projects: b.projects, rate_limit_per_minute: b.rate_limit_per_minute };
+    let patch = TokenPatch { projects: b.projects, rate_limit_per_minute: b.rate_limit_per_minute, apps: None };
     Ok(Json(json!(s.store.update_token(&ctx, id, patch).await?)))
 }
 

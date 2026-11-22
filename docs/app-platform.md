@@ -169,7 +169,14 @@ How the store and connectors work is settled in the next section.
 
 ### Order of work
 
-1. The store in the engine: files, declarations, records, keys, events, undo.
+1. The store in the engine: files, declarations, records, keys, events, undo. **Built (TRAIL-1581), engine only** (`crates/trailhead-core/src/apps`, its types in `trailhead_model::app_data`):
+   - Each app's file is `apps/<app id>.db` beside the tasks database (`Store::with_app_dir` elsewhere), with its own migrations (`migrations/app/`). `Store::register_app` creates it and keeps the declaration in it; the file belongs to the workspace that created it.
+   - A field's type is `kind`, `kind[]`, `kind?` or `kind[]?` (`kind?[]` is refused: a list's items are never missing). An optional field given as `null` is the same as one left out, and is not stored. A `url` is a scheme, `:` and the rest, with no spaces. A fed collection's fields are its feed's, filled in by `Declaration::with_feeds` before it is registered.
+   - A shape that changes other than by addition is taken while the changed collection holds no records, and refused once it does.
+   - Records are removed, not marked deleted; the event keeps what was removed. Replacing a set removes every record of the collection not in it, a record with no key included. Any write that would change nothing writes nothing, not only a write by key. An update never changes a record's key.
+   - A fed collection is written only through `Store::replace_feed_set`, which nothing outside the engine calls yet; step 4 checks there that the caller is the feed's connector. Undo leaves a fed collection alone too, since the next run sets it.
+   - A token's `apps` names the apps it reaches. A person's token that names none reaches every app unless it is limited to projects; any other token that names none reaches none, and a sub-agent's token inherits none.
+   - Not yet: archiving old app events (undo still refuses events past the 90-day window).
 2. The API, the stream, tokens scoped to apps, MCP.
 3. The window's record mirror and test helpers; the example app keeps a collection.
 4. The connector kit, feeds and their routing, scheduled runs, secrets, the CLI.
