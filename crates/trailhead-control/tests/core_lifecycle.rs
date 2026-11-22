@@ -19,9 +19,10 @@ fn pr(n: u8) -> Priority {
 }
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    CodeHost, Commit, FactoryConfig, FileChange, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Scope, Status,
-    TaskKey, Tracker, Usd, Verdict, VerdictKind, label,
+    CodeHost, FactoryConfig, FollowUp, ModelId, Patch, Role, RunOutcome, RunPatch, Scope, Status, TaskKey, Tracker,
+    Usd, Verdict, VerdictKind, label,
 };
+use trailhead_testkit::fixtures::changes;
 use trailhead_testkit::{
     Connect, FAKE_BASE_MERGE, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon, Script, ScriptedHarness,
 };
@@ -122,17 +123,6 @@ impl Rig {
     async fn revoked(&self, agent: &str) -> bool {
         let agents = self.store.list_agents(&self.human).await.unwrap();
         agents.iter().find(|a| a.name == agent).unwrap_or_else(|| panic!("no agent {agent}")).revoked_at.is_some()
-    }
-}
-
-fn changes() -> RunOutcome {
-    RunOutcome::Changes {
-        commits: vec![Commit {
-            message: "feat: greet".into(),
-            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
-            merges: vec![],
-        }],
-        summary: "Adds a greeting.".into(),
     }
 }
 

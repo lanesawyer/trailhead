@@ -4,6 +4,7 @@
 mod codehost;
 mod compute;
 mod daemon;
+pub mod fixtures;
 mod harness;
 mod provider;
 mod tracker;

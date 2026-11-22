@@ -14,10 +14,11 @@ use trailhead_daemon::net::DaemonProtocol;
 use trailhead_daemon::{Connect, HEARTBEAT_EVERY, RENEW_EVERY, Runner, Shot, Taken};
 use trailhead_factory::HostConfig;
 use trailhead_factory::{
-    AttachmentRole, CodeHost, Commit, Credential, DaemonSecrets, Error, FactoryConfig, FileChange, FollowUp, Role,
-    RunOutcome, SandboxId, Status, TaskKey, Tracker, VerdictKind,
+    AttachmentRole, CodeHost, Credential, DaemonSecrets, Error, FactoryConfig, FollowUp, Role, RunOutcome, SandboxId,
+    Status, TaskKey, Tracker, VerdictKind,
 };
 use trailhead_plugins::CLAUDE_CODE;
+use trailhead_testkit::fixtures::changes;
 use trailhead_testkit::{FakeCodeHost, FakeCompute, FakeProvider, FakeWorkspace, Script, ScriptedHarness};
 use trailhead_tracker_rest::RestTracker;
 use trailhead_wire::api::{ApiTunnel, open_api_tunnel};
@@ -171,17 +172,6 @@ impl Rig {
     async fn task(&self, title: &str) -> TaskKey {
         let new = NewTask { project: "TRAIL".into(), title: title.into(), ..Default::default() };
         self.store.create_task(&self.human, new).await.unwrap().key
-    }
-}
-
-fn changes() -> RunOutcome {
-    RunOutcome::Changes {
-        commits: vec![Commit {
-            message: "feat: greet".into(),
-            changes: vec![FileChange::new("src/greet.rs", Some(b"pub fn hi() {}".to_vec()))],
-            merges: vec![],
-        }],
-        summary: "Adds a greeting.".into(),
     }
 }
 
