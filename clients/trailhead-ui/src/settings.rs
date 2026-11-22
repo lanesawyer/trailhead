@@ -2,7 +2,7 @@
 //! settings look like it.
 //!
 //! - [`settings_page`]: a page of settings (a modal's body, or one tab's page of it), its settings a row apart.
-//! - [`spawn_settings_section`]: a group of settings under a dim heading, a group's distance from what is above it,
+//! - [`spawn_settings_section`]: a group of settings under a heading, more than a group's distance from what is above it,
 //!   with its settings in a box of their own for the caller to fill and keep (with `Keyed`).
 //! - [`setting`]: one setting, its label over its control (a select, a button group, a value), with a dim note under
 //!   it saying what it does when there is one.
@@ -16,18 +16,24 @@
 use bevy::prelude::*;
 use bevy::ui_widgets::ControlOrientation;
 
-use crate::containers::section;
+use crate::containers::section_frame;
 use crate::patch::display;
 use crate::spacing::{extent, space};
 use crate::tabs::tab_strip;
-use crate::text::{size, text_dim};
+use crate::text::{size, text, text_dim};
 use crate::toggle::toggle_switch;
 
-/// A page of settings, filling the width of what holds it: its settings and sections a row apart, which a section's own
-/// margin widens to a group's. Spawn the settings and sections as its children, in order.
+/// A page of settings, as wide as what holds it up to [`extent::SETTINGS_MEASURE`], so a control or a note's line
+/// never spans a wide modal: its settings and sections a row apart, which a section's own margin widens to a
+/// group's. Spawn the settings and sections as its children, in order.
 pub fn settings_page() -> impl Scene {
     bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: { px(space::ROWS) }, min_width: px(0) }
+        Node {
+            flex_direction: FlexDirection::Column,
+            row_gap: { px(space::ROWS) },
+            min_width: px(0),
+            max_width: { px(extent::SETTINGS_MEASURE) },
+        }
     }
 }
 
@@ -77,10 +83,18 @@ pub struct SettingsSection {
     pub rows: Entity,
 }
 
-/// A section of settings under `heading`, spawned unparented: put [`SettingsSection::section`] where it goes and its
+/// A section of settings under `heading`, which is a size up from the settings' own labels and in the full text
+/// color, so a page's sections can be told from what is in them. Spawned unparented: put [`SettingsSection::section`] where it goes and its
 /// settings ([`setting`], [`setting_toggle`]) in [`SettingsSection::rows`].
 pub fn spawn_settings_section(commands: &mut Commands, heading: impl Into<String>) -> SettingsSection {
-    let section = commands.spawn_scene(section(heading)).id();
+    let heading = heading.into();
+    let section = commands
+        .spawn_scene(bsn! {
+            @section_frame()
+            Node { margin: { UiRect::top(px(space::GROUPS)) } }
+            Children [ @text(heading, size::HEADING) ]
+        })
+        .id();
     let rows = commands
         .spawn((
             Name::new("settings"),

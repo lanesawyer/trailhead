@@ -25,7 +25,7 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use trailhead_ui::{
     Appearance, ButtonGroup, ButtonKind, ChangeTextSize, Icon, Picked, TextSize, ThemeChoice, UiPlace, button,
-    button_group, row, set_text, setting, size, spawn_settings_section, text, tool_button,
+    button_group, copy_block, row, set_text, setting, size, spawn_settings_section, text,
 };
 
 use crate::connect::allow_command;
@@ -97,13 +97,10 @@ fn value(which: Shows, label: &str, note: &str) -> impl Scene {
     setting(label.to_string(), note.to_string(), bsn_list! { @text("", size::BODY) which })
 }
 
-/// A value with a copy button after it.
+/// A value in a box of its own, with the button that copies it.
 fn copyable(which: Shows, label: &str, note: &str, act: ConnectionAct) -> impl Scene {
     let hint = format!("Copy the {}", label.to_lowercase());
-    let control = bsn_list! {
-        @row()
-        Children [ @text("", size::BODY) which -- @tool_button(Icon::Copy, hint, ButtonKind::Plain) act ]
-    };
+    let control = bsn_list! { @copy_block(bsn! { which }, hint, bsn! { act }) };
     setting(label.to_string(), note.to_string(), control)
 }
 

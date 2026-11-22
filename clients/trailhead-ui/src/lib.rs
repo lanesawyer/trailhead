@@ -108,6 +108,7 @@ mod check_circle;
 mod chip;
 mod choice_tile;
 mod containers;
+mod copy_block;
 mod count;
 mod desktop;
 mod detail;
@@ -169,6 +170,7 @@ pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use choice_tile::{ChoiceCaption, ChoicePicture, ChoiceTile, ChoiceTileParts, spawn_choice_tile};
 pub use containers::{dropdown_item, dropdown_list, field, list_card, panel, row, section, section_frame};
+pub use copy_block::copy_block;
 pub use count::{CountBadge, CountWords, MOST_COUNTED, count_badge, count_words};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
@@ -264,7 +266,8 @@ impl Plugin for UiPlugin {
             .add_systems(Update, select::fit_select_captions.in_set(UiPlace).after(select::show_chosen_icons))
             .add_systems(
                 PostUpdate,
-                (scroll::clamp_scroll_positions, scrollbar::show_scrollbars).after(bevy::ui::UiSystems::Layout),
+                (scroll::clamp_scroll_positions, scrollbar::show_scrollbars, button_group::round_group_rows)
+                    .after(bevy::ui::UiSystems::Layout),
             )
             .add_systems(PostUpdate, motion::fade_backgrounds.after(bevy::ui::UiSystems::Prepare))
             .add_systems(

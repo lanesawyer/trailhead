@@ -101,7 +101,7 @@ panel.
 | `button` | `button(caption: Into<String>, icon: Option<Icon>, kind: ButtonKind) -> impl Scene` | A button with words, after an icon when given. | The caption is the button's descendant `Text`: walk `Children` and `set_text` it (the kit has no `ButtonEdit` yet). Disable with `InteractionDisabled`; the caption dims itself. |
 | `tool_button` | `tool_button(icon: Icon, hint: Into<String>, kind: ButtonKind) -> impl Scene` | An icon alone, with a `Hint` saying what it does. `Plain` on cards and lists, `Normal` in a toolbar. | Its `Hint`'s `.0`. |
 | `ButtonKind` | `Normal` (default), `Primary`, `Plain`, `Danger` | How much a button stands out. One `Primary` per surface (New task, Save); `Danger` for something destructive (cancel, revert): a normal button with its caption in the danger color; `Plain` has no background until hovered. | Fixed at spawn. |
-| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop), or a short ladder of steps a person should see all of (a text size's eight). Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
+| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop), or a short ladder of steps a person should see all of (a text size's eight). Each option is as wide as its caption and at least `extent::GROUP_OPTION_MIN`, so the group is as wide as what it says and never spans the surface; with more options than its room holds it wraps onto further rows, each rounded at its own ends. Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
 | `ButtonGroup` | `ButtonGroup { chosen: Option<usize> }` (component) | A button group's state. | |
 | `link_button` | `link_button(icon: Icon, text: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | A button that opens a URL in the system's browser. `Plain` reads as a link in running text. | Its `ExternalLink { url }`. |
 | `link_tool_button` | `link_tool_button(icon: Icon, hint: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | The same as an icon-only tool button. | Its `ExternalLink`. |
@@ -156,6 +156,7 @@ matters (the text sizes, 80% to 200%). Choices that are best shown (a few kinds 
 | `TextEntered` | `TextEntered { entity: Entity, value: String }` (entity event) | Enter was pressed in a one-line input (not held, not mid-composition), with what it holds: how a field submits from the keyboard (recipe 5). Several lines take Enter as a new line and never trigger it. The kit's `inline_text` saves on it too. | |
 | `InitialText` | `InitialText(pub String)` (component) | Text an input holds when it appears, with the cursor at its end: a form opened on something that exists. Put it in `own`. | |
 | `field` | `field(label: Into<String>, control: impl SceneList) -> impl Scene` | A label above a control (an input, a select). Pass the control into the scene rather than adding it as a child afterwards: the scene's own `Children` replace any added before it spawns, which once left a select orphaned at the window's top left (TRAIL-850). | |
+| `copy_block` | `copy_block(words: impl Scene, hint: Into<String>, copy: impl Scene) -> impl Scene` | Words a person copies (an id, a command, a path) in a bordered box of their own with the copy button at its end, so it is plain what lands on the clipboard. As wide as what holds it, the words wrapping when longer. `words` goes on the text and `copy` on the button: your markers. | `set_text` on the text; observe `Activate` on the button and write the clipboard. |
 | `field_well` | `field_well() -> impl Scene` | A raised box to set text fields in. Feathers fills a field with the same gray as a pane's body and a menu, so a field placed straight in either cannot be seen. | |
 | `spawn_search_field` | `spawn_search_field(commands: &mut Commands, hint: Into<String>) -> SearchField` | A search box, `extent::SEARCH_WIDTH` wide, with a hint while empty and a clear button while not; Escape clears it. | Read `EditableText` on `SearchField::field`. |
 | `spawn_search_field_filling` | `spawn_search_field_filling(commands: &mut Commands, hint: Into<String>) -> SearchField` | The same, as wide as what it sits in (a sidebar, a column). | |
@@ -170,6 +171,10 @@ matters (the text sizes, 80% to 200%). Choices that are best shown (a few kinds 
 | `InlineText` | component: `value()`, `mode()`, `error()`, `draft()`, `set_value(&str)`, `confirm()`, `fail(old, message)`, `fail_keeping(old, draft, message)` | An inline text's state. Answer a change with `confirm` or `fail`; `fail_keeping` keeps what was typed for the next edit (a save that lost to someone else's change). `set_value` shows a value from elsewhere, ignored mid-edit. | |
 | `InlineField` | component: `selected()`, `mode()`, `error()`, `set(options, tones, selected)`, `confirm()`, `fail(old, message)` | An inline field's state, answered the same way. | |
 | `InlineMode` | `Reading`, `Editing`, `Saving` | Where an inline widget is in its edit. | |
+
+A `text_input` fills what holds it, which suits a path or a sentence. One that holds something short says so, with
+`Node { max_width: px(extent::FIELD_SHORT) }` (a number) or `FIELD_MEDIUM` (a word, a name) written after it, so a
+field's width says how much goes in it.
 
 Neither inline widget saves anything itself: the caller decides what saving means and may refuse. An Escape that
 cancels an inline edit is not passed on, so it does not also close the modal the text sits in.
@@ -253,8 +258,8 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 
 | Item | Signature | What it is for | Updated by |
 | --- | --- | --- | --- |
-| `settings_page` | `settings_page() -> impl Scene` | A page of settings (a settings modal's body, or one tab's page of it): a column, its settings `space::ROWS` apart and its sections a group apart. Spawn them as its children, in order. | |
-| `spawn_settings_section` | `spawn_settings_section(commands: &mut Commands, heading: Into<String>) -> SettingsSection` | A group of settings under a dim heading, spawned unparented. | Fill or `Keyed`-sync its `rows`. |
+| `settings_page` | `settings_page() -> impl Scene` | A page of settings (a settings modal's body, or one tab's page of it): a column no wider than `extent::SETTINGS_MEASURE`, so a control or a note's line never spans a wide modal, its settings `space::ROWS` apart and its sections further. Spawn them as its children, in order. | |
+| `spawn_settings_section` | `spawn_settings_section(commands: &mut Commands, heading: Into<String>) -> SettingsSection` | A group of settings under a heading a size up from the settings' labels (`size::HEADING`, in the full text color), spawned unparented. | Fill or `Keyed`-sync its `rows`. |
 | `SettingsSection` | `SettingsSection { section: Entity, rows: Entity }` | Put `section` in the page with `ChildOf`; put the settings in `rows`, which holds nothing else. | |
 | `setting` | `setting(label: Into<String>, note: Into<String>, control: impl SceneList) -> impl Scene` | One setting: its label over its control (a `select`, a `button_group`, a value's `text`), with a dim note under it saying what it does; an empty note is hidden. Pass the control into the scene with your marker on it, as for `field`. | The control's own way; the note is `SettingNote`'s `Text` (`set_text`). |
 | `setting_toggle` | `setting_toggle(label: Into<String>, note: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off: a `toggle_switch` with its label after it, and the note under it. `own` goes on the switch, which sends `ValueChange<bool>`. | The switch keeps its own state. |
@@ -291,7 +296,7 @@ of its own: it adds pages to the shell's (the shell's guide, "Settings pages").
 | `tab_strip` | `tab_strip(orientation: ControlOrientation) -> impl Scene` | A strip of tabs, ruled along the edge it shares with what it shows. A click or an arrow key raises `ValueChange<Option<Entity>>` on the strip, naming the tab. | Insert `SelectedTab(Some(tab))` on the strip from what you keep as the page shown (or add `bevy::ui_widgets::tablist_self_update` when the strip is all there is). |
 | `tab` | `tab(caption: Into<String>, orientation: ControlOrientation) -> impl Scene` | One tab, a child of a strip of the same orientation. Captions are cut to the strip's room. | |
 | `TabCaption` | component | A tab's caption, holding the whole of it; the kit cuts the `Text`. | |
-| `tab_heading` | `tab_heading(words: Into<String>) -> impl Scene` | Dim words over a group of tabs in a strip down the side (one app's settings pages), lined up with the captions. Not a tab: clicks and arrow keys pass over it. | |
+| `tab_heading` | `tab_heading(words: Into<String>) -> impl Scene` | Dim words over a group of tabs in a strip down the side (one app's settings pages), small and in capitals so they read as a label and not a tab, lined up with the captions. Not a tab: clicks and arrow keys pass over it. | |
 
 When the kit moves the sidebar, `beside_sidebar` and `beside_rail` pages, it compares every frame, because a rail or a
 sidebar coming or going moves the others; a node already in place is left untouched.
@@ -681,7 +686,10 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `FIELD_LABEL_WIDTH` | 90 | The label column in a sidebar field |
 | `DETAIL_WIDTH`, `DETAIL_SIDEBAR_WIDTH` | 960, 280 | A detail modal and its sidebar of facts |
 | `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
-| `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 72, 44 | A choice tile's picture |
+| `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 104, 64 | A choice tile's picture |
+| `SETTINGS_MEASURE` | 560 | How wide a page of settings grows |
+| `GROUP_OPTION_MIN` | 64 | The least an option of a button group is across |
+| `FIELD_SHORT`, `FIELD_MEDIUM` | 96, 240 | A text field for a number or a count, and for a word or a name |
 | `PICTURE_WIDTH`, `PICTURE_HEIGHT` | 160, 100 | A picture's thumbnail box (`spawn_picture`): two side by side fit a side panel |
 | `GRAPH_LAYERS_APART`, `GRAPH_NODES_APART` | 56, 24 | How far apart a graph's layers sit across (room for its edges' turns), and the nodes of one layer down |
 | `GRAPH_EDGE_END` | 6 | The square where a graph's edge meets the node it points to |

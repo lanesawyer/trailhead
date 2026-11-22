@@ -283,13 +283,13 @@ mod tests {
         assert_eq!(
             words,
             [
-                "Trailhead",
+                "TRAILHEAD",
                 "tab appearance",
                 "tab notifications",
                 "tab connection",
                 "tab server",
                 "tab about",
-                "Notes",
+                "NOTES",
                 "tab tidy"
             ]
         );

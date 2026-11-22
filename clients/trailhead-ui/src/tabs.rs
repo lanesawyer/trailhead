@@ -96,12 +96,12 @@ pub fn tab(caption: impl Into<String>, orientation: ControlOrientation) -> impl 
 }
 
 /// Dim words over a group of tabs in a [`tab_strip`] down the side (the pages of one app in a settings modal), lined
-/// up with the tabs' captions and a group's distance below the tab before them. It is not a tab: the strip's clicks
-/// and arrow keys pass over it.
+/// up with the tabs' captions and a group's distance below the tab before them. Small and in capitals, so it reads as
+/// a label over the tabs and not as one of them. It is not a tab: the strip's clicks and arrow keys pass over it.
 pub fn tab_heading(words: impl Into<String>) -> impl Scene {
-    let words = words.into();
+    let words = words.into().to_uppercase();
     bsn! {
-        @text_dim(words, size::SECONDARY)
+        @text_dim(words, size::SMALL)
         Node {
             padding: { UiRect::new(px(space::PANEL_INSET), px(space::PANEL_INSET), px(space::GROUPS), px(space::STACKED)) },
             flex_shrink: { 0.0_f32 },
