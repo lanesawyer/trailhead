@@ -72,8 +72,9 @@ fn script(cli: &Path, path: &str) -> Result<String> {
     ))
 }
 
-/// `LSUIElement`: the launcher itself has no window, so it gets no Dock tile of its own to bounce beside the
-/// window's.
+/// No `LSUIElement`, though the launcher has no window of its own: macOS gives the window the launcher starts this
+/// bundle's identity, so the window is what wears the name and icon in the Dock and the menu bar, and with
+/// `LSUIElement` it had neither (seen on a Mac, 2026-11-21).
 const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -96,8 +97,6 @@ const INFO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
     <string>1</string>
-    <key>LSUIElement</key>
-    <true/>
 </dict>
 </plist>
 "#;
@@ -118,6 +117,7 @@ mod tests {
         assert!(script.contains("exec '/Users/me/.cargo/bin/trailhead' app >>\"$log\" 2>&1\n"));
         let info = std::fs::read_to_string(app.join("Contents/Info.plist")).unwrap();
         assert!(info.contains(&format!("<string>{EXECUTABLE}</string>")), "the plist names the script");
+        assert!(!info.contains("LSUIElement"), "an agent app's window gets no Dock tile or menu bar");
         assert_eq!(&std::fs::read(app.join("Contents/Resources/trailhead.icns")).unwrap()[..4], b"icns");
         #[cfg(unix)]
         {

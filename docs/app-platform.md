@@ -254,14 +254,14 @@ build of it there, kept current.
 - **A macOS app.** `trailhead app install` there writes `~/Applications/Trailhead.app`: Trailhead's icon
   (`crates/trailhead/assets/trailhead.icns`, drawn by the shell's `icon` module with macOS's margin) and a script
   that runs `trailhead app` with the PATH of the terminal that installed it, since an app started from the Dock has
-  no cargo on its PATH. What the launcher prints goes to `~/Library/Logs/Trailhead/launcher.log`. The bundle is the
-  launcher, not the window (`LSUIElement`, so it has no Dock tile of its own); signing in and allowing the machine
+  no cargo on its PATH. What the launcher prints goes to `~/Library/Logs/Trailhead/launcher.log`. The window the
+  launcher starts takes the bundle's identity, so it is "Trailhead" with the icon in the Dock and the menu bar (which
+  is why the bundle isn't an `LSUIElement` agent: the window then had neither). Signing in and allowing the machine
   still need one start from a terminal.
-- **Not built:** the window's own Dock tile wearing the icon (winit sets no window icon on macOS, so the running
-  window shows a plain one), and the CLI or MCP reaching the server from another machine (TRAIL-71). The window is
-  the way in from there.
-- **Verified on Lane's Mac (2026-11-21):** the first build and the window signing in. Not yet: an update arriving
-  there, and the app bundle.
+- **Not built:** the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from
+  there.
+- **Verified on Lane's Mac (2026-11-21):** the first build, the window signing in, an update arriving and being
+  taken from the rail, and the app started from Spotlight with its icon.
 
 ## Other things to settle
 
