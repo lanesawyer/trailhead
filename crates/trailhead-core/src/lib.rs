@@ -11,6 +11,7 @@ mod events;
 mod idempotency;
 mod identity;
 mod metadata;
+mod plan;
 mod projects;
 mod reminders;
 mod set_aside;

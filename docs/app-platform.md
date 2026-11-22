@@ -166,7 +166,7 @@ The engine has due days and times, scheduled days and times, reminders, prioriti
 
 ## Planning an ask
 
-Decided with Lane, 2026-11-21. Not built (TRAIL-1609 and its subtasks).
+Decided with Lane, 2026-11-21. Built so far (TRAIL-1609's subtasks have the rest): the server's side of asking and of approving. `POST /v1/shell/ask` takes `plan` and `model` and makes a spec task (ungraded, `metadata.plan.spec`) for a planned change and for every new app; `POST /v1/tasks/{task}/plan/approve` takes a grade for each open, ungraded subtask of a spec task and, as the person, in one write, grades them, resolves the spec task's questions and marks its plan approved (`Store::approve_plan`). The spec task then stays open, ungraded, as the parent of the work.
 
 **Asking.**
 
