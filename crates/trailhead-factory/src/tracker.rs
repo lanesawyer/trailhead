@@ -6,7 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
 
-pub use trailhead_model::{AttachmentRole, Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
+pub use trailhead_model::{
+    AttachmentRole, Grade, NotificationAction, Priority, ProjectRepo, SOURCE_FACTORY, SetAside, Status, TaskKey,
+    key_number,
+};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = trailhead_model::TASK_FACTORY_KEY;
@@ -260,6 +263,10 @@ pub struct MergeDecision {
     /// the decision changed.
     #[serde(default)]
     pub history: Vec<Said>,
+    /// The factory told the person the PR waits on them alone, with a [`NOTICE_REVIEW`] notification it hasn't
+    /// resolved yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notified: bool,
 }
 
 /// How many statuses the merger's status comment lists in its History.
@@ -589,6 +596,26 @@ impl std::fmt::Debug for Picture {
     }
 }
 
+/// A pull request waits on a person's review (`docs/factory/operating.md#notifications`).
+pub const NOTICE_REVIEW: &str = "factory.review";
+/// The factory stopped starting runs until a usage window resets.
+pub const NOTICE_PAUSED: &str = "factory.paused";
+
+/// A notification the factory raises (`docs/app-platform.md#notifications`), for what the task engine can't see on
+/// its own. Its source is always [`SOURCE_FACTORY`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// [`NOTICE_REVIEW`] or [`NOTICE_PAUSED`].
+    pub kind: String,
+    /// One plain line, starting with the task's key when there is a task.
+    pub title: String,
+    pub body: String,
+    /// What it is about, which [`Tracker::resolve_notices`] resolves it by.
+    pub subject: String,
+    pub task: Option<TaskKey>,
+    pub actions: Vec<NotificationAction>,
+}
+
 /// A task tracker, bound to one identity. The control plane holds one for its
 /// own agent and reaches its sandboxes' sub-agents through [`Tracker::sub_agent`];
 /// a daemon holds one for its sub-agent's token.
@@ -679,6 +706,11 @@ pub trait Tracker: Send + Sync {
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+
+    /// Raises a notification from the factory.
+    async fn notify(&self, notice: &Notice) -> Result<()>;
+    /// Resolves every open notification the factory raised about `subject`. None open is fine.
+    async fn resolve_notices(&self, subject: &str) -> Result<()>;
 }
 
 #[cfg(test)]

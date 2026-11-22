@@ -229,6 +229,7 @@ One way for the server, the factory and any app to tell a person something needs
 
 - **The server, by rule, from the engine's events:** an agent's question that isn't put to another agent (which covers the planner replying and a plan ready to approve, both questions on the spec task), a task an agent sent for review in a project where no agent may approve (where one may, whoever runs the review says when a person is needed, as the factory does), and the reminders the engine already emits (`task.due_soon`, `task.overdue`; TRAIL-1505 shares their names). The same rules resolve them: the answer, the approval, the task done.
 - **The factory,** for what the engine cannot see: a run that failed, a task it parked, a budget breach, the factory paused. This takes TRAIL-111's place.
+  **Built (TRAIL-1682):** through the `Tracker` trait, the factory raises `factory.review` when a PR waits on a person alone (every other gate passed), with a link to the pull request, and `factory.paused` once per usage pause; it resolves each when that stops. A failed run it gives up on, a park and a budget breach are each a question the factory asks on the task, which the first rule above already raises, so the factory raises nothing more for them ([operating.md](factory/operating.md#notifications)).
 - **An app, while the window runs,** with a `Notify` command the shell sends to the server. An app cannot raise one while the window is closed; rules over an app's own data wait on the app data store.
 - An agent already has `ask`, which raises one by the first rule.
 

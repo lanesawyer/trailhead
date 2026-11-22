@@ -128,6 +128,17 @@ run finished task=TRAIL-105 outcome=…
 | Usage window nearly full | `subscription usage window nearly full; starting no new runs until it resets`, with how long until the reset | Nothing; runs start again at the reset. The pause survives a restart, since the readings are kept in `<data dir>/factory/usage.json`. Change `pause_at` in `[factory]` of the user `config.toml` to leave more or less room |
 | Dropped model call | `claude's API call failed; resuming the session` in the log | Nothing; it resumes up to three times |
 
+## Notifications
+
+The factory tells you what the task engine can't see on its own, as notifications from the `factory` source (`trailhead inbox`, and the bell in the window; [app-platform.md](../app-platform.md#notifications)):
+
+| Kind | Raised when | Resolved when |
+| --- | --- | --- |
+| `factory.review` | A PR waits on you alone: its grade's gate needs a person and every other gate (checks, CI, the agent review) has passed. Titled with the task's key, with a button that opens the pull request | You approve the task, the PR goes back for a rework, the task leaves review, or it is done |
+| `factory.paused` | A usage window passes its `pause_at` and the factory stops starting runs: once per pause, whichever repo noticed | The window resets and runs start again |
+
+A task the factory parks (a run that failed too often, a budget or time breach, a review that keeps asking for changes, a closed PR) is parked with a question, and the engine already raises a `task.question` notification for that, with the question as its body, so the factory raises nothing more for it. A notification that can't be raised or resolved is logged as a warning and never holds up a run, a record or a park; the merger tries a review notification again on its next pass.
+
 ## Sandboxes and cost
 
 - Workers run in a lazy pool of warm Sprites (`trailhead-w1`, …, up to `max_sandboxes`). The first task pays a cold build of the repo (about 12 minutes for Trailhead today; TRAIL-120 should cut it). After that, each task restores the warm checkpoint and builds incrementally, in about a minute.
@@ -157,5 +168,5 @@ The Rust version is in five places, which one commit changes together:
 - New work is noticed on the next poll, not immediately (TRAIL-158).
 - Reviewers try to build and can't, wasting time (TRAIL-136).
 - A pooled Sprite has 8 GB and no swap; heavy builds have restarted one mid-run (TRAIL-140).
-- No notifications (TRAIL-111); runs in a terminal rather than as a service (TRAIL-112).
+- Runs in a terminal rather than as a service (TRAIL-112).
 - The GitHub connector has classic `repo` scope on all of the maintainer's repos and lets every Sprite use it (TRAIL-95).

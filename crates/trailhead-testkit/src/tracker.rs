@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Picture, Priority, ProjectRepo, Result, RunPatch,
-    RunRecord, Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Notice, Picture, Priority, ProjectRepo, Result,
+    RunPatch, RunRecord, Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent,
+    is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,13 @@ pub struct FakeComment {
     pub body: String,
     /// A review's verdict; `None` on every other kind.
     pub verdict: Option<VerdictKind>,
+}
+
+/// A notification the factory raised, and whether it has since been resolved by its subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeNotice {
+    pub notice: Notice,
+    pub resolved: bool,
 }
 
 #[derive(Default)]
@@ -60,6 +68,10 @@ struct State {
     /// Tasks whose current claim was taken from review, which a release or lapse returns there while the review
     /// still asks for changes.
     claimed_from_review: HashSet<TaskKey>,
+    /// The notifications raised, oldest first.
+    notices: Vec<FakeNotice>,
+    /// Each subject resolved by, oldest first, whether anything was open about it or not.
+    resolves: Vec<String>,
 }
 
 /// The tracker calls `fail_next` and `fail_after` can make fail; each is checked by one `inject` call.
@@ -76,6 +88,8 @@ pub enum TrackerOp {
     Attach,
     RevokeSubAgent,
     InFlight,
+    Notify,
+    ResolveNotices,
 }
 
 impl std::fmt::Display for TrackerOp {
@@ -92,6 +106,8 @@ impl std::fmt::Display for TrackerOp {
             Self::Attach => "attach",
             Self::RevokeSubAgent => "revoke_sub_agent",
             Self::InFlight => "in_flight",
+            Self::Notify => "notify",
+            Self::ResolveNotices => "resolve_notices",
         })
     }
 }
@@ -171,6 +187,21 @@ impl FakeTracker {
             },
         );
         key
+    }
+
+    /// The notifications raised, oldest first, resolved or not.
+    pub fn notices(&self) -> Vec<FakeNotice> {
+        self.state.lock().unwrap().notices.clone()
+    }
+
+    /// The notifications raised and not yet resolved, oldest first.
+    pub fn open_notices(&self) -> Vec<Notice> {
+        self.notices().into_iter().filter(|n| !n.resolved).map(|n| n.notice).collect()
+    }
+
+    /// The subjects resolved by, oldest first.
+    pub fn resolves(&self) -> Vec<String> {
+        self.state.lock().unwrap().resolves.clone()
     }
 
     /// Makes reading a task's human context fail (or heals it), as a tracker outage would.
@@ -893,6 +924,22 @@ impl Tracker for FakeTracker {
                 a.revoked = true;
             }
         }
+        Ok(())
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        self.inject(TrackerOp::Notify)?;
+        self.check_live()?;
+        self.state.lock().unwrap().notices.push(FakeNotice { notice: notice.clone(), resolved: false });
+        Ok(())
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        self.inject(TrackerOp::ResolveNotices)?;
+        self.check_live()?;
+        let mut s = self.state.lock().unwrap();
+        s.notices.iter_mut().filter(|n| n.notice.subject == subject).for_each(|n| n.resolved = true);
+        s.resolves.push(subject.to_string());
         Ok(())
     }
 }

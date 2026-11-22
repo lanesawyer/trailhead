@@ -9,11 +9,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::json;
 use trailhead_client::http::{
-    Client, Error as ApiError, NewAttachment, NewComment, NewTask, ReadyQuery, TaskQuery, TaskUpdate,
+    Client, Error as ApiError, NewAttachment, NewComment, NewNotification, NewTask, ReadyQuery, TaskQuery, TaskUpdate,
 };
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Picture, Priority, ProjectRepo, Result,
-    RunPatch, Scope, Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
+    Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, Notice, Picture, Priority, ProjectRepo, Result,
+    RunPatch, SOURCE_FACTORY, Scope, Status, Task, TaskKey, Tracker, Verdict, VerdictKind, in_ready_order,
 };
 use trailhead_model::{self as model, CommentKind};
 
@@ -348,6 +348,23 @@ impl Tracker for RestTracker {
 
     async fn revoke_sub_agent(&self, _: &str) -> Result<()> {
         Err(unsupported("revoke agents"))
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        let new = NewNotification {
+            source: SOURCE_FACTORY.into(),
+            kind: notice.kind.clone(),
+            title: notice.title.clone(),
+            body: notice.body.clone(),
+            subject: Some(notice.subject.clone()),
+            task: notice.task.as_ref().map(|k| k.0.clone()),
+            actions: notice.actions.clone(),
+        };
+        self.client.raise_notification(&new).await.map(drop).map_err(error)
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        self.client.resolve_notifications_about(SOURCE_FACTORY, subject).await.map(drop).map_err(error)
     }
 }
 

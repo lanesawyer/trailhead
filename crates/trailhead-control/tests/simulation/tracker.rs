@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, Picture, Priority, ProjectRepo, Result, RunPatch, Scope,
-    Task, TaskKey, Tracker, Verdict,
+    Credential, Error, FollowUpTask, Grade, HumanContext, Notice, Picture, Priority, ProjectRepo, Result, RunPatch,
+    Scope, Task, TaskKey, Tracker, Verdict,
 };
 
 /// An armed failure, shared by every handle on the tracker: the control plane's own, its sub-agents' and the
@@ -218,5 +218,15 @@ impl Tracker for Flaky {
     async fn revoke_sub_agent(&self, name: &str) -> Result<()> {
         self.write()?;
         self.inner.revoke_sub_agent(name).await
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        self.write()?;
+        self.inner.notify(notice).await
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        self.write()?;
+        self.inner.resolve_notices(subject).await
     }
 }

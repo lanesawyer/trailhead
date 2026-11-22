@@ -766,6 +766,7 @@ mod tests {
             comment: None,
             message: String::new(),
             history: vec![],
+            notified: false,
         }
     }
 

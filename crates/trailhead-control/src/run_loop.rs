@@ -13,6 +13,7 @@ use trailhead_factory::{
     ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label,
 };
 
+use crate::notify::PauseChange;
 use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
@@ -224,7 +225,9 @@ impl Factory {
         // a usage reading another repo's run heard reaches this repo's board.
         self.capped();
         self.status.usage(self.host.usage());
-        if self.usage_paused() {
+        let paused = self.usage_paused();
+        self.tell_pause().await;
+        if paused {
             return Ok(Vec::new());
         }
         let mut others = self.held_by_others(busy).await?;
@@ -729,8 +732,9 @@ impl Factory {
     /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
     fn usage_paused(&self) -> bool {
         let paused = self.paused_until();
+        let first = !self.host.pause_looked.swap(true, std::sync::atomic::Ordering::Relaxed);
         let mut logged = self.host.pause_logged.lock().unwrap();
-        match &paused {
+        let change = match &paused {
             Some((window, used, resets_at)) if *logged != Some(*resets_at) => {
                 tracing::warn!(
                     %window,
@@ -738,10 +742,25 @@ impl Factory {
                     resumes_in = ?until(*resets_at),
                     "subscription usage window nearly full; starting no new runs until it resets"
                 );
+                // A later reset while already paused is the same pause, told once.
+                let started = logged.is_none();
                 *logged = Some(*resets_at);
+                started.then(|| PauseChange::Paused {
+                    window: window.clone(),
+                    used: *used,
+                    limit: self.host.pause_at.get(window).copied(),
+                    resets_at: *resets_at,
+                })
             }
-            None if logged.take().is_some() => tracing::info!("usage window reset; starting runs again"),
-            _ => {}
+            None if logged.take().is_some() => {
+                tracing::info!("usage window reset; starting runs again");
+                Some(PauseChange::Resumed)
+            }
+            None if first => Some(PauseChange::Resumed),
+            _ => None,
+        };
+        if change.is_some() {
+            *self.host.pause_change.lock().unwrap() = change;
         }
         paused.is_some()
     }

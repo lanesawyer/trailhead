@@ -12,9 +12,9 @@ use trailhead_core::{
 };
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Picture, Priority,
-    ProjectRepo, Result, RunPatch, RunRecord, Scope, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind,
-    in_ready_order, is_factory_agent, is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, Notice, Picture, Priority,
+    ProjectRepo, Result, RunPatch, RunRecord, SOURCE_FACTORY, Scope, Task, TaskKey, TaskNote, Tracker, Verdict,
+    VerdictKind, in_ready_order, is_factory_agent, is_raised_by,
 };
 use uuid::Uuid;
 
@@ -626,5 +626,24 @@ impl Tracker for CoreTracker {
             Ok(_) | Err(trailhead_core::Error::NotFound(_)) => Ok(()),
             Err(e) => Err(map_err(e)),
         }
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        let ctx = self.ctx().await?;
+        let new = trailhead_core::NewNotification {
+            source: SOURCE_FACTORY.into(),
+            kind: notice.kind.clone(),
+            title: notice.title.clone(),
+            body: notice.body.clone(),
+            subject: Some(notice.subject.clone()),
+            task: notice.task.as_ref().map(|k| k.0.clone()),
+            actions: notice.actions.clone(),
+        };
+        self.store.raise_notification(&ctx, new).await.map(drop).map_err(map_err)
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        let ctx = self.ctx().await?;
+        self.store.resolve_notifications_about(&ctx, SOURCE_FACTORY, subject).await.map(drop).map_err(map_err)
     }
 }
