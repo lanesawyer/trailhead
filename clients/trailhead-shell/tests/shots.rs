@@ -1,5 +1,6 @@
-//! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its Ask and
-//! update buttons, the Ask form, the update panel listing what a newer build brings, the settings on each of the
+//! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its plus, Ask
+//! and update buttons, the Ask forms in both themes (a change to be planned first, a new app, and the answer to a
+//! planned ask), the update panel listing what a newer build brings, the settings on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
 //! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
@@ -17,19 +18,21 @@ use bevy::picking::pointer::{Location, PointerId};
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use bevy::ui_widgets::Activate;
-use trailhead_model::shell::{AskTarget, AskTargets};
-use trailhead_shell::ask::Askable;
+use trailhead_model::shell::{AskTarget, AskTargets, Asked, AskedProject, AskedTask};
+use trailhead_shell::ask::{AskForm, Askable};
 use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
 use trailhead_shell::cover::SwitchCover;
 use trailhead_shell::net::{ApiAccess, Reason};
 use trailhead_shell::server_settings::{SectionState, ServerSettings};
 use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SERVER, SettingsPage, ShellDir};
-use trailhead_shell::testing::shot::{ShotApp, ShotOptions, shot, shot_with};
+use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle, show};
 use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
 use trailhead_shell::update::{Newer, UpdateReady};
-use trailhead_shell::{ActiveApp, AppId, Apps, AskButton, Manifest, OpenApp, ShellApp, ShellPlugin, UpdateButton};
+use trailhead_shell::{
+    ActiveApp, AppId, Apps, AskButton, Manifest, NewAppButton, OpenApp, ShellApp, ShellPlugin, UpdateButton,
+};
 use trailhead_ui::{
     BesideRail, Icon, Surface, TextSize, badge, beside_rail, row, setting, setting_toggle, size, space,
     spawn_settings_section, text, text_dim, token,
@@ -379,6 +382,47 @@ fn live_with_news(shot: &mut ShotApp) {
     settle(shot);
 }
 
+/// Starts the Ask form afresh holding `draft`, as if typed.
+fn draft(shot: &mut ShotApp, draft: impl FnOnce(&mut AskForm)) {
+    let mut form = shot.world_mut().resource_mut::<AskForm>();
+    *form = AskForm::default();
+    draft(&mut form);
+}
+
+/// The Ask forms in `theme`: a change to Notes with "Plan this first" on and a model chosen, a new app, and what the
+/// form says once a planned ask is made.
+fn asking(shot: &mut ShotApp, theme: ShotTheme) {
+    shot.set_theme(theme);
+    let text = "Pin a note to the top of the list, and keep it there after a restart.";
+    draft(shot, |f| {
+        f.text = text.into();
+        f.plan = true;
+        f.model = Some("opus");
+    });
+    press::<AskButton>(shot);
+    save(shot, "ask-change-planned");
+    close_modals(shot);
+
+    let text = "Plan a day's hike: the trails I want to walk, how long each takes, and what to pack.";
+    draft(shot, |f| {
+        f.text = text.into();
+        f.name = "Hike Planner".into();
+    });
+    press::<NewAppButton>(shot);
+    save(shot, "ask-new-app");
+    let asked = Asked {
+        project: AskedProject { key: "HP".into(), name: "Hike Planner".into(), created: true },
+        task: Some(AskedTask { key: "HP-1".into(), title: "Hike Planner".into() }),
+        planned: true,
+        notes: Vec::new(),
+    };
+    shot.world_mut().resource_mut::<AskForm>().phase = trailhead_shell::ask::Phase::Asked(asked);
+    settle(shot);
+    save(shot, "ask-planned");
+    close_modals(shot);
+    shot.set_theme(ShotTheme::Dark);
+}
+
 /// What a server with an apps repo and a factory says of its user config.
 fn server_config() -> trailhead_model::config::ServerConfig {
     serde_json::from_value(serde_json::json!({
@@ -458,9 +502,8 @@ fn shots() {
     live_with_news(&mut shot);
     save(&mut shot, "rail");
 
-    press::<AskButton>(&mut shot);
-    save(&mut shot, "ask");
-    close_modals(&mut shot);
+    asking(&mut shot, ShotTheme::Dark);
+    asking(&mut shot, ShotTheme::Light);
 
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
@@ -472,7 +515,7 @@ fn shots() {
     shot.set_text_size(TextSize::nearest(150));
     save(&mut shot, "rail");
     press::<AskButton>(&mut shot);
-    save(&mut shot, "ask");
+    save(&mut shot, "ask-change");
     close_modals(&mut shot);
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");

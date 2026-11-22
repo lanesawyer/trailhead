@@ -1,36 +1,53 @@
-//! The Ask form. Pressing the rail's Ask button ([`crate::rail::AskButton`]) opens a modal titled "Ask": a dropdown of
-//! what it is about (each app the server can be asked about, then [`NEW_APP`]), the new app's name when that is
-//! chosen, the ask itself under a dim line saying what becomes of it, and a notice saying why Ask can't be pressed
-//! yet or what the server said when it refused. Ask and Cancel are in the footer. Once the server has made what was
-//! asked, the form is hidden and a confirmation shown in its place, with Done.
+//! The Ask form, in two kinds. The rail's Ask button ([`crate::rail::AskButton`]) opens "Ask for a change": a dropdown
+//! of the app it is about (each app the server can be asked about, the app shown first), the ask under a dim line
+//! saying what becomes of it, a "Plan this first" switch, off at first, and the planner's model while it is on. The
+//! plus under the apps ([`crate::rail::NewAppButton`]) opens "Ask for a new app": its name, the ask, and the planner's
+//! model, since a new app is always planned. Under them a notice says why Ask can't be pressed yet or what the server
+//! said when it refused. Ask and Cancel are in the footer. Once the server has made what was asked, the form is
+//! hidden and a confirmation shown in its place, with Done.
 //!
 //! Everything is spawned once when the modal opens and changed in place after; the logic is [`crate::ask`]'s.
 
 use bevy::prelude::*;
 use bevy::text::EditableText;
 use bevy::ui::InteractionDisabled;
-use bevy::ui_widgets::{Activate, RequestClose};
+use bevy::ui_widgets::{Activate, RequestClose, ValueChange};
 use trailhead_ui::{
     ButtonKind, InitialText, Modal, ModalFocus, ModalLocked, ModalSlots, Notice, Picked, SelectEdit, Tone, button,
-    display, field, notice, select, set_display, set_text, size, space, text, text_dim, text_input,
+    display, field, notice, select, set_display, set_text, setting_toggle, size, space, text, text_dim, text_input,
 };
 
-use crate::ask::{About, AskForm, Askable, Gate, NEW_APP, OpenAsk, Phase, SendAsk, offline_reason, options};
+use crate::ask::{
+    About, AskFor, AskForm, Askable, Gate, OpenAsk, Phase, SendAsk, confirmation, model_at, model_index, model_options,
+    offline_reason, options,
+};
 use crate::connection::{Connection, ConnectionStatus};
-use crate::rail::AskButton;
+use crate::rail::{AskButton, NewAppButton};
 
-/// The form's modal.
+/// The form's modal, for a change or a new app.
 #[derive(Component)]
-pub struct AskPanel;
+pub struct AskPanel(pub AskFor);
 
 impl Modal for AskPanel {
     fn title(&self) -> String {
-        "Ask".into()
+        match self.0 {
+            AskFor::Change => "Ask for a change".into(),
+            AskFor::NewApp => "Ask for a new app".into(),
+        }
     }
 }
 
-/// The hint over the ask's text.
+/// The hint over a change's text.
 pub const HINT: &str = "Say what you want. It becomes a task the factory builds.";
+
+/// The hint over a new app's text.
+pub const NEW_APP_HINT: &str =
+    "Say what the app is for and what it should do. The planner talks it over with you first.";
+
+/// The "Plan this first" switch's label and the note under it.
+pub const PLAN: &str = "Plan this first";
+pub const PLAN_NOTE: &str =
+    "A planner talks the ask over with you and proposes tasks for you to approve before any work starts.";
 
 /// How many lines the ask's text shows.
 const TEXT_LINES: f32 = 6.0;
@@ -44,24 +61,30 @@ pub enum AskPart {
     /// The column holding the form, hidden once the ask is made.
     #[default]
     Form,
-    /// The dropdown of what the ask is about.
+    /// The dropdown of the app a change is about.
     About,
-    /// The new app's name field, shown only for a new app.
-    NameRow,
-    /// The name's text entity.
+    /// A new app's name's text entity.
     Name,
     /// The ask's text entity.
     Text,
+    /// The "Plan this first" switch, for a change.
+    Plan,
+    /// The planner's model's field, shown while the ask is planned.
+    ModelRow,
+    /// The planner's model's dropdown.
+    Model,
     /// Why Ask can't be pressed, or what the server said.
     Notice,
     /// The column holding the confirmation, shown once the ask is made.
     Done,
-    /// "Asked: TICK-17".
+    /// "Asked: TICK-17", or "Sent to the planner: TICK-17".
     Asked,
     /// The task's title.
     Title,
     /// "Made the project TN, Trail Notes", for a new app.
     Project,
+    /// What the planner does next and where its answer shows, for a planned ask.
+    Next,
     /// What the server noted, for a part it couldn't do.
     Notes,
 }
@@ -80,7 +103,7 @@ pub(crate) struct AskPanelUiPlugin;
 
 impl Plugin for AskPanelUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_observer(on_ask_button).add_observer(on_act).add_observer(on_pick).add_systems(
+        app.add_observer(on_ask_button).add_observer(on_act).add_observer(on_pick).add_observer(on_plan).add_systems(
             Update,
             (fill_panel, read_inputs, show_choice, show_phase, show_notice, show_buttons, show_asked).chain(),
         );
@@ -89,13 +112,19 @@ impl Plugin for AskPanelUiPlugin {
 
 fn on_ask_button(
     activate: On<Activate>,
-    buttons: Query<(), With<AskButton>>,
+    changes: Query<(), With<AskButton>>,
+    new_apps: Query<(), With<NewAppButton>>,
     open: Query<(), With<AskPanel>>,
     mut commands: Commands,
 ) {
-    if buttons.contains(activate.entity) && open.is_empty() {
-        commands.trigger(OpenAsk);
-        trailhead_ui::open_modal(&mut commands, AskPanel);
+    let asks_for = match (changes.contains(activate.entity), new_apps.contains(activate.entity)) {
+        (true, _) => AskFor::Change,
+        (_, true) => AskFor::NewApp,
+        _ => return,
+    };
+    if open.is_empty() {
+        commands.trigger(OpenAsk(asks_for));
+        trailhead_ui::open_modal(&mut commands, AskPanel(asks_for));
     }
 }
 
@@ -108,46 +137,44 @@ fn on_act(activate: On<Activate>, acts: Query<&AskAct>, mut commands: Commands) 
 }
 
 fn on_pick(pick: On<Picked>, parts: Query<&AskPart>, askable: Res<Askable>, mut form: ResMut<AskForm>) {
-    if matches!(parts.get(pick.entity), Ok(AskPart::About)) {
-        let about = About::at(pick.index, askable.targets());
-        if form.about != about {
-            form.about = about;
+    match parts.get(pick.entity) {
+        Ok(AskPart::About) => {
+            let about = About::at(pick.index, askable.targets());
+            if form.about != about {
+                form.about = about;
+            }
         }
+        Ok(AskPart::Model) => {
+            let model = model_at(pick.index);
+            if form.model != model {
+                form.model = model;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn on_plan(change: On<ValueChange<bool>>, parts: Query<&AskPart>, mut form: ResMut<AskForm>) {
+    if matches!(parts.get(change.source), Ok(AskPart::Plan)) && form.plan != change.value {
+        form.plan = change.value;
     }
 }
 
 /// Fills a modal that has just spawned: the form and the confirmation (hidden) in its body, the buttons in its footer.
 fn fill_panel(
-    new: Query<&ModalSlots, (With<AskPanel>, Added<ModalSlots>)>,
+    new: Query<(&ModalSlots, &AskPanel), Added<ModalSlots>>,
     form: Res<AskForm>,
     askable: Res<Askable>,
     mut commands: Commands,
 ) {
-    for slots in &new {
-        let column = |part: AskPart| {
-            (Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() }, part)
-        };
+    for (slots, panel) in &new {
         let body = commands.spawn((column(AskPart::Form), ChildOf(slots.body))).id();
-        let targets = askable.targets();
-        let (choices, chosen) = (options(targets), form.about.index(targets));
-        let about = bsn_list! { @select(choices, Some(chosen), VISIBLE_CHOICES) AskPart::About };
-        commands.spawn_scene(field("About", about)).insert(ChildOf(body));
-        let name = bsn_list! { @text_input(1.0, bsn! { AskPart::Name InitialText({ form.name.clone() }) }) };
-        let (label, new_app) = (format!("{NEW_APP}: its name"), form.about == About::NewApp);
-        let name_row = bsn! { @field(label, name) AskPart::NameRow Node { display: { display(new_app) } } };
-        commands.spawn_scene(name_row).insert(ChildOf(body));
-        let ask =
-            bsn_list! { @text_input(TEXT_LINES, bsn! { AskPart::Text InitialText({ form.text.clone() }) ModalFocus }) };
-        commands.spawn_scene(field(HINT, ask)).insert(ChildOf(body));
+        match panel.0 {
+            AskFor::Change => fill_change(&mut commands, body, &form, &askable),
+            AskFor::NewApp => fill_new_app(&mut commands, body, &form),
+        }
         commands.spawn_scene(notice()).insert((AskPart::Notice, ChildOf(body)));
-
-        let (hidden, part) = column(AskPart::Done);
-        let done = commands.spawn((Node { display: Display::None, ..hidden }, part, ChildOf(slots.body))).id();
-        commands.spawn_scene(text("", size::HEADING)).insert((AskPart::Asked, ChildOf(done)));
-        commands.spawn_scene(text_dim("", size::BODY)).insert((AskPart::Title, ChildOf(done)));
-        commands.spawn_scene(text("", size::BODY)).insert((AskPart::Project, ChildOf(done)));
-        commands.spawn_scene(notice()).insert((AskPart::Notes, ChildOf(done)));
-
+        fill_done(&mut commands, slots.body);
         for (caption, kind, act, shown) in [
             ("Ask", ButtonKind::Primary, AskAct::Ask, true),
             ("Cancel", ButtonKind::Normal, AskAct::Cancel, true),
@@ -157,6 +184,56 @@ fn fill_panel(
             commands.spawn_scene(footed).insert((act, ChildOf(slots.footer)));
         }
     }
+}
+
+/// A column of the form's rows, `space::ROWS` apart.
+fn column(part: AskPart) -> (Node, AskPart) {
+    (Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() }, part)
+}
+
+/// A change's rows: the app, the ask, "Plan this first" and the planner's model.
+fn fill_change(commands: &mut Commands, body: Entity, form: &AskForm, askable: &Askable) {
+    let targets = askable.targets();
+    let (choices, chosen) = (options(targets), form.about.index(targets));
+    let about = bsn_list! { @select(choices, chosen, VISIBLE_CHOICES) AskPart::About };
+    commands.spawn_scene(field("App", about)).insert(ChildOf(body));
+    spawn_text(commands, body, HINT, form);
+    let plan = setting_toggle(PLAN, PLAN_NOTE, form.plan, bsn! { AskPart::Plan });
+    commands.spawn_scene(plan).insert(ChildOf(body));
+    spawn_model(commands, body, form);
+}
+
+/// A new app's rows: its name, the ask and the planner's model.
+fn fill_new_app(commands: &mut Commands, body: Entity, form: &AskForm) {
+    let name = bsn_list! { @text_input(1.0, bsn! { AskPart::Name InitialText({ form.name.clone() }) }) };
+    commands.spawn_scene(field("The new app's name", name)).insert(ChildOf(body));
+    spawn_text(commands, body, NEW_APP_HINT, form);
+    spawn_model(commands, body, form);
+}
+
+fn spawn_text(commands: &mut Commands, body: Entity, hint: &str, form: &AskForm) {
+    let ask =
+        bsn_list! { @text_input(TEXT_LINES, bsn! { AskPart::Text InitialText({ form.text.clone() }) ModalFocus }) };
+    commands.spawn_scene(field(hint, ask)).insert(ChildOf(body));
+}
+
+/// The planner's model, shown while the ask is planned.
+fn spawn_model(commands: &mut Commands, body: Entity, form: &AskForm) {
+    let model = bsn_list! { @select(model_options(), Some(model_index(form.model)), VISIBLE_CHOICES) AskPart::Model };
+    let row =
+        bsn! { @field("The planner's model", model) AskPart::ModelRow Node { display: { display(form.planned()) } } };
+    commands.spawn_scene(row).insert(ChildOf(body));
+}
+
+/// The confirmation, hidden until the ask is made.
+fn fill_done(commands: &mut Commands, body: Entity) {
+    let (hidden, part) = column(AskPart::Done);
+    let done = commands.spawn((Node { display: Display::None, ..hidden }, part, ChildOf(body))).id();
+    commands.spawn_scene(text("", size::HEADING)).insert((AskPart::Asked, ChildOf(done)));
+    commands.spawn_scene(text_dim("", size::BODY)).insert((AskPart::Title, ChildOf(done)));
+    commands.spawn_scene(text("", size::BODY)).insert((AskPart::Project, ChildOf(done)));
+    commands.spawn_scene(text("", size::BODY)).insert((AskPart::Next, ChildOf(done)));
+    commands.spawn_scene(notice()).insert((AskPart::Notes, ChildOf(done)));
 }
 
 /// Copies what is typed into the form while it is being edited. An input that has just appeared is empty until the
@@ -178,8 +255,9 @@ fn read_inputs(fields: Query<(&AskPart, Ref<EditableText>)>, mut form: ResMut<As
     }
 }
 
-/// Keeps the dropdown on what the form is about, with a row for each app the server last named, and the name field
-/// shown for a new app. A dropdown whose list is open is tried again next frame.
+/// Keeps the app dropdown on what the form is about, with a row for each app the server last named, the model
+/// dropdown on the model chosen, and the model shown while the ask is planned. A dropdown whose list is open is tried
+/// again next frame.
 fn show_choice(
     form: Res<AskForm>,
     askable: Res<Askable>,
@@ -194,11 +272,13 @@ fn show_choice(
     }
     let targets = askable.targets();
     let (choices, chosen) = (options(targets), form.about.index(targets));
+    let (models, model) = (model_options(), model_index(form.model));
     *pending = false;
     for (entity, part) in &parts {
         match part {
-            AskPart::About => *pending |= !edit.set(entity, &choices, Some(chosen)),
-            AskPart::NameRow => set_display(&mut nodes, entity, form.about == About::NewApp),
+            AskPart::About => *pending |= !edit.set(entity, &choices, chosen),
+            AskPart::Model => *pending |= !edit.set(entity, &models, Some(model)),
+            AskPart::ModelRow => set_display(&mut nodes, entity, form.planned()),
             _ => {}
         }
     }
@@ -302,22 +382,22 @@ fn show_buttons(
     }
 }
 
-/// Fills the confirmation once the ask is made: the task's key and title, the project for a new app, and any notes. A
-/// new app whose project was made without its task shows the project and the note saying why.
+/// Fills the confirmation once the ask is made ([`confirmation`]): the task's key and title, the project for a new
+/// app, what the planner does next for a planned ask, and any notes. A new app whose project was made without its task
+/// shows the project and the note saying why.
 fn show_asked(form: Res<AskForm>, mut parts: Query<(&AskPart, Option<&mut Text>, Option<&mut Notice>, &mut Node)>) {
     let Phase::Asked(asked) = &form.phase else { return };
     if !form.is_changed() {
         return;
     }
-    let asked_line = asked.task.as_ref().map(|t| format!("Asked: {}", t.key)).unwrap_or_default();
-    let title = asked.task.as_ref().map_or("", |t| t.title.as_str());
-    let made = asked.project.created.then(|| format!("Made the project {}, {}", asked.project.key, asked.project.name));
+    let says = confirmation(asked);
     let notes = asked.notes.join(" ");
     for (part, text, notice, mut node) in &mut parts {
         let words = match part {
-            AskPart::Asked => asked_line.clone(),
-            AskPart::Title => title.to_string(),
-            AskPart::Project => made.clone().unwrap_or_default(),
+            AskPart::Asked => &says.heading,
+            AskPart::Title => &says.title,
+            AskPart::Project => &says.project,
+            AskPart::Next => &says.next,
             AskPart::Notes => {
                 if let Some(mut notice) = notice
                     && notice.message != notes
@@ -333,7 +413,7 @@ fn show_asked(form: Res<AskForm>, mut parts: Query<(&AskPart, Option<&mut Text>,
             node.display = display(shown);
         }
         if let Some(text) = text {
-            set_text(text, &words);
+            set_text(text, words);
         }
     }
 }
@@ -341,7 +421,7 @@ fn show_asked(form: Res<AskForm>, mut parts: Query<(&AskPart, Option<&mut Text>,
 #[cfg(test)]
 mod tests {
     use bevy::state::app::StatesPlugin;
-    use trailhead_model::shell::{AskTarget, AskTargets, Asked, AskedProject, AskedTask};
+    use trailhead_model::shell::{Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask};
     use trailhead_ui::{ModalPlugin, ModalRoot};
 
     use super::*;
@@ -382,10 +462,19 @@ mod tests {
     }
 
     fn open(app: &mut App) -> Entity {
-        let button = one::<With<AskButton>>(app);
+        open_by::<AskButton>(app)
+    }
+
+    fn open_by<B: Component>(app: &mut App) -> Entity {
+        let button = one::<With<B>>(app);
         app.world_mut().trigger(Activate { entity: button });
         settle(app);
         one::<With<AskPanel>>(app)
+    }
+
+    fn has(app: &App, wanted: AskPart) -> bool {
+        let mut parts = app.world().try_query::<&AskPart>().unwrap();
+        parts.iter(app.world()).any(|p| *p == wanted)
     }
 
     fn part(app: &App, wanted: AskPart) -> Entity {
@@ -445,30 +534,29 @@ mod tests {
     }
 
     #[test]
-    fn the_form_opens_on_the_app_shown_with_its_rows_apart_and_ask_waiting_for_words() {
+    fn the_change_form_opens_on_the_app_shown_with_its_rows_apart_and_ask_waiting_for_words() {
         let mut app = windowed();
         let panel = open(&mut app);
         assert!(app.world().get::<ModalRoot>(panel).is_some());
-        assert_eq!(app.world().resource::<AskForm>().about, About::Project("NOTE".into()), "notes is shown");
+        assert_eq!(app.world().get::<AskPanel>(panel).unwrap().title(), "Ask for a change");
+        assert_eq!(app.world().resource::<AskForm>().about, About::Change(Some("NOTE".into())), "notes is shown");
         let about = part(&app, AskPart::About);
         let options = app.world().get::<trailhead_ui::SelectOptions>(about).unwrap().0.clone();
-        assert_eq!(options, ["Atlas", "Notes", NEW_APP]);
+        assert_eq!(options, ["Atlas", "Notes"], "no new app here");
 
         let form = part(&app, AskPart::Form);
         assert_eq!(app.world().get::<Node>(form).unwrap().row_gap, px(space::ROWS), "the rows stand apart");
         let rows: Vec<Entity> = app.world().get::<Children>(form).unwrap().iter().collect();
-        assert_eq!(rows.len(), 4, "about, the name, the ask and the notice");
-        for field in &rows[..3] {
-            assert_eq!(
-                app.world().get::<Node>(*field).unwrap().row_gap,
-                px(space::STACKED),
-                "a label over its control"
-            );
+        assert_eq!(rows.len(), 5, "the app, the ask, plan this first, the model and the notice");
+        for row in &rows[..4] {
+            assert_eq!(app.world().get::<Node>(*row).unwrap().row_gap, px(space::STACKED), "a label over its control");
         }
-        let hint = app.world_mut().query::<&Text>().iter(app.world()).any(|t| t.0 == HINT);
-        assert!(hint, "the hint over the ask");
-        let name_row = part(&app, AskPart::NameRow);
-        assert!(!shown(&app, name_row), "no name for a change to an app");
+        let said =
+            |app: &mut App, words: &str| app.world_mut().query::<&Text>().iter(app.world()).any(|t| t.0 == words);
+        assert!(said(&mut app, HINT) && said(&mut app, PLAN) && said(&mut app, PLAN_NOTE));
+        assert!(!has(&app, AskPart::Name), "no name for a change to an app");
+        assert!(app.world().get::<bevy::ui::Checked>(part(&app, AskPart::Plan)).is_none(), "not planned at first");
+        assert!(!shown(&app, part(&app, AskPart::ModelRow)), "so no model");
         assert!(!shown(&app, part(&app, AskPart::Done)));
 
         let (ask, cancel, done) = (act(&app, AskAct::Ask), act(&app, AskAct::Cancel), act(&app, AskAct::Done));
@@ -478,25 +566,61 @@ mod tests {
         assert_eq!(says, (Tone::Info, "Say what you want first.".into()));
     }
 
+    fn plan(app: &mut App, on: bool) {
+        let switch = part(app, AskPart::Plan);
+        app.world_mut().trigger(ValueChange { source: switch, value: on, is_final: true });
+        settle(app);
+    }
+
     #[test]
-    fn choosing_a_new_app_shows_its_name_in_place_and_ask_waits_for_it() {
+    fn plan_this_first_shows_the_planners_model_in_place_and_off_keeps_what_was_typed() {
         let mut app = windowed();
         open(&mut app);
+        type_into(&mut app, AskPart::Text, "A Completed view");
+        let before = entities(&mut app);
+        plan(&mut app, true);
+        let row = part(&app, AskPart::ModelRow);
+        assert!(app.world().resource::<AskForm>().plan && shown(&app, row));
+        let model = part(&app, AskPart::Model);
+        let options = app.world().get::<trailhead_ui::SelectOptions>(model).unwrap().0.clone();
+        assert_eq!(options, ["The repo's default", "Fable", "Opus", "Sonnet", "Haiku"]);
+        app.world_mut().trigger(Picked { entity: model, index: 2 });
+        settle(&mut app);
+        let asked = app.world().resource::<AskForm>().ask();
+        assert_eq!(asked, Some(Ask::change("A Completed view", "NOTE").planned(Some("opus"))));
+
+        plan(&mut app, false);
+        assert!(!shown(&app, row));
+        let form = app.world().resource::<AskForm>();
+        assert_eq!((form.text.as_str(), form.model), ("A Completed view", Some("opus")), "nothing is cleared");
+        assert_eq!(form.ask(), Some(Ask::change("A Completed view", "NOTE")), "but no model is sent");
+        assert!(enabled(&app, act(&app, AskAct::Ask)));
+        assert_eq!(entities(&mut app), before, "nothing was spawned or despawned");
+    }
+
+    #[test]
+    fn the_plus_opens_a_new_app_always_planned_and_ask_waits_for_its_name() {
+        let mut app = windowed();
+        let panel = open_by::<NewAppButton>(&mut app);
+        assert_eq!(app.world().get::<AskPanel>(panel).unwrap().title(), "Ask for a new app");
+        assert_eq!(app.world().resource::<AskForm>().about, About::NewApp);
+        assert!(!has(&app, AskPart::About) && !has(&app, AskPart::Plan), "no app to choose and no switch");
+        let rows: Vec<Entity> = app.world().get::<Children>(part(&app, AskPart::Form)).unwrap().iter().collect();
+        assert_eq!(rows.len(), 4, "the name, the ask, the model and the notice");
+        assert!(shown(&app, part(&app, AskPart::ModelRow)), "a new app is always planned");
+        let hint = app.world_mut().query::<&Text>().iter(app.world()).any(|t| t.0 == NEW_APP_HINT);
+        assert!(hint);
+
         type_into(&mut app, AskPart::Text, "Notes on routes");
         let ask = act(&app, AskAct::Ask);
-        assert!(enabled(&app, ask));
-        assert_eq!(notice(&app, part(&app, AskPart::Notice)).1, "");
-        let before = entities(&mut app);
-        let about = part(&app, AskPart::About);
-        app.world_mut().trigger(Picked { entity: about, index: 2 });
-        settle(&mut app);
-        assert_eq!(app.world().resource::<AskForm>().about, About::NewApp);
-        assert!(shown(&app, part(&app, AskPart::NameRow)));
         assert!(!enabled(&app, ask));
         assert_eq!(notice(&app, part(&app, AskPart::Notice)).1, "Give the new app a name.");
         type_into(&mut app, AskPart::Name, "Trail Notes");
         assert!(enabled(&app, ask));
-        assert_eq!(entities(&mut app), before, "nothing was spawned or despawned");
+        assert_eq!(
+            app.world().resource::<AskForm>().ask(),
+            Some(Ask::new_app("Notes on routes", "Trail Notes").planned(None))
+        );
 
         set_connection(&mut app, Connection::Offline);
         assert!(!enabled(&app, ask));
@@ -506,8 +630,8 @@ mod tests {
     fn asked() -> Asked {
         Asked {
             project: AskedProject { key: "TN".into(), name: "Trail Notes".into(), created: true },
-            task: Some(AskedTask { key: "TN-1".into(), title: "Create the Trail Notes app".into() }),
-            planned: false,
+            task: Some(AskedTask { key: "TN-1".into(), title: "Trail Notes".into() }),
+            planned: true,
             notes: vec!["There is no `factory` agent yet.".into()],
         }
     }
@@ -516,11 +640,8 @@ mod tests {
     fn asking_says_so_and_success_shows_what_was_made_in_place_and_done_closes() {
         let mut app = windowed();
         let before = entities(&mut app);
-        let panel = open(&mut app);
+        let panel = open_by::<NewAppButton>(&mut app);
         type_into(&mut app, AskPart::Text, "Notes on routes");
-        let about = part(&app, AskPart::About);
-        app.world_mut().trigger(Picked { entity: about, index: 2 });
-        settle(&mut app);
         type_into(&mut app, AskPart::Name, "Trail Notes");
         let (ask, cancel, done) = (act(&app, AskAct::Ask), act(&app, AskAct::Cancel), act(&app, AskAct::Done));
         press(&mut app, ask);
@@ -535,11 +656,13 @@ mod tests {
         settle(&mut app);
         assert_eq!(entities(&mut app), in_form, "the confirmation replaces the form in place");
         assert!(!shown(&app, part(&app, AskPart::Form)) && shown(&app, part(&app, AskPart::Done)));
-        let lines = [AskPart::Asked, AskPart::Title, AskPart::Project].map(|p| part(&app, p));
+        let lines = [AskPart::Asked, AskPart::Title, AskPart::Project, AskPart::Next].map(|p| part(&app, p));
+        let said = lines.map(|l| words(&app, l));
         assert_eq!(
-            lines.map(|l| words(&app, l)),
-            ["Asked: TN-1".to_string(), "Create the Trail Notes app".into(), "Made the project TN, Trail Notes".into()]
+            said[..3],
+            ["Sent to the planner: TN-1".to_string(), "Trail Notes".into(), "Made the project TN, Trail Notes".into()]
         );
+        assert!(said[3].contains("on TN-1 in Lookout, as a question waiting on you"), "{}", said[3]);
         assert!(lines.iter().all(|l| shown(&app, *l)));
         let notes = notice(&app, part(&app, AskPart::Notes));
         assert_eq!(notes, (Tone::Warning, "There is no `factory` agent yet.".into()));

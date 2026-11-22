@@ -1,8 +1,8 @@
 //! The rail of apps down the left edge of the window: a button for each app, the one shown marked, a press switching to
 //! it ([`crate::transition`]), dragged (or moved with Alt and Up or Down) to put the apps in the person's order
-//! ([`crate::MoveApp`]), and at its foot
-//! the window's own buttons: Ask ([`crate::ask`]), while connected to a server with an apps repo, which opens the form
-//! for asking for a change or a new app ([`crate::ask_panel`]); and the update notice ([`crate::update`]) while a newer
+//! ([`crate::MoveApp`]), under them a plus that asks for a new app, and at its foot the window's own buttons: Ask, which
+//! asks for a change to the app shown. Both ([`crate::ask`]) show while connected to a server with an apps repo (Ask
+//! only once there is an app to ask about) and open the form ([`crate::ask_panel`]); then the update notice ([`crate::update`]) while a newer
 //! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]); and last the gear,
 //! which opens the window's settings ([`crate::settings`]). A shell with a single app has no rail, and the app has the
 //! whole window.
@@ -33,10 +33,15 @@ pub struct OpenApp(pub AppId);
 #[derive(Component)]
 pub struct RailFoot;
 
-/// The button at the [`RailFoot`] that opens the Ask form, shown while the connection is live and the server has an
-/// apps repo to ask about.
+/// The button at the [`RailFoot`] that opens the form asking for a change to the app shown, shown while the connection
+/// is live and the server has an apps repo with an app in it to ask about.
 #[derive(Component)]
 pub struct AskButton;
+
+/// The plus under the apps on the rail that opens the form asking for a new app, shown while the connection is live and
+/// the server has an apps repo.
+#[derive(Component)]
+pub struct NewAppButton;
 
 /// The button at the [`RailFoot`] that opens the update's panel, shown while a newer build is ready, its hint saying
 /// how many changes it brings.
@@ -48,7 +53,10 @@ pub struct UpdateButton;
 pub struct SettingsButton;
 
 /// What the Ask button's hint says.
-pub const ASK_HINT: &str = "Ask for a change or a new app";
+pub const ASK_HINT: &str = "Ask for a change to this app";
+
+/// What the plus's hint says.
+pub const NEW_APP_HINT: &str = "Ask for a new app";
 
 pub(crate) struct RailUiPlugin;
 
@@ -61,8 +69,8 @@ impl Plugin for RailUiPlugin {
     }
 }
 
-/// The rail, its items in the order of the apps, a list the person can reorder, then its foot with Ask, the update
-/// notice and the gear, which isn't part of the list. Each is put down at once (`spawn_scene`), so the foot comes after
+/// The rail, its items in the order of the apps, a list the person can reorder, then the plus asking for a new app
+/// and the foot with Ask, the update notice and the gear, which aren't part of the list. Each is put down at once (`spawn_scene`), so the foot comes after
 /// the items and its buttons' nodes are there to hide before the first frame is drawn.
 fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     if !apps.has_rail() {
@@ -75,8 +83,12 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
         let item = (OpenApp(manifest.id), ReorderItem(manifest.id.0.to_string()), ChildOf(root));
         commands.spawn_scene(rail_item(manifest.icon, hint)).insert(item);
     }
+    let plus = bsn! {
+        @tool_button(Icon::Plus, NEW_APP_HINT, ButtonKind::Plain) Node { flex_shrink: 0.0, display: Display::None }
+    };
+    commands.spawn_scene(plus).insert((Name::new("new app"), NewAppButton, ChildOf(root)));
     let foot = commands.spawn_scene(rail_foot()).insert((Name::new("rail foot"), RailFoot, ChildOf(root))).id();
-    let ask = bsn! { @tool_button(Icon::Plus, ASK_HINT, ButtonKind::Normal) Node { display: Display::None } };
+    let ask = bsn! { @tool_button(Icon::Pencil, ASK_HINT, ButtonKind::Normal) Node { display: Display::None } };
     commands.spawn_scene(ask).insert((AskButton, ChildOf(foot)));
     let update =
         bsn! { @tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary) Node { display: Display::None } };
@@ -85,16 +97,19 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     commands.spawn_scene(gear).insert((SettingsButton, SettingsGear, ChildOf(foot)));
 }
 
-/// Shows Ask while the connection is live and the server has an apps repo to ask about.
+/// Shows the plus while the connection is live and the server has an apps repo, and Ask while it also has an app to
+/// ask about.
 fn show_ask(
     askable: Option<Res<Askable>>,
     connection: Option<Res<State<Connection>>>,
-    buttons: Query<Entity, With<AskButton>>,
+    changes: Query<Entity, With<AskButton>>,
+    pluses: Query<Entity, With<NewAppButton>>,
     mut nodes: Query<&mut Node>,
 ) {
     let live = connection.is_some_and(|c| *c.get() == Connection::Live);
-    let shown = live && askable.is_some_and(|a| a.configured());
-    for button in &buttons {
+    let askable = askable.filter(|a| live && a.configured());
+    let change = askable.as_ref().is_some_and(|a| !a.targets().is_empty());
+    for (button, shown) in changes.iter().map(|b| (b, change)).chain(pluses.iter().map(|b| (b, askable.is_some()))) {
         set_display(&mut nodes, button, shown);
     }
 }
@@ -249,7 +264,8 @@ mod tests {
         let rail = app.world_mut().query_filtered::<Entity, With<Rail>>().single(app.world()).unwrap();
         let children: Vec<Entity> = app.world().get::<Children>(rail).unwrap().iter().collect();
         let (foot, buttons) = foot(&mut app);
-        assert_eq!(children.last(), Some(&foot), "the foot comes after the apps");
+        let (plus, _) = shown::<NewAppButton>(&mut app);
+        assert_eq!(children[children.len() - 2..], [plus, foot], "the plus under the apps, then the foot");
         let (ask, _) = shown::<AskButton>(&mut app);
         let (gear, display) = shown::<SettingsButton>(&mut app);
         assert_eq!(buttons, [ask, button, gear], "Ask above the update, and the gear last");
@@ -267,26 +283,35 @@ mod tests {
     }
 
     #[test]
-    fn ask_shows_only_while_live_with_an_apps_repo_to_ask_about() {
+    fn the_plus_shows_while_live_with_an_apps_repo_and_ask_once_it_has_an_app() {
         use bevy::state::app::AppExtStates;
+        use trailhead_model::shell::{AskTarget, AskTargets};
 
         let mut app = windowed(ShellPlugin::new().with(Fake(NOTES)).with(Fake(MAPS)));
         app.init_state::<Connection>();
         app.update();
         let (ask, display) = shown::<AskButton>(&mut app);
-        assert_eq!(display, Display::None);
+        let (plus, plus_display) = shown::<NewAppButton>(&mut app);
+        assert_eq!((display, plus_display), (Display::None, Display::None));
         assert_eq!(app.world().get::<Hint>(ask).map(|h| h.0.as_str()), Some(ASK_HINT));
-        let configured = trailhead_model::shell::AskTargets { configured: true, ..default() };
-        app.world_mut().resource_mut::<Askable>().0 = Some(configured.clone());
+        assert_eq!(app.world().get::<Hint>(plus).map(|h| h.0.as_str()), Some(NEW_APP_HINT));
+        let empty = AskTargets { configured: true, ..default() };
+        app.world_mut().resource_mut::<Askable>().0 = Some(empty.clone());
         app.update();
-        assert_eq!(shown::<AskButton>(&mut app).1, Display::None, "not while offline");
+        assert_eq!(shown::<NewAppButton>(&mut app).1, Display::None, "not while offline");
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.update();
         app.update();
+        assert_eq!(shown::<NewAppButton>(&mut app), (plus, Display::Flex));
+        assert_eq!(shown::<AskButton>(&mut app), (ask, Display::None), "no app to ask about yet");
+        let target = AskTarget { project: "NOTE".into(), name: "Notes".into(), path: Some("apps/notes".into()) };
+        app.world_mut().resource_mut::<Askable>().0 = Some(AskTargets { targets: vec![target], ..empty });
+        app.update();
         assert_eq!(shown::<AskButton>(&mut app), (ask, Display::Flex));
-        app.world_mut().resource_mut::<Askable>().0 = Some(trailhead_model::shell::AskTargets::default());
+        app.world_mut().resource_mut::<Askable>().0 = Some(AskTargets::default());
         app.update();
         assert_eq!(shown::<AskButton>(&mut app), (ask, Display::None), "not without an apps repo");
+        assert_eq!(shown::<NewAppButton>(&mut app), (plus, Display::None));
     }
 
     mod reorder {

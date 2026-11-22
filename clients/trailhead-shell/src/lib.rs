@@ -70,7 +70,7 @@ mod update_panel;
 pub mod view;
 mod window;
 
-pub use rail::{AskButton, OpenApp, Rail, SettingsButton, UpdateButton};
+pub use rail::{AskButton, NewAppButton, OpenApp, Rail, SettingsButton, UpdateButton};
 pub use store::LocalStore;
 pub use view::RememberView;
 pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
