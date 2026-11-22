@@ -3,11 +3,10 @@
 //! `connectors/<connector>/connector.toml` in the same checkout. The server registers them from the checkout its
 //! builder last built, at start and after each build, so a shape goes live with the window that uses it.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
 use trailhead_core::app_data::{Declaration, Fields, check_app_id};
+use trailhead_core::connector::Manifest;
 use trailhead_core::{Ctx, Error, Store};
 
 /// What registering a checkout's declarations did.
@@ -65,19 +64,6 @@ fn fill_feeds(
     Ok(declaration)
 }
 
-/// What a connector's `connector.toml` says of its feeds. The connector kit reads the whole file when it runs; the
-/// server needs only the feeds' fields.
-#[derive(Deserialize)]
-struct Manifest {
-    #[serde(default)]
-    feeds: BTreeMap<String, Feed>,
-}
-
-#[derive(Deserialize)]
-struct Feed {
-    fields: Fields,
-}
-
 /// The fields of `feed` (`<connector>.<feed>`) as `connectors/<connector>/connector.toml` in `dir` declares them.
 fn feed_fields(dir: &Path, feed: &str) -> Result<Fields, String> {
     let Some((connector, name)) = feed.split_once('.') else {
@@ -91,7 +77,7 @@ fn feed_fields(dir: &Path, feed: &str) -> Result<Fields, String> {
         }
         Err(e) => return Err(format!("reading {file}: {e}")),
     };
-    let mut manifest: Manifest = toml::from_str(&text).map_err(|e| format!("{file}: {}", e.message()))?;
+    let mut manifest = Manifest::parse(&text).map_err(|e| format!("{file}: {}", e.0))?;
     manifest.feeds.remove(name).map(|f| f.fields).ok_or_else(|| format!("{file} declares no feed `{name}`"))
 }
 

@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub mod app_data;
 mod attachment;
 pub mod config;
+pub mod connector;
 mod notification;
 pub mod shell;
 pub mod wire;

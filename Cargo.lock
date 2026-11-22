@@ -8198,8 +8198,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "toml",
+ "trailhead-core",
  "trailhead-model",
+ "trailhead-server",
 ]
 
 [[package]]
@@ -8380,6 +8381,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "toml",
  "utoipa",
  "uuid",
