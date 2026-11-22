@@ -15,7 +15,7 @@ use trailhead_factory::{
     Answered, Credential, Error, FollowUpTask, Grade, HumanContext, METADATA_KEY, ModelId, NewPlanTask, Notice,
     Picture, PlanTask, PlanTaskUpdate, Priority, ProjectRepo, Result, RunPatch, RunRecord, SOURCE_FACTORY, Scope,
     TASK_PLAN_KEY, Task, TaskKey, TaskNote, TaskPlan, Tracker, Verdict, VerdictKind, in_ready_order, is_factory_agent,
-    is_raised_by,
+    is_raised_by, raise_to_blocked_priority,
 };
 use uuid::Uuid;
 
@@ -229,31 +229,12 @@ impl CoreTracker {
         Ok(tasks)
     }
 
-    /// Raises each task's priority to the highest among itself and the open tasks it blocks, directly or through a
-    /// chain, so work that holds up urgent work is listed as urgent. A task that can't be read (out of scope, say) is
-    /// left out of the walk.
-    async fn raise_to_blocked_priority(&self, ctx: &Ctx, tasks: &mut [Task]) {
-        // Each task's own priority and the keys it blocks, or None for one that is finished or can't be read.
-        let mut seen: HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = HashMap::new();
-        for task in tasks.iter_mut() {
-            let mut stack = vec![task.key.clone()];
-            let mut visited = std::collections::HashSet::new();
-            while let Some(key) = stack.pop() {
-                if !visited.insert(key.clone()) {
-                    continue;
-                }
-                if !seen.contains_key(&key) {
-                    let read = match self.store.task_detail(ctx, &key).await {
-                        Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
-                        _ => None,
-                    };
-                    seen.insert(key.clone(), read);
-                }
-                if let Some((priority, blocks)) = &seen[&key] {
-                    task.priority = task.priority.min(*priority);
-                    stack.extend(blocks.iter().cloned());
-                }
-            }
+    /// A task's own priority and the keys it blocks, for [`raise_to_blocked_priority`]: `None` for one that is
+    /// finished or can't be read.
+    async fn priority_and_blocks(&self, ctx: &Ctx, key: TaskKey) -> Option<(Priority, Vec<TaskKey>)> {
+        match self.store.task_detail(ctx, &key).await {
+            Ok(d) if !d.task.status.is_closed() => Some((d.task.priority, d.blocks)),
+            _ => None,
         }
     }
 
@@ -349,7 +330,7 @@ impl Tracker for CoreTracker {
             tasks.extend(found.into_iter().filter(|t| seen.insert(t.key.clone())));
         }
         // The raise goes in before the cut ([`in_ready_order`]).
-        self.raise_to_blocked_priority(&ctx, &mut tasks).await;
+        raise_to_blocked_priority(&mut tasks, |key| self.priority_and_blocks(&ctx, key)).await;
         Ok(in_ready_order(tasks, limit))
     }
 
