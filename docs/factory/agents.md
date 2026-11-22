@@ -2,7 +2,7 @@
 
 > **Design note.** It records decisions and intent; where it says something is built or not, check the code if it matters.
 
-A small daemon in every sandbox owns a typed contract with the control plane; the coding agent is a `Harness` plugin behind it. Profiles decide which harness, provider and model each role uses. The daemon's name is TBD (`factoryd` was a placeholder; see [naming.md](naming.md)).
+A small daemon in every sandbox owns a typed contract with the control plane; the coding agent is a `Harness` plugin behind it. Profiles decide which harness, provider and model each role uses. The daemon is `trailhead-daemon` (`factoryd` was a placeholder; see [naming.md](naming.md)).
 
 ## Harness boundary
 
@@ -68,7 +68,7 @@ budget   = { usd = 0.25, minutes = 5, steps = 5 }
 
 - **Stalls (TRAIL-173).** The daemon sends a `Heartbeat` event every 30 seconds while connected, carrying how long the agent has been quiet: no steps, tool calls or output, not counting a tool call still running (the harness reports `ToolResult` when one ends) or the checks after the agent. When that reaches the profile's `stall_timeout`, the control plane cancels the run and fails it like an infrastructure failure, so the attempt is given back. Because the daemon keeps the count, a reattach doesn't restart it. Heartbeats are sent live to the connected control plane and kept out of the replay log, so a reattach never receives stale ones; a stalled run whose daemon ignores the cancel is cut off like any other breach.
 - **Model aliases.** `fable`, `opus`, `sonnet`, `haiku` resolve to concrete ids in one table per provider, so upgrading a model is one line and other providers map the same aliases.
-- **Escalation, not guessing.** A task starts on its profile; repeated failure or a stall escalates to `escalate_to`, and the escalation is logged.
+- **Escalation, not guessing.** A task starts on its profile; repeated failure or a stall escalates to `escalate_to`, and the escalation is logged. Not built: `escalate_to` is read and checked, and nothing acts on it yet.
 - **Different model for review** where possible, to avoid shared blind spots.
 - **Utility calls run in sandboxes too**, through the same connectors, so the control plane never holds a model key.
 - **Profile changes are policy changes.** Moving work to a cheaper profile or raising a budget is loosening and needs a human; see [review.md](review.md).

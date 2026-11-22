@@ -37,7 +37,7 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | --- | --- |
 | `trailhead-core` | Task engine: schema, claims, events, undo |
 | `trailhead-server` | REST, MCP, SSE, webhooks |
-| `trailhead` | CLI; gains `trailhead factory` commands later (TRAIL-116) |
+| `trailhead` | CLI, with the `trailhead factory` commands behind its default `factory` feature |
 | `trailhead-factory` | Factory domain types, daemon protocol, the five traits, the `[factory]` settings, and `messages`: every PR comment, task note and park question, as pure functions the control plane and the daemon share (no i18n framework; logs and prompts stay out) |
 | `trailhead-control` | Control plane: run loop, sandbox pool, budget metering, usage-window pauses, reviews, reconcile; `CoreTracker` |
 | `trailhead-factory-server` | The control plane's setup as a library: credentials, keys, the iroh endpoint and its protocols, the status surface, `check` and `run`, and the `trailhead factory` commands. The server runs it in-process (TRAIL-164) |
@@ -52,4 +52,4 @@ The code in `crates/trailhead-factory` is authoritative; this is what each trait
 | `trailhead-plugins` | The harnesses and providers a build carries, by name: the `Registry` lists the control plane checks config against and the daemon builds its harness from |
 | `trailhead-testkit` | Fakes for all five seams and an in-process daemon |
 
-The factory crates are `publish = false`. CI and the release workflow package and publish only `trailhead-core`, `trailhead-server` and `trailhead`.
+The factory crates are `publish = false`. CI checks that `trailhead-model`, `trailhead-core`, `trailhead-client` and `trailhead-log` package, and the release workflow publishes those and `trailhead-server` and `trailhead`.

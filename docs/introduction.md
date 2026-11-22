@@ -18,7 +18,7 @@ Both are one Rust workspace, licensed AGPL-3.0.
 - **A local server.** One server and one SQLite file. Other machines reach it through a tunnel, never by exposing it publicly. There are no replicas and no hosted service.
 - **The factory needs setup.** Today it runs from a checkout of this repo, with a [Fly Sprites](https://sprites.dev) token, a Claude subscription token and a GitHub token. Its crates aren't published.
 - **No packaged factory release.** Installing and running the factory without this repo is TRAIL-114.
-- **No UI.** The native app is designed ([ui.md](factory/ui.md)) but not started.
+- **A UI that is young.** The factory's native app, Lookout ([ui.md](factory/ui.md)), and the shell of apps it sits in ([app-platform.md](app-platform.md)) are built and in daily use by the maintainer alone.
 
 ## Where to go next
 
