@@ -420,6 +420,24 @@ async fn approving_a_plan_grades_its_tasks_and_one_left_ungraded_is_refused_in_t
 }
 
 #[tokio::test]
+async fn a_dependency_is_added_and_removed_by_key() {
+    let rig = Rig::new().await;
+    rig.spec().await;
+    let (blocked, blocker) = (TaskKey("TRAIL-4".into()), TaskKey("TRAIL-3".into()));
+    let on = Call::AddBlocker { blocked: blocked.clone(), blocker: blocker.clone() };
+    assert!(matches!(rig.run(&rig.token, &Request::new(on.clone(), None)).await.unwrap(), Outcome::Ok { .. }));
+    let shown = rig.send(reqwest::Method::GET, "/v1/tasks/TRAIL-4", Value::Null).await;
+    assert_eq!(shown["blocked_by"], serde_json::json!(["TRAIL-3"]));
+    // The other way round would be a cycle, refused in the server's words.
+    let back = Call::AddBlocker { blocked: blocker.clone(), blocker: blocked.clone() };
+    assert!(matches!(rig.run(&rig.token, &Request::new(back, None)).await.unwrap(), Outcome::Failed(_)));
+    let off = Call::RemoveBlocker { blocked, blocker };
+    assert!(matches!(rig.run(&rig.token, &Request::new(off, None)).await.unwrap(), Outcome::Ok { .. }));
+    let shown = rig.send(reqwest::Method::GET, "/v1/tasks/TRAIL-4", Value::Null).await;
+    assert_eq!(shown["blocked_by"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn a_connection_that_cannot_be_made_is_worth_retrying() {
     let rig = Rig::new().await;
     let gone = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();

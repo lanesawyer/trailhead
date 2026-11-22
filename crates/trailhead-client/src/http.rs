@@ -463,7 +463,16 @@ pub enum Call {
         key: TaskKey,
         grades: BTreeMap<String, Grade>,
     },
-
+    /// `blocker` must finish before `blocked`.
+    AddBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
+    /// `blocked` no longer waits on `blocker`.
+    RemoveBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
     Undo(Undo),
     Revert(Revert),
     CreateProject(NewProject),
@@ -489,25 +498,30 @@ pub enum Call {
 }
 
 impl Call {
-    fn route(&self) -> (Route, Option<&str>) {
+    /// The endpoint, and the value of each of its path's parameters.
+    fn route(&self) -> (Route, Vec<(&'static str, &str)>) {
         match self {
-            Call::CreateTask(_) => (routes::CREATE_TASK, None),
-            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, Some(&key.0)),
-            Call::AddComment { key, .. } => (routes::ADD_COMMENT, Some(&key.0)),
-            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
-            Call::Release(key) => (routes::RELEASE, Some(&key.0)),
-            Call::SetAside { key, .. } => (routes::SET_ASIDE, Some(&key.0)),
-            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, Some(&key.0)),
-            Call::Undo(_) => (routes::UNDO, None),
-            Call::Revert(_) => (routes::REVERT, None),
-            Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
-            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, Some(key)),
-            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, Some(id)),
-            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, Some(id)),
-            Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, None),
-            Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, None),
-            Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, None),
-            Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, None),
+            Call::CreateTask(_) => (routes::CREATE_TASK, vec![]),
+            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, vec![("task", &key.0)]),
+            Call::AddComment { key, .. } => (routes::ADD_COMMENT, vec![("task", &key.0)]),
+            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, vec![("id", id)]),
+            Call::Release(key) => (routes::RELEASE, vec![("task", &key.0)]),
+            Call::SetAside { key, .. } => (routes::SET_ASIDE, vec![("task", &key.0)]),
+            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, vec![("task", &key.0)]),
+            Call::AddBlocker { blocked, .. } => (routes::ADD_BLOCKER, vec![("task", &blocked.0)]),
+            Call::RemoveBlocker { blocked, blocker } => {
+                (routes::REMOVE_BLOCKER, vec![("task", &blocked.0), ("blocker", &blocker.0)])
+            }
+            Call::Undo(_) => (routes::UNDO, vec![]),
+            Call::Revert(_) => (routes::REVERT, vec![]),
+            Call::CreateProject(_) => (routes::CREATE_PROJECT, vec![]),
+            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, vec![("project", key)]),
+            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, vec![("id", id)]),
+            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, vec![("id", id)]),
+            Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, vec![]),
+            Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, vec![]),
+            Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, vec![]),
+            Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, vec![]),
         }
     }
 
@@ -523,9 +537,11 @@ impl Call {
             Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
             Call::ResolveComment { answer: None, .. }
             | Call::Release(_)
+            | Call::RemoveBlocker { .. }
             | Call::ReadNotification(_)
             | Call::UnreadNotification(_)
             | Call::ReadAllNotifications => None,
+            Call::AddBlocker { blocker, .. } => Some(serde_json::json!({ "blocker": blocker })),
             Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
             Call::ApprovePlan { grades, .. } => Some(serde_json::json!({ "grades": grades })),
             Call::Undo(b) => Some(json(b)),
@@ -542,8 +558,8 @@ impl Call {
 
     /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`.
     pub fn path(&self) -> String {
-        let (route, param) = self.route();
-        route.url(param)
+        let (route, params) = self.route();
+        params.iter().fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value))
     }
 
     /// The method this call uses.
@@ -711,8 +727,7 @@ impl Client {
 
     /// The request for a [`Call`], with its body, ready for the caller to add headers to and send.
     pub fn request_for(&self, call: &Call) -> RequestBuilder {
-        let (route, param) = call.route();
-        let req = self.request(route, param);
+        let req = self.http.request(call.method(), format!("{}{}", self.base, call.path())).bearer_auth(&self.token);
         match call.body() {
             Some(body) => req.json(&body),
             None => req,
@@ -1218,5 +1233,15 @@ mod tests {
         let approve = Call::ApprovePlan { key: TaskKey("TRAIL-2".into()), grades };
         assert_eq!((approve.method(), approve.path()), (Method::POST, "/v1/tasks/TRAIL-2/plan/approve".to_string()));
         assert_eq!(approve.body(), Some(serde_json::json!({"grades": {"TRAIL-3": 2}})));
+        let (blocked, blocker) = (TaskKey("TRAIL-3".into()), TaskKey("TRAIL-4".into()));
+        let add = Call::AddBlocker { blocked: blocked.clone(), blocker: blocker.clone() };
+        assert_eq!((add.method(), add.path()), (Method::POST, "/v1/tasks/TRAIL-3/blockers".to_string()));
+        assert_eq!(add.body(), Some(serde_json::json!({"blocker": "TRAIL-4"})));
+        let remove = Call::RemoveBlocker { blocked, blocker };
+        assert_eq!(
+            (remove.method(), remove.path()),
+            (Method::DELETE, "/v1/tasks/TRAIL-3/blockers/TRAIL-4".to_string())
+        );
+        assert_eq!(remove.body(), None);
     }
 }

@@ -12,7 +12,8 @@
 //!
 //! A spec task's graph is its plan, with its conversation beside the canvas ([`conversation`]): the thread with the
 //! planner as a chat, whose turn it is, and a reply box. Until the plan is approved, each task to grade has a grade
-//! dropdown in a bar at the foot of its card, and Approve in the header sends the grades ([`approve`]).
+//! dropdown in a bar at the foot of its card, and Approve in the header sends the grades ([`approve`]). On the graph of
+//! any parent a person changes the plan by hand: Add in the header, and a menu in each node's bar ([`edit`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -33,6 +34,7 @@ use crate::widgets::{
 
 pub mod approve;
 pub mod conversation;
+pub mod edit;
 
 use approve::{Approving, NodeBar};
 pub use approve::{GradeChoices, approval, approve_request, chosen};
@@ -57,6 +59,8 @@ pub struct GraphPage(pub Option<String>);
 pub struct GraphView {
     /// The parent's key and title; none when it isn't in the mirror.
     pub parent: Option<(String, String)>,
+    /// The parent's project, by key, which a task added under it goes in.
+    pub project: Option<String>,
     /// A node per direct subtask, by key.
     pub nodes: Vec<PlanNode>,
     /// Each `blocked_by` between two of them, by id: blocker, then blocked.
@@ -66,7 +70,7 @@ pub struct GraphView {
 }
 
 impl GraphView {
-    fn node(&self, id: &str) -> Option<&PlanNode> {
+    pub(crate) fn node(&self, id: &str) -> Option<&PlanNode> {
         self.nodes.iter().find(|n| n.card.id == id)
     }
 }
@@ -84,6 +88,13 @@ pub struct PlanNode {
     pub proposed: Option<ProposedGrade>,
     /// It is in a plan waiting for approval, open and ungraded: the person gives it a grade from its dropdown.
     pub to_grade: bool,
+    /// What a split copies: its description, and every task it waits on and that waits on it, by key, in the plan
+    /// or not.
+    pub description: String,
+    pub blocked_by: Vec<String>,
+    pub blocks: Vec<String>,
+    /// The version shown, which removing it names.
+    pub version: i64,
     pub size: Vec2,
 }
 
@@ -107,8 +118,16 @@ pub fn build_graph(input: Input, parent: &str, thread: Thread) -> GraphView {
     let tasks: HashMap<String, &trailhead_model::Task> = input.tasks.iter().map(|t| (t.id.to_string(), t)).collect();
     let mut edges = Vec::new();
     let mut needs: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+    let (mut blocked_by, mut blocks): (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) = default();
     for d in input.dependencies {
         let (blocker, blocked) = (d.blocker_id.to_string(), d.blocked_id.to_string());
+        let key = |id: &str| tasks.get(id).map(|t| t.key.0.clone());
+        if let (true, Some(k)) = (children.contains(&blocked), key(&blocker)) {
+            blocked_by.entry(blocked.clone()).or_default().push(k);
+        }
+        if let (true, Some(k)) = (children.contains(&blocker), key(&blocked)) {
+            blocks.entry(blocker.clone()).or_default().push(k);
+        }
         if !children.contains(&blocked) {
             continue;
         }
@@ -134,15 +153,24 @@ pub fn build_graph(input: Input, parent: &str, thread: Thread) -> GraphView {
             let proposed = TaskPlan::of(&task.metadata).and_then(|p| p.proposed);
             let to_grade = awaiting && task.status == Status::Open && task.grade.is_none();
             let node = plan_node(card, task.status, task.grade, needs);
+            let sorted = |mut keys: Vec<String>| {
+                keys.sort_by(|a, b| (key_number(a), a).cmp(&(key_number(b), b)));
+                keys.dedup();
+                keys
+            };
             Some(PlanNode {
                 proposed,
                 to_grade,
-                size: Vec2::new(NODE_WIDTH, node_height(&node.card, to_grade)),
+                description: task.description.clone(),
+                blocked_by: sorted(blocked_by.remove(&node.card.id).unwrap_or_default()),
+                blocks: sorted(blocks.remove(&node.card.id).unwrap_or_default()),
+                version: task.version,
                 ..node
             })
         })
         .collect();
-    GraphView { parent: Some((task.key.0.clone(), task.title.clone())), nodes, edges, plan }
+    let project = input.projects.iter().find(|p| p.id == task.project_id).map(|p| p.key.clone());
+    GraphView { parent: Some((task.key.0.clone(), task.title.clone())), project, nodes, edges, plan }
 }
 
 /// A subtask's node: the board's card for it, its status first among the badges, its grade, what it needs from
@@ -175,14 +203,26 @@ fn plan_node(card: Card, status: Status, grade: Option<Grade>, needs: Vec<(Strin
     }
     let card =
         Card { badges, actions: Vec::new(), parent: None, depth: 0, found: None, pr: None, holder: None, ..card };
-    let size = Vec2::new(NODE_WIDTH, node_height(&card, false));
-    PlanNode { card, status, grade, needs, proposed: None, to_grade: false, size }
+    let size = Vec2::new(NODE_WIDTH, node_height(&card));
+    PlanNode {
+        card,
+        status,
+        grade,
+        needs,
+        proposed: None,
+        to_grade: false,
+        description: String::new(),
+        blocked_by: Vec::new(),
+        blocks: Vec::new(),
+        version: 0,
+        size,
+    }
 }
 
 /// How tall a node's card comes out at most: its key, a title of two lines, its badges wrapped to its width, its tool,
-/// and its bar of controls when it has one (`bar`), by the kit's estimate of a glyph's width. A card shorter than its
-/// box sits in the box's middle.
-fn node_height(card: &Card, bar: bool) -> f32 {
+/// and its bar of controls (its grade dropdown and its menu), by the kit's estimate of a glyph's width. A card shorter
+/// than its box sits in the box's middle.
+fn node_height(card: &Card) -> f32 {
     let badge_height = size::SMALL.px() * LINE_HEIGHT + space::BADGE_INSET * 2.0;
     let room = NODE_WIDTH - (space::CONTROL_INSET + stroke::HAIRLINE) * 2.0;
     let mut rows = 1.0;
@@ -197,7 +237,7 @@ fn node_height(card: &Card, bar: bool) -> f32 {
         }
     }
     let tools = if card.graph { extent::CONTROL_HEIGHT } else { 0.0 };
-    let bar = if bar { extent::CONTROL_HEIGHT + space::STACKED } else { 0.0 };
+    let bar = extent::CONTROL_HEIGHT + space::STACKED;
     (space::CONTROL_INSET + stroke::HAIRLINE) * 2.0
         + badge_height
         + size::CARD_TITLE.px() * LINE_HEIGHT * TITLE_LINES
@@ -281,6 +321,7 @@ pub struct GraphUiPlugin;
 
 impl Plugin for GraphUiPlugin {
     fn build(&self, app: &mut App) {
+        edit::add_edit(app);
         app.add_plugins(GraphPlugin)
             .init_resource::<ThreadRows>()
             .add_systems(OnEnter(View::Graph), spawn_page)
@@ -290,6 +331,7 @@ impl Plugin for GraphUiPlugin {
             .add_observer(conversation::on_reply)
             .add_observer(conversation::on_read_spec)
             .add_observer(approve::on_approve)
+            .add_systems(Update, edit::sync_menus.run_if(in_state(View::Graph)))
             .add_systems(Update, (conversation::finish_reply, approve::finish_approve, approve::tidy_choices))
             .add_systems(
                 Update,
@@ -376,7 +418,7 @@ fn on_fit(activate: On<Activate>, fits: Query<(), With<FitGraph>>, mut canvases:
     }
 }
 
-/// Puts Approve and the Fit button before the header's X once the header has spawned.
+/// Puts Approve, Add and the Fit button before the header's X once the header has spawned.
 fn dress_header(
     tools: Query<(Entity, &ChildOf), Added<PanelTools>>,
     parents: Query<&ChildOf>,
@@ -392,7 +434,8 @@ fn dress_header(
             .insert(FitGraph)
             .id();
         let [note, why, approve] = approve::spawn_approve(&mut commands);
-        commands.entity(row).insert_children(0, &[note, why, approve, fit]);
+        let [edited, add] = edit::spawn_add(&mut commands);
+        commands.entity(row).insert_children(0, &[edited, note, why, approve, add, fit]);
     }
 }
 
@@ -478,7 +521,8 @@ fn dress_bars(
 ) {
     for (card, BoardCard(shown), parent, children) in &cards {
         if boxes.contains(parent.parent()) && !children.iter().any(|c| bars.contains(c)) {
-            approve::spawn_bar(&mut commands, card, &shown.id);
+            let bar = approve::spawn_bar(&mut commands, card, &shown.id);
+            edit::spawn_menu(&mut commands, bar, &shown.id);
         }
     }
 }

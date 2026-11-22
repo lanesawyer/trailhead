@@ -99,9 +99,13 @@ pub(super) struct ApproveNote;
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq)]
 pub struct Approving(pub bool);
 
-/// Spawns a node's bar: its grade dropdown, hidden until the node is one to grade.
+/// Spawns a node's bar at the foot of its card: its grade dropdown, hidden unless the node is one to grade, with the
+/// node's menu ([`super::edit`]) after it, at the bar's end.
 pub(super) fn spawn_bar(commands: &mut Commands, card: Entity, id: &str) -> Entity {
-    let bar = commands.spawn_scene(row()).insert((NodeBar(id.to_string()), ChildOf(card))).id();
+    let bar = commands
+        .spawn_scene(bsn! { @row() Node { justify_content: JustifyContent::FlexEnd } })
+        .insert((NodeBar(id.to_string()), ChildOf(card)))
+        .id();
     let (names, tones) = options();
     let id = id.to_string();
     let pick = bsn! {
@@ -320,7 +324,6 @@ mod tests {
         let none = GradeChoices::default();
         assert_eq!(chosen(&v.nodes[0], &none), Some(grade(2)), "the planner's proposal");
         assert_eq!(chosen(&v.nodes[3], &none), None, "no proposal starts unset");
-        assert!(v.nodes[0].size.y > v.nodes[1].size.y, "room for the dropdown");
         assert_eq!(why(&v.nodes[0]), "The planner proposes grade 2: one crate");
         let plain = view(vec![task_json(json!({"id": "s", "key": "T-1"})), part("a", "T-2", "open", None, Some(2))]);
         assert!(!plain.nodes[0].to_grade, "a parent that is no spec task has no plan to approve");

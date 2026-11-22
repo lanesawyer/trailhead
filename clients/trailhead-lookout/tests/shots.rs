@@ -3,7 +3,7 @@
 //! since it needs a render adapter: `mise run shots` runs every app's, and says where the pictures went.
 
 use bevy::prelude::*;
-use bevy::ui_widgets::Activate;
+use bevy::ui_widgets::{Activate, MenuAction, MenuEvent};
 use serde_json::{Value, json};
 use trailhead_factory::logs::{LogLevel, LogLine};
 use trailhead_factory::{
@@ -14,6 +14,7 @@ use trailhead_lookout::Lookout;
 use trailhead_lookout::board::View;
 use trailhead_lookout::factory::{FactoryItem, FactoryUpdate};
 use trailhead_lookout::graph::OpenGraph;
+use trailhead_lookout::graph::edit::{NodeAct, NodeEdit};
 use trailhead_lookout::inspector::{OpenComposer, Selection, Subject};
 use trailhead_lookout::logs::{LogItem, LogUpdate};
 use trailhead_lookout::peak::MapMode;
@@ -410,6 +411,25 @@ fn plan_view() {
     save(&mut shot, "plan");
     shot.set_theme(ShotTheme::Light);
     save(&mut shot, "plan");
+    shot.set_theme(ShotTheme::Dark);
+    // TRAIL-33's menu open, then its "Depends on…".
+    let item = |shot: &mut ShotApp, edit: NodeEdit| {
+        let world = shot.world_mut();
+        let mut q = world.query::<(Entity, &NodeAct)>();
+        q.iter(world).find(|(_, a)| a.id == sid("s3") && a.edit == edit).map(|(e, _)| e).unwrap()
+    };
+    let split = item(&mut shot, NodeEdit::Split);
+    let popup = shot.world().get::<ChildOf>(split).unwrap().parent();
+    let root = shot.world().get::<ChildOf>(popup).unwrap().parent();
+    let button = shot.world().get::<Children>(root).unwrap()[0];
+    shot.world_mut().trigger(MenuEvent { source: button, action: MenuAction::Toggle });
+    settle(&mut shot);
+    save(&mut shot, "plan-menu");
+    shot.world_mut().trigger(MenuEvent { source: button, action: MenuAction::CloseAll });
+    let depends = item(&mut shot, NodeEdit::DependsOn);
+    shot.world_mut().trigger(Activate { entity: depends });
+    settle(&mut shot);
+    save(&mut shot, "plan-depends");
 }
 
 /// Presses the mouse at `at` (logical pixels in the shot's image), moves it by `drag`, and lets go.
