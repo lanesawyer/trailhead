@@ -1,9 +1,11 @@
 //! Trailhead's domain core: schema, rules, claims, the ready queue and the event
 //! log. Every interface (REST, MCP, CLI) goes through [`Store`].
 
+mod apps;
 mod attachments;
 mod claims;
 mod comments;
+mod connectors;
 mod db;
 mod deps;
 mod error;
@@ -11,6 +13,8 @@ mod events;
 mod idempotency;
 mod identity;
 mod metadata;
+mod notifications;
+mod plan;
 mod projects;
 mod reminders;
 mod set_aside;
@@ -21,6 +25,7 @@ mod undo;
 mod webhooks;
 mod when;
 
+pub use apps::{AppEventFilter, AppWrite, NewRecord, RecordChange, RecordPage};
 pub use attachments::NewAttachment;
 pub use claims::NamedClaim;
 pub use comments::NewComment;
@@ -28,6 +33,7 @@ pub use deps::BlockersOf;
 pub use error::{Error, Result};
 pub use events::{EventFilter, UNDO_WINDOW};
 pub use idempotency::{StoredResponse, idempotency_fingerprint};
+pub use notifications::{NewNotification, NotificationFilter};
 pub use projects::{NewProject, ProjectPatch};
 pub use reminders::{DEFAULT_REMINDER_WINDOW, DUE_SOON, OVERDUE};
 pub use store::{Clock, Ctx, Store};

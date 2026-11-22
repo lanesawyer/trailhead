@@ -17,7 +17,7 @@ use trailhead_factory::{ControlState, FactoryEvent, FactorySnapshot, FactoryStat
 use trailhead_wire::api::ApiTunnel;
 use trailhead_wire::ui::{
     LogFeed, LogFrame, LogStream, RepoFeed, SERVER_UNREACHABLE, StatusFeed, StatusFrame, StatusStream, UI_ALPN,
-    UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel,
+    UiAllowlist, UiProtocol, dial_ui, open_ui_tunnel, refused,
 };
 use trailhead_wire::{API_ALPN, Peers, read_frame, write_frame};
 
@@ -32,6 +32,7 @@ impl StatusFeed for TestFeed {
             sandboxes: vec![],
             runs: vec![],
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),
@@ -453,6 +454,19 @@ async fn an_api_request_resets_with_its_own_code_when_the_server_is_down() {
         }
         other => panic!("expected a reset with SERVER_UNREACHABLE, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_dial_tells_an_endpoint_that_isnt_allowed_from_one_that_is() {
+    let r = Rig::new().await;
+    let (stranger, known) = (SecretKey::generate(), SecretKey::generate());
+    r.allowed.add(known.public()).unwrap();
+    // The endpoints are held: dropping one closes its connections from this side.
+    let (stranger, known) = (r.client(stranger).await, r.client(known).await);
+    let conn = dial_ui(&stranger, r.control.id).await.unwrap();
+    assert!(refused(&conn).await, "a dial from off the allowlist succeeds, and is then closed as not allowed");
+    let conn = dial_ui(&known, r.control.id).await.unwrap();
+    assert!(!refused(&conn).await);
 }
 
 #[tokio::test]

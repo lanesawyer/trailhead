@@ -5,8 +5,9 @@
 //! [`headless`] runs an app's logic ([`ShellApp::build`]) under `MinimalPlugins`; [`windowed`] also runs its drawing
 //! ([`ShellApp::build_ui`]) and the rail, but not the kit's `UiPlugin` or `ThemePlugin`, so it checks what is spawned
 //! and kept, not how it looks. Both give the app the shell's [`Connection`] state (`Offline` until a test sets it with
-//! [`set_connection`]), its [`ConnectionStatus`], the mirror and the outbox, with no net thread: a test fills the
-//! mirror with [`fill`] and [`feed`], reads what the app sent with [`sent`], and answers it with [`answer`].
+//! [`set_connection`]), its [`ConnectionStatus`], the mirror, the record mirror and the outbox, with no net thread: a
+//! test fills the mirror with [`fill`] and [`feed`], an app's collections with [`fill_records`] and [`feed_record`],
+//! reads what the app sent with [`sent`], and answers it with [`answer`].
 //!
 //! `shot` (the `shots` feature) draws the shell to PNGs, for an app's shots test.
 
@@ -20,6 +21,8 @@ use crate::commands::{CommandDone, CommandId, CommandsPlugin, Outcome, Submit};
 use crate::connection::{Connection, ConnectionStatus, Dialed, LocalEndpoint, SendNet};
 use crate::mirror::MirrorPlugin;
 use crate::net::{NetCommand, Reason};
+use crate::record_sync::{RecordItem, RecordSnapshot, RecordStatus};
+use crate::records::RecordsPlugin;
 use crate::sync::{Snapshot, SyncItem};
 use crate::transition::Switching;
 use crate::{ActiveApp, AppId, Manifest, ShellApp, ShellPlugin};
@@ -56,7 +59,7 @@ impl Plugin for TestConnection {
             .init_resource::<LocalEndpoint>()
             .init_resource::<Dialed>()
             .add_message::<SendNet>()
-            .add_plugins((MirrorPlugin, CommandsPlugin));
+            .add_plugins((MirrorPlugin, RecordsPlugin, CommandsPlugin));
     }
 }
 
@@ -110,6 +113,41 @@ pub fn fill(app: &mut App, snapshot: Snapshot) {
 /// Hands the mirror one item off the sync (an event made with [`crate::fixture::sync_event`]), and settles.
 pub fn feed(app: &mut App, item: SyncItem) {
     app.world_mut().write_message(item);
+    settle(app);
+}
+
+/// Replaces what the record mirror holds of app `id` with these collections' records (each a
+/// [`crate::fixture::record_json`]; its `collection` is filled in), as a snapshot would, marks them loaded and the
+/// app's sync live, and settles. A collection the app keeps and this leaves out stays not loaded.
+pub fn fill_records(app: &mut App, id: AppId, collections: Vec<(&str, Vec<serde_json::Value>)>) {
+    let collections = collections
+        .into_iter()
+        .map(|(name, records)| {
+            let records = records
+                .into_iter()
+                .map(|mut record| {
+                    record["collection"] = serde_json::Value::String(name.to_string());
+                    serde_json::from_value(record).expect("a whole record: make it with fixture::record_json")
+                })
+                .collect();
+            (name.to_string(), records)
+        })
+        .collect();
+    let app_id = id.0.to_string();
+    app.world_mut().write_message(RecordItem::Snapshot(RecordSnapshot {
+        app: app_id.clone(),
+        at: 0,
+        declaration: None,
+        collections,
+    }));
+    app.world_mut().write_message(RecordItem::Status { app: app_id, status: RecordStatus::Live });
+    settle(app);
+}
+
+/// Hands the record mirror one event off app `id`'s stream (made with [`crate::fixture::app_event`]), and settles.
+/// Its `id` must be above the last one fed, as on the stream.
+pub fn feed_record(app: &mut App, id: AppId, event: trailhead_model::app_data::AppEvent) {
+    app.world_mut().write_message(RecordItem::Event { app: id.0.to_string(), event });
     settle(app);
 }
 
@@ -200,5 +238,75 @@ mod tests {
         assert_eq!((out.len(), out[0].request.method()), (1, Method::Post));
         answer(&mut app, source, Outcome::Ok { version: None });
         assert_eq!(app.world().resource::<Answers>().0, [(source, Outcome::Ok { version: None })]);
+    }
+
+    const KEEPER: AppId = AppId("keeper");
+
+    #[derive(serde::Deserialize, Debug, Clone, PartialEq)]
+    struct Item {
+        name: String,
+    }
+
+    /// An app that keeps a collection of its own and one filled from a feed.
+    struct Keeper;
+
+    impl ShellApp for Keeper {
+        fn manifest(&self) -> Manifest {
+            Manifest { id: KEEPER, name: "Keeper", icon: Icon::Board }
+        }
+
+        fn build(&self, _: &mut App) {}
+
+        fn collections(&self) -> crate::records::Collections {
+            let toml =
+                "[collections.items]\nfields = { name = \"string\" }\n\n[collections.mail]\nfrom = \"mail.inbox\"\n";
+            crate::records::Collections::declared(toml).keep::<Item>("items").keep::<Item>("mail")
+        }
+    }
+
+    #[test]
+    fn an_apps_records_come_from_fixtures_and_a_write_to_a_fed_collection_is_refused_at_once() {
+        use crate::fixture::{app_event, record_json};
+        use crate::records::{self, Record, RecordMirror};
+
+        let mut app = headless(ShellPlugin::new().with(Keeper));
+        app.init_resource::<Answers>().add_systems(
+            Update,
+            |mut done: MessageReader<CommandDone>, mut answers: ResMut<Answers>| {
+                answers.0.extend(done.read().map(|d| (d.source, d.outcome.clone())));
+            },
+        );
+        let names = |app: &mut App| {
+            let world = app.world_mut();
+            let mut names: Vec<String> =
+                world.query::<&Record<Item>>().iter(world).map(|r| r.data.name.clone()).collect();
+            names.sort();
+            names
+        };
+        assert!(!app.world().resource::<RecordMirror>().loaded(KEEPER, "items"));
+        let item = |id: &str, name: &str| record_json(json!({"id": id, "data": {"name": name}}));
+        fill_records(&mut app, KEEPER, vec![("items", vec![item("r1", "rope"), item("r2", "chalk")])]);
+        assert_eq!(names(&mut app), ["chalk", "rope"]);
+        let mirror = app.world().resource::<RecordMirror>();
+        assert!(mirror.loaded(KEEPER, "items") && !mirror.loaded(KEEPER, "mail"));
+
+        let after = record_json(json!({"id": "r3", "collection": "items", "data": {"name": "tape"}}));
+        feed_record(
+            &mut app,
+            KEEPER,
+            app_event(json!({"id": 1, "collection": "items", "record_id": "r3", "after": after})),
+        );
+        assert_eq!(names(&mut app), ["chalk", "rope", "tape"]);
+
+        set_connection(&mut app, Connection::Live);
+        let source = app.world_mut().spawn_empty().id();
+        let request = records::create(KEEPER, "mail", &json!({"name": "hi"}));
+        app.world_mut().write_message(Submit { source, request });
+        settle(&mut app);
+        let answers = &app.world().resource::<Answers>().0;
+        assert!(
+            matches!(&answers[..], [(s, Outcome::Forbidden(why))] if *s == source && why.contains("mail.inbox")),
+            "{answers:?}"
+        );
     }
 }

@@ -10,6 +10,8 @@ use bevy::prelude::*;
 use crate::commands::{CommandsPlugin, Reply};
 use crate::mirror::{MirrorPlugin, apply_sync};
 use crate::net::{ApiAccess, Link, LinkJob, NetCommand, NetConfig, NetEvent, NetHandle, Reason};
+use crate::record_sync::{AppSpec, RecordItem};
+use crate::records::{RecordsPlugin, apply_records};
 use crate::sync::SyncItem;
 
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,18 +71,27 @@ pub struct ConnectionPlugin {
     target: Option<String>,
     /// The app's work while a control plane is held, handed to the net thread when the plugin is built.
     jobs: Mutex<Vec<Box<dyn LinkJob>>>,
+    /// The apps whose records are mirrored while signed in.
+    records: Vec<AppSpec>,
 }
 
 impl ConnectionPlugin {
     pub fn new(config: NetConfig, target: Option<String>) -> Self {
         let target = target.or_else(|| config.saved_target());
-        ConnectionPlugin { config, target, jobs: Mutex::default() }
+        ConnectionPlugin { config, target, jobs: Mutex::default(), records: Vec::new() }
     }
 
     /// Runs `jobs` on the net thread while a control plane is held.
     #[must_use]
     pub fn with_jobs(self, jobs: impl IntoIterator<Item = Box<dyn LinkJob>>) -> Self {
         self.jobs.lock().expect("jobs lock").extend(jobs);
+        self
+    }
+
+    /// Mirrors these apps' records while signed in ([`crate::record_sync`]).
+    #[must_use]
+    pub fn with_records(mut self, records: impl IntoIterator<Item = AppSpec>) -> Self {
+        self.records.extend(records);
         self
     }
 }
@@ -92,10 +103,15 @@ impl Plugin for ConnectionPlugin {
             .init_resource::<ConnectionStatus>()
             .init_resource::<LocalEndpoint>()
             .insert_resource(Dialed(self.target.clone()))
-            .add_plugins((MirrorPlugin, CommandsPlugin))
+            .add_plugins((MirrorPlugin, RecordsPlugin, CommandsPlugin))
             .add_message::<SendNet>()
-            .insert_resource(Net(NetHandle::spawn(self.config.clone(), self.target.clone(), jobs)))
-            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync)).chain());
+            .insert_resource(Net(NetHandle::spawn(
+                self.config.clone(),
+                self.target.clone(),
+                jobs,
+                self.records.clone(),
+            )))
+            .add_systems(PreUpdate, (forward_commands, apply_events.before(apply_sync).before(apply_records)).chain());
     }
 }
 
@@ -106,7 +122,7 @@ fn forward_commands(net: Res<Net>, mut commands: MessageReader<SendNet>) {
 }
 
 // A Bevy system takes what it reads and writes as parameters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn apply_events(
     net: Res<Net>,
     mut commands: Commands,
@@ -115,6 +131,7 @@ fn apply_events(
     mut dialed: ResMut<Dialed>,
     mut endpoint: ResMut<LocalEndpoint>,
     mut sync: MessageWriter<SyncItem>,
+    mut records: MessageWriter<RecordItem>,
     mut replies: MessageWriter<Reply>,
 ) {
     for event in net.0.drain() {
@@ -132,6 +149,9 @@ fn apply_events(
             NetEvent::Fetched(fetched) => commands.queue(move |world: &mut World| fetched.deliver(world)),
             NetEvent::Sync(item) => {
                 sync.write(item);
+            }
+            NetEvent::Records(item) => {
+                records.write(item);
             }
         }
     }
@@ -155,6 +175,7 @@ mod tests {
             .init_resource::<Dialed>()
             .add_message::<SendNet>()
             .add_message::<SyncItem>()
+            .add_message::<RecordItem>()
             .add_message::<Reply>()
             .insert_resource(Net(handle))
             .add_systems(PreUpdate, (forward_commands, apply_events).chain());

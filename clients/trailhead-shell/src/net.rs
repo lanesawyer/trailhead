@@ -26,6 +26,7 @@ use trailhead_wire::ui::{CLOSE_NOT_ALLOWED, UI_ALPN, UiTunnel, open_ui_tunnel};
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
 use crate::commands::{self, CommandId, Reply, Request};
+use crate::record_sync::{self, AppSpec, RecordItem, RecordRemote, RecordTimings};
 use crate::sync::{self, Remote, Report, Resume, SyncItem, SyncTimings};
 
 /// How the app is connected to its factory. The Bevy `States` type is in [`crate::connection`]; this is the same
@@ -128,6 +129,8 @@ pub enum NetEvent {
     Access(ApiAccess),
     /// The snapshot and then each event, for the mirror.
     Sync(SyncItem),
+    /// An app's records and then its events, for the record mirror.
+    Records(RecordItem),
     /// What came of a [`NetCommand::Request`].
     Reply(Reply),
     /// What came of a [`NetCommand::Fetch`].
@@ -263,7 +266,7 @@ impl NetConfig {
         let trailhead_config_dir = pick("TRAILHEAD_CONFIG_DIR", trailhead.as_ref().map(|d| d.config_dir()))?;
         Some(NetConfig {
             config_dir: pick("TRAILHEAD_SHELL_DIR", shell.as_deref())?,
-            trailhead_config_dir: trailhead_config_dir.clone(),
+            trailhead_config_dir,
             trailhead_data_dir: pick("TRAILHEAD_DATA_DIR", trailhead.as_ref().map(|d| d.data_dir()))?,
             keyring: CredStore::new(PathBuf::new()).keyring,
             network: Network::Internet,
@@ -306,8 +309,14 @@ pub struct NetHandle {
 
 impl NetHandle {
     /// Starts the net thread. `target` is dialed straight away; without one the link is `Offline` until a
-    /// [`NetCommand::Connect`]. `jobs` run while a control plane is held.
-    pub fn spawn(config: NetConfig, target: Option<String>, jobs: Vec<Box<dyn LinkJob>>) -> NetHandle {
+    /// [`NetCommand::Connect`]. `jobs` run while a control plane is held, and the apps in `records` have their
+    /// records synced while signed in.
+    pub fn spawn(
+        config: NetConfig,
+        target: Option<String>,
+        jobs: Vec<Box<dyn LinkJob>>,
+        records: Vec<AppSpec>,
+    ) -> NetHandle {
         let (cmd_tx, cmd_rx) = tokio_mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -320,7 +329,7 @@ impl NetHandle {
                         return;
                     }
                 };
-                runtime.block_on(run(config, target, jobs, cmd_rx, event_tx));
+                runtime.block_on(run(config, target, jobs, records, cmd_rx, event_tx));
             })
             .expect("spawn the net thread");
         NetHandle { commands: cmd_tx, events: Mutex::new(event_rx), thread: Some(thread) }
@@ -432,6 +441,9 @@ struct Net {
     resume: Resume,
     reports: tokio_mpsc::UnboundedSender<(u64, Report)>,
     timings: SyncTimings,
+    /// The apps whose records are synced, each with where its stream got to, and their running syncs.
+    records: Vec<(AppSpec, Resume)>,
+    record_syncs: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// The net thread can't start (no runtime, no endpoint): go `Offline` and say nothing is dialed, so the
@@ -445,6 +457,7 @@ async fn run(
     config: NetConfig,
     target: Option<String>,
     jobs: Vec<Box<dyn LinkJob>>,
+    records: Vec<AppSpec>,
     mut commands: tokio_mpsc::UnboundedReceiver<NetCommand>,
     events: mpsc::Sender<NetEvent>,
 ) {
@@ -459,6 +472,7 @@ async fn run(
     let http = reqwest::Client::builder().timeout(REQUEST_TIMEOUT).build().expect("http client");
     let (reports, mut report_rx) = tokio_mpsc::unbounded_channel();
     let mut net = Net::new(config, endpoint, http, events, reports, jobs);
+    net.records = records.into_iter().map(|spec| (spec, Resume::default())).collect();
     match target {
         Some(t) => net.connect(&t).await,
         None => net.set(Link::Offline, Some(Reason::NoTarget)),
@@ -550,6 +564,8 @@ impl Net {
             resume: Resume::default(),
             reports,
             timings: SyncTimings::default(),
+            records: Vec::new(),
+            record_syncs: Vec::new(),
         }
     }
 
@@ -566,12 +582,9 @@ impl Net {
     }
 
     async fn connect(&mut self, text: &str) {
-        let id = match parse_endpoint_id(text) {
-            Ok(id) => id,
-            Err(_) => {
-                self.drop_target();
-                return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string())));
-            }
+        let Ok(id) = parse_endpoint_id(text) else {
+            self.drop_target();
+            return self.set(Link::Offline, Some(Reason::BadTarget(text.trim().to_string())));
         };
         if self.target.as_ref().is_none_or(|t| t.id != id) {
             match open_ui_tunnel(self.endpoint.clone(), id).await {
@@ -585,7 +598,7 @@ impl Net {
             self.token = None;
             self.state = None;
             self.stop_sync();
-            self.resume.clear();
+            self.clear_resume();
         }
         let _ = self.events.send(NetEvent::Dialed(Some(id.to_string())));
         if std::fs::create_dir_all(&self.config.config_dir).is_ok()
@@ -651,7 +664,7 @@ impl Net {
         self.stop_sync();
         self.token = None;
         self.pasted = None;
-        self.resume.clear();
+        self.clear_resume();
     }
 
     /// One probe of the whole path, and the climb back to `Live` from wherever it broke.
@@ -716,7 +729,7 @@ impl Net {
                 && r.status() == reqwest::StatusCode::UNAUTHORIZED
             {
                 self.token = None;
-                self.resume.clear();
+                self.clear_resume();
                 self.set(Link::Offline, Some(Reason::TokenRejected));
             }
             return;
@@ -739,7 +752,7 @@ impl Net {
             Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.unwrap_or_default(),
             Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
                 self.token = None;
-                self.resume.clear();
+                self.clear_resume();
                 return self.refuse(Reason::TokenRejected, pasted.is_some(), has_saved);
             }
             Ok(r) => {
@@ -751,7 +764,7 @@ impl Net {
         // The user token only: an agent's would let the shell act as one.
         if !me["agent_id"].is_null() {
             self.token = None;
-            self.resume.clear();
+            self.clear_resume();
             return self.refuse(Reason::AgentToken, pasted.is_some(), has_saved);
         }
         self.release_probe();
@@ -761,7 +774,7 @@ impl Net {
             tracing::warn!(error = %e, "can't save the token; it will be asked for again next start");
         }
         if pasted.is_some() {
-            self.resume.clear();
+            self.clear_resume();
         }
         let user = me["user"]["name"].as_str().unwrap_or("you").to_string();
         let user_id = me["user"]["id"].as_str().unwrap_or_default().to_string();
@@ -825,6 +838,7 @@ impl Net {
         self.stop_sync();
         self.sync_run += 1;
         let (run, events, reports) = (self.sync_run, self.events.clone(), self.reports.clone());
+        self.start_record_syncs(&base, &token);
         let remote = Remote::new(base, token, &self.timings);
         self.sync = Some(tokio::spawn(sync::run(
             remote,
@@ -841,6 +855,35 @@ impl Net {
         self.resume.pause();
         if let Some(task) = self.sync.take() {
             task.abort();
+        }
+        for task in self.record_syncs.drain(..) {
+            task.abort();
+        }
+        for (_, resume) in &self.records {
+            resume.pause();
+        }
+    }
+
+    /// Forgets where the streams got to: the next sync starts from snapshots, the tasks' and each app's.
+    fn clear_resume(&self) {
+        self.resume.clear();
+        for (_, resume) in &self.records {
+            resume.clear();
+        }
+    }
+
+    /// Starts each app's record sync beside the task sync, from where its stream got to.
+    fn start_record_syncs(&mut self, base: &str, token: &str) {
+        // An app the server doesn't know is asked about again this much slower than the link is probed: a minute by
+        // default.
+        let timings = RecordTimings { sync: self.timings, unregistered: self.config.status_retry * 30 };
+        for (spec, resume) in &self.records {
+            let events = self.events.clone();
+            let remote = RecordRemote::new(base.to_string(), token.to_string(), &self.timings);
+            let run = record_sync::run(remote, timings, resume.clone(), spec.clone(), move |item| {
+                events.send(NetEvent::Records(item)).is_ok()
+            });
+            self.record_syncs.push(tokio::spawn(run));
         }
     }
 
@@ -1042,7 +1085,7 @@ mod tests {
         };
         std::fs::create_dir_all(&config.config_dir).unwrap();
         std::fs::write(config.key_file(), "not a key").unwrap();
-        let handle = NetHandle::spawn(config, Some("abc".into()), Vec::new());
+        let handle = NetHandle::spawn(config, Some("abc".into()), Vec::new(), Vec::new());
         let mut events = Vec::new();
         for _ in 0..100 {
             events.extend(handle.drain());

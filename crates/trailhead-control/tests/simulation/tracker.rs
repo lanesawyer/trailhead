@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Credential, Error, FollowUpTask, Grade, HumanContext, Picture, Priority, ProjectRepo, Result, RunPatch, Scope,
-    Task, TaskKey, Tracker, Verdict,
+    Credential, Error, FollowUpTask, Grade, HumanContext, NewPlanTask, Notice, Picture, PlanTask, PlanTaskUpdate,
+    Priority, ProjectRepo, Result, RunPatch, Scope, Task, TaskKey, Tracker, Verdict,
 };
 
 /// An armed failure, shared by every handle on the tracker: the control plane's own, its sub-agents' and the
@@ -210,6 +210,36 @@ impl Tracker for Flaky {
         self.inner.find_open_by_title(project, title).await
     }
 
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>> {
+        self.read()?;
+        self.inner.plan_tasks(spec).await
+    }
+
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey> {
+        self.write()?;
+        self.inner.create_plan_task(spec, task).await
+    }
+
+    async fn update_plan_task(&self, task: &TaskKey, update: &PlanTaskUpdate) -> Result<()> {
+        self.write()?;
+        self.inner.update_plan_task(task, update).await
+    }
+
+    async fn cancel(&self, task: &TaskKey) -> Result<()> {
+        self.write()?;
+        self.inner.cancel(task).await
+    }
+
+    async fn set_description(&self, task: &TaskKey, description: &str) -> Result<()> {
+        self.write()?;
+        self.inner.set_description(task, description).await
+    }
+
+    async fn patch_plan(&self, task: &TaskKey, patch: serde_json::Value) -> Result<()> {
+        self.write()?;
+        self.inner.patch_plan(task, patch).await
+    }
+
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential> {
         self.write()?;
         self.inner.create_sub_agent(name, project, ttl).await
@@ -218,5 +248,15 @@ impl Tracker for Flaky {
     async fn revoke_sub_agent(&self, name: &str) -> Result<()> {
         self.write()?;
         self.inner.revoke_sub_agent(name).await
+    }
+
+    async fn notify(&self, notice: &Notice) -> Result<()> {
+        self.write()?;
+        self.inner.notify(notice).await
+    }
+
+    async fn resolve_notices(&self, subject: &str) -> Result<()> {
+        self.write()?;
+        self.inner.resolve_notices(subject).await
     }
 }

@@ -9,10 +9,9 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 use tracing::Instrument;
 use trailhead_factory::messages;
-use trailhead_factory::{
-    ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label,
-};
+use trailhead_factory::{ControlState, Labels, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label};
 
+use crate::notify::PauseChange;
 use crate::phase::{Phase, phase};
 use crate::timing::{unix_now, until};
 use crate::{FACTORY_LABEL, Factory, Outcome, Placed, Reconciled, SHUTDOWN_GRACE};
@@ -224,7 +223,9 @@ impl Factory {
         // a usage reading another repo's run heard reaches this repo's board.
         self.capped();
         self.status.usage(self.host.usage());
-        if self.usage_paused() {
+        let paused = self.usage_paused();
+        self.tell_pause().await;
+        if paused {
             return Ok(Vec::new());
         }
         let mut others = self.held_by_others(busy).await?;
@@ -309,13 +310,9 @@ impl Factory {
         let delay = Duration::from_secs(u64::from(after) * 60);
         let mut due: Vec<(TaskKey, Duration)> = self
             .pool
-            .parked_since
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(key, _)| !busy.contains(*key))
-            .map(|(key, since)| (key.clone(), since.elapsed()))
-            .filter(|(_, parked_for)| *parked_for >= delay)
+            .parked()
+            .into_iter()
+            .filter(|(key, parked_for)| !busy.contains(key) && *parked_for >= delay)
             .collect();
         if due.is_empty() {
             return 0;
@@ -392,13 +389,13 @@ impl Factory {
                 }
             }
             // Recorded before the release, so reconcile and `factory status` don't look for a sandbox that is going.
-            let record = RunPatch { released: Patch::Set(unix_now()), ..RunPatch::default() };
+            let record = RunPatch::released(unix_now());
             if let Err(e) = self.tracker.report(&key, record).await {
                 // Most likely the asker's lease on the task hasn't lapsed yet, which keeps everyone else out of it.
                 tracing::debug!(task = %key, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
                 continue;
             }
-            self.pool.parked_since.lock().unwrap().remove(&key);
+            self.pool.unparked(&key);
             released += 1;
             tracing::info!(task = %key, parked_for = ?parked_for, "released a parked task's sandbox for waiting work");
             if let Err(e) = self.release_worker(sandbox).await {
@@ -455,7 +452,7 @@ impl Factory {
         let tasks = if waiting == 1 { "task" } else { "tasks" };
         if parked_fill_repo_cap(parked.len(), max_sandboxes) {
             tracing::warn!(
-                held_by = collapse_repeats(parked.clone()).join(", "),
+                held_by = collapse_repeats(parked).join(", "),
                 max_sandboxes,
                 "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
             );
@@ -464,7 +461,7 @@ impl Factory {
                 holders
                     .iter()
                     .map(|(k, parked)| {
-                        let retry = self.backoff.setbacks.lock().unwrap().get(k).map(|(_, _, next_try)| *next_try);
+                        let retry = self.backoff.next_try(k);
                         describe_holder(&k.0, *parked, retry.map(|t| t.saturating_duration_since(Instant::now())))
                     })
                     .collect(),
@@ -485,6 +482,15 @@ impl Factory {
         let ready = self.tracker.ready(&scopes, usize::MAX).await?;
         let mut work = Vec::new();
         for task in ready {
+            // A spec task is a planner's while its plan waits for approval, graded or not. Once it is approved, and
+            // a task of a plan until a person grades it, the factory leaves it alone without a word.
+            if task.plan.awaits_planner() && Scope::of(&scopes, &task.key).is_some() {
+                work.push(task);
+                continue;
+            }
+            if task.held_by_plan() {
+                continue;
+            }
             match Scope::of(&scopes, &task.key) {
                 // A task a person set aside waits for them to grade it again, in a project worked whole too, and
                 // without a note: they know (TRAIL-1617).
@@ -507,7 +513,7 @@ impl Factory {
         if task.run.ungraded != Some(true) {
             return;
         }
-        let update = RunPatch { ungraded: Patch::Set(false), ..RunPatch::default() };
+        let update = RunPatch::ungraded(false);
         if let Err(e) = self.tracker.report(&task.key, update).await {
             // Keep the key out of the set only if nothing was cleared, so a failed write is retried next poll.
             if was_reported {
@@ -524,7 +530,7 @@ impl Factory {
         tracing::info!(task = %task.key, "no grade; skipping it until a human sets one");
         let told = async {
             self.tracker.note(&task.key, &messages::ungraded_note()).await?;
-            self.tracker.report(&task.key, RunPatch { ungraded: Patch::Set(true), ..RunPatch::default() }).await
+            self.tracker.report(&task.key, RunPatch::ungraded(true)).await
         };
         if let Err(e) = told.await {
             tracing::warn!(task = %task.key, error = %e, "couldn't note that the task has no grade");
@@ -590,7 +596,7 @@ impl Factory {
             .filter(|s| s.labels.get(label::TASK).is_some_and(|t| !running.contains(&TaskKey(t.clone()))))
             .collect();
         if candidates.is_empty() {
-            self.pool.parked_since.lock().unwrap().clear();
+            self.pool.forget_parked();
             return Ok(held);
         }
         let mut parked = HashSet::new();
@@ -627,7 +633,7 @@ impl Factory {
             let whole = Scope::of(&scopes, &TaskKey(key.clone())).is_some_and(|s| s.queue.is_empty());
             let off_queue = listing_ok && !whole && !listed.contains_key(&TaskKey(key.clone()));
             let task = match found {
-                Ok(task) if matches!(task.status, Status::Open | Status::Cancelled | Status::Done) => task,
+                Ok(task) if done_with_sandbox(&task) => task,
                 Ok(task)
                     if off_queue
                         && matches!(task.status, Status::NeedsInput | Status::InProgress | Status::InReview) =>
@@ -653,7 +659,11 @@ impl Factory {
                     // The wait before a sandbox is given up (`release_parked_after`) counts from the first look.
                     if task.status == Status::NeedsInput {
                         let key = task.key.clone();
-                        self.pool.parked_since.lock().unwrap().entry(key.clone()).or_insert_with(Instant::now);
+                        self.pool.seen_parked(&key);
+                        if self.release_idle_planner(&task, sandbox).await {
+                            released.push(sandbox.name.clone());
+                            continue;
+                        }
                         parked.insert(key);
                     }
                     continue;
@@ -673,7 +683,7 @@ impl Factory {
                 released.push(sandbox.name.clone());
             }
         }
-        self.pool.parked_since.lock().unwrap().retain(|key, _| parked.contains(key));
+        self.pool.keep_parked(|key| parked.contains(key));
         if released.is_empty() {
             return Ok(held);
         }
@@ -729,8 +739,9 @@ impl Factory {
     /// Whether to hold off starting runs because a usage window is nearly full. Running ones carry on.
     fn usage_paused(&self) -> bool {
         let paused = self.paused_until();
+        let first = !self.host.pause_looked.swap(true, std::sync::atomic::Ordering::Relaxed);
         let mut logged = self.host.pause_logged.lock().unwrap();
-        match &paused {
+        let change = match &paused {
             Some((window, used, resets_at)) if *logged != Some(*resets_at) => {
                 tracing::warn!(
                     %window,
@@ -738,10 +749,25 @@ impl Factory {
                     resumes_in = ?until(*resets_at),
                     "subscription usage window nearly full; starting no new runs until it resets"
                 );
+                // A later reset while already paused is the same pause, told once.
+                let started = logged.is_none();
                 *logged = Some(*resets_at);
+                started.then(|| PauseChange::Paused {
+                    window: window.clone(),
+                    used: *used,
+                    limit: self.host.pause_at.get(window).copied(),
+                    resets_at: *resets_at,
+                })
             }
-            None if logged.take().is_some() => tracing::info!("usage window reset; starting runs again"),
-            _ => {}
+            None if logged.take().is_some() => {
+                tracing::info!("usage window reset; starting runs again");
+                Some(PauseChange::Resumed)
+            }
+            None if first => Some(PauseChange::Resumed),
+            _ => None,
+        };
+        if change.is_some() {
+            *self.host.pause_change.lock().unwrap() = change;
         }
         paused.is_some()
     }
@@ -802,6 +828,17 @@ fn in_start_order(mut ready: Vec<Task>) -> Vec<Task> {
     let rework = |t: &Task| t.changes_requested || (t.run.pr.is_some() && t.run.pending_changes().is_some());
     ready.sort_by_key(|t| (t.priority, !rework(t)));
     ready
+}
+
+/// Whether a task no longer needs the pooled sandbox held for it: reopened or finished, or a spec task whose plan a
+/// person approved, which no planner runs on again. An open spec task still waiting on its planner keeps it: the
+/// planner's session is on its disk.
+fn done_with_sandbox(task: &Task) -> bool {
+    match task.status {
+        Status::Open => !task.keeps_planner_sandbox(),
+        Status::Cancelled | Status::Done => true,
+        _ => task.plan_approved(),
+    }
 }
 
 /// Whether `sandbox` is the one pooled sandbox `task` keeps among `candidates` labelled for it: the one it last ran
@@ -932,6 +969,7 @@ mod keeps_tests {
                 host: host.map(str::to_string),
                 ..RunRecord::default()
             },
+            plan: Default::default(),
         }
     }
 

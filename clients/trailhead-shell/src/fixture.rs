@@ -3,7 +3,7 @@
 //! ([`id`]), so a test can write `"parent_id": "t7"` and find the task by `id("t7")`.
 
 use serde_json::{Value, json};
-use trailhead_model::{Agent, Attachment, Claim, Comment, Project, Task, User};
+use trailhead_model::{Agent, Attachment, Claim, Comment, Notification, Project, Task, User};
 
 use crate::sync::SyncItem;
 use uuid::Uuid;
@@ -25,7 +25,7 @@ pub fn sid(name: &str) -> String {
     id(name).to_string()
 }
 
-const IDS: [&str; 12] = [
+const IDS: [&str; 15] = [
     "id",
     "workspace_id",
     "project_id",
@@ -38,6 +38,9 @@ const IDS: [&str; 12] = [
     "created_by",
     "owner_user_id",
     "duplicate_of",
+    "raised_by",
+    "record_id",
+    "batch_id",
 ];
 
 /// `defaults` with `fields` over them, each id field's short name turned into its UUID.
@@ -155,6 +158,49 @@ pub fn user_json(fields: Value) -> Value {
 
 pub fn user(fields: Value) -> User {
     serde_json::from_value(user_json(fields)).expect("a whole user")
+}
+
+/// A notification's JSON as the API sends it: raised by the server, unread.
+pub fn notification_json(fields: Value) -> Value {
+    let defaults = json!({
+        "id": "n0", "workspace_id": "w", "source": "server", "kind": "task.question", "title": "", "body": "",
+        "actions": [], "raised_by": "u", "created_at": AT, "read_at": null, "resolved_at": null,
+    });
+    whole(defaults, fields)
+}
+
+pub fn notification(fields: Value) -> Notification {
+    serde_json::from_value(notification_json(fields)).expect("a whole notification")
+}
+
+/// An app's record as the API sends it (`{id, collection, key, data, version, ...}`): give the short name in `id`, the
+/// `collection` and its `data`. A test of an app fills its collections with these ([`crate::testing::fill_records`]).
+pub fn record_json(fields: Value) -> Value {
+    let defaults = json!({
+        "id": "r0", "collection": "", "key": null, "data": {}, "version": 1, "created_at": AT, "updated_at": AT,
+        "created_by": "u",
+    });
+    whole(defaults, fields)
+}
+
+/// One event off an app's stream, whole from the fields a test gives (`id`, `collection`, `record_id`, and `after`
+/// as a [`record_json`], or `before` and no `after` for a removal). `kind` follows from them unless given.
+pub fn app_event(fields: Value) -> trailhead_model::app_data::AppEvent {
+    let kind =
+        match (fields.get("before").is_some_and(|b| !b.is_null()), fields.get("after").is_some_and(|a| !a.is_null())) {
+            (false, true) => "record.created",
+            (true, true) => "record.updated",
+            _ => "record.deleted",
+        };
+    let defaults = json!({
+        "id": 0, "batch_id": "b", "actor_id": "u", "on_behalf_of": "u", "collection": "", "record_id": "r0",
+        "kind": kind, "before": null, "after": null, "undoes": null, "at": AT,
+    });
+    let mut event = whole(defaults, fields);
+    if let Some(Value::String(s)) = event.get("actor_id") {
+        event["actor_id"] = Value::String(sid(s));
+    }
+    serde_json::from_value(event).expect("a whole app event")
 }
 
 /// A `created_at` from a small number (0 to 59), for tests that order comments: `1` is a second after [`AT`].

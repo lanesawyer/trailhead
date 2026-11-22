@@ -179,7 +179,7 @@ mod tests {
         let keys = |set: &PictureSet| picture_items(std::slice::from_ref(set)).into_iter().map(|(k, _)| k).collect();
         let shut: Vec<String> = keys(&set);
         assert_eq!(shut, ["p/run-7/head", "p/run-7/board/Changed/a/b", "p/run-7/inbox/New//c", "p/run-7/fold/false"]);
-        let open: Vec<String> = keys(&PictureSet { open: true, ..set.clone() });
+        let open: Vec<String> = keys(&PictureSet { open: true, ..set });
         assert_eq!(open[3..], ["p/run-7/fold/true".to_string(), "p/run-7/map/Unchanged/d/d".to_string()]);
     }
 

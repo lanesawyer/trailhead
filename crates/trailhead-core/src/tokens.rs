@@ -19,6 +19,8 @@ pub struct TokenPatch {
     /// Project keys or ids; empty means every project, like `Some(None)`.
     pub projects: Option<Option<Vec<String>>>,
     pub rate_limit_per_minute: Option<Option<i64>>,
+    /// App ids; `Some(None)` or empty is the default for the token's principal (see [`TokenOptions::apps`]).
+    pub apps: Option<Option<Vec<String>>>,
 }
 
 /// Optional limits on a new token.
@@ -29,6 +31,9 @@ pub struct TokenOptions {
     pub rate_limit_per_minute: Option<i64>,
     /// How long until it stops working. `None` means never, unless the caller's own token expires.
     pub expires_in: Option<SignedDuration>,
+    /// App ids whose data it reaches. `None` or empty: a person's own token reaches what the caller does (every app,
+    /// for a person), an agent's none.
+    pub apps: Option<Vec<String>>,
 }
 
 fn token_from_row(row: &Row) -> Result<Token> {
@@ -44,11 +49,12 @@ fn token_from_row(row: &Row) -> Result<Token> {
         projects: get_opt_json(row, 7)?.map(serde_json::from_value).transpose()?,
         rate_limit_per_minute: row.get(8)?,
         expires_at: get_opt_ts(row, 9)?,
+        apps: get_opt_json(row, 10)?.map(serde_json::from_value).transpose()?,
     })
 }
 
 const TOKEN_COLS: &str = "id, workspace_id, principal_kind, principal_id, name, created_at, revoked_at, projects, \
-     rate_limit_per_minute, expires_at";
+     rate_limit_per_minute, expires_at, apps";
 
 fn hash(secret: &str) -> String {
     hex::encode(Sha256::digest(secret.as_bytes()))
@@ -70,6 +76,31 @@ async fn project_scope(tx: &Tx, ctx: &Ctx, refs: Option<&[String]>) -> Result<Op
         return Err(Error::Forbidden("a token can't reach projects you can't".into()));
     }
     Ok(Some(serde_json::to_string(&ids)?))
+}
+
+/// Checks app ids for `tokens.apps`; `None` or empty stores `NULL`. Never wider than the caller's own reach.
+fn app_scope(ctx: &Ctx, apps: Option<&[String]>) -> Result<Option<String>> {
+    let Some(apps) = apps.filter(|a| !a.is_empty()) else { return Ok(None) };
+    let mut ids = apps.iter().map(|a| a.trim().to_string()).collect::<Vec<_>>();
+    for id in &ids {
+        trailhead_model::app_data::check_app_id(id)?;
+    }
+    ids.sort();
+    ids.dedup();
+    if let Some(app) = ids.iter().find(|a| !ctx.reaches_app(a)) {
+        return Err(Error::Forbidden(format!("a token can't reach app {app}, which you can't")));
+    }
+    Ok(Some(serde_json::to_string(&ids)?))
+}
+
+/// What a token's context reaches of app data: what it names, else every app for a person's token not limited to
+/// projects, else none.
+fn token_apps(token: &Token) -> Option<Vec<String>> {
+    match (&token.apps, token.principal, &token.projects) {
+        (Some(apps), ..) => Some(apps.clone()),
+        (None, Principal::User(_), None) => None,
+        _ => Some(Vec::new()),
+    }
 }
 
 /// Checks and stores a token for [`Store::create_token_with`], returning it with its secret.
@@ -115,6 +146,12 @@ pub(crate) async fn issue_token(
     {
         opts.projects = Some(scope.iter().map(Uuid::to_string).collect());
     }
+    if let (Some(mine), Principal::User(_)) = (&ctx.apps, principal)
+        && opts.apps.as_ref().is_none_or(|a| a.is_empty())
+    {
+        opts.apps = Some(mine.clone());
+    }
+    let apps = app_scope(ctx, opts.apps.as_deref())?;
     let (kind, pid) = token_principal(tx, principal).await?;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| Error::Corrupt(format!("no randomness: {e}")))?;
@@ -125,8 +162,8 @@ pub(crate) async fn issue_token(
         .query(
             &format!(
                 "INSERT INTO tokens (id, workspace_id, principal_kind, principal_id, name, secret_hash, created_at,
-                 projects, rate_limit_per_minute, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) RETURNING {TOKEN_COLS}"
+                 projects, rate_limit_per_minute, expires_at, apps)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) RETURNING {TOKEN_COLS}"
             ),
             libsql::params![
                 Uuid::now_v7().to_string(),
@@ -138,7 +175,8 @@ pub(crate) async fn issue_token(
                 tx.now_str(),
                 projects,
                 opts.rate_limit_per_minute,
-                expires_at.map(fmt_ts)
+                expires_at.map(fmt_ts),
+                apps
             ],
         )
         .await?;
@@ -229,6 +267,7 @@ impl Store {
         };
         ctx.rate_limit = token.rate_limit_per_minute;
         ctx.expires_at = token.expires_at;
+        ctx.apps = token_apps(&token);
         Ok((ctx, token))
     }
 
@@ -322,13 +361,18 @@ impl Store {
                 Some(refs) => project_scope(tx, ctx, refs.as_deref()).await?,
             };
             let rate_limit = patch.rate_limit_per_minute.unwrap_or(before.rate_limit_per_minute);
+            let apps = match &patch.apps {
+                None => before.apps.as_ref().map(serde_json::to_string).transpose()?,
+                Some(apps) => app_scope(ctx, apps.as_deref())?,
+            };
             let mut rows = tx
                 .conn
                 .query(
                     &format!(
-                        "UPDATE tokens SET projects = ?1, rate_limit_per_minute = ?2 WHERE id = ?3 RETURNING {TOKEN_COLS}"
+                        "UPDATE tokens SET projects = ?1, rate_limit_per_minute = ?2, apps = ?3 WHERE id = ?4
+                         RETURNING {TOKEN_COLS}"
                     ),
-                    libsql::params![projects, rate_limit, id.to_string()],
+                    libsql::params![projects, rate_limit, apps, id.to_string()],
                 )
                 .await?;
             token_from_row(&rows.next().await?.expect("RETURNING yields a row"))

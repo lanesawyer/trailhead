@@ -1,6 +1,11 @@
-//! The whole of the selected task (`GET /v1/tasks/{key}`), for the task modal: what the mirror doesn't hold, such as
-//! its dependencies and every comment (the mirror keeps only open questions and the last handoff). It is fetched when
-//! the task is selected and again when the stream brings an event about it, and the newest answer wins.
+//! The whole of a task (`GET /v1/tasks/{key}`): what the mirror doesn't hold, such as its dependencies and every
+//! comment (the mirror keeps only open questions and the last handoff). [`Detail`] follows one resource that names a
+//! task ([`Followed`]): the inspector's [`Selection`] for the task modal, and the graph's page for a plan's
+//! conversation. It is fetched when that task changes and again when the stream brings an event about it, and the
+//! newest answer wins. Following a task also marks the unread notifications about it read: the person is looking at
+//! it.
+
+use std::marker::PhantomData;
 
 use bevy::prelude::*;
 use trailhead_client::http::Client;
@@ -8,20 +13,44 @@ use trailhead_model::{Task, TaskDetail, TaskKey};
 use trailhead_shell::connection::{Connection, SendNet};
 use trailhead_shell::mirror::Mirrored;
 use trailhead_shell::net::{Fetch, NetCommand};
+use trailhead_shell::notifications::ReadNotificationsAbout;
 use trailhead_shell::sync::{SyncItem, task_of};
 
 use crate::inspector::{Selection, Subject};
 
-/// The server's answer to a fetch, as the net thread hands it back.
+/// A resource naming the task (its id) a [`Detail`] fetches.
+pub trait Followed: Resource {
+    /// The task to fetch, if any.
+    fn followed(&self) -> Option<String>;
+}
+
+impl Followed for Selection {
+    fn followed(&self) -> Option<String> {
+        match &self.0 {
+            Some(Subject::Task(id)) => Some(id.clone()),
+            _ => None,
+        }
+    }
+}
+
+/// The server's answer to a fetch for the [`Detail`] following `F`, as the net thread hands it back.
 #[derive(Message, Debug, Clone, PartialEq)]
-pub struct DetailReply {
+pub struct DetailReply<F = Selection> {
     /// Which ask this answers.
     pub seq: u64,
     /// Boxed: a whole task is large beside the net thread's other events.
     pub result: Result<Box<TaskDetail>, String>,
+    of: PhantomData<fn() -> F>,
 }
 
-/// Fetch the selected task again: an edit lost to a newer change, so the modal should show it.
+impl<F> DetailReply<F> {
+    pub fn new(seq: u64, result: Result<Box<TaskDetail>, String>) -> Self {
+        DetailReply { seq, result, of: PhantomData }
+    }
+}
+
+/// Fetch the selected task again: an edit lost to a newer change, so the modal should show it. Every [`Detail`]
+/// hears it.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct Refetch;
 
@@ -30,50 +59,70 @@ pub async fn fetch(api: &Client, key: &str) -> Result<Box<TaskDetail>, String> {
     api.show_task(&TaskKey(key.to_string())).await.map(Box::new).map_err(|e| e.chain())
 }
 
-/// The selected task in full. It changes only when the selection or the answer does, so a view that rebuilds on its
-/// change doesn't rebuild every frame; the asking is kept in [`Fetching`].
-#[derive(Resource, Default, Debug)]
-pub struct Detail {
-    /// The task (its id) this is about; none when no task is selected.
+/// The task `F` names, in full. It changes only when `F` or the answer does, so a view that rebuilds on its change
+/// doesn't rebuild every frame; the asking is kept in [`Fetching`].
+#[derive(Resource, Debug)]
+pub struct Detail<F = Selection> {
+    /// The task (its id) this is about; none when `F` names none.
     pub id: Option<String>,
     /// The last answer for it; none until one has come.
     pub data: Option<TaskDetail>,
     /// Why the last fetch failed, if it did.
     pub error: Option<String>,
+    of: PhantomData<fn() -> F>,
 }
 
-impl Detail {
+impl<F> Default for Detail<F> {
+    fn default() -> Self {
+        Detail { id: None, data: None, error: None, of: PhantomData }
+    }
+}
+
+impl<F> Detail<F> {
     /// The fetched task, if it is the one with this id.
     pub fn of(&self, id: &str) -> Option<&TaskDetail> {
         self.data.as_ref().filter(|_| self.id.as_deref() == Some(id))
     }
 }
 
-/// The fetch in flight, and whether the answer we have is out of date.
-#[derive(Resource, Default, Debug)]
-struct Fetching {
+/// The fetch in flight for the [`Detail`] following `F`, and whether the answer we have is out of date.
+#[derive(Resource, Debug)]
+struct Fetching<F> {
     /// The ask in flight: its number and the task's id.
     asked: Option<(u64, String)>,
     /// The last ask's number; never reset, so an old answer can't match a new ask.
     next: u64,
-    /// The selected task needs (another) fetch.
+    /// The followed task needs (another) fetch.
     stale: bool,
+    of: PhantomData<fn() -> F>,
 }
 
-/// Keeps [`Detail`]; runs headless.
-pub struct DetailPlugin;
+impl<F> Default for Fetching<F> {
+    fn default() -> Self {
+        Fetching { asked: None, next: 0, stale: false, of: PhantomData }
+    }
+}
 
-impl Plugin for DetailPlugin {
+/// Keeps the [`Detail`] following `F` (the [`Selection`] unless said); runs headless.
+pub struct DetailPlugin<F = Selection>(PhantomData<fn() -> F>);
+
+impl<F> Default for DetailPlugin<F> {
+    fn default() -> Self {
+        DetailPlugin(PhantomData)
+    }
+}
+
+impl<F: Followed + Default> Plugin for DetailPlugin<F> {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Detail>()
-            .init_resource::<Fetching>()
-            .init_resource::<Selection>()
-            .add_message::<DetailReply>()
+        app.init_resource::<Detail<F>>()
+            .init_resource::<Fetching<F>>()
+            .init_resource::<F>()
+            .add_message::<DetailReply<F>>()
             .add_message::<SendNet>()
             .add_message::<SyncItem>()
             .add_message::<Refetch>()
-            .add_systems(Update, (follow_selection, mark_stale, take_replies, ask).chain())
-            .add_systems(OnEnter(Connection::Live), |mut fetching: ResMut<Fetching>| {
+            .add_systems(Update, (follow::<F>, mark_stale::<F>, take_replies::<F>, ask::<F>).chain())
+            .add_systems(OnEnter(Connection::Live), |mut fetching: ResMut<Fetching<F>>| {
                 // Whatever was asked before the link dropped won't be answered; ask again.
                 fetching.asked = None;
                 fetching.stale = true;
@@ -81,28 +130,34 @@ impl Plugin for DetailPlugin {
     }
 }
 
-/// A different selection starts over: nothing shown from the last task, and a fetch for the new one.
-fn follow_selection(selection: Res<Selection>, mut detail: ResMut<Detail>, mut fetching: ResMut<Fetching>) {
-    if !selection.is_changed() {
+/// Another task followed starts over: nothing shown from the last task, and a fetch for the new one. Its unread
+/// notifications are marked read.
+fn follow<F: Followed>(
+    followed: Res<F>,
+    mut detail: ResMut<Detail<F>>,
+    mut fetching: ResMut<Fetching<F>>,
+    mut commands: Commands,
+) {
+    if !followed.is_changed() {
         return;
     }
-    let id = match &selection.0 {
-        Some(Subject::Task(id)) => Some(id.clone()),
-        _ => None,
-    };
+    let id = followed.followed();
     if detail.id != id {
+        if let Some(task_id) = id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()) {
+            commands.trigger(ReadNotificationsAbout { task_id });
+        }
         *detail = Detail { id: id.clone(), ..Detail::default() };
         fetching.asked = None;
         fetching.stale = id.is_some();
     }
 }
 
-/// An event about the selected task (it, a comment on it, its claim) makes the answer we have out of date.
-fn mark_stale(
+/// An event about the followed task (it, a comment on it, its claim) makes the answer we have out of date.
+fn mark_stale<F: Followed>(
     mut items: MessageReader<SyncItem>,
     mut refetch: MessageReader<Refetch>,
-    detail: Res<Detail>,
-    mut fetching: ResMut<Fetching>,
+    detail: Res<Detail<F>>,
+    mut fetching: ResMut<Fetching<F>>,
 ) {
     let asked = refetch.read().count() > 0;
     let Some(id) = detail.id.as_deref() else {
@@ -120,8 +175,12 @@ fn mark_stale(
     }
 }
 
-/// Keeps an answer only if it is to the ask in flight for the task still selected.
-fn take_replies(mut replies: MessageReader<DetailReply>, mut fetching: ResMut<Fetching>, mut detail: ResMut<Detail>) {
+/// Keeps an answer only if it is to the ask in flight for the task still followed.
+fn take_replies<F: Followed>(
+    mut replies: MessageReader<DetailReply<F>>,
+    mut fetching: ResMut<Fetching<F>>,
+    mut detail: ResMut<Detail<F>>,
+) {
     for reply in replies.read() {
         let Some((seq, id)) = fetching.asked.clone() else { continue };
         if seq != reply.seq {
@@ -141,13 +200,13 @@ fn take_replies(mut replies: MessageReader<DetailReply>, mut fetching: ResMut<Fe
     }
 }
 
-/// Asks for the selected task when it is out of date and nothing is in flight. The key comes from the mirror, since
+/// Asks for the followed task when it is out of date and nothing is in flight. The key comes from the mirror, since
 /// the API takes a key or an id and the mirror's copy is the one the board shows.
-fn ask(
+fn ask<F: Followed>(
     connection: Res<State<Connection>>,
-    detail: Res<Detail>,
+    detail: Res<Detail<F>>,
     tasks: Query<&Mirrored<Task>>,
-    mut fetching: ResMut<Fetching>,
+    mut fetching: ResMut<Fetching<F>>,
     mut net: MessageWriter<SendNet>,
 ) {
     if !fetching.stale || fetching.asked.is_some() || *connection.get() != Connection::Live {
@@ -159,11 +218,11 @@ fn ask(
     let seq = fetching.next;
     fetching.asked = Some((seq, id));
     fetching.stale = false;
-    net.write(SendNet(NetCommand::Fetch(read(seq, key))));
+    net.write(SendNet(NetCommand::Fetch(read::<F>(seq, key))));
 }
 
 /// The read of the task `key`, answered with `seq`.
-fn read(seq: u64, key: String) -> Fetch {
+fn read<F: Followed>(seq: u64, key: String) -> Fetch {
     Fetch::new(move |api| {
         let key = key.clone();
         async move {
@@ -171,7 +230,7 @@ fn read(seq: u64, key: String) -> Fetch {
                 Some(api) => fetch(&api, &key).await,
                 None => Err("not connected".into()),
             };
-            DetailReply { seq, result }
+            DetailReply::<F>::new(seq, result)
         }
     })
 }
@@ -186,7 +245,9 @@ mod tests {
 
     fn app() -> App {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin)).init_state::<Connection>().add_plugins(DetailPlugin);
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<Connection>()
+            .add_plugins(DetailPlugin::<Selection>::default());
         app.world_mut().resource_mut::<NextState<Connection>>().set(Connection::Live);
         app.update();
         app
@@ -198,7 +259,7 @@ mod tests {
         let sent: Vec<_> = app.world_mut().resource_mut::<Messages<SendNet>>().drain().collect();
         let fetches = sent.iter().filter(|SendNet(c)| matches!(c, NetCommand::Fetch(_))).count();
         assert!(fetches <= 1, "{fetches} fetches in one frame");
-        let asked = app.world().resource::<Fetching>().asked.clone();
+        let asked = app.world().resource::<Fetching<Selection>>().asked.clone();
         (fetches == 1).then(|| asked.expect("a fetch sent is the one asked")).into_iter().collect()
     }
 
@@ -216,7 +277,7 @@ mod tests {
     }
 
     fn reply(app: &mut App, seq: u64, result: Result<Box<TaskDetail>, String>) {
-        app.world_mut().write_message(DetailReply { seq, result });
+        app.world_mut().write_message(DetailReply::<Selection>::new(seq, result));
         app.update();
     }
 
@@ -226,6 +287,19 @@ mod tests {
             json!({"id": 9, "entity": entity, "entity_id": id, "after": after}),
         ));
         app.update();
+    }
+
+    #[test]
+    fn selecting_a_task_asks_for_its_notifications_to_be_marked_read() {
+        #[derive(Resource, Default)]
+        struct Read(Vec<uuid::Uuid>);
+        let mut app = app();
+        app.init_resource::<Read>()
+            .add_observer(|read: On<ReadNotificationsAbout>, mut seen: ResMut<Read>| seen.0.push(read.task_id));
+        select(&mut app, "t7");
+        app.update();
+        select(&mut app, "t7");
+        assert_eq!(app.world().resource::<Read>().0, [trailhead_shell::fixture::id("t7")], "once, as it is opened");
     }
 
     #[test]

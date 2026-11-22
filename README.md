@@ -7,7 +7,7 @@ A software factory built on a task engine that humans and agents share.
 
 Agents can learn the API from `GET /llms.txt` on any server, and the workflow from the portable skill in [skills/trailhead/SKILL.md](skills/trailhead/SKILL.md).
 
-**Status:** the task engine (phases 1 to 3) is in daily use, and Trailhead's own work is tracked in it. The factory MVP was finished on 2026-10-28: real tasks go from a spec to a merged PR. Phase 5, making the factory run unattended, is under way, and a native factory UI comes after. See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap, and [docs/factory/](docs/factory/README.md) for the factory's design.
+**Status:** the task engine (phases 1 to 3) is in daily use, and Trailhead's own work is tracked in it. The factory MVP was finished on 2026-10-28: real tasks go from a spec to a merged PR. Phase 5, making the factory run unattended, is under way, and so are the factory's native app, Lookout (phase 6), and the shell of apps it sits in (phase 7). See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap, and [docs/factory/](docs/factory/README.md) for the factory's design.
 
 ## Install
 
@@ -36,7 +36,7 @@ mise run factory                                               # build and run t
 trailhead --as-me add "..." -p TRAIL --parent TRAIL-102 -d "spec"   # hand it a task
 ```
 
-It takes ready subtasks of the queue task, runs each in a pooled Sprite, opens a PR with an agent review, and leaves the merge to you. It pauses new runs when a Claude subscription's usage window is nearly full. [docs/factory/operating.md](docs/factory/operating.md) covers setup, watching runs and what to do with each outcome. Installing and running it without this repo (`trailhead factory init|start|status`) is TRAIL-114.
+It takes ready subtasks of the queue task, runs each in a pooled Sprite, opens a PR with an agent review, and leaves the merge to you. It pauses new runs when a Claude subscription's usage window is nearly full. [docs/factory/operating.md](docs/factory/operating.md) covers setup, watching runs and what to do with each outcome. Installing and setting it up without this repo (`trailhead factory init`) is TRAIL-114.
 
 ## Other machines
 
@@ -66,7 +66,7 @@ cargo fmt --all
 
 `cargo test` covers the engine and the whole factory lifecycle on in-memory fakes. Tests that touch real services are `#[ignore]`d and run as mise tasks (`mise run test-live-sprites`, `mise run test-live-daemon`), with secrets from Bitwarden through fnox. Work on Trailhead is tracked in Trailhead, in the `TRAIL` project; [AGENTS.md](AGENTS.md) has the conventions for agents working here.
 
-CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`, and checks that the published crates package (`cargo package -p trailhead-core -p trailhead-server -p trailhead`). The factory's crates aren't published yet.
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --all -- --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` on every pull request and push to `main`, and checks that the published crates package (`cargo package -p trailhead-model -p trailhead-core -p trailhead-client -p trailhead-log`). The factory's crates aren't published yet.
 
 The docs in `docs/` are also a book, built with mdBook and published to the [docs site](https://lanesawyer.github.io/trailhead/) by `.github/workflows/docs.yml`, which builds them on pull requests that touch them and deploys from `main`. `mise run docs` builds them locally and `mise run docs-serve` previews them (a plain `mdbook serve` fails or draws no diagrams on a fresh clone, because the git-ignored `mermaid.min.js` is unpacked by the docs tasks). A new page has to be listed in `docs/SUMMARY.md`; the build fails on a listed page that doesn't exist.
 
@@ -76,7 +76,7 @@ Releases are cut from GitHub Actions; there's nothing to do locally.
 
 1. Run the **Release** workflow on `main` (Actions → Release → Run workflow). Leave the version empty to take the next version [git-cliff](https://git-cliff.org) calculates from the conventional commits since the last tag (`feat` and breaking changes bump the minor version while we're pre-1.0, everything else the patch), or enter one to override it.
 2. It sets every crate to that version, regenerates [CHANGELOG.md](CHANGELOG.md) from `cliff.toml`, commits `chore(release): vX.Y.Z` to `main`, and pushes the tag.
-3. It then builds `trailhead` Linux binaries (x86_64 and arm64) and a static `trailhead-daemon` (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, with a `.sha256` beside it, which the factory's control plane downloads and verifies), publishes `trailhead-core`, `trailhead-server` and `trailhead` to crates.io, and creates a GitHub release with that version's changelog and the binaries.
+3. It then builds `trailhead` Linux binaries (x86_64 and arm64) and a static `trailhead-daemon` (`trailhead-daemon-vX.Y.Z-x86_64-unknown-linux-musl`, with a `.sha256` beside it, which the factory's control plane downloads and verifies), publishes `trailhead-model`, `trailhead-core`, `trailhead-client`, `trailhead-log`, `trailhead-server` and `trailhead` to crates.io, and creates a GitHub release with that version's changelog and the binaries.
 
 Publishing needs a crates.io API token in the `CARGO_REGISTRY_TOKEN` repository secret, and the Release workflow needs to be able to push to `main`.
 

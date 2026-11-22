@@ -8,11 +8,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+pub mod app_data;
 mod attachment;
 pub mod config;
+pub mod connector;
+mod notification;
 pub mod shell;
+pub mod wire;
 
 pub use attachment::*;
+pub use notification::*;
 
 /// A value that isn't a valid status, kind or other model value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +433,62 @@ impl ProjectRepo {
     }
 }
 
+/// The key in a task's metadata that holds its part in a plan ([`TaskPlan`]).
+pub const TASK_PLAN_KEY: &str = "plan";
+
+/// A task's part in a plan a planner draws up with a person (`docs/app-platform.md`, "Planning an ask"), read from
+/// `metadata.plan`. A spec task carries [`TaskPlan::spec`]; each subtask the planner made carries
+/// [`TaskPlan::proposed`]. Nothing here gives a task a grade: a plan's tasks stay ungraded, so the factory leaves
+/// them, until a person approves the plan, which is the person grading them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskPlan {
+    /// This is a spec task: the ask a planner works, and the parent of the plan's tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Spec>,
+    /// The planner made this task, and proposes this grade for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<ProposedGrade>,
+}
+
+/// Where a spec task's plan stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spec {
+    /// The model the person chose for this plan's planner when asking, as the factory's config names models
+    /// (`opus`); the repo's planner profile decides when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The planner's last turn said the plan is ready to approve.
+    #[serde(default)]
+    pub ready: bool,
+    /// When a person approved the plan, in Unix seconds. The planner is finished with the task from then on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved: Option<i64>,
+    /// The ask as the person wrote it: the task's description before the planner's first spec replaced it. The
+    /// factory keeps it here before that write, so every later turn is still told what was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
+}
+
+/// The grade a planner proposes for a task it made, and why, for the person approving the plan to take or change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProposedGrade {
+    pub grade: Grade,
+    #[serde(default)]
+    pub why: String,
+}
+
+impl TaskPlan {
+    /// The `plan` object in a task's metadata, or `None` when it is absent or unreadable.
+    pub fn of(metadata: &Value) -> Option<TaskPlan> {
+        serde_json::from_value(metadata.get(TASK_PLAN_KEY)?.clone()).ok()
+    }
+
+    /// Whether a planner still has this task to work: a spec task whose plan no person has approved.
+    pub fn awaits_planner(&self) -> bool {
+        self.spec.as_ref().is_some_and(|spec| spec.approved.is_none())
+    }
+}
+
 /// Whether `file` lies inside the directory `path` (`None` is the whole repo).
 pub fn within(path: Option<&str>, file: &str) -> bool {
     match path {
@@ -659,6 +720,7 @@ string_enum!(Entity "entity" {
     Dependency => "dependency",
     Agent => "agent",
     Attachment => "attachment",
+    Notification => "notification",
 });
 
 /// The task `POST /v1/tasks` returns, with a warning when open tasks have a close title.
@@ -696,6 +758,10 @@ pub struct Token {
     pub rate_limit_per_minute: Option<i64>,
     /// When it stops working. `None` means never.
     pub expires_at: Option<Timestamp>,
+    /// The apps whose data it reaches, by id. `None`: a person's token not limited to projects reaches every app;
+    /// any other token reaches none.
+    #[serde(default)]
+    pub apps: Option<Vec<String>>,
 }
 
 /// `GET /v1/me`: the caller.
@@ -804,6 +870,20 @@ pub struct CreatedToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tasks_plan_is_read_from_its_metadata() {
+        let spec = TaskPlan::of(&serde_json::json!({"plan": {"spec": {"model": "opus"}}})).unwrap();
+        assert_eq!(spec.spec.as_ref().and_then(|s| s.model.as_deref()), Some("opus"));
+        assert!(spec.awaits_planner());
+        let approved = TaskPlan::of(&serde_json::json!({"plan": {"spec": {"ready": true, "approved": 5}}})).unwrap();
+        assert!(!approved.awaits_planner());
+        let made = TaskPlan::of(&serde_json::json!({"plan": {"proposed": {"grade": 2, "why": "one app"}}})).unwrap();
+        assert_eq!(made.proposed.map(|p| p.why), Some("one app".into()));
+        assert!(!TaskPlan::default().awaits_planner());
+        assert_eq!(TaskPlan::of(&serde_json::json!({"factory": {}})), None);
+        assert_eq!(TaskPlan::of(&serde_json::json!({"plan": {"proposed": {"grade": 9}}})), None);
+    }
 
     #[test]
     fn a_project_repo_reads_tolerantly() {

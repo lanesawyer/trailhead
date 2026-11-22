@@ -35,8 +35,8 @@ pub(crate) async fn agent(cx: &Ctx, cmd: AgentCmd) -> Result<()> {
                 }
             }
         }
-        AgentCmd::Add { name, projects, rate_limit, print_token } => {
-            let new = NewAgent { name, projects, rate_limit_per_minute: rate_limit };
+        AgentCmd::Add { name, projects, apps, rate_limit, print_token } => {
+            let new = NewAgent { name, projects, apps, rate_limit_per_minute: rate_limit };
             let created = c.api().create_agent(&new).await.map_err(api_err)?;
             if print_token {
                 println!("{}", created.secret);
@@ -56,7 +56,7 @@ pub(crate) async fn agent(cx: &Ctx, cmd: AgentCmd) -> Result<()> {
                 match saved {
                     Some(Saved::Keyring) => println!("token saved to the OS keyring; use `trailhead --as {name}`"),
                     Some(Saved::File(path)) => {
-                        println!("token saved to {}; use `trailhead --as {name}`", path.display())
+                        println!("token saved to {}; use `trailhead --as {name}`", path.display());
                     }
                     None => println!("token (shown once): {}", created.secret),
                 }
@@ -91,6 +91,11 @@ pub(crate) async fn token(cx: &Ctx, cmd: TokenCmd) -> Result<()> {
                     Some(n) => format!("{n}/min"),
                     None => "unlimited".into(),
                 };
+                let apps = match (&t.apps, t.principal, &t.projects) {
+                    (Some(apps), ..) => apps.join(","),
+                    (None, Principal::User(_), None) => "all".into(),
+                    _ => "none".into(),
+                };
                 let expires = match t.expires_at {
                     Some(at) => format!("  expires={}", short_time(&at.to_string())),
                     None => String::new(),
@@ -99,12 +104,21 @@ pub(crate) async fn token(cx: &Ctx, cmd: TokenCmd) -> Result<()> {
                     Principal::User(id) => ("user", id),
                     Principal::Agent(id) => ("agent", id),
                 };
-                println!("{}  {kind} {id}  {}  projects={scope}  rate={limit}{expires}{revoked}", t.id, t.name);
+                println!(
+                    "{}  {kind} {id}  {}  projects={scope}  apps={apps}  rate={limit}{expires}{revoked}",
+                    t.id, t.name
+                );
             }
         }
-        TokenCmd::Add { name, agent, projects, rate_limit, expires } => {
-            let new =
-                NewToken { name, agent, projects, rate_limit_per_minute: rate_limit, expires_in_seconds: expires };
+        TokenCmd::Add { name, agent, projects, apps, rate_limit, expires } => {
+            let new = NewToken {
+                name,
+                agent,
+                projects,
+                apps,
+                rate_limit_per_minute: rate_limit,
+                expires_in_seconds: expires,
+            };
             let created = api.create_token(&new).await.map_err(api_err)?;
             cx.emit(&created, |c| c.secret.clone());
         }
@@ -112,11 +126,15 @@ pub(crate) async fn token(cx: &Ctx, cmd: TokenCmd) -> Result<()> {
             let token = api.revoke_token(&id).await.map_err(api_err)?;
             cx.emit(&token, |_| "revoked".into());
         }
-        TokenCmd::Edit { id, projects, rate_limit } => {
+        TokenCmd::Edit { id, projects, apps, rate_limit } => {
             let mut update = TokenUpdate::default();
             if let Some(p) = projects {
                 let all = p.iter().all(|k| k.trim().is_empty() || k.eq_ignore_ascii_case("all"));
                 update.projects = Some((!all).then_some(p));
+            }
+            if let Some(a) = apps {
+                let default = a.iter().all(|k| k.trim().is_empty() || k.eq_ignore_ascii_case("default"));
+                update.apps = Some((!default).then_some(a));
             }
             if let Some(r) = rate_limit {
                 update.rate_limit_per_minute = Some(match r.as_str() {
@@ -125,7 +143,7 @@ pub(crate) async fn token(cx: &Ctx, cmd: TokenCmd) -> Result<()> {
                 });
             }
             if update == TokenUpdate::default() {
-                bail!("nothing to change: pass --projects and/or --rate-limit");
+                bail!("nothing to change: pass --projects, --apps or --rate-limit");
             }
             let token = api.update_token(&id, &update).await.map_err(api_err)?;
             cx.emit(&token, |_| "updated".into());

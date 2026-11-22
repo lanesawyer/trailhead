@@ -1,12 +1,17 @@
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
+use crate::{Error, GateKind, NewPlanTask, PlanTask, PlanTaskUpdate, PrGrade, PrRef, Result, TaskPlan, Usd, Verdict};
 
-pub use trailhead_model::{AttachmentRole, Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
+pub use trailhead_model::{
+    AttachmentRole, Grade, NotificationAction, Priority, ProjectRepo, SOURCE_FACTORY, SetAside, Status, TaskKey,
+    key_number,
+};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = trailhead_model::TASK_FACTORY_KEY;
@@ -31,12 +36,16 @@ pub struct Task {
     pub changes_requested: bool,
     /// The `factory` object in the task's metadata ([`RunRecord`] fields).
     pub run: RunRecord,
+    /// The task's part in a plan (`metadata.plan`): a spec task a planner works, or a task a planner proposed.
+    #[serde(default)]
+    pub plan: TaskPlan,
 }
 
 impl Task {
     /// The factory's view of a Trailhead task. `holder` is the name of the agent holding its claim, if any.
     pub fn from_model(task: trailhead_model::Task, holder: Option<String>) -> Result<Task> {
         let run = RunRecord::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
+        let plan = TaskPlan::of(&task.metadata).unwrap_or_default();
         let key = task.key;
         Ok(Task {
             project: key.project().to_string(),
@@ -49,7 +58,28 @@ impl Task {
             holder,
             changes_requested: false,
             run,
+            plan,
         })
+    }
+
+    /// Whether this is a spec task a person approved the plan of: the planner is finished with it, and nothing else
+    /// in the factory works it.
+    pub fn plan_approved(&self) -> bool {
+        self.plan.spec.as_ref().is_some_and(|s| s.approved.is_some())
+    }
+
+    /// Whether a spec task keeps the pooled sandbox its last planner turn ran in, for the next turn to carry on the
+    /// agent's session there: it still awaits its planner, the sandbox wasn't given up, and the turn didn't breach its
+    /// budget, whose sandbox was cut off.
+    pub fn keeps_planner_sandbox(&self) -> bool {
+        let breached = self.run.worker_breach.as_ref().is_some_and(|b| self.run.sandbox.as_ref() == Some(&b.run));
+        self.plan.awaits_planner() && self.run.released.is_none() && !breached
+    }
+
+    /// Whether the factory leaves this task alone without a word whatever its scope: an approved spec task, or a task
+    /// a planner proposed that no person has graded yet.
+    pub fn held_by_plan(&self) -> bool {
+        self.plan_approved() || (self.plan.proposed.is_some() && self.grade.is_none())
     }
 }
 
@@ -134,6 +164,15 @@ macro_rules! run_fields {
             pub fn apply(&mut self, patch: RunPatch) {
                 $( patch.$name.apply(&mut self.$name); )*
             }
+        }
+
+        impl RunPatch {
+            $(
+                /// A write that sets this one field and keeps every other.
+                pub fn $name(value: $ty) -> RunPatch {
+                    RunPatch { $name: Patch::Set(value), ..RunPatch::default() }
+                }
+            )*
         }
     };
 }
@@ -260,6 +299,10 @@ pub struct MergeDecision {
     /// the decision changed.
     #[serde(default)]
     pub history: Vec<Said>,
+    /// The factory told the person the PR waits on them alone, with a [`NOTICE_REVIEW`] notification it hasn't
+    /// resolved yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notified: bool,
 }
 
 /// How many statuses the merger's status comment lists in its History.
@@ -335,6 +378,12 @@ pub struct ChangesRequested {
     /// for the record but is no longer pending.
     #[serde(default)]
     pub settled: bool,
+    /// The factory answered this request's verdict as stale, with a handoff, because the PR had moved on since
+    /// (reconcile's stale request). A request for changes that stands after that is a new one, however alike its
+    /// words: without this a person asking twice in the same words was answered as stale again, and the task sat
+    /// in review with nobody owing it a move (TRAIL-1705).
+    #[serde(default)]
+    pub answered: bool,
 }
 
 /// A request as task metadata holds it. Records from before `kind` say a conflict with a flag, and CI by the
@@ -353,6 +402,8 @@ struct StoredRequest {
     head: Option<String>,
     #[serde(default)]
     settled: bool,
+    #[serde(default)]
+    answered: bool,
 }
 
 impl From<StoredRequest> for ChangesRequested {
@@ -369,6 +420,7 @@ impl From<StoredRequest> for ChangesRequested {
             kind,
             head: stored.head,
             settled: stored.settled,
+            answered: stored.answered,
         }
     }
 }
@@ -512,6 +564,36 @@ pub fn in_ready_order(mut tasks: Vec<Task>, limit: usize) -> Vec<Task> {
     tasks
 }
 
+/// The step of [`Tracker::ready`] before [`in_ready_order`]: raises each task's priority to the highest among itself
+/// and the open tasks it blocks, directly or through a chain, so work that holds up urgent work is listed as urgent.
+/// `read` answers a task's own priority and the keys of the tasks it blocks, or `None` for one that is finished or
+/// can't be read (out of scope, say), which is left out of the walk. Each task is read once, however many of the
+/// listed tasks reach it.
+pub async fn raise_to_blocked_priority<F, Fut>(tasks: &mut [Task], mut read: F)
+where
+    F: FnMut(TaskKey) -> Fut,
+    Fut: Future<Output = Option<(Priority, Vec<TaskKey>)>>,
+{
+    let mut seen: HashMap<TaskKey, Option<(Priority, Vec<TaskKey>)>> = HashMap::new();
+    for task in tasks.iter_mut() {
+        let mut stack = vec![task.key.clone()];
+        let mut visited = HashSet::new();
+        while let Some(key) = stack.pop() {
+            if !visited.insert(key.clone()) {
+                continue;
+            }
+            if !seen.contains_key(&key) {
+                let found = read(key.clone()).await;
+                seen.insert(key.clone(), found);
+            }
+            if let Some((priority, blocks)) = &seen[&key] {
+                task.priority = task.priority.min(*priority);
+                stack.extend(blocks.iter().cloned());
+            }
+        }
+    }
+}
+
 /// One project a repo's factory works, and which of its tasks are the factory's work.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
@@ -587,6 +669,28 @@ impl std::fmt::Debug for Picture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Picture({} {}, {} bytes)", self.name, self.role, self.png.len())
     }
+}
+
+/// A pull request waits on a person's review (`docs/factory/operating.md#notifications`).
+pub const NOTICE_REVIEW: &str = "factory.review";
+/// The factory stopped starting runs until a usage window resets.
+pub const NOTICE_PAUSED: &str = "factory.paused";
+/// Every task of an approved plan is finished, and the factory closed its spec task.
+pub const NOTICE_PLAN_DONE: &str = "factory.plan_done";
+
+/// A notification the factory raises (`docs/app-platform.md#notifications`), for what the task engine can't see on
+/// its own. Its source is always [`SOURCE_FACTORY`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// [`NOTICE_REVIEW`], [`NOTICE_PAUSED`] or [`NOTICE_PLAN_DONE`].
+    pub kind: String,
+    /// One plain line, starting with the task's key when there is a task.
+    pub title: String,
+    pub body: String,
+    /// What it is about, which [`Tracker::resolve_notices`] resolves it by.
+    pub subject: String,
+    pub task: Option<TaskKey>,
+    pub actions: Vec<NotificationAction>,
 }
 
 /// A task tracker, bound to one identity. The control plane holds one for its
@@ -674,11 +778,31 @@ pub trait Tracker: Send + Sync {
     /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
+    /// The direct subtasks of the spec task `spec`, which are its plan, each with its grade, proposal and unfinished
+    /// blockers, oldest first.
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>>;
+    /// Adds a task to `spec`'s plan: its subtask, ungraded, with the proposal in `metadata.plan.proposed` and its
+    /// blockers, in one write.
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey>;
+    /// Changes a task of a plan: its title, description and proposal in one write, then each blocker added or taken
+    /// away.
+    async fn update_plan_task(&self, task: &TaskKey, update: &PlanTaskUpdate) -> Result<()>;
+    /// Cancels a task.
+    async fn cancel(&self, task: &TaskKey) -> Result<()>;
+    async fn set_description(&self, task: &TaskKey, description: &str) -> Result<()>;
+    /// Merges `patch` into the task's `metadata.plan`, as a JSON merge patch.
+    async fn patch_plan(&self, task: &TaskKey, patch: serde_json::Value) -> Result<()>;
+
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
     /// in case revoking it is missed.
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+
+    /// Raises a notification from the factory.
+    async fn notify(&self, notice: &Notice) -> Result<()>;
+    /// Resolves every open notification the factory raised about `subject`. None open is fine.
+    async fn resolve_notices(&self, subject: &str) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -731,6 +855,7 @@ mod tests {
             kind: RequestKind::Ci,
             head: None,
             settled: false,
+            answered: false,
         };
         let written = serde_json::to_value(&request).unwrap();
         assert_eq!(written["kind"], "ci");
@@ -750,6 +875,7 @@ mod tests {
             holder: None,
             changes_requested,
             run: RunRecord::default(),
+            plan: TaskPlan::default(),
         }
     }
 
@@ -765,5 +891,43 @@ mod tests {
         let keys = |tasks: Vec<Task>| tasks.into_iter().map(|t| t.key.0).collect::<Vec<_>>();
         assert_eq!(keys(in_ready_order(tasks.clone(), 10)), ["TRAIL-3", "TRAIL-2", "TRAIL-4", "TRAIL-5", "TRAIL-1"]);
         assert_eq!(keys(in_ready_order(tasks, 2)), ["TRAIL-3", "TRAIL-2"]);
+    }
+
+    #[tokio::test]
+    async fn a_task_takes_the_priority_of_the_most_urgent_open_task_it_holds_up() {
+        // 1 blocks 2, which blocks 3 (urgent); 4 blocks 5 (urgent, but finished); 6 blocks itself round a cycle.
+        let blocks = |key: &str| -> Option<(u8, Vec<&str>)> {
+            match key {
+                "TRAIL-1" => Some((4, vec!["TRAIL-2"])),
+                "TRAIL-2" => Some((3, vec!["TRAIL-3"])),
+                "TRAIL-3" => Some((1, vec![])),
+                "TRAIL-4" => Some((3, vec!["TRAIL-5"])),
+                "TRAIL-6" => Some((2, vec!["TRAIL-7"])),
+                "TRAIL-7" => Some((3, vec!["TRAIL-6"])),
+                // Finished, or out of reach.
+                _ => None,
+            }
+        };
+        let reads = std::cell::RefCell::new(Vec::new());
+        let read = |key: TaskKey| {
+            reads.borrow_mut().push(key.0.clone());
+            let found = blocks(&key.0).map(|(priority, blocks)| {
+                (Priority::new(priority).unwrap(), blocks.into_iter().map(|k| TaskKey(k.into())).collect())
+            });
+            async move { found }
+        };
+        let mut tasks = vec![
+            task("TRAIL-1", 4, false),
+            task("TRAIL-2", 3, false),
+            task("TRAIL-4", 3, false),
+            task("TRAIL-6", 2, false),
+        ];
+        raise_to_blocked_priority(&mut tasks, read).await;
+        let priorities: Vec<u8> = tasks.iter().map(|t| t.priority.get()).collect();
+        assert_eq!(priorities, [1, 1, 3, 2], "through a chain; not from a finished task; a cycle ends");
+        let mut read_once = reads.borrow().clone();
+        read_once.sort();
+        read_once.dedup();
+        assert_eq!(reads.borrow().len(), read_once.len(), "each task is read once: {:?}", reads.borrow());
     }
 }

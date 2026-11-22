@@ -4,6 +4,7 @@
 mod codehost;
 mod compute;
 mod daemon;
+pub mod fixtures;
 mod harness;
 mod provider;
 mod tracker;
@@ -13,5 +14,5 @@ pub use compute::FakeCompute;
 pub use daemon::{Connect, FAKE_BASE, FAKE_BASE_MERGE, FakeWorkspace, LocalDaemon, Shot, Taken};
 pub use harness::{SCRIPTED, Script, ScriptedHarness, harnesses};
 pub use provider::FakeProvider;
-pub use tracker::{FakeComment, FakeTracker, TrackerOp};
+pub use tracker::{FakeComment, FakeNotice, FakeTracker, TrackerOp};
 pub use trailhead_factory::clock::unix_now;

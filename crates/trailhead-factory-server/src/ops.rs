@@ -344,6 +344,9 @@ fn render_live(snapshot: &FactorySnapshot) -> String {
     if let Some(why) = &snapshot.holding {
         let _ = writeln!(out, "  holding merges: {why}");
     }
+    if !snapshot.restart_for.is_empty() {
+        let _ = writeln!(out, "  {}", trailhead_factory::status::restart_needed(&snapshot.restart_for));
+    }
     for t in &snapshot.targets {
         let state = if t.capped { "capped, taking no new runs" } else { "under its cap" };
         let _ = writeln!(out, "  target {}: spent {} of {} today, {state}", t.target, t.spent, t.cap);
@@ -468,7 +471,10 @@ fn task_line(t: &Task) -> String {
 
 /// The sandboxes matching `labels` on every target, each with the index of the target it is on, and the names of the
 /// targets that couldn't be reached. An error only when none could.
-async fn list_everywhere(computes: &[crate::Built], labels: &Labels) -> Result<(Vec<(usize, Sandbox)>, Vec<String>)> {
+async fn list_everywhere(
+    computes: &[crate::computes::Built],
+    labels: &Labels,
+) -> Result<(Vec<(usize, Sandbox)>, Vec<String>)> {
     let mut found = Vec::new();
     let mut unreachable = Vec::new();
     let mut last = None;
@@ -544,6 +550,7 @@ mod tests {
             holder: None,
             changes_requested: false,
             run,
+            plan: Default::default(),
         }
     }
 
@@ -714,6 +721,7 @@ mod tests {
                 phase_started: 0,
             }],
             holding: Some("#306 has auto-merge on".into()),
+            restart_for: vec!["profiles".into(), "checks".into()],
             targets: vec![TargetSpend {
                 target: "sprites".into(),
                 spent: Usd::dollars(5.0),
@@ -728,6 +736,7 @@ mod tests {
         let out = render_live(&snapshot);
         assert!(out.contains("Control plane: reattaching to TRAIL-7"), "{out}");
         assert!(out.contains("holding merges: #306 has auto-merge on"), "{out}");
+        assert!(out.contains("restart the server to apply the changed [factory] settings (profiles, checks)"), "{out}");
         assert!(out.contains("target sprites: spent $5.0000 of $5.0000 today, capped"), "{out}");
         assert!(out.contains("last error ("), "{out}");
         assert!(out.contains(": reconcile failed: boom\n"), "{out}");

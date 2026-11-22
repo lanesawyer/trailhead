@@ -260,7 +260,7 @@ pub fn inline_text_sized(value: impl Into<String>, hint: impl Into<String>, line
                         margin: { UiRect::horizontal(px(-space::INPUT_INSET)) },
                     }
                     --
-                    @text_dim(hint.clone(), font_size)
+                    @text_dim(hint, font_size)
                     Part::EditHint
                     Node { display: { Display::None }, position_type: { PositionType::Absolute }, left: px(0) }
                     Pickable::IGNORE
@@ -436,7 +436,7 @@ fn on_entered(
 }
 
 /// Save or Cancel under a text being edited.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn on_action(
     pressed: On<Activate>,
     actions: Query<&EditAction>,
@@ -499,7 +499,7 @@ fn on_picked(
 /// Draws each inline widget from its state, in place: shows the value or the editor, the hint, "Saving…" and the
 /// error, and a field's choice. A widget is drawn when its state changed; a text being edited is looked at every frame
 /// too, since its input's text changes without it.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn sync_inline(
     texts: Query<(Entity, Ref<InlineText>)>,
     fields: Query<(Entity, Ref<InlineField>)>,
@@ -570,7 +570,6 @@ struct View<'a> {
     error: &'a str,
 }
 
-#[allow(clippy::type_complexity)]
 fn draw(
     root: Entity,
     view: &View,
@@ -641,6 +640,7 @@ mod tests {
     use bevy::input_focus::FocusLost;
 
     use super::*;
+    use crate::test_support::settle;
 
     #[derive(Resource, Default)]
     struct Edits(Vec<InlineEdited>);
@@ -661,13 +661,6 @@ mod tests {
             .add_observer(|e: On<InlineEdited>, mut edits: ResMut<Edits>| edits.0.push(e.clone()))
             .add_observer(|e: On<InlineChosen>, mut choices: ResMut<Choices>| choices.0.push(e.clone()));
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn text(app: &mut App, value: &str, lines: f32) -> (Entity, Entity) {

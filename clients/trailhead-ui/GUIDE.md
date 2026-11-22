@@ -101,11 +101,12 @@ panel.
 | `button` | `button(caption: Into<String>, icon: Option<Icon>, kind: ButtonKind) -> impl Scene` | A button with words, after an icon when given. | The caption is the button's descendant `Text`: walk `Children` and `set_text` it (the kit has no `ButtonEdit` yet). Disable with `InteractionDisabled`; the caption dims itself. |
 | `tool_button` | `tool_button(icon: Icon, hint: Into<String>, kind: ButtonKind) -> impl Scene` | An icon alone, with a `Hint` saying what it does. `Plain` on cards and lists, `Normal` in a toolbar. | Its `Hint`'s `.0`. |
 | `ButtonKind` | `Normal` (default), `Primary`, `Plain`, `Danger` | How much a button stands out. One `Primary` per surface (New task, Save); `Danger` for something destructive (cancel, revert): a normal button with its caption in the danger color; `Plain` has no background until hovered. | Fixed at spawn. |
-| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop), or a short ladder of steps a person should see all of (a text size's eight). Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
+| `button_group` | `button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene` | Two to four short options side by side as one control, the chosen one primary (light, dark, desktop), or a short ladder of steps a person should see all of (a text size's eight). Each option is as wide as its caption and at least `extent::GROUP_OPTION_MIN`, so the group is as wide as what it says and never spans the surface; with more options than its room holds it wraps onto further rows, each rounded at its own ends. Pressing one triggers `Picked` on the group. | Set `ButtonGroup { chosen }` on the group's root. |
 | `ButtonGroup` | `ButtonGroup { chosen: Option<usize> }` (component) | A button group's state. | |
 | `link_button` | `link_button(icon: Icon, text: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | A button that opens a URL in the system's browser. `Plain` reads as a link in running text. | Its `ExternalLink { url }`. |
 | `link_tool_button` | `link_tool_button(icon: Icon, hint: Into<String>, url: Into<String>, kind: ButtonKind) -> impl Scene` | The same as an icon-only tool button. | Its `ExternalLink`. |
 | `ExternalLink` | `ExternalLink { url: String }` (component) | The URL a link button opens; the kit's observer opens it. | |
+| `open_link` | `open_link(url: &str)` | Opens a URL in the system's browser, as a link button does when pressed: for a link pressed somewhere the kit doesn't draw (a notification on the desktop). | |
 | `check_circle` | `check_circle(checked: bool, hint: Into<String>) -> impl Scene` | A round check to mark something done (a todo's "complete"): an empty ring that draws its check in the accent under the pointer, and is filled with the accent and the check while checked or held down. No square background. A press, Enter or Space sends `Activate` from it; it does not check itself, so the caller sets the state from its data. Focusable, with `hint` as its `Hint`; `InteractionDisabled` dims it and stops presses. | Set `CheckCircle { checked }` with `set_if_neq`; the kit repaints it. |
 | `CheckCircle`, `CheckRing`, `CheckMark` | `CheckCircle { checked: bool }` (component on the root); markers | The check's state, and its ring and mark, which the kit paints. | |
 | `HoverTone` | `HoverTone { rest: Token, hover: Token }` (component) | Something pressable that is not a button (a card, a hand-built row, a tab) answering the pointer as a button does. The hover token must show against the surface the node sits on. | Insert a new one. |
@@ -133,6 +134,7 @@ if let Ok(mut check) = checks.get_mut(check_entity) {
 | `select_iconed` | `select_iconed(options: Vec<String>, icons: Vec<Icon>, selected: Option<usize>, max_visible: usize) -> impl Scene` | A select with an icon before each option, and the chosen one's before the caption. | `SelectEdit::set`. |
 | `Picked` | `Picked { entity: Entity, index: usize }` (entity event) | Which option of a select or a button group was picked, triggered on the control itself. | |
 | `SelectEdit` | system parameter: `is_open(select) -> bool`, `set_enabled(select, enabled: bool)`, `is_enabled(select) -> bool`, `selected_rows(select) -> Vec<usize>`, `set(select, options: &[String], selected: Option<usize>) -> bool`, `set_toned(select, options, tones: &[Option<Token>], selected) -> bool` | Changes a spawned select in place: the chosen row, and its rows only when the options changed. It touches nothing while the popup is open and returns `false`; try again next frame. | |
+| `SelectHint` | `SelectHint(pub String)` (component, beside a `select` or `select_toned`) | What the caption says, dim, while none of the options is chosen: a choice a person still has to make ("Grade…"). Spawn the select with `None` chosen, writing it after the select in a `bsn!`. | `SelectEdit` with `None` chosen brings the hint back. |
 | `SelectOptions`, `SelectTones`, `SelectIcons` | components holding `Vec<String>`, `Vec<Option<Token>>`, `Vec<Icon>` | The state a select was last given, which `SelectEdit` compares against. Read them; do not write them. | |
 | `toggle_switch` | `toggle_switch(label: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off, with its label after it. `own` goes on the switch itself (your marker). A press flips it and sends `ValueChange<bool>` from the switch. | The switch keeps its own state (`bevy::ui::Checked`). |
 | `slider` | `slider(value: f32, range: (f32, f32), decimals: i32) -> impl Scene` | A number picked on a track; a click sets the value where it lands. The kit writes the value back. | Read `SliderValue`, or observe `ValueChange<f32>`. |
@@ -155,6 +157,7 @@ matters (the text sizes, 80% to 200%). Choices that are best shown (a few kinds 
 | `TextEntered` | `TextEntered { entity: Entity, value: String }` (entity event) | Enter was pressed in a one-line input (not held, not mid-composition), with what it holds: how a field submits from the keyboard (recipe 5). Several lines take Enter as a new line and never trigger it. The kit's `inline_text` saves on it too. | |
 | `InitialText` | `InitialText(pub String)` (component) | Text an input holds when it appears, with the cursor at its end: a form opened on something that exists. Put it in `own`. | |
 | `field` | `field(label: Into<String>, control: impl SceneList) -> impl Scene` | A label above a control (an input, a select). Pass the control into the scene rather than adding it as a child afterwards: the scene's own `Children` replace any added before it spawns, which once left a select orphaned at the window's top left (TRAIL-850). | |
+| `copy_block` | `copy_block(words: impl Scene, hint: Into<String>, copy: impl Scene) -> impl Scene` | Words a person copies (an id, a command, a path) in a bordered box of their own with the copy button at its end, so it is plain what lands on the clipboard. At least as wide as what holds it; the words stay on one line, so a long command runs wider than a settings page's measure rather than wrapping. `words` goes on the text and `copy` on the button: your markers. | `set_text` on the text; observe `Activate` on the button and write the clipboard. |
 | `field_well` | `field_well() -> impl Scene` | A raised box to set text fields in. Feathers fills a field with the same gray as a pane's body and a menu, so a field placed straight in either cannot be seen. | |
 | `spawn_search_field` | `spawn_search_field(commands: &mut Commands, hint: Into<String>) -> SearchField` | A search box, `extent::SEARCH_WIDTH` wide, with a hint while empty and a clear button while not; Escape clears it. | Read `EditableText` on `SearchField::field`. |
 | `spawn_search_field_filling` | `spawn_search_field_filling(commands: &mut Commands, hint: Into<String>) -> SearchField` | The same, as wide as what it sits in (a sidebar, a column). | |
@@ -169,6 +172,10 @@ matters (the text sizes, 80% to 200%). Choices that are best shown (a few kinds 
 | `InlineText` | component: `value()`, `mode()`, `error()`, `draft()`, `set_value(&str)`, `confirm()`, `fail(old, message)`, `fail_keeping(old, draft, message)` | An inline text's state. Answer a change with `confirm` or `fail`; `fail_keeping` keeps what was typed for the next edit (a save that lost to someone else's change). `set_value` shows a value from elsewhere, ignored mid-edit. | |
 | `InlineField` | component: `selected()`, `mode()`, `error()`, `set(options, tones, selected)`, `confirm()`, `fail(old, message)` | An inline field's state, answered the same way. | |
 | `InlineMode` | `Reading`, `Editing`, `Saving` | Where an inline widget is in its edit. | |
+
+A `text_input` fills what holds it, which suits a path or a sentence. One that holds something short says so, with
+`Node { max_width: px(extent::FIELD_SHORT) }` (a number) or `FIELD_MEDIUM` (a word, a name) written after it, so a
+field's width says how much goes in it.
 
 Neither inline widget saves anything itself: the caller decides what saving means and may refuse. An Escape that
 cancels an inline edit is not passed on, so it does not also close the modal the text sits in.
@@ -235,6 +242,7 @@ field. The Trailhead shell's Server settings list the factory's repos with it.
 | `PanelTitle` | component | Marks the header's title text, so a changing title is set in place with `set_text`. |
 | `PanelTools` | component | The row at the header's right, ending with the X: insert a panel's own controls at its start. |
 | `sidebar_card` | `sidebar_card() -> impl Scene` | A raised box in a sidebar for something to keep an eye on (a usage meter), spawned just before the `sidebar_footer`. |
+| `list_card` | `list_card() -> impl Scene` | One item of a list read item by item rather than scanned (a notification): a raised, padded, rounded column whose lines read as one block. Stack them `space::CARDS` apart and spawn the item's lines (a heading `row`, its words, a row of buttons) as its children. |
 | `spawn_detail_panes` | `spawn_detail_panes(commands: &mut Commands, parent: Entity) -> DetailPanes` | A detail modal's body: a wide main column beside a narrower sidebar of facts, spawned under `parent` (a modal's body). Use it in a modal `extent::DETAIL_WIDTH` wide. |
 | `DetailPanes` | `DetailPanes { main: Entity, side: Entity }` | The two columns to fill. `DetailMain` and `DetailSide` mark them. |
 | `spawn_accordion` | `spawn_accordion(commands: &mut Commands, title: &str, fold: Fold, level: SectionLevel) -> AccordionParts` | A section that opens and closes, drawn as a feathers pane (`SectionLevel::Pane`, a division of a panel) or group (`SectionLevel::Group`, a section inside one). A press on the header toggles it. Do not nest a pane in a pane. |
@@ -251,14 +259,16 @@ Pages that fill the window are under "A sidebar, the rail and navigation".
 
 | Item | Signature | What it is for | Updated by |
 | --- | --- | --- | --- |
-| `settings_page` | `settings_page() -> impl Scene` | A page of settings (a settings modal's body, or one tab's page of it): a column, its settings `space::ROWS` apart and its sections a group apart. Spawn them as its children, in order. | |
-| `spawn_settings_section` | `spawn_settings_section(commands: &mut Commands, heading: Into<String>) -> SettingsSection` | A group of settings under a dim heading, spawned unparented. | Fill or `Keyed`-sync its `rows`. |
+| `settings_page` | `settings_page() -> impl Scene` | A page of settings (a settings modal's body, or one tab's page of it): a column no wider than `extent::SETTINGS_MEASURE`, so a control or a note's line never spans a wide modal, its settings `space::ROWS` apart and its sections further. Spawn them as its children, in order. | |
+| `spawn_settings_section` | `spawn_settings_section(commands: &mut Commands, heading: Into<String>) -> SettingsSection` | A group of settings under a heading a size up from the settings' labels (`size::HEADING`, in the full text color), spawned unparented. | Fill or `Keyed`-sync its `rows`. |
 | `SettingsSection` | `SettingsSection { section: Entity, rows: Entity }` | Put `section` in the page with `ChildOf`; put the settings in `rows`, which holds nothing else. | |
 | `setting` | `setting(label: Into<String>, note: Into<String>, control: impl SceneList) -> impl Scene` | One setting: its label over its control (a `select`, a `button_group`, a value's `text`), with a dim note under it saying what it does; an empty note is hidden. Pass the control into the scene with your marker on it, as for `field`. | The control's own way; the note is `SettingNote`'s `Text` (`set_text`). |
 | `setting_toggle` | `setting_toggle(label: Into<String>, note: Into<String>, checked: bool, own: impl Scene) -> impl Scene` | A setting that is on or off: a `toggle_switch` with its label after it, and the note under it. `own` goes on the switch, which sends `ValueChange<bool>`. | The switch keeps its own state. |
 | `SettingNote` | component | A setting's note. | |
+| `SettingWords` | `SettingWords { label: String, note: String }` (component, on every `setting` and `setting_toggle`); `matches(&self, query: &str) -> bool` | The label and note a setting was made with, which a search of the settings finds it by. | |
+| `SettingsHeading` | `SettingsHeading(pub String)` (component, on a settings section) | The section's heading, which a search finds all of the section by. | |
 | `spawn_settings_tabs` | `spawn_settings_tabs(commands: &mut Commands, parent: Entity) -> SettingsTabs` | A settings modal with pages: a vertical `tab_strip` `extent::SETTINGS_TABS_WIDTH` wide down the side, and a pane beside it for the page shown, spawned under `parent` (a modal's body). It grows into a tall modal's height, so a page can fill what is left. | |
-| `SettingsTabs` | `SettingsTabs { root: Entity, strip: Entity, pane: Entity }` | Fill `strip` with `tab`s (a `tab_heading` over each group); spawn the page shown as a `settings_page()` in `pane` when its tab is picked, and despawn it when another is. | The strip's `SelectedTab`. |
+| `SettingsTabs` | `SettingsTabs { root: Entity, side: Entity, strip: Entity, pane: Entity }` | `side` is the column the strip is in: what goes over the tabs (a search field that narrows them) is inserted as its first child. Fill `strip` with `tab`s (a `tab_heading` over each group); spawn the page shown as a `settings_page()` in `pane` when its tab is picked, and despawn it when another is. | The strip's `SelectedTab`. |
 
 Every settings surface is built from these, Lookout's settings modal included, so settings look alike in every app.
 Never stack `toggle_switch`es or `field`s in a modal body by hand: bare, with no gap, a list of toggles reads as one
@@ -289,7 +299,7 @@ of its own: it adds pages to the shell's (the shell's guide, "Settings pages").
 | `tab_strip` | `tab_strip(orientation: ControlOrientation) -> impl Scene` | A strip of tabs, ruled along the edge it shares with what it shows. A click or an arrow key raises `ValueChange<Option<Entity>>` on the strip, naming the tab. | Insert `SelectedTab(Some(tab))` on the strip from what you keep as the page shown (or add `bevy::ui_widgets::tablist_self_update` when the strip is all there is). |
 | `tab` | `tab(caption: Into<String>, orientation: ControlOrientation) -> impl Scene` | One tab, a child of a strip of the same orientation. Captions are cut to the strip's room. | |
 | `TabCaption` | component | A tab's caption, holding the whole of it; the kit cuts the `Text`. | |
-| `tab_heading` | `tab_heading(words: Into<String>) -> impl Scene` | Dim words over a group of tabs in a strip down the side (one app's settings pages), lined up with the captions. Not a tab: clicks and arrow keys pass over it. | |
+| `tab_heading` | `tab_heading(words: Into<String>) -> impl Scene` | Dim words over a group of tabs in a strip down the side (one app's settings pages), small and in capitals so they read as a label and not a tab, lined up with the captions. Not a tab: clicks and arrow keys pass over it. | |
 
 When the kit moves the sidebar, `beside_sidebar` and `beside_rail` pages, it compares every frame, because a rail or a
 sidebar coming or going moves the others; a node already in place is left untouched.
@@ -330,6 +340,8 @@ view.
 | `Progress`, `ProgressTone`, `MeterPart` | components | As above. | |
 | `badge` | `badge(label: Into<String>, icon: Option<Icon>, tone: Option<Token>) -> impl Scene` | A short label in a small rounded chip, after an icon when given: what a card or row says about its item. Without a tone the text is dim, so a row of badges stays quiet beside the title. | `BadgeEdit::set(badge, label: &str, icon: Option<Icon>, tone: Option<Token>)` and `BadgeEdit::set_shown(badge, shown: bool)`, which write only what differs. A badge that comes and goes keeps its entity and is hidden. |
 | `BadgeEdit`, `BadgeIcon`, `BadgeLabel` | system parameter; components | The badge's editor and the parts it finds. | |
+| `count_badge` | `count_badge(count: usize) -> impl Scene` | How many of something wait behind a button (unread notifications on a bell, an app's own on its rail button): a small accent pill over the button's top right corner, `space::COUNT_OFFSET` out past it, hidden at 0, `99+` past `MOST_COUNTED`. Spawn it as the button's last child, after the button's own children are down. It takes no presses. | Set its `CountBadge { count }` with `set_if_neq`; the kit rewrites the figure and hides it at 0. |
+| `CountBadge`, `CountWords`, `count_words`, `MOST_COUNTED` | `CountBadge { count: usize }` (component on the root); marker; `count_words(count: usize) -> String`; `usize` (99) | The count's state, its figure, and what a count says. | |
 | `chip` | `chip(tone: Token, words: Into<String>, hint: Into<String>) -> impl Scene` | A colored dot and a few words, with the full explanation in a hint: state that is always there and rarely needs reading (a connection). | `ChipEdit::set(chip, tone, words: &str, hint: &str)`, which writes only what differs. |
 | `dot` | `dot(tone: Token) -> impl Scene` | The chip's dot on its own. | A new `BackgroundTone`. |
 | `ChipEdit`, `ChipDot`, `ChipWords` | system parameter; components | The chip's editor and the parts it finds. | |
@@ -339,6 +351,8 @@ view.
 | `skeleton` | `skeleton(rows: usize, row_height: f32) -> impl Scene` | Pulsing placeholder bars where content is on its way. `SkeletonBar` marks each. | Despawn it when the content arrives. |
 | `bubble` | `bubble(side: Side) -> impl Scene` | A message in a conversation: the reader's (`Side::Mine`) against the end edge in the accent, others' (`Side::Theirs`) against the start edge. Put it in a column and spawn its lines as children. | |
 | `bubble_head` | `bubble_head(icon: Icon, words: Into<String>) -> impl Scene` | A bubble's first line: an icon for the kind of message and dim words about it (who, when). | |
+| `message` | `message(side: Side, icon: Icon, head: Into<String>, body: Into<String>, tone: Token) -> impl Scene` | A whole message: a `bubble` on `side`, a `bubble_head` of `icon` and `head`, and `body` in `tone` (`token::TEXT`, or a status's for one waiting on the reader). Spawn more lines (a row of buttons) as its children after it. Every conversation's messages are these (Lookout's task modal and plan view). | `MessageEdit::set(message, icon, head: &str, body: &str, tone: &Token)`, which writes only what differs. |
+| `MessageEdit`, `MessagePart` | system parameter; component (`Icon`, `Head`, `Body`) | The message's editor and the parts it finds (a `bubble_head`'s icon and words carry them too). | |
 
 ### A picture
 
@@ -385,6 +399,71 @@ physical pixels, so a list that fits can come out a pixel past its area, and the
 (TRAIL-1610). The wheel, the scrollbar and the kit's clamp all measure the same range, so an area with none shows no
 bar and does not move, and a position left over from taller content is brought back when the content shrinks.
 
+### A canvas and a graph
+
+| Item | Signature | What it is for | Updated by |
+| --- | --- | --- | --- |
+| `spawn_canvas` | `spawn_canvas(commands: &mut Commands) -> CanvasParts` | Content of any size with no edge, that a drag pans and the wheel zooms about the pointer (a sideways swipe, or Shift and the wheel, pans across). The root clips to its own box and grows into what holds it (`flex_grow`). Clicks reach what lies on it; a press that moves past `DRAG_THRESHOLD` pans instead and activates nothing. Spawned unparented. | Its `Canvas`. |
+| `CanvasParts` | `CanvasParts { root: Entity, content: Entity }` | Put `root` where it goes; fill `content` with absolutely placed nodes (`left`, `top` from its origin). | |
+| `Canvas` | component on the root: `pan() -> Vec2`, `zoom() -> f32`, `set(pan, zoom)`, `fit()`, `fitting() -> bool`, `panning() -> bool` | The view: where the content's origin sits in the box (UI pixels) and the zoom, held between `CANVAS_MIN_ZOOM` (0.25) and `CANVAS_MAX_ZOOM` (2). `fit()` fits the content in the box, centered, never zoomed in past its own size ("fit all"); a new canvas fits itself once its content has an extent. The view is apart from the content, so changing the content never moves it. | `fit()` or `set` through `Query<&mut Canvas>`. |
+| `CanvasExtent` | `CanvasExtent(pub Vec2)` (component on the root) | How big the content is, which fitting goes by. Set it when the content changes (a graph sets its own). | `set_if_neq`. |
+| `CanvasContent` | `CanvasContent { canvas: Entity }` (component) | The node the kit moves, holding what is on a canvas. | |
+| `spawn_graph` | `spawn_graph(commands: &mut Commands) -> GraphParts` | A directed graph on a canvas of its own: nodes in layers left to right by what points at what (nodes nothing points into first), ordered to keep crossings few, each edge drawn from its node's right side to its target's left in `token::BORDER`, `stroke::EDGE` thick, turning at right angles between the layers, with a square where it meets its target. A cycle is broken where a walk in the nodes' order closes it, the same way every time, and its edge still drawn. Spawned unparented. | Its `Graph`. |
+| `GraphParts` | `GraphParts { root: Entity, nodes: Entity, edges: Entity }` | `root` is the canvas's box, holding the `Graph` and the `Canvas`. `nodes` holds the node boxes, `edges` the lines, under them. | |
+| `Graph` | `Graph { nodes: Vec<GraphNode>, edges: Vec<GraphEdge> }` (component on the root) | What the graph holds. The kit lays it out when it changes and keeps a box per key in place: a box keeps its `Entity` while its key is in the graph, and lines follow the same way. The nodes' order breaks ties in the layout, so keep it steady (by key). | `set_if_neq`, with the whole of it. |
+| `GraphNode`, `GraphEdge` | `GraphNode::new(key: Into<String>, size: Vec2)`; `GraphEdge::new(from: Into<String>, to: Into<String>)` | A node's key and its box's size in UI pixels; an edge from one key to another, `from` laid out left of `to`. An edge to a key that isn't a node, or from a node to itself, is left out. | |
+| `GraphNodeBox` | `GraphNodeBox { graph: Entity, key: String }` (component) | A node's box, placed and sized by the kit, for the caller to draw the node in: spawn its content as a child, which fills the box's width and sits in the middle of its height. What the node shows is the caller's to keep in step in place. | |
+| `GraphEdgeLine` | component | A line or end mark of an edge, which the kit keeps; for a test to find. | |
+| `lay_out_graph` | `lay_out_graph(nodes: &[GraphNode], edges: &[GraphEdge]) -> GraphLayout` | The layout as a pure function, which the graph uses: each node's `Rect`, each edge's `EdgeRoute { from, to, points }`, and the whole `size`. A few hundred nodes take a few milliseconds. | |
+
+The wheel and the kit's scrolling: one observer routes every wheel turn (section 4, "Scrolling goes through the kit").
+It finds the nearest of a `ScrollDown`, a `ScrollBoth` and a `Canvas` above what the pointer is over, and the nearest
+takes the whole turn: a list that scrolls inside a canvas scrolls, and a canvas inside a page that scrolls zooms
+rather than scrolling the page. Never add a wheel observer of your own for a canvas.
+
+A graph whose nodes are an app's own cards, kept in step with its data (Lookout's `graph.rs` is the full one):
+
+```rust
+use bevy::prelude::*;
+use trailhead_ui::{Graph, GraphEdge, GraphNode, GraphNodeBox, spawn_graph};
+
+/// The graph's root, kept to set its `Graph` and fit it.
+#[derive(Component)]
+struct PlanGraph;
+
+/// What a node shows, kept by the app's logic by key.
+#[derive(Resource, Default)]
+struct Wanted {
+    nodes: Vec<(String, String)>,
+    edges: Vec<(String, String)>,
+}
+
+// In the page's spawn system, once: the canvas fills the page.
+// let parts = spawn_graph(&mut commands);
+// commands.entity(parts.root).insert((PlanGraph, ChildOf(page)));
+
+fn set_graph(wanted: Res<Wanted>, mut graphs: Query<&mut Graph, With<PlanGraph>>) {
+    let Ok(mut graph) = graphs.single_mut() else { return };
+    let size = Vec2::new(240.0, 96.0);
+    graph.set_if_neq(Graph {
+        nodes: wanted.nodes.iter().map(|(key, _)| GraphNode::new(key.clone(), size)).collect(),
+        edges: wanted.edges.iter().map(|(from, to)| GraphEdge::new(from.clone(), to.clone())).collect(),
+    });
+}
+
+/// Draws a node's card in a new box; a card already drawn is updated in place by the card's own system.
+fn fill_boxes(boxes: Query<(Entity, &GraphNodeBox), Added<GraphNodeBox>>, mut commands: Commands) {
+    for (entity, node) in &boxes {
+        commands.spawn((MyCard(node.key.clone()), ChildOf(entity)));
+    }
+}
+```
+
+`set_graph` runs before `UiPlace`, where the kit lays the graph out; `fill_boxes` after it, so a new node's box is
+filled in the frame it appears. A Fit button calls `fit()` on the root's `Canvas`. The sizes are the caller's: pick
+one the card fits at its tallest, since the box doesn't grow to its content (a card shorter than its box sits in its
+middle, where its edges meet it).
+
 ### Icons
 
 | Item | Signature | What it is for |
@@ -413,13 +492,15 @@ these, or compares first, so the UI does not lay itself out when nothing on scre
 | `ease_in` | `ease_in(t: f32) -> f32` | Starts slow, ends at full speed (`t` 0 to 1, clamped): something arriving to cover what is there. |
 | `ease_out` | `ease_out(t: f32) -> f32` | Starts at full speed and settles: something leaving to show what is under it. |
 | `BackgroundFade` | `BackgroundFade(pub f32)` (component; default 1) | A node's background drawn at this share of its tone's opacity, beside a `BackgroundTone` or `Surface`: something fading in or out. The kit repaints it after the theme does, so it holds through a theme change. Set it with `set_if_neq`. |
+| `Ring` | `Ring::default()` (component) | Rings a node as a bell rings, to say something arrived: it swings either way, less each time, and grows a little and shrinks back, over `RING_TIME` (half a second) of real time. Insert it to ring, again to ring from the start; the kit moves the node's `UiTransform`, puts it back and takes the `Ring` off when done. While `Appearance::reduce_motion()` it is taken off at once, unmoved; a caller that has something else to show (a count) shows only that. The Trailhead shell rings its bell with it. |
+| `ring_pose`, `RING_TIME` | `ring_pose(t: f32) -> (f32, f32)`; `Duration` | Where a ring is `t` of the way through (its turn in radians, clockwise, and its scale), and how long it lasts. |
 
 Something that moves is driven by real time (`Res<Time<Real>>`), so a slow frame carries it further instead of
 stretching it, and is worked out from where it started rather than added to frame by frame. While it moves it writes
 `bevy::window::RequestRedraw` every frame, since the Trailhead shell's window updates only on input otherwise, and it
 stops writing when it stops moving. What moves is set in place each frame (`patch_node`, `set_if_neq` on a
 `BackgroundFade`), which is an in-place update, not a redraw. The kit's own: the scrollbar's fade, the skeleton's
-pulse; the shell's: the cover drawn while it switches apps.
+pulse, the ring; the shell's: the cover drawn while it switches apps.
 
 ### The theme and the plugins
 
@@ -432,12 +513,12 @@ pulse; the shell's: the cover drawn while it switches apps.
 | `Theme` | `new()`, `set(&Token, Color)`, `set_accent(&Token, Color)`, `alias(&Token, &Token)`, `paint(&Token, Color)`, `paint_both(&Token, dark: Color, light: Color)`, `color(&Token) -> Color`, `color_on(&Token, Surface) -> Color`, `has(&Token) -> bool`, `repeated_colors() -> Vec<String>`, `light() -> Theme`, `with_accent(Color) -> Theme` | Every token and its color (section 3). |
 | `palette` | `GRAY_0` .. `GRAY_3`, `WHITE`, `ACCENT` | The raw colors the theme is painted from, named only where a theme is built. |
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
-| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
+| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `with_reduce_motion(bool) -> Self`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. `with_reduce_motion` sets what the desktop would say, where there is no desktop to ask (a test, a shot). |
 | `ThemeColors` | system param: `color(&Token) -> Color`, `is_changed() -> bool` | The worn theme's colors for what no tone component reaches, such as a 3D scene's materials and lights (Lookout's trail map), so they follow the light theme and the accent too. A node's colors stay `BackgroundTone`, `TextTone` and `BorderTone`. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
-| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
+| `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, canvases and graphs, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
 | `UiPlace` | system set | Where the kit's per-frame systems run in `Update`. |
-| `ModalPlugin`, `InlinePlugin`, `ReorderPlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals, answers inline edits or reorders a list without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
+| `ModalPlugin`, `InlinePlugin`, `ReorderPlugin`, `CanvasPlugin` | plugins | Part of `UiPlugin`. Add one on its own only in a headless test of logic that opens modals, answers inline edits, reorders a list or lays out a graph without `UiPlugin`; adding it beside `UiPlugin` adds it twice. |
 | `layer` | module of `i32` constants | Which surface is over which (section 3). |
 | `lint` | module | The design-system lint and the scan for wholesale redraws, `lint::redraws` (section 6). |
 
@@ -458,7 +539,8 @@ window simply redraws larger or smaller.
 
 `trailhead_ui::test_support`, behind the kit's `test-support` feature (turn it on in `[dev-dependencies]`):
 `press_key(world: &mut World, target: Entity, key_code: KeyCode, logical_key: Key)` triggers a key press on `target`
-as if it had focus, without running a frame; `press_escape(world, target)` presses Escape.
+as if it had focus, without running a frame; `press_escape(world, target)` presses Escape. `settle(app: &mut App)` applies
+what was queued and runs three frames, enough for a scene spawned through commands to land and be answered.
 
 ### Near-synonyms: which to use when
 
@@ -473,12 +555,14 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   `HoverTone`.** A button with words; one with an icon only; a round check that marks an item done; one that opens a
   URL; a place to go in a sidebar; a row of a menu; a row of a dropdown list; a table row; anything else pressable.
   A setting that is on or off is a `toggle_switch`, not a check.
-- **`badge` / `chip` / `notice`.** Something an item says about itself (a key, a priority); state that is always
-  there, with a dot and a hint; a message about how something went. All three are updated in place.
+- **`badge` / `chip` / `notice` / `count_badge`.** Something an item says about itself (a key, a priority); state that
+  is always there, with a dot and a hint; a message about how something went; how many wait behind a button. All four
+  are updated in place.
 - **`field` / `setting` / `setting_toggle`.** A label over a control in a form; the same in a settings page, with a
   note under it; a setting that is on or off.
-- **`panel` / `section` / `field_well` / `sidebar_card` / `spawn_accordion`.** A surface over the content; a group of
-  rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
+- **`panel` / `section` / `field_well` / `sidebar_card` / `list_card` / `spawn_accordion`.** A surface over the content;
+  a group of rows inside one; a box to set text fields in; a raised box in a sidebar; one item of a list read item by
+  item; a section that opens and closes.
 - **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
   status color; one line cut to fit its row; a caption inside a hand-built button.
 - **`spawn_choice_tile` / `spawn_picture`.** A small picture that is one of a row of choices; a picture shown for
@@ -487,6 +571,9 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   each move for you to apply to that data (and then `Keyed` moves the nodes).
 - **`scroll_frame` + `scroll_body` / `ScrollBoth`.** A panel's body that scrolls down; an area (a board of columns) that
   scrolls both ways, with `ScrollDown` areas inside it.
+- **`ScrollBoth` / `spawn_canvas` / `spawn_graph`.** An area of laid-out content bigger than its box (a board of
+  columns), which scrolls to its edges; content placed by hand with no edge, which pans and zooms; nodes and edges the
+  kit lays out on a canvas.
 
 ## 3. Colors, sizes, spacing, icons and layers
 
@@ -568,6 +655,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `HINT_MARGIN` | 4 | The least room a hint keeps from the window's or its surface's edge |
 | `DOT` | 8 | A status chip's dot, across |
 | `BADGE_INSET` | 2 | Inside a badge |
+| `COUNT_OFFSET` | 4 | How far a count sits out past its button's corner |
 | `LABEL_INSET` | 4 | Inside a small labelled box |
 | `INPUT_INSET` | 4 | Inside an inline text's input, before and after the text |
 | `CONTROL_INSET` | 8 | Inside a card, a field, a hint |
@@ -584,6 +672,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `HAIRLINE` | 1 | A border, a divider |
 | `GRIP` | 2 | The line a drag edge shows while hovered or dragged |
 | `RING` | 1.5 | A round check's ring |
+| `EDGE` | 2 | An edge of a graph, readable zoomed out |
 
 | `extent::` | px | For |
 | --- | --- | --- |
@@ -593,6 +682,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `DRAG_EDGE` | 6 | The strip along a sidebar's edge that drags it |
 | `CONTROL_HEIGHT` | 24 | A control one line high: a button, a select, a one-line text input (feathers' row height) |
 | `CHECK_SIZE` | 16 | A round check's ring, across |
+| `COUNT_SIZE` | 14 | A count over a button's corner, down and at least across |
 | `PROGRESS_HEIGHT` | 6 | A progress bar |
 | `SIDE_PANEL_WIDTH` | 360 | A panel down the right of the window (an inspector) |
 | `MODAL_WIDTH` | 640 | A modal, unless its kind says otherwise |
@@ -600,8 +690,13 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `FIELD_LABEL_WIDTH` | 90 | The label column in a sidebar field |
 | `DETAIL_WIDTH`, `DETAIL_SIDEBAR_WIDTH` | 960, 280 | A detail modal and its sidebar of facts |
 | `SETTINGS_TABS_WIDTH` | 180 | The tabs down the side of a settings modal with pages |
-| `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 72, 44 | A choice tile's picture |
+| `TILE_PICTURE_WIDTH`, `TILE_PICTURE_HEIGHT` | 104, 64 | A choice tile's picture |
+| `SETTINGS_MEASURE` | 560 | How wide a page of settings grows |
+| `GROUP_OPTION_MIN` | 64 | The least an option of a button group is across |
+| `FIELD_SHORT`, `FIELD_MEDIUM` | 96, 240 | A text field for a number or a count, and for a word or a name |
 | `PICTURE_WIDTH`, `PICTURE_HEIGHT` | 160, 100 | A picture's thumbnail box (`spawn_picture`): two side by side fit a side panel |
+| `GRAPH_LAYERS_APART`, `GRAPH_NODES_APART` | 56, 24 | How far apart a graph's layers sit across (room for its edges' turns), and the nodes of one layer down |
+| `GRAPH_EDGE_END` | 6 | The square where a graph's edge meets the node it points to |
 
 The lint reads lines, not meaning: a number hidden in a constant named for nothing gets past it. Name constants for
 what they are for, and prefer the kit's names over constants of your own.
@@ -613,9 +708,9 @@ Icons are `Icon` variants, glyphs from the embedded Lucide font (`src/assets/luc
 and they take the text color a button gives its caption, so hover and disabled repaint them. The text font has no icon
 glyphs, so anything that is not an `Icon` shows as a box or a question mark.
 
-The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Board` (kanban), `Bot`,
-`Calendar`, `Check`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
-(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Filter`, `Flag`, `Footprints`, `Help` (circle-help),
+The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Bell`, `Board` (kanban), `Bot`,
+`Calendar`, `Check`, `CheckCheck`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
+(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Factory`, `Filter`, `Fit` (scan), `Flag`, `Footprints`, `Graph` (network), `Help` (circle-help),
 `Handshake`, `History`, `Info`, `Inspect` (panel-right-open), `LogIn`, `Map`, `Monitor`, `Moon`, `Pencil`, `Plus`,
 `PullRequest` (git-pull-request), `Refresh` (refresh-cw), `Release` (lock-open), `Search`, `Send`, `Settings`,
 `Shield`, `Signpost`, `Stop` (ban), `Sun`, `TriangleAlert`, `Undo` (undo-2), `User`, `Wifi`, `WifiOff`, `X`.
@@ -721,7 +816,8 @@ though it draws on top. Give every overlay its layer from `layer` (section 3).
 ### Scrolling goes through the kit (TRAIL-836)
 
 Mark an area `ScrollBoth` or `ScrollDown`. The kit's one observer walks up from what the pointer is over to the
-nearest of each and splits the wheel turn between them. Do not add a wheel observer of your own per area: a bubbling
+nearest of each and splits the wheel turn between them; a `Canvas` nearer than either takes the whole turn to zoom
+(TRAIL-1668). Do not add a wheel observer of your own per area: a bubbling
 `PointerScroll` keeps naming the entity it was fired on, so an ancestor's handler never sees its own entity. A view
 that did rebuild its nodes would have to carry `ScrollPosition` over itself; keeping the node is the fix.
 

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Credential, Endpoint, Error, EventSink, Feedback, HarnessSecrets, ModelId, PrGrade, PrRef, Repo, Result, Role,
-    RunEvent, SandboxId, Secret, TaskSpec, Usage, Verdict,
+    Credential, Endpoint, Error, EventSink, Feedback, HarnessSecrets, ModelId, PlanTurn, Planning, PrGrade, PrRef,
+    Repo, Result, Role, RunEvent, SandboxId, Secret, TaskSpec, Usage, Verdict,
 };
 
 /// A named check and the shell command that runs it in the repo (`docs/factory/sandbox.md`).
@@ -146,6 +146,9 @@ pub struct RunRequest {
     /// this field ignores it, and takes none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shots: Option<Shots>,
+    /// For a planner: the ask and the plan as the engine holds it now. The daemon adds where the turn is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<Planning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +176,9 @@ pub enum RunResult {
     Reviewed(Verdict),
     /// The agent parked the task with a question.
     NeedsInput(String),
+    /// A planner ended its turn. The daemon writes nothing for it: the control plane records the plan and asks the
+    /// person, as the run's sub-agent, which still holds the claim.
+    PlanTurn(PlanTurn),
     Failed(String),
 }
 

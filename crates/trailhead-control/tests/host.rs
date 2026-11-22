@@ -10,6 +10,7 @@ use trailhead_factory::HostConfig;
 use trailhead_factory::{
     Compute, FactoryConfig, Labels, Patch, Role, RunOutcome, RunPatch, SandboxSpec, Scope, TaskKey, VerdictKind, label,
 };
+use trailhead_testkit::fixtures::until;
 use trailhead_testkit::{
     FakeCodeHost, FakeCompute, FakeProvider, FakeTracker, LocalDaemon, Script, ScriptedHarness, unix_now,
 };
@@ -56,7 +57,7 @@ fn repo(name: &str, extra: &str, compute: &FakeCompute, host: &Arc<Host>) -> Rep
     let harness = Arc::new(ScriptedHarness::new());
     let heads = codehost.clone();
     let daemon = Arc::new(
-        LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+        LocalDaemon::new(harness.clone(), Arc::new(codehost), tracker.clone())
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
@@ -146,16 +147,6 @@ async fn a_repos_own_cap_still_applies_under_a_roomy_host() {
     assert!(a.factory.tick().await.unwrap().is_empty());
 }
 
-async fn until(what: &str, mut done: impl FnMut() -> bool) {
-    for _ in 0..400 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 #[tokio::test]
 async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
     let compute = FakeCompute::new();
@@ -168,7 +159,7 @@ async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
         let harness = Arc::new(ScriptedHarness::new());
         let heads = codehost.clone();
         let daemon = Arc::new(
-            LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+            LocalDaemon::new(harness.clone(), Arc::new(codehost), tracker.clone())
                 .with_heads(move |repo, branch| heads.head(repo, branch)),
         );
         let factory = Arc::new(Factory::new(

@@ -126,7 +126,7 @@ pub fn notice_with(says: Notice) -> impl Scene {
 }
 
 /// Draw each notice from what it says: shown or hidden, its words, and its tone's icon and tokens.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn sync_notices(
     notices: Query<(Entity, Ref<Notice>, &Children, &mut Node, &BorderTone)>,
     mut icons: Query<(Entity, &mut Text), (With<NoticeIcon>, Without<NoticeText>)>,

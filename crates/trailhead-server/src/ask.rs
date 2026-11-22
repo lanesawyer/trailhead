@@ -1,6 +1,6 @@
-//! Asking for work from the window (`docs/app-platform.md`, "Asking for an app"): what can be asked about, the
-//! projects pointed at the apps repo, and an ask turned into one graded task in such a project, or into a new app's
-//! project and its first task.
+//! Asking for work from the window (`docs/app-platform.md`, "Asking for an app" and "Planning an ask"): what can be
+//! asked about, the projects pointed at the apps repo, and an ask turned into one graded task in such a project, or,
+//! planned first, into a spec task a planner works with the person. A new app is its project and a spec task.
 //!
 //! Only a person asks. The server then acts as that person, with their context, through the same store calls the API
 //! makes, so giving a task its first grade and pointing a project at the apps repo need no rule of their own. Everything
@@ -9,9 +9,13 @@
 use std::ops::RangeInclusive;
 
 use serde_json::json;
-use trailhead_core::shell::{Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS};
+use trailhead_core::shell::{
+    Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS, NewApp, PLANNER_MODELS, chosen_key,
+    key_from, words,
+};
 use trailhead_core::{
-    Ctx, Error, FACTORY_AGENT, Grade, NewProject, NewTask, PROJECT_REPO_KEY, Priority, ProjectPatch, Result, Store,
+    Ctx, Error, FACTORY_AGENT, Grade, NewProject, NewTask, PROJECT_REPO_KEY, Priority, ProjectPatch, Result, Spec,
+    Store, TASK_PLAN_KEY, TaskPlan,
 };
 
 /// App ids the shell or the `trailhead` repo already uses.
@@ -85,9 +89,6 @@ const NOT_A_CRATE: &[&str] = &[
 /// How long an app's id may be.
 const ID_CHARS: RangeInclusive<usize> = 2..=32;
 
-/// How long a project key made from a name may be, before a digit is added to make it unique.
-const KEY_CHARS: RangeInclusive<usize> = 2..=6;
-
 /// The longest task title an ask's first line makes; a longer line is cut at a word.
 const TITLE_CHARS: usize = 80;
 
@@ -140,15 +141,35 @@ pub async fn ask(store: &Store, ctx: &Ctx, configured: bool, repo: Option<&str>,
     if text.chars().count() > MAX_ASK_CHARS {
         return Err(Error::Invalid(format!("an ask is at most {MAX_ASK_CHARS} characters")));
     }
+    let model = match ask.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) if !PLANNER_MODELS.contains(&model) => {
+            return Err(Error::Invalid(format!(
+                "{model} isn't a planner's model: one of {}",
+                PLANNER_MODELS.join(", ")
+            )));
+        }
+        model => model.map(str::to_string),
+    };
     let today = jiff::Zoned::now().date();
     match (ask.project, ask.new_app) {
-        (Some(project), None) => change(store, ctx, repo, &project, text, today).await,
-        (None, Some(app)) => new_app(store, ctx, repo, app.name.trim(), text, today).await,
+        (Some(_), None) if model.is_some() && !ask.plan => {
+            Err(Error::Invalid("a model is the planner's: it goes with `plan`".into()))
+        }
+        (Some(project), None) => {
+            let planner = ask.plan.then_some(Planner { model });
+            change(store, ctx, repo, &project, text, today, planner).await
+        }
+        (None, Some(app)) => new_app(store, ctx, repo, &app, text, today, Planner { model }).await,
         _ => Err(Error::Invalid("ask about one thing: a `project` or a `new_app`".into())),
     }
 }
 
-/// One graded task in the app `project` is.
+/// An ask that is planned first, and the model the person chose for its planner, if any.
+struct Planner {
+    model: Option<String>,
+}
+
+/// One graded task in the app `project` is, or, with a `planner`, a spec task for it.
 async fn change(
     store: &Store,
     ctx: &Ctx,
@@ -156,6 +177,7 @@ async fn change(
     project: &str,
     text: &str,
     today: jiff::civil::Date,
+    planner: Option<Planner>,
 ) -> Result<Asked> {
     let targets = pointed_at(store, ctx, repo).await?;
     let Some(target) = targets.iter().find(|t| t.project.eq_ignore_ascii_case(project.trim())) else {
@@ -164,24 +186,33 @@ async fn change(
             project.trim()
         )));
     };
-    let new = graded_task(&target.project, title_of(text), format!("Asked from the window, {today}:\n\n{text}"));
+    let description = format!("Asked from the window, {today}:\n\n{text}");
+    let planned = planner.is_some();
+    let new = match planner {
+        Some(planner) => spec_task(&target.project, title_of(text), description, planner),
+        None => graded_task(&target.project, title_of(text), description),
+    };
     let task = store.create_task(ctx, new).await?;
     Ok(Asked {
         project: AskedProject { key: target.project.clone(), name: target.name.clone(), created: false },
         task: Some(AskedTask { key: task.key.0, title: task.title }),
+        planned,
         notes: Vec::new(),
     })
 }
 
-/// A new app's project, pointed at `apps/<id>` of `repo` with the factory as its reviewer, and its first task.
+/// A new app's project, pointed at `apps/<id>` of `repo` with the factory as its reviewer, and the spec task its
+/// planner works: a new app is always planned.
 async fn new_app(
     store: &Store,
     ctx: &Ctx,
     repo: &str,
-    name: &str,
+    app: &NewApp,
     text: &str,
     today: jiff::civil::Date,
+    planner: Planner,
 ) -> Result<Asked> {
+    let name = app.name.trim();
     if name.is_empty() {
         return Err(Error::Invalid("a new app needs a name".into()));
     }
@@ -196,9 +227,17 @@ async fn new_app(
             t.name, t.project
         )));
     }
+    let chosen =
+        app.key.as_deref().filter(|k| !k.trim().is_empty()).map(chosen_key).transpose().map_err(Error::Invalid)?;
     let mut taken: Vec<String> = store.list_projects(ctx, true).await?.into_iter().map(|p| p.key).collect();
     let project = loop {
-        let key = project_key(name, &taken).map_err(Error::Invalid)?;
+        let key = match &chosen {
+            Some(key) if taken.iter().any(|t| t.eq_ignore_ascii_case(key)) => {
+                return Err(Error::Invalid(format!("the key {key} is another project's: choose another")));
+            }
+            Some(key) => key.clone(),
+            None => project_key(name, &taken).map_err(Error::Invalid)?,
+        };
         let new = NewProject {
             key: key.clone(),
             name: name.to_string(),
@@ -216,20 +255,21 @@ async fn new_app(
     if let Some(note) = review_by_factory(store, ctx, &project.key).await {
         notes.push(note);
     }
-    let title = format!("Create the {name} app: scaffold {path}, register it in the shell, build its first version");
-    let task = match store.create_task(ctx, graded_task(&project.key, title, first_task(name, &id, text, today))).await
-    {
+    let title = format!("Plan the {name} app");
+    let spec = spec_task(&project.key, title, new_app_ask(name, &id, text, today), planner);
+    let task = match store.create_task(ctx, spec).await {
         Ok(task) => Some(AskedTask { key: task.key.0, title: task.title }),
         Err(e) => {
             notes.push(format!(
-                "The project {} was made, but its first task wasn't ({e}). Add it by hand: \
-                 `trailhead --as-me add \"Create the {name} app\" -p {} --grade 2`.",
-                project.key, project.key
+                "The project {} was made, but the task to plan the app wasn't ({e}). Ask again as a change to {name}, \
+                 with \"Plan this first\" on.",
+                project.key
             ));
             None
         }
     };
-    Ok(Asked { project: AskedProject { key: project.key, name: project.name, created: true }, task, notes })
+    let project = AskedProject { key: project.key, name: project.name, created: true };
+    Ok(Asked { project, task, planned: true, notes })
 }
 
 /// Makes the factory's agent a reviewer of `project`, so it can approve the work, or says why it isn't one.
@@ -267,6 +307,20 @@ fn graded_task(project: &str, title: String, description: String) -> NewTask {
     }
 }
 
+/// A spec task: ungraded, so no worker takes it, and marked for a planner, which the factory runs on it. The tasks
+/// the planner makes under it stay ungraded until the person approves the plan.
+fn spec_task(project: &str, title: String, description: String, planner: Planner) -> NewTask {
+    let plan = TaskPlan { spec: Some(Spec { model: planner.model, ..Spec::default() }), proposed: None };
+    NewTask {
+        project: project.to_string(),
+        title,
+        description,
+        priority: Some(Priority::new(2).expect("2 is a priority")),
+        metadata: Some(json!({ TASK_PLAN_KEY: plan })),
+        ..NewTask::default()
+    }
+}
+
 fn brief(name: &str, id: &str, key: &str, repo: &str, text: &str, today: jiff::civil::Date) -> String {
     format!(
         "{name} is an app in the Trailhead shell, asked for from the window on {today}. It lives in `apps/{id}` of \
@@ -276,17 +330,15 @@ fn brief(name: &str, id: &str, key: &str, repo: &str, text: &str, today: jiff::c
     )
 }
 
-fn first_task(name: &str, id: &str, text: &str, today: jiff::civil::Date) -> String {
+fn new_app_ask(name: &str, id: &str, text: &str, today: jiff::civil::Date) -> String {
     format!(
         "Asked from the window, {today}, as a new app called {name}:\n\n{text}\n\n\
-         Done looks like:\n\n\
+         What any new app's plan has to cover:\n\n\
          - `apps/{id}` is a new crate made as the repo's AGENTS.md and apps/README.md say, its app id `{id}`.\n\
          - It is added to the one list of apps in `shell/src/lib.rs`.\n\
          - It has its design-system lint test and its in-place (redraws) test, both with empty allowlists.\n\
-         - The repo's checks pass.\n\
-         - The first version does what was asked above. Anything left out is listed as follow-ups in your summary.\n\n\
-         This task is grade 2, but adding a crate changes `Cargo.toml` and `shell/`, which the repo's path rules put \
-         at grade 3, so a person approves the new app before it merges."
+         - `apps/{id}/README.md` says what the app does and why, and is kept up as the app changes.\n\n\
+         Adding a crate changes `Cargo.toml` and `shell/`, which the repo's path rules put at grade 3."
     )
 }
 
@@ -299,56 +351,6 @@ pub(crate) fn title_of(text: &str) -> String {
     let head: String = line.chars().take(TITLE_CHARS - 1).collect();
     let at = head.rfind(char::is_whitespace).filter(|&i| i > 0).unwrap_or(head.len());
     format!("{}…", head[..at].trim_end())
-}
-
-/// A name's words: its letters and digits, accented Latin letters taken as their plain ones, everything else a break.
-fn words(name: &str) -> Vec<String> {
-    let mut words = vec![String::new()];
-    for c in name.chars() {
-        let plain = fold(c);
-        match plain {
-            Some(p) => words.last_mut().expect("never empty").push_str(p),
-            None if c.is_ascii_alphanumeric() => words.last_mut().expect("never empty").push(c),
-            None if c == '\'' || c == '\u{2019}' => {}
-            None => words.push(String::new()),
-        }
-    }
-    words.retain(|w| !w.is_empty());
-    words
-}
-
-/// The plain letters an accented Latin one is written with.
-fn fold(c: char) -> Option<&'static str> {
-    Some(match c {
-        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' => "a",
-        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' => "A",
-        'æ' => "ae",
-        'Æ' => "AE",
-        'ç' | 'č' | 'ć' => "c",
-        'Ç' | 'Č' | 'Ć' => "C",
-        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ę' => "e",
-        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ę' => "E",
-        'ì' | 'í' | 'î' | 'ï' | 'ī' => "i",
-        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' => "I",
-        'ł' => "l",
-        'Ł' => "L",
-        'ñ' | 'ń' => "n",
-        'Ñ' | 'Ń' => "N",
-        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' => "o",
-        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' => "O",
-        'œ' => "oe",
-        'Œ' => "OE",
-        'š' | 'ś' => "s",
-        'Š' | 'Ś' => "S",
-        'ß' => "ss",
-        'ù' | 'ú' | 'û' | 'ü' | 'ū' => "u",
-        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' => "U",
-        'ý' | 'ÿ' => "y",
-        'Ý' | 'Ÿ' => "Y",
-        'ž' | 'ź' | 'ż' => "z",
-        'Ž' | 'Ź' | 'Ż' => "Z",
-        _ => return None,
-    })
 }
 
 /// An app's id from its name: its words in lowercase joined by `-`, starting with a letter, [`ID_CHARS`] long, and a
@@ -374,32 +376,10 @@ pub(crate) fn app_id(name: &str) -> std::result::Result<String, String> {
     Ok(id)
 }
 
-/// A project key from a name, not one of `taken` (compared ignoring case): the first four letters of a name of one
-/// word, the initials of a name of several, padded from the first word to at least two, at most six; then a digit
-/// added (2 to 9) until it is unique.
+/// A project key from a name ([`key_from`]), not one of `taken` (compared ignoring case): a digit is added (2 to 9)
+/// until it is unique.
 pub(crate) fn project_key(name: &str, taken: &[String]) -> std::result::Result<String, String> {
-    let lettered: Vec<String> = words(name)
-        .iter()
-        .map(|w| w.chars().filter(char::is_ascii_alphabetic).collect::<String>().to_ascii_uppercase())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let Some(first) = lettered.first() else {
-        return Err(format!("{name:?} has no letters to make a project key from"));
-    };
-    let mut base: String = if lettered.len() == 1 {
-        first.chars().take(4).collect()
-    } else {
-        lettered.iter().take(*KEY_CHARS.end()).filter_map(|w| w.chars().next()).collect()
-    };
-    for c in first.chars().skip(1) {
-        if base.len() >= *KEY_CHARS.start() {
-            break;
-        }
-        base.push(c);
-    }
-    if base.len() < *KEY_CHARS.start() {
-        return Err(format!("{name:?} is too short to make a project key from: give it at least two letters"));
-    }
+    let base = key_from(name)?;
     let free = |key: &String| !taken.iter().any(|t| t.eq_ignore_ascii_case(key));
     std::iter::once(base.clone())
         .chain((2..=9).map(|n| format!("{base}{n}")))
@@ -502,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_app_is_a_pointed_project_and_its_first_graded_task() {
+    async fn a_new_app_is_a_pointed_project_and_a_spec_task_for_its_planner() {
         let rig = rig().await;
         rig.apps().await;
         rig.store.create_agent(&rig.human, FACTORY_AGENT).await.unwrap();
@@ -511,11 +491,8 @@ mod tests {
         assert_eq!(asked.project, AskedProject { key: "TN2".into(), name: "Trail Notes".into(), created: true });
         assert!(asked.notes.is_empty(), "{:?}", asked.notes);
         let made = asked.task.unwrap();
-        assert_eq!(made.key, "TN2-1");
-        assert_eq!(
-            made.title,
-            "Create the Trail Notes app: scaffold apps/trail-notes, register it in the shell, build its first version"
-        );
+        assert_eq!((made.key.as_str(), made.title.as_str()), ("TN2-1", "Plan the Trail Notes app"));
+        assert!(asked.planned, "a new app is always planned");
 
         let project = rig.store.get_project(&rig.human, "TN2").await.unwrap();
         let pointed = project.repo().unwrap();
@@ -526,14 +503,45 @@ mod tests {
         assert!(project.brief.contains("`apps/trail-notes`") && project.brief.contains("[TN2-n]"), "{}", project.brief);
         assert!(project.brief.ends_with("Notes on routes I want to try"));
         let task = rig.store.get_task(&rig.human, "TN2-1").await.unwrap();
-        assert_eq!((task.grade.map(Grade::get), task.priority.get()), (Some(2), 2));
-        assert!(task.description.contains("Notes on routes I want to try\n\nDone looks like"));
-        assert!(task.description.contains("`shell/src/lib.rs`") && task.description.contains("grade 3"));
+        assert_eq!((task.grade, task.priority.get()), (None, 2), "ungraded, so no worker takes it");
+        assert!(TaskPlan::of(&task.metadata).unwrap().awaits_planner());
+        assert!(task.description.contains("Notes on routes I want to try\n\nWhat any new app's plan has to cover"));
+        assert!(task.description.contains("`shell/src/lib.rs`") && task.description.contains("README.md"));
 
         let targets = targets(&rig.store, &rig.human, true, Some(REPO.into())).await.unwrap();
         assert!(targets.targets.iter().any(|t| t.project == "TN2"), "the new app can be asked for changes");
         let again = rig.ask(&rig.human, Ask::new_app("twice", "Trail notes")).await.unwrap_err();
         assert!(matches!(&again, Error::Invalid(m) if m.contains("apps/trail-notes")), "{again}");
+    }
+
+    #[tokio::test]
+    async fn a_change_planned_first_is_a_spec_task_with_the_planners_model() {
+        let rig = rig().await;
+        rig.apps().await;
+        let asked = rig.ask(&rig.human, Ask::change("Sync with CalDAV", "TICK").planned(Some("opus"))).await.unwrap();
+        assert!(asked.planned);
+        let task = rig.store.get_task(&rig.human, &asked.task.unwrap().key).await.unwrap();
+        assert_eq!(task.grade, None);
+        let plan = TaskPlan::of(&task.metadata).unwrap();
+        assert!(plan.awaits_planner());
+        assert_eq!(plan.spec.unwrap().model.as_deref(), Some("opus"));
+
+        let unplanned = rig.ask(&rig.human, Ask::change("A small thing", "TICK")).await.unwrap();
+        assert!(!unplanned.planned);
+        let task = rig.store.get_task(&rig.human, &unplanned.task.unwrap().key).await.unwrap();
+        assert_eq!((task.grade.map(Grade::get), TaskPlan::of(&task.metadata)), (Some(2), None));
+
+        let default = rig.ask(&rig.human, Ask::new_app("recipes", "Recipes").planned(None)).await.unwrap();
+        let task = rig.store.get_task(&rig.human, &default.task.unwrap().key).await.unwrap();
+        assert_eq!(TaskPlan::of(&task.metadata).unwrap().spec.unwrap().model, None, "the repo's profile decides");
+
+        for bad in [
+            Ask::change("x", "TICK").planned(Some("gpt")),
+            Ask { model: Some("opus".into()), ..Ask::change("x", "TICK") },
+        ] {
+            let err = rig.ask(&rig.human, bad.clone()).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{bad:?}: {err}");
+        }
     }
 
     #[tokio::test]
@@ -552,12 +560,11 @@ mod tests {
         let rig = rig().await;
         rig.apps().await;
         let long = "x".repeat(MAX_ASK_CHARS + 1);
-        let both =
-            Ask { new_app: Some(trailhead_core::shell::NewApp { name: "A b".into() }), ..Ask::change("x", "TICK") };
+        let both = Ask { new_app: Some(NewApp { name: "A b".into(), key: None }), ..Ask::change("x", "TICK") };
         for bad in [
             Ask::change("   \n ", "TICK"),
             Ask::change(long, "TICK"),
-            Ask { text: "x".into(), project: None, new_app: None },
+            Ask { text: "x".into(), ..Ask::default() },
             both,
             Ask::new_app("x", "  "),
             Ask::new_app("x", "Shell"),
@@ -573,25 +580,45 @@ mod tests {
         assert!(matches!(err, Error::Invalid(_)), "{err}");
     }
 
+    #[tokio::test]
+    async fn a_new_app_takes_the_key_the_person_chose_or_says_why_not() {
+        let rig = rig().await;
+        let asked = rig.ask(&rig.human, Ask::new_app("a trail of what's next", "Cairn").keyed(" crn ")).await.unwrap();
+        assert_eq!(asked.project, AskedProject { key: "CRN".into(), name: "Cairn".into(), created: true });
+        assert_eq!(asked.task.map(|t| t.key).as_deref(), Some("CRN-1"));
+        let project = rig.store.get_project(&rig.human, "CRN").await.unwrap();
+        assert!(project.brief.contains("[CRN-n]"), "{}", project.brief);
+
+        for (name, key) in [("Stones", "crn"), ("Stones", "2x"), ("Stones", "far-too-long")] {
+            let err = rig.ask(&rig.human, Ask::new_app("x", name).keyed(key)).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{key:?}: {err}");
+        }
+        assert!(rig.store.get_project(&rig.human, "STONES").await.is_err(), "a refused key makes no project");
+        let blank = rig.ask(&rig.human, Ask::new_app("x", "Stones").keyed("  ")).await.unwrap();
+        assert_eq!(blank.project.key, "STONES", "a blank key is none");
+    }
+
     #[test]
     fn a_name_makes_an_id_and_a_key() {
         let none: &[String] = &[];
         let cases: &[(&str, Result2, Result2)] = &[
             ("Trail Notes", Ok("trail-notes"), Ok("TN")),
             ("Recipes", Ok("recipes"), Ok("RECI")),
+            ("Cairn", Ok("cairn"), Ok("CAIRN")),
+            ("Ticker", Ok("ticker"), Ok("TICKER")),
             ("Go", Ok("go"), Ok("GO")),
             ("My  climbing-log!", Ok("my-climbing-log"), Ok("MCL")),
             ("Bob's Boulders", Ok("bobs-boulders"), Ok("BB")),
             ("Café Crème", Ok("cafe-creme"), Ok("CC")),
             ("Ångström Notes 2", Ok("angstrom-notes-2"), Ok("AN")),
-            ("Notes 2", Ok("notes-2"), Ok("NOTE")),
+            ("Notes 2", Ok("notes-2"), Ok("NOTES")),
             ("Top 10 Crags", Ok("top-10-crags"), Ok("TC")),
             ("a b c d e f g h", Ok("a-b-c-d-e-f-g-h"), Ok("ABCDEF")),
             ("日記", Err(()), Err(())),
             ("X", Err(()), Err(())),
             ("2048", Err(()), Err(())),
             ("10 Pitches", Err(()), Ok("PITC")),
-            ("Shell", Err(()), Ok("SHEL")),
+            ("Shell", Err(()), Ok("SHELL")),
             ("Lookout", Err(()), Ok("LOOK")),
             ("example", Err(()), Ok("EXAM")),
             ("Type", Err(()), Ok("TYPE")),

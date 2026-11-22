@@ -149,7 +149,7 @@ pub(crate) fn spawn_cover_pieces(commands: &mut Commands, area: Entity) {
 }
 
 /// Puts each cover's pieces where its frame says, in place, when the frame or the area's size changes.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn draw_covers(
     areas: Query<(&CoverFrame, &Children, &ComputedNode), Or<(Changed<CoverFrame>, Changed<ComputedNode>)>>,
     mut bars: Query<(&CoverBar, &mut Node, &mut BackgroundFade, &BackgroundTone), Without<CoverIris>>,
