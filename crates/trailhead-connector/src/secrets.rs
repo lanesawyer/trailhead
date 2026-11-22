@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::manifest::Manifest;
+use crate::{Manifest, env_var};
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SecretError {
@@ -11,10 +11,6 @@ pub enum SecretError {
     Missing { name: String, var: String },
     #[error("`{0}` is not a secret this connector declared")]
     Undeclared(String),
-}
-
-pub fn env_var(name: &str) -> String {
-    format!("TRAILHEAD_CONNECTOR_SECRET_{}", name.to_ascii_uppercase())
 }
 
 #[derive(Clone)]
@@ -35,7 +31,10 @@ impl Secrets {
         })
     }
 
-    fn from_lookup(manifest: &Manifest, lookup: impl Fn(&str) -> Option<String>) -> Result<Secrets, SecretError> {
+    pub(crate) fn from_lookup(
+        manifest: &Manifest,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Secrets, SecretError> {
         let mut map = BTreeMap::new();
         for name in &manifest.secrets {
             let var = env_var(name);
@@ -61,7 +60,7 @@ impl fmt::Debug for Secrets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::tests::GITHUB;
+    use crate::fixtures::GITHUB;
 
     #[test]
     fn reads_declared_secrets_and_never_prints_them() {

@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::get;
 
-use crate::manifest::tests::GITHUB;
+use crate::fixtures::GITHUB;
 use crate::{Http, HttpError, Manifest, Recorded, RetryPolicy};
 
 fn manifest(host: &str) -> Manifest {

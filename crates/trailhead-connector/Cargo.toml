@@ -20,10 +20,17 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-toml.workspace = true
 trailhead-model.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net"] }
+trailhead-core.workspace = true
+trailhead-server.workspace = true
+
+# The connector a planner points at: one JSON list from one host, handed over as one feed, with a replay test.
+[[example]]
+name = "todo_list"
+path = "examples/todo_list/main.rs"
+test = true

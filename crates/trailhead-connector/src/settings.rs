@@ -2,21 +2,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::manifest::{Manifest, SettingKind, SettingSpec};
-
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum SettingsError {
-    #[error("settings must be a JSON object")]
-    NotAnObject,
-    #[error("setting `{0}` is required")]
-    Missing(String),
-    #[error("`{0}` is not a setting this connector declares")]
-    Unknown(String),
-    #[error("setting `{name}` must be a {kind}")]
-    Mistyped { name: String, kind: SettingKind },
-    #[error("setting `{name}` is a {declared}, not a {asked}")]
-    WrongGetter { name: String, declared: SettingKind, asked: SettingKind },
-}
+use crate::{Manifest, SettingKind, SettingSpec, SettingsError};
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -24,35 +10,13 @@ pub struct Settings {
     values: Map<String, Value>,
 }
 
-fn matches_kind(kind: SettingKind, v: &Value) -> bool {
-    match kind {
-        SettingKind::String => v.is_string(),
-        SettingKind::List => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
-        SettingKind::Boolean => v.is_boolean(),
-        SettingKind::Integer => v.is_i64() || v.is_u64(),
-    }
-}
-
 impl Settings {
-    /// `values` is the JSON object the server holds for the connector; `null` is the same as nothing set.
+    /// `values` is the JSON object the server holds for the connector; `null` is the same as nothing set. Every
+    /// required setting has to be set.
     pub fn new(manifest: &Manifest, values: Value) -> Result<Settings, SettingsError> {
-        let mut values = match values {
-            Value::Null => Map::new(),
-            Value::Object(m) => m,
-            _ => return Err(SettingsError::NotAnObject),
-        };
-        values.retain(|_, v| !v.is_null());
-        if let Some(name) = values.keys().find(|k| !manifest.settings.contains_key(*k)) {
-            return Err(SettingsError::Unknown(name.clone()));
-        }
-        for (name, spec) in &manifest.settings {
-            match values.get(name) {
-                None if spec.required => return Err(SettingsError::Missing(name.clone())),
-                Some(v) if !matches_kind(spec.kind, v) => {
-                    return Err(SettingsError::Mistyped { name: name.clone(), kind: spec.kind });
-                }
-                _ => {}
-            }
+        let values = manifest.check_settings(values)?;
+        if let Some(name) = manifest.missing_settings(&values).into_iter().next() {
+            return Err(SettingsError::Missing(name));
         }
         Ok(Settings { specs: manifest.settings.clone(), values })
     }
@@ -93,7 +57,7 @@ mod tests {
     use super::*;
 
     fn manifest() -> Manifest {
-        let text = crate::manifest::tests::GITHUB.replace(
+        let text = crate::fixtures::GITHUB.replace(
             "[feeds.pull_requests]",
             "[settings.site]\nkind = \"string\"\n[settings.limit]\nkind = \"integer\"\n[settings.mine]\nkind = \"boolean\"\n\n[feeds.pull_requests]",
         );

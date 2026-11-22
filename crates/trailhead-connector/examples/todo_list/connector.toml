@@ -1,0 +1,15 @@
+id = "todo-list"
+name = "To-do list"
+every = "15m"
+timeout = "1m"
+hosts = ["todos.example.com"]
+secrets = ["token"]
+
+[settings.list]
+kind = "string"
+label = "List"
+help = "The list's name on todos.example.com"
+required = true
+
+[feeds.items]
+fields = { title = "string", done = "boolean", url = "url?" }

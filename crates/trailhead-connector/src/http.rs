@@ -10,7 +10,7 @@ use reqwest::Url;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::manifest::Manifest;
+use crate::Manifest;
 use crate::replay::{Recorded, Recorder, Replay};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
