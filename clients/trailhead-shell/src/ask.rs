@@ -518,6 +518,7 @@ mod tests {
         let made = Asked {
             project: AskedProject { key: "TN".into(), name: "Trail Notes".into(), created: true },
             task: Some(AskedTask { key: "TN-1".into(), title: "Create the Trail Notes app".into() }),
+            planned: false,
             notes: Vec::new(),
         };
         assert_eq!((done.phase, done.text.as_str(), done.error), (Phase::Asked(made), "", None));

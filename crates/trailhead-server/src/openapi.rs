@@ -283,6 +283,7 @@ impl Modify for Common {
         routes::claims::renew,
         routes::claims::release,
         routes::tasks::set_aside,
+        routes::tasks::approve_plan,
         routes::comments::list_comments,
         routes::comments::add_comment,
         routes::attachments::list_attachments,

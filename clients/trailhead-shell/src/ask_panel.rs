@@ -507,6 +507,7 @@ mod tests {
         Asked {
             project: AskedProject { key: "TN".into(), name: "Trail Notes".into(), created: true },
             task: Some(AskedTask { key: "TN-1".into(), title: "Create the Trail Notes app".into() }),
+            planned: false,
             notes: vec!["There is no `factory` agent yet.".into()],
         }
     }

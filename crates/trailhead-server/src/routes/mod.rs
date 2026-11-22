@@ -50,6 +50,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/renew", post(claims::renew))
         .route("/tasks/{task}/release", post(claims::release))
         .route("/tasks/{task}/set-aside", post(tasks::set_aside))
+        .route("/tasks/{task}/plan/approve", post(tasks::approve_plan))
         .route("/tasks/{task}/comments", get(comments::list_comments).post(comments::add_comment))
         .route(
             "/tasks/{task}/attachments",

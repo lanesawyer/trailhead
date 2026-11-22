@@ -848,7 +848,7 @@ async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
 }
 
 #[tokio::test]
-async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
+async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task_or_a_spec_task() {
     let api = Api::new().await;
     let r = api.as_human("GET", "/v1/shell/ask", None).await;
     assert_eq!((r.status, &r.body), (StatusCode::OK, &json!({"configured": false, "repo": null, "targets": []})));
@@ -899,7 +899,7 @@ async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
     assert_eq!(
         r.body,
         json!({"project": {"key": "TICK", "name": "Ticklist", "created": false},
-               "task": {"key": "TICK-1", "title": "A Completed view"}, "notes": []})
+               "task": {"key": "TICK-1", "title": "A Completed view"}, "planned": false, "notes": []})
     );
     let task = api.as_human("GET", "/v1/tasks/TICK-1", None).await;
     assert_eq!((&task.body["task"]["grade"], &task.body["task"]["priority"]), (&json!(2), &json!(2)), "{}", task.body);
@@ -908,9 +908,37 @@ async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
         api.as_human("POST", "/v1/shell/ask", Some(json!({"text": "notes", "new_app": {"name": "Trail Notes"}}))).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["project"], json!({"key": "TN", "name": "Trail Notes", "created": true}));
-    assert_eq!(r.body["task"]["key"], "TN-1");
+    assert_eq!((&r.body["task"]["key"], &r.body["planned"]), (&json!("TN-1"), &json!(true)));
+    let spec = api.as_human("GET", "/v1/tasks/TN-1", None).await;
+    assert_eq!(spec.body["task"]["grade"], json!(null), "{}", spec.body);
+    assert_eq!(spec.body["task"]["metadata"]["plan"]["spec"]["ready"], json!(false), "{}", spec.body);
+    let plan = json!({"text": "Sync with CalDAV", "project": "TICK", "plan": true, "model": "opus"});
+    let r = api.as_human("POST", "/v1/shell/ask", Some(plan)).await;
+    assert_eq!((r.status, &r.body["planned"]), (StatusCode::CREATED, &json!(true)), "{}", r.body);
     let project = api.as_human("GET", "/v1/projects/TN", None).await;
     assert_eq!(project.body["metadata"]["factory"], json!({"repo": "lane/trailhead-apps", "path": "apps/trail-notes"}));
+}
+
+#[tokio::test]
+async fn approving_a_plan_over_http_grades_its_tasks() {
+    let api = Api::new().await;
+    api.as_human("POST", "/v1/projects", Some(json!({"key": "TICK", "name": "Ticklist"}))).await;
+    let spec = json!({"project": "TICK", "title": "Plan it", "metadata": {"plan": {"spec": {}}}});
+    assert_eq!(api.as_human("POST", "/v1/tasks", Some(spec)).await.status, StatusCode::CREATED);
+    for title in ["a", "b"] {
+        let child = json!({"project": "TICK", "title": title, "parent": "TICK-1"});
+        assert_eq!(api.as_human("POST", "/v1/tasks", Some(child)).await.status, StatusCode::CREATED);
+    }
+    let partial = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(json!({"grades": {"TICK-2": 2}}))).await;
+    assert_eq!((partial.status, &partial.body["error"]["code"]), (StatusCode::BAD_REQUEST, &json!("invalid")));
+    let bad = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(json!({"grades": {"TICK-2": 9}}))).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    let grades = json!({"grades": {"TICK-2": 1, "TICK-3": 3}});
+    let r = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(grades)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body["metadata"]["plan"]["spec"]["approved"].is_i64(), "{}", r.body);
+    let b = api.as_human("GET", "/v1/tasks/TICK-3", None).await;
+    assert_eq!(b.body["task"]["grade"], json!(3));
 }
 
 /// A server whose user config is `text`, in a directory of its own, read as what the server started with.

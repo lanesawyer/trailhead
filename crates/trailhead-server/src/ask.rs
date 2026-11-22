@@ -1,6 +1,6 @@
-//! Asking for work from the window (`docs/app-platform.md`, "Asking for an app"): what can be asked about, the
-//! projects pointed at the apps repo, and an ask turned into one graded task in such a project, or into a new app's
-//! project and its first task.
+//! Asking for work from the window (`docs/app-platform.md`, "Asking for an app" and "Planning an ask"): what can be
+//! asked about, the projects pointed at the apps repo, and an ask turned into one graded task in such a project, or,
+//! planned first, into a spec task a planner works with the person. A new app is its project and a spec task.
 //!
 //! Only a person asks. The server then acts as that person, with their context, through the same store calls the API
 //! makes, so giving a task its first grade and pointing a project at the apps repo need no rule of their own. Everything
@@ -9,9 +9,12 @@
 use std::ops::RangeInclusive;
 
 use serde_json::json;
-use trailhead_core::shell::{Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS};
+use trailhead_core::shell::{
+    Ask, AskTarget, AskTargets, Asked, AskedProject, AskedTask, MAX_ASK_CHARS, PLANNER_MODELS,
+};
 use trailhead_core::{
-    Ctx, Error, FACTORY_AGENT, Grade, NewProject, NewTask, PROJECT_REPO_KEY, Priority, ProjectPatch, Result, Store,
+    Ctx, Error, FACTORY_AGENT, Grade, NewProject, NewTask, PROJECT_REPO_KEY, Priority, ProjectPatch, Result, Spec,
+    Store, TASK_PLAN_KEY, TaskPlan,
 };
 
 /// App ids the shell or the `trailhead` repo already uses.
@@ -140,15 +143,35 @@ pub async fn ask(store: &Store, ctx: &Ctx, configured: bool, repo: Option<&str>,
     if text.chars().count() > MAX_ASK_CHARS {
         return Err(Error::Invalid(format!("an ask is at most {MAX_ASK_CHARS} characters")));
     }
+    let model = match ask.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) if !PLANNER_MODELS.contains(&model) => {
+            return Err(Error::Invalid(format!(
+                "{model} isn't a planner's model: one of {}",
+                PLANNER_MODELS.join(", ")
+            )));
+        }
+        model => model.map(str::to_string),
+    };
     let today = jiff::Zoned::now().date();
     match (ask.project, ask.new_app) {
-        (Some(project), None) => change(store, ctx, repo, &project, text, today).await,
-        (None, Some(app)) => new_app(store, ctx, repo, app.name.trim(), text, today).await,
+        (Some(_), None) if model.is_some() && !ask.plan => {
+            Err(Error::Invalid("a model is the planner's: it goes with `plan`".into()))
+        }
+        (Some(project), None) => {
+            let planner = ask.plan.then_some(Planner { model });
+            change(store, ctx, repo, &project, text, today, planner).await
+        }
+        (None, Some(app)) => new_app(store, ctx, repo, app.name.trim(), text, today, Planner { model }).await,
         _ => Err(Error::Invalid("ask about one thing: a `project` or a `new_app`".into())),
     }
 }
 
-/// One graded task in the app `project` is.
+/// An ask that is planned first, and the model the person chose for its planner, if any.
+struct Planner {
+    model: Option<String>,
+}
+
+/// One graded task in the app `project` is, or, with a `planner`, a spec task for it.
 async fn change(
     store: &Store,
     ctx: &Ctx,
@@ -156,6 +179,7 @@ async fn change(
     project: &str,
     text: &str,
     today: jiff::civil::Date,
+    planner: Option<Planner>,
 ) -> Result<Asked> {
     let targets = pointed_at(store, ctx, repo).await?;
     let Some(target) = targets.iter().find(|t| t.project.eq_ignore_ascii_case(project.trim())) else {
@@ -164,16 +188,23 @@ async fn change(
             project.trim()
         )));
     };
-    let new = graded_task(&target.project, title_of(text), format!("Asked from the window, {today}:\n\n{text}"));
+    let description = format!("Asked from the window, {today}:\n\n{text}");
+    let planned = planner.is_some();
+    let new = match planner {
+        Some(planner) => spec_task(&target.project, title_of(text), description, planner),
+        None => graded_task(&target.project, title_of(text), description),
+    };
     let task = store.create_task(ctx, new).await?;
     Ok(Asked {
         project: AskedProject { key: target.project.clone(), name: target.name.clone(), created: false },
         task: Some(AskedTask { key: task.key.0, title: task.title }),
+        planned,
         notes: Vec::new(),
     })
 }
 
-/// A new app's project, pointed at `apps/<id>` of `repo` with the factory as its reviewer, and its first task.
+/// A new app's project, pointed at `apps/<id>` of `repo` with the factory as its reviewer, and the spec task its
+/// planner works: a new app is always planned.
 async fn new_app(
     store: &Store,
     ctx: &Ctx,
@@ -181,6 +212,7 @@ async fn new_app(
     name: &str,
     text: &str,
     today: jiff::civil::Date,
+    planner: Planner,
 ) -> Result<Asked> {
     if name.is_empty() {
         return Err(Error::Invalid("a new app needs a name".into()));
@@ -216,20 +248,21 @@ async fn new_app(
     if let Some(note) = review_by_factory(store, ctx, &project.key).await {
         notes.push(note);
     }
-    let title = format!("Create the {name} app: scaffold {path}, register it in the shell, build its first version");
-    let task = match store.create_task(ctx, graded_task(&project.key, title, first_task(name, &id, text, today))).await
-    {
+    let title = format!("Plan the {name} app");
+    let spec = spec_task(&project.key, title, new_app_ask(name, &id, text, today), planner);
+    let task = match store.create_task(ctx, spec).await {
         Ok(task) => Some(AskedTask { key: task.key.0, title: task.title }),
         Err(e) => {
             notes.push(format!(
-                "The project {} was made, but its first task wasn't ({e}). Add it by hand: \
-                 `trailhead --as-me add \"Create the {name} app\" -p {} --grade 2`.",
-                project.key, project.key
+                "The project {} was made, but the task to plan the app wasn't ({e}). Ask again as a change to {name}, \
+                 with \"Plan this first\" on.",
+                project.key
             ));
             None
         }
     };
-    Ok(Asked { project: AskedProject { key: project.key, name: project.name, created: true }, task, notes })
+    let project = AskedProject { key: project.key, name: project.name, created: true };
+    Ok(Asked { project, task, planned: true, notes })
 }
 
 /// Makes the factory's agent a reviewer of `project`, so it can approve the work, or says why it isn't one.
@@ -267,6 +300,20 @@ fn graded_task(project: &str, title: String, description: String) -> NewTask {
     }
 }
 
+/// A spec task: ungraded, so no worker takes it, and marked for a planner, which the factory runs on it. The tasks
+/// the planner makes under it stay ungraded until the person approves the plan.
+fn spec_task(project: &str, title: String, description: String, planner: Planner) -> NewTask {
+    let plan = TaskPlan { spec: Some(Spec { model: planner.model, ..Spec::default() }), proposed: None };
+    NewTask {
+        project: project.to_string(),
+        title,
+        description,
+        priority: Some(Priority::new(2).expect("2 is a priority")),
+        metadata: Some(json!({ TASK_PLAN_KEY: plan })),
+        ..NewTask::default()
+    }
+}
+
 fn brief(name: &str, id: &str, key: &str, repo: &str, text: &str, today: jiff::civil::Date) -> String {
     format!(
         "{name} is an app in the Trailhead shell, asked for from the window on {today}. It lives in `apps/{id}` of \
@@ -276,17 +323,15 @@ fn brief(name: &str, id: &str, key: &str, repo: &str, text: &str, today: jiff::c
     )
 }
 
-fn first_task(name: &str, id: &str, text: &str, today: jiff::civil::Date) -> String {
+fn new_app_ask(name: &str, id: &str, text: &str, today: jiff::civil::Date) -> String {
     format!(
         "Asked from the window, {today}, as a new app called {name}:\n\n{text}\n\n\
-         Done looks like:\n\n\
+         What any new app's plan has to cover:\n\n\
          - `apps/{id}` is a new crate made as the repo's AGENTS.md and apps/README.md say, its app id `{id}`.\n\
          - It is added to the one list of apps in `shell/src/lib.rs`.\n\
          - It has its design-system lint test and its in-place (redraws) test, both with empty allowlists.\n\
-         - The repo's checks pass.\n\
-         - The first version does what was asked above. Anything left out is listed as follow-ups in your summary.\n\n\
-         This task is grade 2, but adding a crate changes `Cargo.toml` and `shell/`, which the repo's path rules put \
-         at grade 3, so a person approves the new app before it merges."
+         - `apps/{id}/README.md` says what the app does and why, and is kept up as the app changes.\n\n\
+         Adding a crate changes `Cargo.toml` and `shell/`, which the repo's path rules put at grade 3."
     )
 }
 
@@ -502,7 +547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_new_app_is_a_pointed_project_and_its_first_graded_task() {
+    async fn a_new_app_is_a_pointed_project_and_a_spec_task_for_its_planner() {
         let rig = rig().await;
         rig.apps().await;
         rig.store.create_agent(&rig.human, FACTORY_AGENT).await.unwrap();
@@ -511,11 +556,8 @@ mod tests {
         assert_eq!(asked.project, AskedProject { key: "TN2".into(), name: "Trail Notes".into(), created: true });
         assert!(asked.notes.is_empty(), "{:?}", asked.notes);
         let made = asked.task.unwrap();
-        assert_eq!(made.key, "TN2-1");
-        assert_eq!(
-            made.title,
-            "Create the Trail Notes app: scaffold apps/trail-notes, register it in the shell, build its first version"
-        );
+        assert_eq!((made.key.as_str(), made.title.as_str()), ("TN2-1", "Plan the Trail Notes app"));
+        assert!(asked.planned, "a new app is always planned");
 
         let project = rig.store.get_project(&rig.human, "TN2").await.unwrap();
         let pointed = project.repo().unwrap();
@@ -526,14 +568,45 @@ mod tests {
         assert!(project.brief.contains("`apps/trail-notes`") && project.brief.contains("[TN2-n]"), "{}", project.brief);
         assert!(project.brief.ends_with("Notes on routes I want to try"));
         let task = rig.store.get_task(&rig.human, "TN2-1").await.unwrap();
-        assert_eq!((task.grade.map(Grade::get), task.priority.get()), (Some(2), 2));
-        assert!(task.description.contains("Notes on routes I want to try\n\nDone looks like"));
-        assert!(task.description.contains("`shell/src/lib.rs`") && task.description.contains("grade 3"));
+        assert_eq!((task.grade, task.priority.get()), (None, 2), "ungraded, so no worker takes it");
+        assert!(TaskPlan::of(&task.metadata).unwrap().awaits_planner());
+        assert!(task.description.contains("Notes on routes I want to try\n\nWhat any new app's plan has to cover"));
+        assert!(task.description.contains("`shell/src/lib.rs`") && task.description.contains("README.md"));
 
         let targets = targets(&rig.store, &rig.human, true, Some(REPO.into())).await.unwrap();
         assert!(targets.targets.iter().any(|t| t.project == "TN2"), "the new app can be asked for changes");
         let again = rig.ask(&rig.human, Ask::new_app("twice", "Trail notes")).await.unwrap_err();
         assert!(matches!(&again, Error::Invalid(m) if m.contains("apps/trail-notes")), "{again}");
+    }
+
+    #[tokio::test]
+    async fn a_change_planned_first_is_a_spec_task_with_the_planners_model() {
+        let rig = rig().await;
+        rig.apps().await;
+        let asked = rig.ask(&rig.human, Ask::change("Sync with CalDAV", "TICK").planned(Some("opus"))).await.unwrap();
+        assert!(asked.planned);
+        let task = rig.store.get_task(&rig.human, &asked.task.unwrap().key).await.unwrap();
+        assert_eq!(task.grade, None);
+        let plan = TaskPlan::of(&task.metadata).unwrap();
+        assert!(plan.awaits_planner());
+        assert_eq!(plan.spec.unwrap().model.as_deref(), Some("opus"));
+
+        let unplanned = rig.ask(&rig.human, Ask::change("A small thing", "TICK")).await.unwrap();
+        assert!(!unplanned.planned);
+        let task = rig.store.get_task(&rig.human, &unplanned.task.unwrap().key).await.unwrap();
+        assert_eq!((task.grade.map(Grade::get), TaskPlan::of(&task.metadata)), (Some(2), None));
+
+        let default = rig.ask(&rig.human, Ask::new_app("recipes", "Recipes").planned(None)).await.unwrap();
+        let task = rig.store.get_task(&rig.human, &default.task.unwrap().key).await.unwrap();
+        assert_eq!(TaskPlan::of(&task.metadata).unwrap().spec.unwrap().model, None, "the repo's profile decides");
+
+        for bad in [
+            Ask::change("x", "TICK").planned(Some("gpt")),
+            Ask { model: Some("opus".into()), ..Ask::change("x", "TICK") },
+        ] {
+            let err = rig.ask(&rig.human, bad.clone()).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{bad:?}: {err}");
+        }
     }
 
     #[tokio::test]
@@ -557,7 +630,7 @@ mod tests {
         for bad in [
             Ask::change("   \n ", "TICK"),
             Ask::change(long, "TICK"),
-            Ask { text: "x".into(), project: None, new_app: None },
+            Ask { text: "x".into(), ..Ask::default() },
             both,
             Ask::new_app("x", "  "),
             Ask::new_app("x", "Shell"),
