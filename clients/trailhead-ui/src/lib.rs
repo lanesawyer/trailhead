@@ -34,7 +34,7 @@
 //! - A hint over anything: put a [`Hint`] on it.
 //! - Something pressable that isn't a button (a card, a row) answering the pointer: a [`HoverTone`] on it.
 //! - A message in a conversation, the reader's on the right and others' on the left: [`bubble`] on a [`Side`], headed by
-//!   [`bubble_head`].
+//!   [`bubble_head`]; or a whole one, head and words, kept in step in place: [`message`] and [`MessageEdit`].
 //! - An app's sidebar down the left: [`sidebar`], holding [`nav_item`]s under [`nav_heading`]s and a
 //!   [`sidebar_footer`], with a [`sidebar_card`] above it for something to keep an eye on; mark the page shown on its
 //!   [`NavItem`], and change a [`nav_item_noted`] with [`NavEdit`]. Pages fill [`beside_sidebar`].
@@ -159,7 +159,7 @@ pub use accordion::{
 };
 pub use appearance::{Appearance, ThemeChoice, ThemeColors, ThemePlugin};
 pub use badge::{BadgeEdit, BadgeIcon, BadgeLabel, badge};
-pub use bubble::{Side, bubble, bubble_head};
+pub use bubble::{MessageEdit, MessagePart, Side, bubble, bubble_head, message};
 pub use button_group::{ButtonGroup, button_group};
 pub use buttons::{ButtonKind, button, button_text, tool_button};
 pub use canvas::{

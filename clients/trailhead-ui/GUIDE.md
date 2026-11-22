@@ -342,6 +342,8 @@ view.
 | `skeleton` | `skeleton(rows: usize, row_height: f32) -> impl Scene` | Pulsing placeholder bars where content is on its way. `SkeletonBar` marks each. | Despawn it when the content arrives. |
 | `bubble` | `bubble(side: Side) -> impl Scene` | A message in a conversation: the reader's (`Side::Mine`) against the end edge in the accent, others' (`Side::Theirs`) against the start edge. Put it in a column and spawn its lines as children. | |
 | `bubble_head` | `bubble_head(icon: Icon, words: Into<String>) -> impl Scene` | A bubble's first line: an icon for the kind of message and dim words about it (who, when). | |
+| `message` | `message(side: Side, icon: Icon, head: Into<String>, body: Into<String>, tone: Token) -> impl Scene` | A whole message: a `bubble` on `side`, a `bubble_head` of `icon` and `head`, and `body` in `tone` (`token::TEXT`, or a status's for one waiting on the reader). Spawn more lines (a row of buttons) as its children after it. Every conversation's messages are these (Lookout's task modal and plan view). | `MessageEdit::set(message, icon, head: &str, body: &str, tone: &Token)`, which writes only what differs. |
+| `MessageEdit`, `MessagePart` | system parameter; component (`Icon`, `Head`, `Body`) | The message's editor and the parts it finds (a `bubble_head`'s icon and words carry them too). | |
 
 ### A picture
 
