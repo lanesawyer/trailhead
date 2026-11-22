@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
-    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit,
-    Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
+    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction, Priority,
+    Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook,
+    WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -65,6 +66,13 @@ pub mod routes {
     pub const ADD_ATTACHMENT: Route = Route::new(Method::POST, "/v1/tasks/{task}/attachments");
     pub const READ_ATTACHMENT: Route = Route::new(Method::GET, "/v1/attachments/{id}");
     pub const REMOVE_ATTACHMENT: Route = Route::new(Method::DELETE, "/v1/attachments/{id}");
+    pub const LIST_NOTIFICATIONS: Route = Route::new(Method::GET, "/v1/notifications");
+    pub const RAISE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications");
+    pub const READ_ALL_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/read-all");
+    pub const RESOLVE_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/resolve");
+    pub const READ_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/read");
+    pub const UNREAD_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/unread");
+    pub const RESOLVE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/resolve");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
@@ -226,6 +234,37 @@ pub struct NewAttachment {
     pub name: String,
     pub role: Option<AttachmentRole>,
     pub set: Option<String>,
+}
+
+/// `GET /v1/notifications`: a page of them, newest first, and how many are unread in all.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+pub struct NotificationList {
+    pub notifications: Vec<Notification>,
+    pub unread: i64,
+}
+
+/// `POST /v1/notifications`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewNotification {
+    /// What raises it: an app's id, `factory` or `server`.
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// What it is about, as the raiser names it, to resolve by later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// The key or id of the task it is about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<NotificationAction>,
+}
+
+/// How many notifications a call changed.
+#[derive(Debug, Deserialize)]
+struct Count {
+    count: usize,
 }
 
 /// `POST /v1/tasks`.
@@ -760,6 +799,40 @@ impl Client {
     /// `DELETE /v1/attachments/{id}`: the picture, removed (undo restores it).
     pub async fn remove_attachment(&self, id: Uuid) -> Result<Attachment> {
         self.send(self.request(routes::REMOVE_ATTACHMENT, Some(&id.to_string()))).await
+    }
+
+    /// `GET /v1/notifications`: newest first, only the unread ones if asked, those raised before `before` to page back.
+    pub async fn list_notifications(&self, unread: bool, before: Option<Uuid>, limit: i64) -> Result<NotificationList> {
+        let mut query = vec![("unread", unread.to_string()), ("limit", limit.to_string())];
+        query.extend(before.map(|b| ("before", b.to_string())));
+        self.send(self.request(routes::LIST_NOTIFICATIONS, None).query(&query)).await
+    }
+
+    /// `POST /v1/notifications`.
+    pub async fn raise_notification(&self, new: &NewNotification) -> Result<Notification> {
+        self.send(self.request(routes::RAISE_NOTIFICATION, None).json(new)).await
+    }
+
+    /// `POST /v1/notifications/{id}/read` or `/unread`. Only a person may.
+    pub async fn mark_notification(&self, id: Uuid, read: bool) -> Result<Notification> {
+        let route = if read { routes::READ_NOTIFICATION } else { routes::UNREAD_NOTIFICATION };
+        self.send(self.request(route, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/read-all`: how many were unread. Only a person may.
+    pub async fn mark_all_notifications_read(&self) -> Result<usize> {
+        self.send::<Count>(self.request(routes::READ_ALL_NOTIFICATIONS, None)).await.map(|c| c.count)
+    }
+
+    /// `POST /v1/notifications/{id}/resolve`: what it is about no longer needs the person.
+    pub async fn resolve_notification(&self, id: Uuid) -> Result<Notification> {
+        self.send(self.request(routes::RESOLVE_NOTIFICATION, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/resolve`: resolves every open one `source` raised about `subject`.
+    pub async fn resolve_notifications_about(&self, source: &str, subject: &str) -> Result<usize> {
+        let body = serde_json::json!({ "source": source, "subject": subject });
+        self.send::<Count>(self.request(routes::RESOLVE_NOTIFICATIONS, None).json(&body)).await.map(|c| c.count)
     }
 
     /// `POST /v1/comments/{id}/resolve`, optionally with an answer.

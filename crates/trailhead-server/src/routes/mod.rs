@@ -7,6 +7,7 @@ pub(crate) mod comments;
 pub(crate) mod config;
 pub(crate) mod dependencies;
 pub(crate) mod events;
+pub(crate) mod notifications;
 pub(crate) mod projects;
 pub(crate) mod shell;
 pub(crate) mod tasks;
@@ -63,6 +64,12 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/blockers/{blocker}", delete(dependencies::remove_blocker))
         .route("/tasks/{task}/history", get(events::task_history))
         .route("/comments/{id}/resolve", post(comments::resolve_comment))
+        .route("/notifications", get(notifications::list).post(notifications::raise))
+        .route("/notifications/read-all", post(notifications::read_all))
+        .route("/notifications/resolve", post(notifications::resolve_about))
+        .route("/notifications/{id}/read", post(notifications::read))
+        .route("/notifications/{id}/unread", post(notifications::unread))
+        .route("/notifications/{id}/resolve", post(notifications::resolve))
         .route("/ready", get(tasks::ready))
         .route("/claims", get(claims::my_claims))
         .route("/search", get(tasks::search))

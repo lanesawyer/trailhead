@@ -171,6 +171,21 @@ pub(crate) enum Cmd {
     Attachments {
         task: String,
     },
+    /// What you've been told: the unread notifications, newest first.
+    Inbox {
+        /// Also those read or resolved.
+        #[arg(long)]
+        all: bool,
+        /// At most this many.
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+        /// Mark this one read, by id.
+        #[arg(long, value_name = "ID", conflicts_with = "read_all")]
+        read: Option<uuid::Uuid>,
+        /// Mark every one read.
+        #[arg(long)]
+        read_all: bool,
+    },
     /// Record a review verdict on a task: approve or request-changes. Doesn't move the task.
     Verdict {
         task: String,

@@ -1116,3 +1116,90 @@ async fn without_the_factory_its_table_is_neither_shown_nor_changed() {
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[factory]\nrepos = []\n");
 }
+
+#[tokio::test]
+async fn notifications_are_raised_listed_read_and_resolved_over_http() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "Pick a colour"}))).await;
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "worker"}))).await;
+    let agent = agent.body["secret"].as_str().unwrap().to_string();
+
+    // An agent's question tells the person, by the engine's rule.
+    let q = json!({"kind": "question", "body": "Red or blue?"});
+    let q = api.call(Some(&agent), "POST", "/v1/tasks/AUTH-1/comments", Some(q), &[]).await;
+    assert_eq!(q.status, StatusCode::CREATED, "{}", q.body);
+
+    // An app raises its own through the window, as the person.
+    let raise = json!({
+        "source": "ticklist", "kind": "ticklist.streak", "title": "A streak", "body": "Seven days.",
+        "subject": "streak", "actions": [{"label": "See it", "url": "https://example.com/streak"}],
+    });
+    let mine = api.as_human("POST", "/v1/notifications", Some(raise)).await;
+    assert_eq!(mine.status, StatusCode::CREATED, "{}", mine.body);
+    let id = mine.body["id"].as_str().unwrap().to_string();
+    let bad = json!({"source": "ticklist", "kind": "k", "title": "t", "actions": [{"label": "x", "url": "file:///x"}]});
+    let bad = api.as_human("POST", "/v1/notifications", Some(bad)).await;
+    assert_eq!((bad.status, bad.body["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid")));
+
+    let list = api.as_human("GET", "/v1/notifications", None).await;
+    assert_eq!(list.body["unread"], 2, "{}", list.body);
+    let got = list.body["notifications"].as_array().unwrap();
+    assert_eq!((got[0]["title"].as_str(), got[0]["actions"][0]["label"].as_str()), (Some("A streak"), Some("See it")));
+    assert_eq!((got[1]["kind"].as_str(), got[1]["source"].as_str()), (Some("task.question"), Some("server")));
+    assert_eq!((got[1]["task_key"].as_str(), got[1]["body"].as_str()), (Some("AUTH-1"), Some("Red or blue?")));
+    let page = api.as_human("GET", &format!("/v1/notifications?before={id}&limit=5"), None).await;
+    assert_eq!(page.body["notifications"].as_array().unwrap().len(), 1);
+
+    // Only the person says what they have seen.
+    let r = api.call(Some(&agent), "POST", &format!("/v1/notifications/{id}/read"), None, &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/read"), None).await;
+    assert!(r.body["read_at"].is_string(), "{}", r.body);
+    let list = api.as_human("GET", "/v1/notifications?unread=true", None).await;
+    assert_eq!((list.body["unread"].as_i64(), list.body["notifications"].as_array().unwrap().len()), (Some(1), 1));
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/unread"), None).await;
+    assert!(r.body["read_at"].is_null(), "{}", r.body);
+
+    // The raiser resolves by subject; the engine resolves its own when the task is finished.
+    let about = json!({"source": "ticklist", "subject": "streak"});
+    let r = api.as_human("POST", "/v1/notifications/resolve", Some(about)).await;
+    assert_eq!(r.body["count"], 1, "{}", r.body);
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/resolve"), None).await;
+    assert!(r.body["resolved_at"].is_string(), "{}", r.body);
+    api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "cancelled"}))).await;
+    assert_eq!(api.as_human("GET", "/v1/notifications", None).await.body["unread"], 0);
+
+    let again =
+        api.as_human("POST", "/v1/notifications", Some(json!({"source": "s", "kind": "k", "title": "t"}))).await;
+    assert_eq!(again.status, StatusCode::CREATED);
+    assert_eq!(api.as_human("POST", "/v1/notifications/read-all", None).await.body["count"], 1);
+    let missing = api.as_human("POST", &format!("/v1/notifications/{}/read", uuid::Uuid::now_v7()), None).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_event_stream_carries_a_notifications_life() {
+    let api = Api::new().await;
+    api.seed().await;
+    let res = api
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stream")
+                .header(header::AUTHORIZATION, format!("Bearer {}", api.human))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reader = tokio::spawn(read_sse(res.into_body(), |s| s.contains("event: notification.read")));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let n =
+        api.as_human("POST", "/v1/notifications", Some(json!({"source": "s", "kind": "k", "title": "Hello"}))).await;
+    api.as_human("POST", &format!("/v1/notifications/{}/read", n.body["id"].as_str().unwrap()), None).await;
+    let got = reader.await.unwrap();
+    assert!(got.contains("event: notification.raised"), "{got}");
+    assert!(got.contains("\"entity\":\"notification\"") && got.contains("\"title\":\"Hello\""), "{got}");
+}
