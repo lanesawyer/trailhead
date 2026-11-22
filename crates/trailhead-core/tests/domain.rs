@@ -1940,3 +1940,36 @@ async fn approving_a_plan_grades_its_open_ungraded_subtasks_and_marks_the_spec_t
     let plain = env.task("plain").await;
     assert!(matches!(env.store.approve_plan(&env.human, &plain.key, &both).await, Err(Error::Invalid(_))));
 }
+
+#[tokio::test]
+async fn a_reviewer_finishes_a_parent_whose_subtasks_are_all_finished_without_a_review_of_its_own() {
+    let env = Env::new().await;
+    let reviewer = env.agent("factory").await;
+    let project = env.store.get_project(&env.human, "AUTH").await.unwrap();
+    let patch =
+        ProjectPatch { require_review: Some(true), reviewers: Some(vec!["factory".into()]), ..ProjectPatch::default() };
+    env.store.update_project(&env.human, &project.key, patch, None).await.unwrap();
+    let parent = env.task("parent").await;
+    let child = |title: &str| NewTask { title: title.into(), parent: Some(parent.key.clone()), ..Default::default() };
+    let (a, b) = (env.task_with(child("a")).await, env.task_with(child("b")).await);
+    let finish = async || env.store.update_task(&reviewer, &parent.key, status(Status::Done), None).await;
+
+    assert!(matches!(finish().await, Err(Error::ReviewRequired)), "its subtasks are unfinished");
+    env.store.update_task(&env.human, &a.key, status(Status::Cancelled), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, status(Status::Cancelled), None).await.unwrap();
+    assert!(matches!(finish().await, Err(Error::ReviewRequired)), "all cancelled is dropped, not finished");
+    env.store.update_task(&env.human, &b.key, status(Status::Open), None).await.unwrap();
+    env.store.update_task(&env.human, &b.key, status(Status::Done), None).await.unwrap();
+    assert_eq!(finish().await.unwrap().status, Status::Done);
+
+    let alone = env.task("no subtasks").await;
+    let refused = env.store.update_task(&reviewer, &alone.key, status(Status::Done), None).await;
+    assert!(matches!(refused, Err(Error::ReviewRequired)), "{refused:?}");
+    let other = env.agent("worker").await;
+    let again = env.task("another parent").await;
+    let kid = NewTask { title: "kid".into(), parent: Some(again.key.clone()), ..Default::default() };
+    let kid = env.task_with(kid).await;
+    env.store.update_task(&env.human, &kid.key, status(Status::Done), None).await.unwrap();
+    let refused = env.store.update_task(&other, &again.key, status(Status::Done), None).await;
+    assert!(matches!(refused, Err(Error::ReviewRequired)), "only a reviewer closes a finished parent: {refused:?}");
+}

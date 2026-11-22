@@ -54,6 +54,7 @@ async fn reconcile_after_a_crash_requeues_and_cleans_up() {
             closed: vec![],
             unknown: vec![],
             abandoned: vec![],
+            finished: vec![],
         }
     );
     let names: Vec<String> = r.compute.sandboxes().into_iter().map(|s| s.name).collect();

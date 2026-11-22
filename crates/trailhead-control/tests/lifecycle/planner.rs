@@ -204,6 +204,51 @@ async fn an_approved_spec_task_is_never_planned_and_lets_its_sandbox_go() {
 }
 
 #[tokio::test]
+async fn a_spec_task_is_closed_and_the_person_told_once_every_task_of_its_plan_is_finished() {
+    let (r, spec) = queued_spec();
+    let tasks = vec![task(Some("a"), None, "A", &[], 2), task(Some("b"), None, "B", &[], 2)];
+    r.harness.push(Role::Planner, Script::new(plan_turn("Plan.", "Spec.", tasks, true)));
+    r.factory.tick().await.unwrap();
+    let keys: Vec<TaskKey> = r.tracker.children(&spec).into_iter().map(|t| t.key).collect();
+    r.factory.reconcile().await.unwrap();
+    assert_eq!(r.tracker.task(&spec).status, Status::NeedsInput, "not approved, it is the planner's still");
+
+    r.tracker.approve_plan(&spec);
+    r.tracker.set_status(&keys[0], Status::Done);
+    let done = r.factory.reconcile().await.unwrap();
+    assert!(done.finished.is_empty());
+    assert_eq!(r.tracker.task(&spec).status, Status::Open, "one task is still to do");
+
+    r.tracker.set_status(&keys[1], Status::Cancelled);
+    r.tracker.fail_next("factory", trailhead_testkit::TrackerOp::Finish, 1);
+    assert!(r.factory.reconcile().await.unwrap().finished.is_empty(), "a close that fails is tried again");
+    let done = r.factory.reconcile().await.unwrap();
+    assert_eq!(done.finished, std::slice::from_ref(&spec.0));
+    assert_eq!(r.tracker.task(&spec).status, Status::Done);
+    let notices = r.tracker.open_notices();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].kind, trailhead_factory::NOTICE_PLAN_DONE);
+    assert!(notices[0].title.starts_with(&format!("{} is finished", spec.0)), "{}", notices[0].title);
+    assert_eq!(notices[0].task.as_ref(), Some(&spec));
+    assert!(r.factory.reconcile().await.unwrap().finished.is_empty());
+    assert_eq!(r.tracker.open_notices().len(), 1, "told once");
+}
+
+#[tokio::test]
+async fn a_plan_whose_tasks_were_all_cancelled_is_left_for_the_person() {
+    let (r, spec) = queued_spec();
+    r.harness
+        .push(Role::Planner, Script::new(plan_turn("Plan.", "Spec.", vec![task(Some("a"), None, "A", &[], 2)], true)));
+    r.factory.tick().await.unwrap();
+    let a = r.tracker.children(&spec)[0].key.clone();
+    r.tracker.approve_plan(&spec);
+    r.tracker.set_status(&a, Status::Cancelled);
+    assert!(r.factory.reconcile().await.unwrap().finished.is_empty());
+    assert_eq!(r.tracker.task(&spec).status, Status::Open);
+    assert!(r.tracker.open_notices().is_empty());
+}
+
+#[tokio::test]
 async fn a_plans_tasks_are_left_alone_until_graded_then_worked() {
     let r = planned();
     let spec = r.tracker.add_spec("TRAIL", "A todo app", "Lists.");

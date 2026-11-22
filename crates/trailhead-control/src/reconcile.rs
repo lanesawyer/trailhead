@@ -501,6 +501,10 @@ impl Factory {
     /// going: one that is, the caller follows.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
         self.forget_review_notice_out_of_review(task).await;
+        if self.close_finished_plan(task).await {
+            done.finished.push(task.key.0.clone());
+            return Ok(false);
+        }
         match phase(task, self.tracker.agent(), false) {
             Phase::Untouched | Phase::Closed => Ok(false),
             // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.

@@ -625,12 +625,14 @@ impl std::fmt::Debug for Picture {
 pub const NOTICE_REVIEW: &str = "factory.review";
 /// The factory stopped starting runs until a usage window resets.
 pub const NOTICE_PAUSED: &str = "factory.paused";
+/// Every task of an approved plan is finished, and the factory closed its spec task.
+pub const NOTICE_PLAN_DONE: &str = "factory.plan_done";
 
 /// A notification the factory raises (`docs/app-platform.md#notifications`), for what the task engine can't see on
 /// its own. Its source is always [`SOURCE_FACTORY`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
-    /// [`NOTICE_REVIEW`] or [`NOTICE_PAUSED`].
+    /// [`NOTICE_REVIEW`], [`NOTICE_PAUSED`] or [`NOTICE_PLAN_DONE`].
     pub kind: String,
     /// One plain line, starting with the task's key when there is a task.
     pub title: String,

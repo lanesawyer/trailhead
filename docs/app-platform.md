@@ -200,6 +200,7 @@ Decided with Lane, 2026-11-21. Built so far (TRAIL-1609's subtasks have the rest
 
 - Approving the plan is the person setting the grades: each subtask shows its proposed grade in a dropdown, the person changes any, and presses Approve. The server sets them as that person, in one batch to undo.
 - After approval the planner is finished. The subtasks are ordinary factory tasks, taken as their dependencies clear.
+- **The spec task is closed when the plan is finished. Built (TRAIL-1687).** Once every task of an approved plan is done or cancelled, at least one of them done, the factory closes the spec task with a handoff naming them and raises a notification (`factory.plan_done`). The spec task has no work of its own, so the engine lets a delegated reviewer finish a parent whose subtasks are all finished without a review of its own; nobody else may, and a parent with no subtasks, or one whose subtasks were all cancelled, still needs its review. A plan whose tasks were all cancelled is left open for the person.
 
 **The graph.** A second way to look at work, beside the board, which is every task by status: one parent task's subtasks by what depends on what.
 

@@ -223,7 +223,7 @@ impl FakeTracker {
     }
 
     /// A person approves a spec task's plan: each open, ungraded subtask gets the grade proposed for it, and the spec
-    /// is marked approved.
+    /// is marked approved and open again, as the engine leaves it.
     pub fn approve_plan(&self, spec: &TaskKey) {
         let mut s = self.state.lock().unwrap();
         let children: Vec<TaskKey> = s.parents.iter().filter(|(_, p)| *p == spec).map(|(k, _)| k.clone()).collect();
@@ -235,6 +235,8 @@ impl FakeTracker {
         }
         let t = s.tasks.get_mut(spec).unwrap();
         t.plan.spec.get_or_insert_with(Spec::default).approved = Some(1);
+        t.status = Status::Open;
+        t.holder = None;
     }
 
     /// A person makes `task` wait on `blocker`.

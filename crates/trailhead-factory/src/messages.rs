@@ -725,6 +725,15 @@ pub fn ci_failure_feedback(
     body
 }
 
+/// The handoff a spec task is closed with once every task of its approved plan is finished.
+pub fn plan_finished_handoff(done: &[String], cancelled: &[String]) -> String {
+    let dropped = match cancelled {
+        [] => String::new(),
+        keys => format!(" Cancelled along the way: {}.", keys.join(", ")),
+    };
+    format!("Every task of the plan is finished, so the factory closed it. Done: {}.{dropped}", done.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

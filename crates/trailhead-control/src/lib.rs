@@ -335,6 +335,8 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
     /// In-progress tasks left alone because the target they ran on didn't answer.
     pub unknown: Vec<String>,
+    /// Spec tasks closed because every task of their approved plan is finished.
+    pub finished: Vec<String>,
 }
 
 impl Factory {

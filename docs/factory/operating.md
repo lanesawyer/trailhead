@@ -137,6 +137,7 @@ The factory tells you what the task engine can't see on its own, as notification
 | --- | --- | --- |
 | `factory.review` | A PR waits on you alone: its grade's gate needs a person and every other gate (checks, CI, the agent review) has passed. Titled with the task's key, with a button that opens the pull request | You approve the task, the PR goes back for a rework, the task leaves review, or it is done |
 | `factory.paused` | A usage window passes its `pause_at` and the factory stops starting runs: once per pause, whichever repo noticed | The window resets and runs start again |
+| `factory.plan_done` | Every task of an approved plan is done or cancelled (at least one done), and the factory closed its spec task: once | Nothing resolves it; it is read |
 
 A task the factory parks (a run that failed too often, a budget or time breach, a review that keeps asking for changes, a closed PR) is parked with a question, and the engine already raises a `task.question` notification for that, with the question as its body, so the factory raises nothing more for it. A notification that can't be raised or resolved is logged as a warning and never holds up a run, a record or a park; the merger tries a review notification again on its next pass.
 

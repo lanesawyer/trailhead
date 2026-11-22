@@ -9,8 +9,8 @@ use std::time::Duration;
 use serde_json::json;
 use trailhead_factory::messages;
 use trailhead_factory::{
-    Error, ModelAlias, Patch, PlanChanges, PlanTaskUpdate, PlanTurn, Planning, Profile, ProposedTask, Result, Role,
-    RunPatch, RunPhase, RunRequest, Sandbox, Task, TaskKey, Tracker, plan,
+    Error, ModelAlias, NOTICE_PLAN_DONE, Notice, Patch, PlanChanges, PlanTaskUpdate, PlanTurn, Planning, Profile,
+    ProposedTask, Result, Role, RunPatch, RunPhase, RunRequest, Sandbox, Status, Task, TaskKey, Tracker, plan,
 };
 
 use crate::lifecycle::{Begin, spec, worker_name};
@@ -257,6 +257,50 @@ impl Factory {
         tracing::info!(task = %task.key, sandbox = %sandbox.name, waited = ?waited, "released an idle planner's sandbox");
         if let Err(e) = self.release_worker(sandbox).await {
             tracing::warn!(task = %task.key, sandbox = %sandbox.name, error = %e, "couldn't release an idle planner's sandbox; reconcile will");
+        }
+        true
+    }
+}
+
+impl Factory {
+    /// Closes a spec task whose approved plan is finished: every direct subtask done or cancelled, at least one of
+    /// them done. The spec task has no work of its own, so the engine lets a reviewer finish such a parent without a
+    /// review. The person is told once it is closed. True when it was closed; a plan still being worked, one whose
+    /// tasks were all cancelled (which is the person's to settle), or a failure, which the next pass retries, is
+    /// false.
+    pub(crate) async fn close_finished_plan(&self, task: &Task) -> bool {
+        if !task.plan_approved() || task.status != Status::Open {
+            return false;
+        }
+        let plan = match self.tracker.plan_tasks(&task.key).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                tracing::debug!(task = %task.key, error = %e, "couldn't read an approved plan's tasks");
+                return false;
+            }
+        };
+        let keys = |status: Status| -> Vec<String> {
+            plan.iter().filter(|t| t.status == status).map(|t| t.key.0.clone()).collect()
+        };
+        let (done, cancelled) = (keys(Status::Done), keys(Status::Cancelled));
+        if done.is_empty() || done.len() + cancelled.len() != plan.len() {
+            return false;
+        }
+        if let Err(e) = self.tracker.finish(&task.key, &messages::plan_finished_handoff(&done, &cancelled)).await {
+            tracing::warn!(task = %task.key, error = %e, "couldn't close a spec task whose plan is finished; trying again later");
+            return false;
+        }
+        tracing::info!(task = %task.key, tasks = done.len(), "closed a spec task: every task of its plan is finished");
+        let notice = Notice {
+            kind: NOTICE_PLAN_DONE.into(),
+            title: format!("{} is finished: {}", task.key, trailhead_core::clip(&task.title, 120)),
+            body: format!("Every task of its plan is done ({}), so the factory closed it.", done.join(", ")),
+            subject: format!("plan:{}", task.key),
+            task: Some(task.key.clone()),
+            actions: Vec::new(),
+        };
+        if let Err(e) = self.tracker.notify(&notice).await {
+            tracing::warn!(task = %task.key, error = %e, "couldn't tell the person the plan is finished");
         }
         true
     }
