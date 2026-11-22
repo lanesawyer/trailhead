@@ -25,6 +25,7 @@ struct Inner {
     sandboxes: Vec<SandboxStatus>,
     runs: Vec<RunStatus>,
     holding: Option<String>,
+    restart_for: Vec<String>,
     targets: Vec<TargetSpend>,
     human_grades: Option<Vec<Grade>>,
     queue: Vec<TaskKey>,
@@ -47,6 +48,7 @@ impl Default for StatusBoard {
                 sandboxes: Vec::new(),
                 runs: Vec::new(),
                 holding: None,
+                restart_for: Vec::new(),
                 targets: Vec::new(),
                 human_grades: None,
                 queue: Vec::new(),
@@ -97,6 +99,7 @@ fn snapshot_locked(inner: &Inner) -> FactorySnapshot {
         sandboxes,
         runs,
         holding: inner.holding.clone(),
+        restart_for: inner.restart_for.clone(),
         targets: inner.targets.clone(),
         human_grades: inner.human_grades.clone(),
         queue: inner.queue.clone(),
@@ -144,6 +147,23 @@ impl StatusBoard {
             Some(FactoryEvent::Holding { holding })
         });
         changed
+    }
+
+    /// Sets which sections of the repo's file wait for a restart (none: the file and the factory agree), publishing
+    /// them when they changed.
+    pub fn restart_for(&self, sections: Vec<String>) {
+        self.apply(|i| {
+            if i.restart_for == sections {
+                return None;
+            }
+            i.restart_for = sections.clone();
+            Some(FactoryEvent::RestartNeeded { sections })
+        });
+    }
+
+    /// The sections of the repo's file that wait for a restart.
+    pub fn restart_needed(&self) -> Vec<String> {
+        self.inner.lock().unwrap().restart_for.clone()
     }
 
     /// Sets the subscription's usage readings, publishing them when they changed.

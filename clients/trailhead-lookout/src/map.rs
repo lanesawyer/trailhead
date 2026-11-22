@@ -837,6 +837,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),
@@ -919,6 +920,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: Some("#306 has auto-merge on but CI failed".into()),
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), repo);
@@ -1012,6 +1014,7 @@ mod tests {
             runs: w.runs.iter().map(|r| r.status.clone()).collect(),
             seq: 1,
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),

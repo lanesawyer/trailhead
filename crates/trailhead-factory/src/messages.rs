@@ -466,6 +466,15 @@ pub fn no_planner_profile_question() -> String {
         .to_string()
 }
 
+/// Why a spec task is parked when the repo's profiles changed after the server read them: a planner profile may
+/// well be in the file, and the factory can't use it until it starts again (TRAIL-1689).
+pub fn planner_profile_needs_restart_question() -> String {
+    "This task asks for a plan, and the factory that is running has no planner profile. The repo's `.trailhead.toml` \
+     has changed its `[factory.profiles]` since the server started, and profiles are only read at start: restart the \
+     server (`trailhead server restart`), then reopen the task."
+        .to_string()
+}
+
 /// What a planner's turn asked for that the factory didn't do, said after the planner's message.
 pub fn plan_not_saved(problems: &[String]) -> String {
     let mut out = String::from("\n\n---\nThe factory couldn't do all of what the planner proposed:");

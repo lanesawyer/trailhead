@@ -289,6 +289,24 @@ async fn without_a_planner_profile_the_spec_task_is_parked_with_a_question() {
     assert!(r.compute.sandboxes().is_empty());
 }
 
+/// TRAIL-1689: a planner profile written to the file after the server read it. The park says to restart, not to
+/// add what is already there, and the status board says a restart is owed.
+#[tokio::test]
+async fn a_spec_task_parked_while_the_files_profiles_wait_for_a_restart_says_to_restart() {
+    let mut r = rig();
+    r.factory = r.factory.with_live_settings(Box::new(|| {
+        Ok(trailhead_control::LiveSettings {
+            merge_mode: trailhead_factory::MergeMode::Off,
+            restart_for: vec!["profiles".into()],
+        })
+    }));
+    let spec = r.tracker.add_spec("TRAIL", "A todo app", "Lists.");
+    r.factory.tick().await.unwrap();
+    assert_eq!(r.tracker.task(&spec).status, Status::NeedsInput);
+    assert_eq!(questions(&r, &spec), [messages::planner_profile_needs_restart_question()]);
+    assert_eq!(r.factory.status().snapshot().restart_for, ["profiles"]);
+}
+
 #[tokio::test]
 async fn a_planner_that_breaches_its_budget_is_parked_like_a_worker() {
     let r = planned();

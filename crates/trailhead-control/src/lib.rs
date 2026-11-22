@@ -73,8 +73,18 @@ pub const UPDATE_ASKS: u32 = 3;
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
-/// Reads the current `[factory.merge] mode`, or says why it can't.
-pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
+/// Reads the repo's file as it is now: the merge mode, and which other sections wait for a restart. Or says why it
+/// can't.
+pub type LiveSettingsSource = Box<dyn Fn() -> std::result::Result<LiveSettings, String> + Send + Sync>;
+
+/// What the repo's file says now, read again while the factory runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveSettings {
+    /// `[factory.merge] mode`, the one setting that applies without a restart.
+    pub merge_mode: MergeMode,
+    /// The other `[factory]` sections that differ from what the factory started with, which wait for a restart.
+    pub restart_for: Vec<String>,
+}
 
 /// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
 /// and the sandbox cap can span repos.
@@ -206,7 +216,7 @@ pub struct Factory {
     /// doesn't notice merges or closed PRs.
     pub codehost: Option<Arc<dyn CodeHost>>,
     /// Where the merge mode is re-read from before each merge decision, so it can be switched without a restart.
-    merge_mode_source: Option<MergeModeSource>,
+    live_settings: Option<LiveSettingsSource>,
     merger: MergerState,
     pool: PoolState,
     backoff: Backoff,
@@ -417,7 +427,7 @@ impl Factory {
             targets,
             tracker,
             codehost: None,
-            merge_mode_source: None,
+            live_settings: None,
             merger: MergerState { merge_mode, ..MergerState::default() },
             pool: PoolState::default(),
             backoff: Backoff::default(),
@@ -431,10 +441,11 @@ impl Factory {
         }
     }
 
-    /// Re-reads the merge mode from `source` before each merge decision, so switching it (to `off` as the quick stop)
-    /// takes effect on the next pass. A failed read keeps the last mode read and is logged.
-    pub fn with_merge_mode_source(mut self, source: MergeModeSource) -> Factory {
-        self.merge_mode_source = Some(source);
+    /// Re-reads the repo's file from `source` before each merge decision, so switching the merge mode (to `off` as
+    /// the quick stop) takes effect on the next pass, and the status board says when other sections changed and wait
+    /// for a restart. A failed read keeps the last mode read and is logged.
+    pub fn with_live_settings(mut self, source: LiveSettingsSource) -> Factory {
+        self.live_settings = Some(source);
         self
     }
 
@@ -459,10 +470,12 @@ impl Factory {
     /// The merge mode now in force.
     fn merge_mode(&self) -> MergeMode {
         let mut mode = self.merger.merge_mode.lock().unwrap();
-        if let Some(source) = &self.merge_mode_source {
+        if let Some(source) = &self.live_settings {
             let mut unread = self.merger.merge_mode_unread.lock().unwrap();
             match source() {
-                Ok(read) => {
+                Ok(LiveSettings { merge_mode: read, restart_for }) => {
+                    // On the status board, so `factory status` and Lookout say a restart is owed, not only the log.
+                    self.status.restart_for(restart_for);
                     if unread.take().is_some() {
                         tracing::info!(mode = ?read, "the merge mode can be read again");
                     }

@@ -811,6 +811,7 @@ mod tests {
                 queue: Vec::new(),
                 last_error: None,
                 holding: None,
+                restart_for: Vec::new(),
                 human_grades: None,
                 usage,
             };

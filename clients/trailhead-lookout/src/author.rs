@@ -920,6 +920,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: None,
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         factory.repos.insert("o/r".into(), state);
@@ -1214,6 +1215,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: None,
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         app.world_mut().resource_mut::<FactoryStatus>().repos.insert("o/r".into(), state);
@@ -1381,6 +1383,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
+            restart_for: Vec::new(),
             human_grades: Some(human),
             usage: Vec::new(),
         };

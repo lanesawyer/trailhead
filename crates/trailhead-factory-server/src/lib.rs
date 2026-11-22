@@ -204,15 +204,9 @@ fn load_config(opts: &Opts) -> Result<(PathBuf, Option<trailhead_factory::Repo>,
     find::load_config(opts.config.as_deref())
 }
 
-/// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it is
-/// re-read live) and need a restart, unless that same edit was already `warned` about, so it is reported once, not on every
-/// merge decision. Empty when there is nothing to report.
-fn changed_without_restart(
-    started: &FactoryConfig,
-    now: FactoryConfig,
-    warned: &mut Option<FactoryConfig>,
-) -> Vec<&'static str> {
-    let now = FactoryConfig { merge: Default::default(), ..now };
+/// The `[factory]` sections of `now` that differ from the `started` config (whose `[factory.merge]` is blanked, as it
+/// is re-read live) and so wait for a restart.
+fn changed_sections(started: &FactoryConfig, now: &FactoryConfig) -> Vec<&'static str> {
     // Destructured so that a new section can't be left out of the comparison.
     let FactoryConfig {
         repo,
@@ -228,7 +222,7 @@ fn changed_without_restart(
         merge: _,
         shots,
     } = started;
-    let changed: Vec<&'static str> = [
+    [
         ("repo", *repo != now.repo),
         ("stack", *stack != now.stack),
         ("checks", *checks != now.checks),
@@ -243,7 +237,18 @@ fn changed_without_restart(
     ]
     .into_iter()
     .filter_map(|(name, differs)| differs.then_some(name))
-    .collect();
+    .collect()
+}
+
+/// [`changed_sections`] for the log: the sections that wait for a restart, unless that same edit was already `warned`
+/// about, so it is logged once, not on every read. Empty when there is nothing new to say.
+fn changed_without_restart(
+    started: &FactoryConfig,
+    now: FactoryConfig,
+    warned: &mut Option<FactoryConfig>,
+) -> Vec<&'static str> {
+    let now = FactoryConfig { merge: Default::default(), ..now };
+    let changed = changed_sections(started, &now);
     if changed.is_empty() {
         *warned = None;
         return changed;
@@ -445,13 +450,14 @@ async fn wire(
         let warned = std::sync::Mutex::new(None::<FactoryConfig>);
         let mut factory = Factory::with_targets(config, placed, tracker.clone(), host.clone())
             .with_spend_file(paths.data_dir.join("factory").join(format!("spend-{}.json", slug.replace('/', "-"))));
-        factory = factory.with_merge_mode_source(Box::new(move || {
-            // The control plane's `MergeModeSource` reports a `String`.
+        factory = factory.with_live_settings(Box::new(move || {
+            // The control plane's `LiveSettingsSource` reports a `String`.
             let read = || -> Result<_> {
                 let src = std::fs::read_to_string(&config_path).map_err(|e| Error::at(&config_path, e))?;
                 let config =
                     FactoryConfig::from_repo_file(&src, remote.clone()).map_err(|e| Error::at(&config_path, e))?;
-                let mode = config.merge.mode;
+                let merge_mode = config.merge.mode;
+                let restart_for = changed_sections(&started, &config).into_iter().map(String::from).collect();
                 let changed = changed_without_restart(&started, config, &mut warned.lock().unwrap());
                 if !changed.is_empty() {
                     tracing::warn!(
@@ -460,7 +466,7 @@ async fn wire(
                         "the factory settings changed in the file, but only [factory.merge] mode is re-read live; restart the server to apply them"
                     );
                 }
-                Ok(mode)
+                Ok(trailhead_control::LiveSettings { merge_mode, restart_for })
             };
             read().map_err(|e| e.to_string())
         }));

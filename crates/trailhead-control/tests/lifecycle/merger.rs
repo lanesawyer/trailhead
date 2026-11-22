@@ -481,9 +481,12 @@ async fn a_merge_whose_close_failed_is_closed_by_the_next_pass_as_the_mergers() 
 #[tokio::test]
 async fn switching_merge_mode_off_in_the_source_stops_the_merger_without_a_restart() {
     let (mut r, queue) = queued_rig_with(&merging());
-    let mode = Arc::new(std::sync::Mutex::new(Ok(trailhead_factory::MergeMode::On)));
+    let mode = Arc::new(std::sync::Mutex::new(Ok::<_, String>(trailhead_factory::MergeMode::On)));
     let source = mode.clone();
-    r.factory = r.factory.with_merge_mode_source(Box::new(move || source.lock().unwrap().clone()));
+    r.factory = r.factory.with_live_settings(Box::new(move || {
+        let merge_mode = source.lock().unwrap().clone()?;
+        Ok(trailhead_control::LiveSettings { merge_mode, restart_for: Vec::new() })
+    }));
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
     r.codehost.set_ci(&pr, CiState::Passed);
     *mode.lock().unwrap() = Ok(trailhead_factory::MergeMode::Off);

@@ -50,6 +50,7 @@ impl StatusFeed for TestFeed {
             sandboxes: vec![sandbox("camp-1", SandboxState::Idle)],
             runs: vec![],
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),

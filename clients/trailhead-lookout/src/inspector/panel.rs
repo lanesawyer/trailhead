@@ -725,6 +725,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
+            restart_for: Vec::new(),
             human_grades: Some(human),
             usage: Vec::new(),
         };
@@ -812,6 +813,7 @@ mod tests {
                     last_error: None,
                     human_grades: Some(human),
                     holding: None,
+                    restart_for: Vec::new(),
                     usage: Vec::new(),
                 },
             );

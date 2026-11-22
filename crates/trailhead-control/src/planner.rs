@@ -97,9 +97,16 @@ impl Factory {
     /// A spec task in a repo with no planner profile: parked, as the factory's own identity, with a question saying
     /// to add one. Never planned on the worker's profile instead.
     async fn park_without_planner(&self, task: &Task) -> Result<Outcome> {
-        tracing::warn!(task = %task.key, "a spec task, but the repo has no planner profile; parking it");
+        // Read the file again first: a profile added since the server started is there, and what is owed is a restart.
+        self.merge_mode();
+        let unread = self.status.restart_needed().iter().any(|section| section == "profiles");
+        tracing::warn!(task = %task.key, unread, "a spec task, but the factory has no planner profile; parking it");
         self.tracker.claim(&task.key).await?;
-        let question = messages::no_planner_profile_question();
+        let question = if unread {
+            messages::planner_profile_needs_restart_question()
+        } else {
+            messages::no_planner_profile_question()
+        };
         if let Err(e) = self.tracker.ask(&task.key, &question).await {
             if let Err(re) = self.tracker.release(&task.key).await {
                 tracing::warn!(task = %task.key, error = %re, "couldn't release a spec task it failed to park");
