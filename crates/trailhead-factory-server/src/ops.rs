@@ -471,7 +471,10 @@ fn task_line(t: &Task) -> String {
 
 /// The sandboxes matching `labels` on every target, each with the index of the target it is on, and the names of the
 /// targets that couldn't be reached. An error only when none could.
-async fn list_everywhere(computes: &[crate::Built], labels: &Labels) -> Result<(Vec<(usize, Sandbox)>, Vec<String>)> {
+async fn list_everywhere(
+    computes: &[crate::computes::Built],
+    labels: &Labels,
+) -> Result<(Vec<(usize, Sandbox)>, Vec<String>)> {
     let mut found = Vec::new();
     let mut unreachable = Vec::new();
     let mut last = None;
