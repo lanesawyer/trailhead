@@ -146,7 +146,7 @@ Before any of it: the Lookout and factory changes now in review are merged, grad
    - `GET /v1/shell/ask` lists what can be asked about: the active projects whose `metadata.factory.repo` is the apps repo, which the builder reads from its checkout's `origin`. `POST /v1/shell/ask` takes `{"text", "project"}` or `{"text", "new_app": {"name"}}`. Only a person may ask (an agent gets 403); the server acts as that person, so it may give the first grade and point a project at the repo with no new engine rule, and everything one ask writes is one batch to undo.
    - **A change** is one task in the app's project: titled from the ask's first line, its whole text in the description, grade 2 and priority 2, so the factory takes it from its next poll.
    - **A new app** gets an id from its name (lowercase words joined by `-`, starting with a letter, 2 to 32 characters, a name cargo takes for a crate, not `shell`, `lookout` or `example`, and not an app's that exists) and a project key (the first four letters of one word, the initials of several, a digit added until unique). Its project is named for it, pointed at `apps/<id>`, requires review, has the `factory` agent as reviewer when the factory has run here (the reply says so when it hasn't), and has a brief naming the path, the kit and the commit subjects. Its first task, at grade 2, is to scaffold the crate, register it in the shell and build a first version of what was asked; adding a crate touches `Cargo.toml` and `shell/`, so the PR is graded 3 and a person approves the new app.
-   - **Not built:** the planner run. An ask is one task, its text the spec, with no questions asked first. No project default grade either: every task in an asked-for project so far is a person's ask, which carries its own grade. Asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
+   - **Not built:** the planner, designed in [Planning an ask](#planning-an-ask) (TRAIL-1609). Until it is, an ask is one task, its text the spec, with no questions asked first. Asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
 6. **The app data store.**
 7. **Connectors.**
 
@@ -163,6 +163,53 @@ The engine has due days and times, scheduled days and times, reminders, prioriti
 - A one-time import from Todoist (PLAN.md phase 9).
 - Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet.
 - Quick capture without opening the shell. The CLI covers it today.
+
+## Planning an ask
+
+Decided with Lane, 2026-11-21. Not built (TRAIL-1609 and its subtasks).
+
+**Asking.**
+
+- **A plus below the app list** asks for a new app. It always goes to the planner, and its plan always needs a person's approval.
+- **The Ask button** asks for a change to the app shown, with a "Plan this first" toggle, off by default. Off, the ask is one grade 2 task straight to a worker, as now. On, it goes to the planner, and the form shows a dropdown of the planner's model.
+- A person says which asks are big; nothing guesses. A worker that finds a small ask is a big one stops and asks through `needs_input`, as any worker does.
+
+**The planner run.**
+
+- An ask to be planned becomes a **spec task**, the parent of everything the ask produces.
+- The planner is a factory run with a job of its own: a sandbox with the repo checked out, so it plans against the real code and kit, and no PR. What it leaves is the spec and the subtasks.
+- Its model defaults to an entry in `.trailhead.toml`. The dropdown at asking time overrides it, and the choice is kept on the spec task, so every turn of one conversation uses it. No settings page for it yet.
+
+**The conversation.**
+
+- The spec task's comments are the conversation, by turns: the planner posts and parks the task, the person replies, and the factory resumes the planner with the reply. This is `needs_input`, used more than once. Nothing streams.
+- The window draws that thread as a chat panel on the spec task.
+- The planner keeps its context from turn to turn: the factory remembers its Claude Code session and resumes it (a run resumed after an answer starts a new session today). The session is on the sandbox's disk, so the sandbox is held, paused, while the conversation is open, and released once it has sat idle for some hours; a reply after that starts a new session from the thread.
+- Each turn the planner is given the plan as it stands in the engine and what a person changed in it since its last turn. The engine holds the plan, not the planner's memory.
+
+**The plan.**
+
+- The spec is written into the spec task's description.
+- Each piece of work is a subtask with acceptance criteria, `blocked_by` the pieces it needs. A subtask is one worker run and one PR; a piece too big for that is several subtasks. Subtasks have no subtasks of their own: the plan is one level deep, though the engine allows more, and nesting can come back later as grouping (a big plan's phases drawn around their nodes).
+- Subtasks are created ungraded, each carrying the grade the planner proposes and a line saying why. The factory skips an ungraded task, so nothing starts early.
+- A person changes the plan by replying in the conversation, or by hand in the graph.
+- **No plan document is committed.** The breakdown and the conversation are history, which the engine keeps. What later work needs is what the app is now: each app has a `README.md` in its folder saying what it does and why, written from the spec by the plan's first task and kept up by any task that changes what the app does, as one of its acceptance criteria.
+
+**Approval.**
+
+- Approving the plan is the person setting the grades: each subtask shows its proposed grade in a dropdown, the person changes any, and presses Approve. The server sets them as that person, in one batch to undo.
+- After approval the planner is finished. The subtasks are ordinary factory tasks, taken as their dependencies clear.
+
+**The graph.** A second way to look at work, beside the board, which is every task by status: one parent task's subtasks by what depends on what.
+
+- It opens from any parent task, so an epic made by hand has it too.
+- A node is a subtask in its status's colors, a line is `blocked_by`, and it changes as the factory works. Clicking a node opens the inspector.
+- It lies on a canvas that pans and zooms with no edge, so a large plan can be read. The canvas and the graph laid out on it are kit widgets (`trailhead-ui`), for any app.
+- First: read-only, with the grade dropdowns and Approve on a plan not yet approved. Then editing by hand: add a node, remove one, split one (a second node with the same parent and dependencies), and add or remove a dependency. No merge (cancel one, edit the other) and no moving to another parent (there is one).
+
+**Left out:** planning again after approval (follow-ups are ordinary tasks); the planner filing kit tasks for what an app needs from the kit (TRAIL-1612); a streaming conversation, over ACP or otherwise, which could replace the turns without changing the panel or the thread; saving the session out of the sandbox so a waiting planner holds none. Telling a person the planner has replied waits on notifications for the whole shell, a piece of its own.
+
+**Order:** the graph, read-only (it needs nothing else here); the planner run; the chat panel; approval; the two buttons; editing by hand. The middle four prove themselves only together: the first real test is asking for a small new app and approving its plan.
 
 ## Trust, grades and undo
 
@@ -192,7 +239,7 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 
 **Apps that need more care. Leaning.** A grade means the same approvals everywhere in a repo; apps do not get gates of their own, or nobody could say what "grade 2" means. An app differs by where it starts: a path rule gives it a floor (`3 = ["apps/<name>/**"]` for an app holding work or money data), which path rules can already do.
 
-**Grading asked-for tasks. Leaning on the default; an engine change. Not built:** an ask from the window carries grade 2 itself (TRAIL-1580), which covers asks until a planner creates tasks. Only a person can give a task its first grade, and the factory skips ungraded tasks, so tasks a planner creates for an asked-for app would never be worked. A project carries a default grade, set by a person when the app is created, and tasks agents create in it start there. A person still set the first grade, once, for the app.
+**Grading asked-for tasks. Decided (2026-11-21), not built:** an ask from the window carries grade 2 itself (TRAIL-1580). Only a person can give a task its first grade, and the factory skips ungraded tasks, which is what holds a planner's tasks back until a person has looked: the planner proposes a grade for each task it creates, and approving the plan is the person setting them ([Planning an ask](#planning-an-ask)). Tasks in one plan differ in grade, so a default grade on the project, the earlier leaning, is dropped.
 
 **A grader agent. Open, leaning not yet.** An agent that grades each task before work starts would add little: the task's grade is only a floor, the diff's paths raise the PR by what it really touched, and a reviewer can already raise it for a risk no path shows. If it is wanted later it is a duty of the planner, never of the worker (the author does not grade its own work), and it may only raise above the project's default; lowering stays a person's.
 
