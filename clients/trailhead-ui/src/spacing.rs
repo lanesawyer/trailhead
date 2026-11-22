@@ -107,10 +107,18 @@ pub mod extent {
     pub const DETAIL_SIDEBAR_WIDTH: f32 = 280.0;
     /// The tabs down the side of a settings modal with pages (`spawn_settings_tabs`): room for a page's name.
     pub const SETTINGS_TABS_WIDTH: f32 = 180.0;
-    /// A choice tile's picture, across (`spawn_choice_tile`): a few dozen pixels, room for a small preview.
-    pub const TILE_PICTURE_WIDTH: f32 = 72.0;
+    /// A choice tile's picture, across (`spawn_choice_tile`): room for a small preview a person can follow.
+    pub const TILE_PICTURE_WIDTH: f32 = 104.0;
     /// A choice tile's picture, down.
-    pub const TILE_PICTURE_HEIGHT: f32 = 44.0;
+    pub const TILE_PICTURE_HEIGHT: f32 = 64.0;
+    /// How wide a page of settings grows: a line of its notes stays readable, and no control spans a wide modal.
+    pub const SETTINGS_MEASURE: f32 = 560.0;
+    /// The least an option of a button group is across, so a ladder of short steps comes out even.
+    pub const GROUP_OPTION_MIN: f32 = 64.0;
+    /// A field for a few characters: a number, a percent, a count.
+    pub const FIELD_SHORT: f32 = 96.0;
+    /// A field for a word or a name: a profile, a branch.
+    pub const FIELD_MEDIUM: f32 = 240.0;
     /// A picture's thumbnail box, across (`spawn_picture`): two side by side fit a side panel.
     pub const PICTURE_WIDTH: f32 = 160.0;
     /// A picture's thumbnail box, down: a screen's shape.

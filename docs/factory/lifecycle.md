@@ -62,7 +62,7 @@ A rework (a review's changes, a failed CI, a conflict) whose `setup` check fails
 | Queued | `open`, graded, under the queue task, or in a project pointed at the repo (TRAIL-1595, [operating.md](operating.md), "Pointing a project at a repo"); ready queue; repo cap enforced by the control plane; ordered by priority (raised to the highest open task it blocks), then reworks of open PRs before fresh tasks, then due date and age, as [Handing it work](operating.md#handing-it-work) says | Fits once tasks have grades |
 | Running | Claim + `in_progress`; the daemon renews the lease | Fits |
 | PR open / Review | `in_review`; PR URL, grade, profile in `metadata` | Fits, but the claim is released |
-| Agent review verdict | One delegated reviewer approves straight to `done` | Gap: no verdict record, no quorum |
+| Agent review verdict | A typed verdict on a `review` comment (TRAIL-84) | Gap: no quorum |
 | Changes requested | Stays `in_review`; computed from the newest `review` verdict being `request_changes` with no `handoff` after it (TRAIL-963); the review is also kept in `metadata` for the prompt | Fits; the rework starts a fresh sandbox, not the original one. `Tracker::ready` lists these tasks ahead of new work, the worker's claim makes the task `in_progress`, and the handoff it leaves when it pushes answers the review |
 | Approved | `approved`: the grade's gates passed, waiting to merge | `approved` exists (TRAIL-86) |
 | Merging | The merger or a person merges; `done` means merged | Fits |

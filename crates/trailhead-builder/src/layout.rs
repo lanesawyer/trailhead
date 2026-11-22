@@ -105,6 +105,7 @@ impl Layout {
             bad: self.bad(),
             changes: Vec::new(),
             changes_total: 0,
+            repo: None,
         }
     }
 }

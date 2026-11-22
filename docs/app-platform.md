@@ -105,7 +105,7 @@ One repo, not one per app, because the shell is a single binary that needs one l
   - Every `poll_secs` (60) it `git ls-remote`s the checkout's `origin` at its default branch, and builds a head it has not built, failed on or been told is bad, in a clone of its own (`<data dir>/shell/src`), with `cargo build --locked --profile <profile> -p <package> -j <jobs>` (release, 3 jobs) into a target directory of its own. One build at a time; a head that moves during a build is built after it.
   - Under `<data dir>/shell`: `builds/<rev>/trailhead-shell` for the current build and the one before it (older ones are removed), `state.json` (current, previous, building, the last failure with the tail of cargo's output), `build.log` and `bad`. `GET /v1/shell/build` and `trailhead app status` show them.
   - The running shell hears of a build by asking `GET /v1/shell/build` every 30 seconds while connected, not from the event stream, which carries the task engine's stored and undoable events. It knows its own build from `TRAILHEAD_SHELL_BUILD`, which the launcher sets, so the binary is not rebuilt to know it; started any other way it shows no notice.
-  - It asks with `?since=<its build>`, and the answer's `changes` are the subjects of the commits since then (`git log` in the builder's clone, never while it checks the clone out), the newest 30 with `changes_total` for the rest (TRAIL-1605). The rail's button opens a panel listing them, each subject's `type(scope)` as a badge and its task key at the end, with Restart and Later.
+  - It asks with `?since=<its build>`, and the answer's `changes` are the subjects of the commits since then (`git log` in the builder's clone, never while it checks the clone out), the newest 30 with `changes_total` for the rest (TRAIL-1605). The rail's button opens a panel listing them, each subject's `type(scope)` as a badge and its task key at the end, with Restart and Later. The answer's `repo` is the apps repo as `owner/name` when its `origin` is on GitHub, which the settings' About page links this build's commit by (TRAIL-1694).
   - `trailhead app` runs the newest good build. A shell that exits with the restart code (75, `trailhead_model::shell::RESTART_CODE`) is run again on the newest build; one that exits with an error within ten seconds of starting is marked bad (in `bad`, which the builder reads too) and the build before it is run.
 
 The personal todo app lives in the apps repo, not in `trailhead`: it is the app Lane will keep asking to change, which is the point of the whole design, and upstream should not take that churn. **Leaning.**
@@ -162,7 +162,7 @@ The engine has due days and times, scheduled days and times, reminders, prioriti
 - Recurring tasks (in PLAN.md's Later list).
 - Labels (TRAIL-155).
 - A one-time import from Todoist (PLAN.md phase 9).
-- Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet ([Notifications](#notifications)).
+- Reminders that reach the person: the engine emits events, which the shell turns into notifications ([Notifications](#notifications)).
 - Quick capture without opening the shell. The CLI covers it today.
 
 ## Planning an ask
@@ -215,7 +215,7 @@ Decided with Lane, 2026-11-21. Built so far (TRAIL-1609's subtasks have the rest
 
 ## Notifications
 
-Decided with Lane, 2026-11-21 (TRAIL-1671), except what is marked **Open**. Nothing is built.
+Decided with Lane, 2026-11-21 (TRAIL-1671), except what is marked **Open**. What is built is marked so below.
 
 One way for the server, the factory and any app to tell a person something needs them. The shell shows them, in the window and on the desktop.
 
@@ -268,8 +268,8 @@ them as cards, newest first, with an Unread and All switch, Show older paging ba
 each, a link button for each action and Mark all read; resolved ones say so. Each app's button on the rail has the count
 of its own. `NotificationCounts { shown }` is the one switch for the counts, for the settings page to come. A shell with
 one app has no rail, so Lookout puts the bell in its sidebar's footer beside the gear, and opening a task in Lookout
-marks the notifications about it read. Not built: the desktop notifications, levels, quiet hours, focus, the sound, the
-settings page and an app's `Notify`.
+marks the notifications about it read. The desktop notifications, levels, quiet hours, focus, the sound, the
+settings page and an app's `Notify` are built since, each marked below.
 
 **Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. The desktop notification has the same buttons, which Ubuntu draws; a link needs no window focus. Later: buttons that act (Approve, Answer).
 
@@ -355,7 +355,7 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 
 **Apps that need more care. Leaning.** A grade means the same approvals everywhere in a repo; apps do not get gates of their own, or nobody could say what "grade 2" means. An app differs by where it starts: a path rule gives it a floor (`3 = ["apps/<name>/**"]` for an app holding work or money data), which path rules can already do.
 
-**Grading asked-for tasks. Decided (2026-11-21), not built:** an ask from the window carries grade 2 itself (TRAIL-1580). Only a person can give a task its first grade, and the factory skips ungraded tasks, which is what holds a planner's tasks back until a person has looked: the planner proposes a grade for each task it creates, and approving the plan is the person setting them ([Planning an ask](#planning-an-ask)). Tasks in one plan differ in grade, so a default grade on the project, the earlier leaning, is dropped.
+**Grading asked-for tasks. Decided (2026-11-21), built:** an ask from the window carries grade 2 itself (TRAIL-1580). Only a person can give a task its first grade, and the factory skips ungraded tasks, which is what holds a planner's tasks back until a person has looked: the planner proposes a grade for each task it creates, and approving the plan is the person setting them ([Planning an ask](#planning-an-ask)). Tasks in one plan differ in grade, so a default grade on the project, the earlier leaning, is dropped.
 
 **A grader agent. Open, leaning not yet.** An agent that grades each task before work starts would add little: the task's grade is only a floor, the diff's paths raise the PR by what it really touched, and a reviewer can already raise it for a risk no path shows. If it is wanted later it is a duty of the planner, never of the worker (the author does not grade its own work), and it may only raise above the project's default; lowering stays a person's.
 
@@ -372,7 +372,7 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 
 Lane wants UI changes shown, live if possible. Three steps, each useful alone, chosen by how much a change needs. **Leaning.**
 
-1. **Screenshots.** The sandbox renders the changed views headless and attaches the images to the task; Lookout shows them on the task, before and after, and the UX reviewer reads the same images. The local half is built (TRAIL-1614, on TRAIL-802's spike): `trailhead_shell::testing::shot` draws the shell to PNGs with no window, display or GPU (software rendering with Mesa's lavapipe, byte for byte the same from run to run on one renderer), and each app has an `#[ignore]`d `tests/shots.rs` that draws its views, named `<app>-<view>-<theme>` (`<app>-<view>-150-<theme>` at a text size of 150%) and set up from fixtures; `mise run shots` runs them all (the shell's guide, section 7). Where they go is built (TRAIL-1630): a task carries pictures in the engine, not on the code host (`POST /v1/tasks/{task}/attachments` with the PNG as the body, a `name` such as `ticklist-today-dark`, a `role` of `before` or `after` and a `set` naming the run), and Lookout's task modal shows them under Pictures, each set's pairs by name, before beside after, a new, removed or unchanged view said as such, and a pair opens large side by side or flipped in place (`docs/factory/ui.md`). Not built: lavapipe in the sandbox image, and the factory drawing the shots before and after a change and attaching them. CI does not run the shots yet, having no render adapter.
+1. **Screenshots.** The sandbox renders the changed views headless and attaches the images to the task; Lookout shows them on the task, before and after, and the UX reviewer reads the same images. The local half is built (TRAIL-1614, on TRAIL-802's spike): `trailhead_shell::testing::shot` draws the shell to PNGs with no window, display or GPU (software rendering with Mesa's lavapipe, byte for byte the same from run to run on one renderer), and each app has an `#[ignore]`d `tests/shots.rs` that draws its views, named `<app>-<view>-<theme>` (`<app>-<view>-150-<theme>` at a text size of 150%) and set up from fixtures; `mise run shots` runs them all (the shell's guide, section 7). Where they go is built (TRAIL-1630): a task carries pictures in the engine, not on the code host (`POST /v1/tasks/{task}/attachments` with the PNG as the body, a `name` such as `ticklist-today-dark`, a `role` of `before` or `after` and a `set` naming the run), and Lookout's task modal shows them under Pictures, each set's pairs by name, before beside after, a new, removed or unchanged view said as such, and a pair opens large side by side or flipped in place (`docs/factory/ui.md`). The sandbox image has lavapipe, and the factory draws the shots before and after a change and attaches them (`[factory.shots]`, TRAIL-1614). CI does not run the shots yet, having no render adapter.
 2. **Try it, on your machine.** A button on the task in Lookout has the builder build that PR's shell into a separate slot and open it as a second window beside the running one. It is the real app, live, built on demand. Offered only once checks and the agent gates have passed, since it runs unmerged code. **Open:** what data it runs on. A copy of the app's SQLite file is cheap, which is one more reason for a file per app; tasks have no such copy, so a previewed Ticklist would act on real tasks, with undo behind it, unless the server grows a preview scope.
 3. **Live from the sandbox. Later, maybe.** The sandbox runs the shell and streams frames to Lookout over iroh, with input sent back: watching an agent's work as it happens, with no unmerged code on your machine, and usable from a phone. It needs a frame stream built and software rendering fast enough to watch.
 - **Instead of the single review, or as well. Open.** Proposal: instead. The engineer is today's reviewer under another name, and reviewing twice buys nothing.

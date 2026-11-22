@@ -197,6 +197,7 @@ async fn the_repo_is_the_origin_the_builder_last_read_as_owner_and_name() {
     *rig.fake.url.lock().unwrap() = Some("git@github.com:lane/trailhead-apps.git".into());
     rig.step_at("a").await;
     assert_eq!(builds.repo().as_deref(), Some("lane/trailhead-apps"));
+    assert_eq!(builds.read(None).await.repo.as_deref(), Some("lane/trailhead-apps"), "a shell is told it too");
 }
 
 #[test]

@@ -20,8 +20,8 @@ use bevy::text::EditableText;
 use bevy::ui::{Checked, InteractionDisabled};
 use bevy::ui_widgets::{Activate, ValueChange};
 use trailhead_ui::{
-    ButtonKind, Icon, InitialText, Notice, SettingNote, Tone, UiPlace, ValueList, ValuesEdited, button, notice, row,
-    set_display, set_text, setting, setting_toggle, size, spawn_settings_section, text, text_input, tool_button,
+    ButtonKind, InitialText, Notice, SettingNote, Tone, UiPlace, ValueList, ValuesEdited, button, copy_block, extent,
+    notice, row, set_display, set_text, setting, setting_toggle, size, spawn_settings_section, text, text_input,
     value_list,
 };
 
@@ -151,7 +151,10 @@ pub(crate) fn server_page(In(page): In<Entity>, settings: Res<ServerSettings>, m
         (ServerField::Jobs, "Jobs", &draft.jobs),
         (ServerField::PollSecs, "How often it looks (seconds)", &draft.poll_secs),
     ] {
-        let control = bsn_list! { @text_input(1.0, bsn! { field InitialText({ typed.clone() }) }) };
+        let control = bsn_list! {
+            @text_input(1.0, bsn! { field InitialText({ typed.clone() }) })
+            Node { max_width: { field_width(field) } }
+        };
         commands.spawn_scene(setting(label, field.note(), control)).insert((NoteOf(field), ChildOf(builds.rows)));
     }
     let state = bsn_list! { @text("", size::BODY) ServerPart::BuildState };
@@ -176,7 +179,10 @@ pub(crate) fn server_page(In(page): In<Entity>, settings: Res<ServerSettings>, m
         (ServerField::FiveHour, "Pause at five-hour usage (%)", &draft.five_hour),
         (ServerField::SevenDay, "Pause at seven-day usage (%)", &draft.seven_day),
     ] {
-        let control = bsn_list! { @text_input(1.0, bsn! { field InitialText({ typed.clone() }) }) };
+        let control = bsn_list! {
+            @text_input(1.0, bsn! { field InitialText({ typed.clone() }) })
+            Node { max_width: { field_width(field) } }
+        };
         commands.spawn_scene(setting(label, field.note(), control)).insert((NoteOf(field), ChildOf(rows)));
     }
     save_row(&mut commands, rows, Section::Factory);
@@ -185,6 +191,17 @@ pub(crate) fn server_page(In(page): In<Entity>, settings: Res<ServerSettings>, m
     commands.entity(file.section).insert((ServerPart::Loaded, ChildOf(page)));
     let path = copyable(ServerPart::Path, "User config", FILE_NOTE, CopyServer::Path);
     commands.spawn_scene(path).insert(ChildOf(file.rows));
+}
+
+/// How wide a field's input is: as wide as what is typed in it runs, a path taking the page's whole measure.
+fn field_width(field: ServerField) -> Val {
+    match field {
+        ServerField::Profile => px(extent::FIELD_MEDIUM),
+        ServerField::Jobs | ServerField::PollSecs | ServerField::FiveHour | ServerField::SevenDay => {
+            px(extent::FIELD_SHORT)
+        }
+        ServerField::Repo | ServerField::Repos | ServerField::Runs => Val::Auto,
+    }
 }
 
 /// On the restart command's setting: its note says how to restart.
@@ -198,13 +215,10 @@ fn save_row(commands: &mut Commands, rows: Entity, section: Section) {
     commands.spawn_scene(button("Save", None, ButtonKind::Primary)).insert((SaveSection(section), ChildOf(bar)));
 }
 
-/// A value with a copy button after it.
+/// A value in a box of its own, with the button that copies it.
 fn copyable(part: ServerPart, label: &str, note: &str, copy: CopyServer) -> impl Scene {
     let hint = format!("Copy: {}", label.to_lowercase());
-    let control = bsn_list! {
-        @row()
-        Children [ @text("", size::BODY) part -- @tool_button(Icon::Copy, hint, ButtonKind::Plain) copy ]
-    };
+    let control = bsn_list! { @copy_block(bsn! { part }, hint, bsn! { copy }) };
     setting(label.to_string(), note.to_string(), control)
 }
 

@@ -367,6 +367,12 @@ fn settings(shot: &mut ShotApp) {
     save(shot, "settings-about");
     open_settings(shot, NOTES_SETTINGS);
     save(shot, "settings-app");
+    let world = shot.world_mut();
+    let search =
+        world.query_filtered::<Entity, With<trailhead_shell::settings::SettingsSearch>>().single(world).unwrap();
+    world.entity_mut(search).insert(bevy::text::EditableText::new("size"));
+    settle(shot);
+    save(shot, "settings-search");
     close_modals(shot);
 }
 
@@ -389,6 +395,7 @@ fn live_with_news(shot: &mut ShotApp) {
     ]
     .map(String::from);
     shot.world_mut().insert_resource(UpdateReady(Some(Newer::new("4567def", &subjects, 6))));
+    shot.world_mut().insert_resource(trailhead_shell::update::BuildRepo(Some("someone/apps".into())));
     settle(shot);
 }
 

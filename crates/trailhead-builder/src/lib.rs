@@ -235,11 +235,12 @@ impl Builds {
         self.origin.read().unwrap_or_else(|e| e.into_inner()).as_deref().and_then(github_slug)
     }
 
-    /// The state and the bad builds, and with `since` the commits after it up to the newest build
-    /// ([`ShellBuild::changes`]). The changes are left empty, never an error, when `since` isn't a commit hash, is
+    /// The state, the bad builds and the apps repo ([`Builds::repo`]), and with `since` the commits after it up to
+    /// the newest build ([`ShellBuild::changes`]). The changes are left empty, never an error, when `since` isn't a commit hash, is
     /// the newest build or isn't in the builder's clone, and when git doesn't answer within [`CHANGES_WAIT`].
     pub async fn read(&self, since: Option<&str>) -> ShellBuild {
         let mut build = self.layout.read();
+        build.repo = self.repo();
         let Some(since) = since.filter(|s| is_rev(s)) else { return build };
         let Some(newest) = build.newest().filter(|n| is_rev(n) && *n != since).map(String::from) else { return build };
         let src = self.layout.src();

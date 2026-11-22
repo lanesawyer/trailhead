@@ -277,6 +277,66 @@ mod tests {
         BTreeMap::new()
     }
 
+    /// A command for the real mise that touches nothing of the machine's own mise: its data, cache, state and
+    /// global config are all under `root`. What a mise that started the tests left in the environment goes too:
+    /// under `__MISE_SHIM` (set when `cargo` is itself a mise shim) mise installs nothing, which hides the hazard.
+    fn isolated(cmd: &mut Command, root: &Path) {
+        for (name, _) in std::env::vars_os().filter(|(k, _)| k.to_string_lossy().starts_with("__MISE")) {
+            cmd.env_remove(name);
+        }
+        cmd.env("HOME", root.join("home"))
+            .env("MISE_CONFIG_DIR", root.join("conf"))
+            .env("MISE_DATA_DIR", root.join("data"))
+            .env("MISE_CACHE_DIR", root.join("cache"))
+            .env("MISE_STATE_DIR", root.join("state"))
+            .stdin(Stdio::null());
+    }
+
+    /// TRAIL-340, with the real mise and no network: a checkout whose own mise files pin tools that aren't installed
+    /// fails every `mise exec` offline, and the settings checks run under keep it from being read.
+    #[tokio::test]
+    async fn a_check_runs_though_the_checkouts_own_mise_files_pin_tools_that_arent_installed() {
+        let Some(bin) = Mise::new().find() else {
+            eprintln!("no mise on this machine: not checked");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let checkout = root.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("sub")).unwrap();
+        for dir in ["home", "data", "cache", "state"] {
+            std::fs::create_dir_all(root.path().join(dir)).unwrap();
+        }
+        std::fs::write(checkout.join("mise.toml"), "[tools]\nfnox = \"1.2.3\"\n").unwrap();
+        std::fs::write(checkout.join(".tool-versions"), "nodejs 99.0.0\n").unwrap();
+        std::fs::write(checkout.join("sub/mise.toml"), "[tools]\nlima = \"0.0.1\"\n").unwrap();
+        let conf = root.path().join("conf/conf.d");
+        std::fs::create_dir_all(&conf).unwrap();
+        let mise = Mise::with(&bin, &conf);
+        // The factory's own config is what makes mise active; an empty stack needs nothing installed.
+        std::fs::write(mise.generated(), "[tools]\n").unwrap();
+
+        let mut bare = Command::new(&bin);
+        bare.args(["exec", "--", "sh", "-c", "echo ran"]).current_dir(&checkout);
+        bare.env("MISE_YES", "1").env("MISE_OFFLINE", "1");
+        isolated(&mut bare, root.path());
+        let out = bare.output().await.unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            !out.status.success(),
+            "the hazard: mise reads the checkout's files and fails on the missing tools: {said}"
+        );
+
+        for dir in [checkout.clone(), checkout.join("sub")] {
+            let mut check = mise.shell(&checkout);
+            check.arg("echo ran").current_dir(&dir);
+            isolated(&mut check, root.path());
+            let out = check.output().await.unwrap();
+            let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success(), "in {}: {said}", dir.display());
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ran");
+        }
+    }
+
     fn names(hosts: &[InstallHost]) -> Vec<&str> {
         hosts.iter().map(|h| h.host.as_str()).collect()
     }
