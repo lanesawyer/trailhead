@@ -429,6 +429,11 @@ each app's button the count of the unread ones whose `source` is that app's id. 
 - `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps'; `source_label` names a
   source as the panel does (an app's icon and name, Trailhead for `server`, Factory for `factory`).
 
+The desktop's own notifications are the shell's too (`trailhead_shell::desktop`): one that arrives while the window
+has no focus is shown there, with its link buttons, and taken down once it is read or resolved; several arriving
+together are one. An app does nothing for it. A test that wants to see what would be shown inserts a `Desktop` holding
+its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there.
+
 An app raising one of its own (a `Notify` command) is not built yet.
 
 To test them, give a snapshot notifications (`fixture::notification_json`) or feed an event with `"entity":

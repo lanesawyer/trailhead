@@ -57,6 +57,11 @@ trailhead-server = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
+# The desktop's notifications are the session bus's `org.freedesktop.Notifications`. zbus is already built for the
+# keyring `trailhead-client` uses, so naming it here adds no package.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
 [dev-dependencies]
 # The shell's own tests use the test support, the server and the shots too.
 trailhead-shell = { workspace = true, features = ["test-server", "shots"] }

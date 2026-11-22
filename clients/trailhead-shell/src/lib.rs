@@ -47,6 +47,7 @@ pub mod commands;
 pub mod connect;
 pub mod connection;
 pub mod cover;
+pub mod desktop;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
 pub mod icon;
@@ -355,7 +356,11 @@ impl Plugin for ShellPlugin {
                 app.add_plugins(connect::ConnectUiPlugin);
             }
             if connected {
-                app.add_plugins((server_page::ServerPageUiPlugin, notifications_panel::NotificationsUiPlugin));
+                app.add_plugins((
+                    server_page::ServerPageUiPlugin,
+                    notifications_panel::NotificationsUiPlugin,
+                    desktop::DesktopPlugin,
+                ));
             }
             for shell_app in &self.apps {
                 shell_app.build_ui(app);

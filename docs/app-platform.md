@@ -269,7 +269,7 @@ settings page and an app's `Notify`.
 - **A burst is one notification.** Several at once, those raised during quiet hours, and those raised while the window was not running become one: "10 things need you". The shell keeps the last one it announced in its `LocalStore` entry, per machine, to know what a launch missed.
 - **Pressing one brings the window forward with the bell's panel open.** It goes no further than that (phase 2). To check on Ubuntu: that GNOME on Wayland lets the window come forward from the press; if it does not, the panel is still open when the person gets there.
 - One read or resolved elsewhere is taken down.
-- The D-Bus client is a new package, so a `Cargo.lock` change at grade 4.
+- **Built (TRAIL-1679),** in `clients/trailhead-shell/src/desktop.rs`: arrivals without focus are gathered for a second and a half, then shown one by one, or as one saying how many when more than three came; a launch without focus says what was raised since this machine last announced one (`announced` in the shell's `LocalStore` entry); the desktop plays its own theme's message sound with it. It talks to `org.freedesktop.Notifications` with `zbus`, which the keyring already brought in, so no package was added. **Not yet seen on a real desktop:** a press reaching the window, and whether GNOME on Wayland lets the window come forward; a trial notification sent the same way did show.
 
 **Quiet hours and focus.**
 

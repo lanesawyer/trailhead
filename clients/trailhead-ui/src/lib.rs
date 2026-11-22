@@ -185,7 +185,7 @@ pub use inline::{
 };
 pub use input::{InitialText, TextEntered, text_input, text_input_sized};
 pub use keyed::Keyed;
-pub use link::{ExternalLink, link_button, link_tool_button};
+pub use link::{ExternalLink, link_button, link_tool_button, open_link};
 pub use menu::{MENU_WIDTH, Menu, close_menu_holding, menu_item, spawn_icon_menu};
 pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,

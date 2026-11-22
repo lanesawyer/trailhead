@@ -106,7 +106,11 @@ impl Shell {
         if let Some(kept) = place.kept() {
             kept.apply(&mut window);
         }
-        let exit = App::new()
+        let mut app = App::new();
+        if let Some(desktop) = crate::desktop::Desktop::of_this_machine() {
+            app.insert_resource(desktop);
+        }
+        let exit = app
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
             .insert_resource(place)
             .insert_resource(ShellDir(self.dir.clone()))
