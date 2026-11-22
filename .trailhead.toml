@@ -84,3 +84,12 @@ adapter = "claude-code"
 provider = "anthropic"
 model = "opus"
 budget = { usd = 2, minutes = 20, steps = 30 }
+
+# Plans a spec task with a person, by turns, into ungraded subtasks (docs/app-platform.md, "Planning an ask"). A spec
+# task's own `metadata.plan.spec.model` overrides the model.
+[factory.profiles.planner]
+role = "planner"
+adapter = "claude-code"
+provider = "anthropic"
+model = "fable"
+budget = { usd = 5, minutes = 30, steps = 80 }
