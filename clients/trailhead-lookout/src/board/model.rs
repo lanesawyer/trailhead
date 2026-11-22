@@ -176,7 +176,7 @@ pub struct Card {
     pub pr: Option<PrLink>,
     /// The agent holding it, whom a tool button opens in the inspector. A person holding it has no such view.
     pub holder: Option<HolderLink>,
-    /// Whether it has subtasks, so a tool button opens the graph of them.
+    /// Whether it has subtasks or is a spec task, so a tool button opens the graph of them.
     pub graph: bool,
 }
 
@@ -219,6 +219,12 @@ pub struct Input<'a> {
     /// The time claims are judged against: core expires them lazily, so one past its `expires_at` may still be
     /// in the mirror.
     pub now: Timestamp,
+}
+
+/// Whether `task` is a spec task (`docs/app-platform.md`, "Planning an ask"), whose plan the graph shows even before
+/// it has subtasks.
+pub fn is_spec(task: &Task) -> bool {
+    trailhead_model::TaskPlan::of(&task.metadata).is_some_and(|p| p.spec.is_some())
 }
 
 /// Groups the tasks passing `filter` into one column per status (empty ones included; done and cancelled
@@ -398,7 +404,7 @@ pub(crate) fn build_with(input: Input, filter: &Filter, nest: bool) -> BoardView
                     .find(|a| a.id == *id)
                     .map(|a| HolderLink { id: id.to_string(), name: a.name.clone() })
             }),
-            graph: parents.contains(&t.id),
+            graph: parents.contains(&t.id) || is_spec(t),
         }
     };
 

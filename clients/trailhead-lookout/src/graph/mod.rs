@@ -1,18 +1,17 @@
 //! One task's subtasks as a graph, by what depends on what (`docs/app-platform.md`, "The graph"): a second way to
-//! look at work beside the board, read-only for now.
+//! look at work beside the board, and the plan view of a spec task (`docs/app-platform.md`, "Planning an ask").
 //!
 //! [`OpenGraph`] shows it for a task from anywhere: a card's tool button, and the task modal's header, offer it on a
-//! task with subtasks ([`OpensGraph`]). [`build_graph`] is a pure function from the mirror to the [`GraphView`]: a
-//! node per direct subtask, each the board's [`Card`] with its status and grade, an edge for each `blocked_by` between
-//! two of them (blocker to the left), and a "needs TRAIL-12" badge on a node for each task outside the parent it waits
-//! on. [`GraphPlugin`] keeps the view from the mirror; [`GraphUiPlugin`] draws it in [`View::Graph`] on the kit's
-//! graph, whose canvas pans and zooms, with the cards drawn and opened in the inspector as on the board. A change in
-//! the mirror (a status, a new subtask, a dependency) updates the nodes in place and keeps the pan and zoom.
+//! task with subtasks or a spec task ([`OpensGraph`]). [`build_graph`] is a pure function from the mirror to the
+//! [`GraphView`]: a node per direct subtask, each the board's [`Card`] with its status and grade, an edge for each
+//! `blocked_by` between two of them (blocker to the left), and a "needs TRAIL-12" badge on a node for each task outside
+//! the parent it waits on. [`GraphPlugin`] keeps the view from the mirror; [`GraphUiPlugin`] draws it in
+//! [`View::Graph`] on the kit's graph, whose canvas pans and zooms, with the cards drawn and opened in the inspector as
+//! on the board. A change in the mirror (a status, a new subtask, a dependency) updates the nodes in place and keeps
+//! the pan and zoom.
 //!
-//! Left for what comes next: a grade dropdown per node goes in [`PlanNode`] (it carries the grade) and the card's
-//! tools row; an Approve button goes in the page's header beside Fit (`dress_header`); editing the plan (adding,
-//! removing or splitting a node, adding or removing an edge) answers presses on the canvas and the nodes, and changes
-//! the server, from which the mirror brings the graph back.
+//! A spec task's graph is its plan, with its conversation beside the canvas ([`conversation`]): the thread with the
+//! planner as a chat, whose turn it is, and a reply box.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,14 +19,21 @@ use bevy::prelude::*;
 use bevy::ui_widgets::{Activate, RequestClose};
 use jiff::Timestamp;
 use trailhead_model::{Grade, Status, key_number};
+use trailhead_shell::connection::Api;
 
 use crate::board::{Badge, BadgeKind, BoardCard, Card, Filter, Input, Sources, View, build_with, next_expiry};
+use crate::detail::DetailPlugin;
 use crate::inspector::Selection;
 use crate::widgets::{
     self, ButtonKind, COLUMN_WIDTH, Canvas, Graph, GraphEdge, GraphNode, GraphNodeBox, Icon, PanelTitle, PanelTools,
     TITLE_LINES, UiPlace, extent, set_display, set_text, size, space, spawn_graph, status_label, status_tone, stroke,
     text_dim, token, tool_button, width_of,
 };
+
+pub mod conversation;
+
+use conversation::{PlanDetail, Replying, ThreadRows};
+pub use conversation::{PlanView, Said, Thread, Turn, build_plan, reply_gate};
 
 /// Shows the graph of the subtasks of the task with this id.
 #[derive(Event, Debug, Clone, PartialEq, Eq)]
@@ -50,6 +56,8 @@ pub struct GraphView {
     pub nodes: Vec<PlanNode>,
     /// Each `blocked_by` between two of them, by id: blocker, then blocked.
     pub edges: Vec<(String, String)>,
+    /// The plan and its conversation, when the parent is a spec task.
+    pub plan: Option<PlanView>,
 }
 
 impl GraphView {
@@ -77,9 +85,11 @@ const NODE_WIDTH: f32 = COLUMN_WIDTH - space::PANEL_INSET * 2.0;
 /// Bevy's default line height, as a multiple of the font size.
 const LINE_HEIGHT: f32 = 1.2;
 
-/// The graph of the subtasks of the task `parent` (an id): only its direct children are nodes.
-pub fn build_graph(input: Input, parent: &str) -> GraphView {
+/// The graph of the subtasks of the task `parent` (an id): only its direct children are nodes. A spec task's carries
+/// its plan and conversation, from `thread` when it is fetched.
+pub fn build_graph(input: Input, parent: &str, thread: Thread) -> GraphView {
     let Some(task) = input.tasks.iter().find(|t| t.id.to_string() == parent) else { return GraphView::default() };
+    let plan = build_plan(&input, task, thread);
     let filter = Filter { parent: Some(task.key.0.clone()), closed: true, ..default() };
     let mut cards: Vec<Card> = build_with(input, &filter, false).columns.into_iter().flat_map(|c| c.cards).collect();
     cards.sort_by(|a, b| (key_number(&a.key), &a.key).cmp(&(key_number(&b.key), &b.key)));
@@ -114,7 +124,7 @@ pub fn build_graph(input: Input, parent: &str) -> GraphView {
             Some(plan_node(card, task.status, task.grade, needs))
         })
         .collect();
-    GraphView { parent: Some((task.key.0.clone(), task.title.clone())), nodes, edges }
+    GraphView { parent: Some((task.key.0.clone(), task.title.clone())), nodes, edges, plan }
 }
 
 /// A subtask's node: the board's card for it, its status first among the badges, its grade, what it needs from
@@ -183,8 +193,10 @@ pub struct GraphPlugin;
 
 impl Plugin for GraphPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<GraphPage>()
+        app.add_plugins(DetailPlugin::<GraphPage>::default())
+            .init_resource::<GraphPage>()
             .init_resource::<GraphView>()
+            .init_resource::<Replying>()
             .add_observer(on_open)
             .add_observer(on_opens_graph)
             .add_systems(Update, rebuild_view);
@@ -219,10 +231,11 @@ fn on_opens_graph(
 fn rebuild_view(
     page: Res<GraphPage>,
     mut sources: Sources,
+    (detail, api): (Res<PlanDetail>, Option<Res<Api>>),
     mut view: ResMut<GraphView>,
     mut expiry: Local<Option<Timestamp>>,
 ) {
-    let changed = sources.changed();
+    let changed = sources.changed() || detail.is_changed() || api.as_ref().is_some_and(|a| a.is_changed());
     let now = Timestamp::now();
     let expired = expiry.is_some_and(|at| at <= now);
     if !(changed || page.is_changed() || expired) {
@@ -231,7 +244,9 @@ fn rebuild_view(
     let Some(parent) = &page.0 else { return };
     let rows = sources.rows();
     *expiry = next_expiry(&rows.claims, now);
-    let next = build_graph(rows.input(&[], now), parent);
+    let comments = detail.of(parent).map(|d| d.comments.as_slice());
+    let me = api.as_ref().map(|a| (a.0.user_id.as_str(), a.0.user.as_str()));
+    let next = build_graph(rows.input(&[], now), parent, Thread { comments, me });
     if *view != next {
         *view = next;
     }
@@ -243,13 +258,21 @@ pub struct GraphUiPlugin;
 impl Plugin for GraphUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(GraphPlugin)
+            .init_resource::<ThreadRows>()
             .add_systems(OnEnter(View::Graph), spawn_page)
             .add_systems(OnExit(View::Graph), despawn_page)
             .add_observer(on_close)
             .add_observer(on_fit)
+            .add_observer(conversation::on_reply)
+            .add_observer(conversation::on_read_spec)
+            .add_systems(Update, conversation::finish_reply)
             .add_systems(
                 Update,
-                ((set_graph, update_title, dress_header, show_empty).before(UiPlace), fill_nodes.after(UiPlace))
+                (
+                    (set_graph, update_title, dress_header, show_empty).before(UiPlace),
+                    conversation::conversation_systems(),
+                    fill_nodes.after(UiPlace),
+                )
                     .after(rebuild_view)
                     .run_if(in_state(View::Graph)),
             );
@@ -272,16 +295,37 @@ struct FitGraph;
 #[derive(Component)]
 struct GraphEmpty;
 
-fn spawn_page(mut commands: Commands) {
+/// The page: its header over the canvas, and beside the canvas the conversation, shown for a spec task.
+fn spawn_page(mut commands: Commands, mut rows: ResMut<ThreadRows>) {
     let panel = commands.spawn((Name::new("graph"), GraphPanel, widgets::BesideSidebar, widgets::page_node())).id();
     commands.spawn_scene(widgets::panel_header("")).insert(ChildOf(panel));
-    commands.spawn_scene(text_dim("No subtasks", size::BODY)).insert((
+    let body = commands
+        .spawn((
+            Node { flex_grow: 1.0, min_height: px(0), min_width: px(0), column_gap: px(space::GROUPS), ..default() },
+            ChildOf(panel),
+        ))
+        .id();
+    let area = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                flex_grow: 1.0,
+                min_width: px(0),
+                min_height: px(0),
+                row_gap: px(space::ROWS),
+                ..default()
+            },
+            ChildOf(body),
+        ))
+        .id();
+    commands.spawn_scene(text_dim("", size::BODY)).insert((
         GraphEmpty,
         Node { display: Display::None, ..default() },
-        ChildOf(panel),
+        ChildOf(area),
     ));
     let parts = spawn_graph(&mut commands);
-    commands.entity(parts.root).insert((PlanGraph, ChildOf(panel)));
+    commands.entity(parts.root).insert((PlanGraph, ChildOf(area)));
+    conversation::spawn_conversation(&mut commands, &mut rows, body);
 }
 
 fn despawn_page(mut commands: Commands, panel: Query<Entity, With<GraphPanel>>) {
@@ -325,15 +369,16 @@ fn dress_header(
     }
 }
 
-/// "Subtasks of TRAIL-12 · its title", in place.
+/// "Subtasks of TRAIL-12 · its title" ("Plan of" for a spec task), in place.
 fn update_title(
     view: Res<GraphView>,
     panels: Query<(), With<GraphPanel>>,
     parents: Query<&ChildOf>,
     mut titles: Query<(Entity, &mut Text), With<PanelTitle>>,
 ) {
+    let of = if view.plan.is_some() { "Plan of" } else { "Subtasks of" };
     let words = match &view.parent {
-        Some((key, title)) => format!("Subtasks of {key} · {title}"),
+        Some((key, title)) => format!("{of} {key} · {title}"),
         None => "Subtasks".to_string(),
     };
     for (title, text) in &mut titles {
@@ -343,10 +388,19 @@ fn update_title(
     }
 }
 
-/// Says so when there are no subtasks to draw.
-fn show_empty(view: Res<GraphView>, empty: Query<Entity, With<GraphEmpty>>, mut nodes: Query<&mut Node>) {
+/// Says so when there are no subtasks to draw: a plan the planner hasn't drawn up yet, or a task with none.
+fn show_empty(
+    view: Res<GraphView>,
+    empty: Query<Entity, With<GraphEmpty>>,
+    mut nodes: Query<&mut Node>,
+    mut texts: Query<&mut Text>,
+) {
+    let words = if view.plan.is_some() { "No tasks are planned yet." } else { "No subtasks" };
     for line in &empty {
         set_display(&mut nodes, line, view.nodes.is_empty());
+        if let Ok(text) = texts.get_mut(line) {
+            set_text(text, words);
+        }
     }
 }
 
@@ -424,7 +478,11 @@ mod tests {
     }
 
     fn graph(tasks: &[Task], deps: &[Dependency], parent: &str) -> GraphView {
-        build_graph(Input { tasks, dependencies: deps, now: at(), ..Default::default() }, &sid(parent))
+        build_graph(
+            Input { tasks, dependencies: deps, now: at(), ..Default::default() },
+            &sid(parent),
+            Thread::default(),
+        )
     }
 
     fn keys(view: &GraphView) -> Vec<&str> {
@@ -555,7 +613,9 @@ mod tests {
     /// The graph's logic and the kit's layout, headless: the view from the mirror, the boxes, and the cards in them.
     fn app(tasks: Vec<Value>) -> (App, Entity) {
         let mut app = App::new();
-        app.add_plugins((MinimalPlugins, StatesPlugin)).add_plugins((MirrorPlugin, BoardPlugin, GraphPlugin));
+        app.add_plugins((MinimalPlugins, StatesPlugin))
+            .init_state::<trailhead_shell::connection::Connection>()
+            .add_plugins((MirrorPlugin, BoardPlugin, GraphPlugin));
         app.add_plugins(crate::widgets::CanvasPlugin);
         app.insert_state(trailhead_shell::ActiveApp(crate::LOOKOUT)).add_sub_state::<View>();
         app.add_systems(Update, (set_graph.before(UiPlace), fill_nodes.after(UiPlace)).after(rebuild_view));

@@ -144,7 +144,7 @@ pub(super) fn sync_tools(
     let live = *connection.get() == Connection::Live;
     gate_button(&mut commands, tools.previous, neighbours.previous.is_some());
     gate_button(&mut commands, tools.next, neighbours.next.is_some());
-    let parent = view.task.as_ref().is_some_and(|t| !t.subtasks.is_empty());
+    let parent = view.task.as_ref().is_some_and(|t| t.spec || !t.subtasks.is_empty());
     set_display(&mut nodes, tools.graph, parent);
     if let Subject::Task(id) = &view.subject {
         commands.entity(tools.graph).insert(OpensGraph(id.clone()));

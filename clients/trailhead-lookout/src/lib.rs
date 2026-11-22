@@ -78,7 +78,7 @@ impl ShellApp for Lookout {
             factory_link,
             factory::FactoryPlugin,
             search::SearchPlugin,
-            detail::DetailPlugin,
+            detail::DetailPlugin::<inspector::Selection>::default(),
             logs::LogsPlugin,
             pictures::PicturesPlugin,
         ));

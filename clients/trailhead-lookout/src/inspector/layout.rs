@@ -412,6 +412,7 @@ pub(super) fn layout_task(
         ("s/dates", "Dates", &facts.dates),
         ("s/links", "Dependencies", &facts.links),
         ("s/run", "Factory run", &facts.run),
+        ("s/plan", "Plan", &facts.plan),
         ("s/details", "Details", &facts.details),
     ] {
         if !rows.is_empty() {
@@ -620,12 +621,11 @@ pub(super) fn spawn_block(
         }
         Block::Entry { key, entry, live, note } => {
             let side = if entry.mine { Side::Mine } else { Side::Theirs };
-            let item = commands.spawn_scene(bubble(side)).id();
             let mut head = vec![kind_label(entry.kind).to_string(), entry.author.clone(), entry.when.clone()];
             head.extend(entry.tags.iter().cloned());
-            commands.spawn_scene(bubble_head(comment_icon(entry.kind), head.join(" · "))).insert(ChildOf(item));
             let tone = if entry.open_question { token::STATUS_WARN } else { token::TEXT };
-            commands.spawn_scene(text_toned(entry.body.clone(), size::BODY, tone)).insert(ChildOf(item));
+            let said = message(side, comment_icon(entry.kind), head.join(" · "), entry.body.clone(), tone);
+            let item = commands.spawn_scene(said).id();
             if entry.open_question {
                 let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
                 let act = Act::Answer { key: key.clone(), comment_id: entry.id.clone(), question: entry.body.clone() };
