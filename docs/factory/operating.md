@@ -18,7 +18,7 @@ How to run the factory day to day, as it works today. It assumes this repo and i
 - `.trailhead.toml` at the repo root, with the factory's settings under `[factory]` (the top-level `project` is shared with the CLI; `owner` and `name` default to the git remote): the repo, the queue task, `[stack]` tools, checks, egress, profiles and budgets, and `max_sandboxes`.
 - **Path-scoped checks.** A `[factory.checks]` entry can be `{ run = "...", paths = ["clients/**"] }`, which a worker runs only when its changes against the base branch touch one of the globs (the same matching as `[factory.grades]`); a string runs always. A skipped check is reported as skipped in the reviewer's brief and in a note on the PR, and a gate's `checks` still means every check that applied passed. They aren't run in `setup`, so the first task that touches their paths pays a cold build; the warm checkpoint keeps it (`docs/factory/sandbox.md`).
 - **Pictures.** `[factory.shots]` (`run`, and `paths` as on a scoped check) names a command that draws the repo's views to PNGs in `$SHOTS_DIR`. A worker whose change touches the paths runs it on the change and on the commit it is against, attaches the views that differ to the task (before and after; Lookout shows them), names them on the PR, and the reviewer is handed the files. A failure is noted on the PR and never fails the task (`docs/factory/sandbox.md#pictures`). Add the table only once the installed `trailhead` knows it: a server from before TRAIL-1614 refuses the repo file, and won't start.
-- **`[stack]` tools** (`tools = { rust = "stable", node = "26" }`) are installed in each worker Sprite with mise when it's prepared; you don't install or configure mise (`docs/factory/sandbox.md#standard-checks`). A repo's own `mise.toml` isn't read. Changing `[stack]` replaces the idle pooled Sprites on the next task, so that task pays a cold install. Install egress opens only for the tools being installed: the control plane logs each host (`opening install egress`, with the tool that asked) and closes them before the agent starts. A `[stack]` tool with no known hosts fails the prepare, naming it; list its hosts in `[factory.egress.tools]`. Built (TRAIL-334); the live check is `mise run test-live-mise`.
+- **`[stack]` tools** (`tools = { rust = "1.100.0", node = "26" }`; a Rust comes with clippy and rustfmt) are installed in each worker Sprite with mise when it's prepared; you don't install or configure mise (`docs/factory/sandbox.md#standard-checks`). A repo's own `mise.toml` isn't read. Changing `[stack]` replaces the idle pooled Sprites on the next task, so that task pays a cold install. Install egress opens only for the tools being installed: the control plane logs each host (`opening install egress`, with the tool that asked) and closes them before the agent starts. A `[stack]` tool with no known hosts fails the prepare, naming it; list its hosts in `[factory.egress.tools]`. Built (TRAIL-334); the live check is `mise run test-live-mise`.
 - **`[stack]` `env`** (`env = { CARGO_BUILD_JOBS = "2" }`, strings only) sets variables for the agent and every check, `setup` and `trim` included, in sandboxes only, so it can cap what would hurt there without changing local builds. The factory's own names (`PATH`, `HOME`, proxy variables, `TRAILHEAD_*`, `ANTHROPIC_*`, `MISE_*`, the harness's credential) are refused when the config loads. Changing it replaces the idle pooled Sprites like a changed tool (`docs/factory/sandbox.md#standard-checks`).
 - The local Trailhead server running (`trailhead server status`); the CLI starts it on demand.
 
@@ -134,6 +134,22 @@ run finished task=TRAIL-105 outcome=…
 - Between tasks, pooled Sprites are restored (wiping the last task), have no egress and no connector access, and pause about two minutes after their last task. A paused Sprite costs only storage. Stopping the factory doesn't delete the pool; destroy a Sprite in the Sprites dashboard if you want it gone. A Sprite that keeps failing to release is given up on after five tries or ten minutes: an `ERROR` line in the log, the label `state=broken`, and a new Sprite for the next task. Destroy it in the dashboard if the factory can't.
 - Reviewers get a fresh Sprite each, skip the build, and are destroyed after.
 - Each run is capped by its profile's budget: dollars (API-equivalent in subscription mode), minutes and steps.
+
+## Tool versions
+
+Every tool version is exact, and nothing moves one but a commit. A `latest` Rust that moved under the factory failed every prepare for a day (TRAIL-1483), and a newer cargo changed the build directory's layout under the trim (TRAIL-1649).
+
+The Rust version is in five places, which one commit changes together:
+
+- `mise.toml`, for a person's machine;
+- `[factory.stack] tools` in `.trailhead.toml`, for the sandboxes;
+- `ARG RUST_VERSION` in `crates/trailhead-compute-docker/image/Dockerfile`;
+- the `dtolnay/rust-toolchain@<version>` steps in `.github/workflows`;
+- the apps repo's `mise.toml`, `.trailhead.toml` and workflow, which follow the framework's.
+
+`crates/trailhead-compute-docker/tests/pins.rs` fails when this repo's differ. To move to a new Rust: change them, run the checks on it (a new clippy usually has new lints), and merge. The sandboxes need nothing else: the daemon installs the new version beside the old one, with clippy and rustfmt, the next time each is prepared, and that task pays a cold build. Rebuilding the image (`mise run docker-image`, then `trailhead factory refresh`) is optional, and only saves that install.
+
+`docker-cli`, `fnox`, `lima`, `mdbook` and `mdbook-mermaid` are pinned in `mise.toml` alone: `mise latest <tool>` says what is newest, and `mise install` after the edit gets it. Claude Code in the image is not pinned: it updates itself.
 
 ## Known rough edges
 
