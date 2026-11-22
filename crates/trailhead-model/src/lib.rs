@@ -13,6 +13,7 @@ mod attachment;
 pub mod config;
 mod notification;
 pub mod shell;
+pub mod wire;
 
 pub use attachment::*;
 pub use notification::*;

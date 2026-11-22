@@ -21,7 +21,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::IntoParams;
 
@@ -102,10 +102,8 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/apps/{app}/undo", post(apps::undo))
 }
 
-/// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`).
-fn nullable<'de, T: Deserialize<'de>, D: Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
-    Option::<T>::deserialize(d).map(Some)
-}
+// Distinguishes an absent field (`None`) from an explicit `null` (`Some(None)`): the one the task bodies use.
+use trailhead_core::wire::nullable;
 
 /// `?fields=key,title` trims each object in a list to the named fields.
 fn select_fields<T: Serialize>(items: &[T], fields: Option<&str>) -> ApiResult<Value> {

@@ -34,3 +34,8 @@ pub fn split_list(s: Option<&str>) -> Vec<String> {
 pub fn parse_list<T: std::str::FromStr<Err = trailhead_core::ParseError>>(s: Option<&str>) -> Result<Vec<T>> {
     Ok(split_list(s).iter().map(|p| p.parse()).collect::<Result<_, _>>()?)
 }
+
+/// `?grade=`: a grade, a range or `none`; absent is every grade.
+pub fn parse_grade_filter(s: Option<&str>) -> Result<trailhead_core::GradeFilter> {
+    Ok(s.map(trailhead_core::GradeFilter::parse).transpose()?.unwrap_or_default())
+}

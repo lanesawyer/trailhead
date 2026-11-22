@@ -18,8 +18,8 @@ use trailhead_model::app_data::{App, AppEvent, AppUndoReport, BatchWrite, BatchW
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
     CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
-    NotificationSettings, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token,
-    UndoReport, Verdict, Webhook, WebhookDelivery,
+    NotificationSettings, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport,
+    Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -345,95 +345,8 @@ struct Count {
     count: usize,
 }
 
-/// `POST /v1/tasks`.
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct NewTask {
-    pub project: String,
-    pub title: String,
-    pub description: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    /// The key of the task this one goes under.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<String>,
-    /// Only a human can create a task with a grade.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grade: Option<Grade>,
-    /// The day it's due, `YYYY-MM-DD`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_on: Option<String>,
-    /// A time it's due by, RFC 3339 with the offset it was set in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<String>,
-    /// The IANA zone the deadline was set in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_tz: Option<String>,
-    /// The day to work it, `YYYY-MM-DD`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_on: Option<String>,
-    /// A time on that day, RFC 3339 with the offset it was planned in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_at: Option<String>,
-    /// The IANA zone `scheduled_at` was planned in.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_tz: Option<String>,
-    /// The task's metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-    /// Keys of the tasks that must finish first, added with the task.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub blocked_by: Vec<String>,
-    /// Keys of the tasks this one blocks, added the same way.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub blocks: Vec<String>,
-}
-
-/// `PATCH /v1/tasks/{task}`: only the fields set are sent.
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
-pub struct TaskUpdate {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<Status>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub priority: Option<Priority>,
-    /// `Some(None)` sends `null`, which clears the grade.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub grade: Option<Option<Grade>>,
-    /// Merged into the task's metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
-    /// A handoff comment written with the update, or not at all if the update is refused.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<String>,
-    /// The key of the task this one duplicates, which needs `cancelled`. `Some(None)` clears it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duplicate_of: Option<Option<String>>,
-    /// `YYYY-MM-DD`. A new day without `due_at` drops the time; `Some(None)` removes the deadline.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_on: Option<Option<String>>,
-    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_at: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due_tz: Option<Option<String>>,
-    /// `YYYY-MM-DD`. A new day without `scheduled_at` drops the time; `Some(None)` unschedules.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_on: Option<Option<String>>,
-    /// RFC 3339 with an offset; moves the day to match. `Some(None)` keeps the day without a time.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_at: Option<Option<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scheduled_tz: Option<Option<String>>,
-    /// The key of the task to move this one under; `Some(None)` makes it top-level.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent: Option<Option<String>>,
-    /// Refuses the update if the task has changed since this version, like `If-Match`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<i64>,
-}
+/// `POST /v1/tasks`' and `PATCH /v1/tasks/{task}`' bodies, the ones the server reads (`trailhead_model::wire`).
+pub use trailhead_model::wire::{CreateTask as NewTask, UpdateTask as TaskUpdate};
 
 /// `POST /v1/projects`.
 #[derive(Debug, Clone, PartialEq, Serialize)]

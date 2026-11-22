@@ -25,15 +25,15 @@ use serde::{Deserialize, Serialize};
 use trailhead_client::text::Text;
 use trailhead_core::app_data::{Collection, Declaration, Outcome, Record, Written};
 use trailhead_core::{
-    Claim, CommentKind, Ctx, Error, EventFilter, Grade, GradeFilter, NewComment, NewProject, NewRecord, NewTask,
-    Priority, Project, ProjectPatch, RecordChange, RecordPage, Status, StoredResponse, Task, TaskFilter, TaskPatch,
-    TaskSort, Verdict, idempotency_fingerprint, parse_grade,
+    Claim, CommentKind, Ctx, Error, EventFilter, Grade, NewComment, NewProject, NewRecord, NewTask, Priority, Project,
+    ProjectPatch, RecordChange, RecordPage, Status, StoredResponse, Task, TaskFilter, TaskPatch, TaskSort, Verdict,
+    idempotency_fingerprint, parse_grade,
 };
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::params::{parse_date, parse_list, parse_opt_at, parse_opt_date};
+use crate::params::{parse_date, parse_grade_filter, parse_list, parse_opt_at, parse_opt_date};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -104,10 +104,6 @@ fn clearable<T>(
     parse: impl Fn(&str) -> trailhead_core::Result<T>,
 ) -> trailhead_core::Result<Option<Option<T>>> {
     s.map(str::trim).map(|s| (!s.is_empty()).then(|| parse(s)).transpose()).transpose()
-}
-
-fn parse_grade_filter(s: Option<&str>) -> trailhead_core::Result<GradeFilter> {
-    Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
 }
 
 fn task_line(t: &Task) -> String {
