@@ -19,6 +19,7 @@ mod notify;
 mod person;
 mod phase;
 mod place;
+mod planner;
 mod pool;
 mod reconcile;
 mod review;

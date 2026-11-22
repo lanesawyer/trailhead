@@ -133,7 +133,9 @@ impl Factory {
             let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
+                // An open spec task keeps its sandbox for its planner's next turn, whose session is on it.
                 (t.status == Status::NeedsInput
+                    || (t.status == Status::Open && t.keeps_planner_sandbox())
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())

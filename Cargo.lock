@@ -8444,6 +8444,7 @@ name = "trailhead-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde_json",
  "tokio",
  "trailhead-daemon",
  "trailhead-factory",

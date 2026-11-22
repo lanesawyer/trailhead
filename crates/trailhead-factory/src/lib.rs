@@ -15,6 +15,7 @@ pub mod language;
 pub mod logs;
 pub mod messages;
 pub mod money;
+pub mod plan;
 pub mod provider;
 pub mod registry;
 pub mod status;
@@ -50,6 +51,10 @@ pub use harness::{
 pub use host::HostConfig;
 pub use language::{Language, languages};
 pub use money::{Usage, Usd};
+pub use plan::{
+    NewPlanTask, PlanChanges, PlanContext, PlanFiles, PlanTask, PlanTaskUpdate, PlanTurn, Planning, ProposedGrade,
+    ProposedTask, Spec, TASK_PLAN_KEY, TaskPlan,
+};
 pub use provider::{Endpoint, ModelAlias, ModelId, ModelProvider};
 pub use registry::{HarnessKind, HarnessSecrets, HarnessSetup, ProviderKind, Registry};
 pub use status::{

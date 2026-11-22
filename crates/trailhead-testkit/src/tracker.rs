@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use trailhead_factory::{
-    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, Notice, Picture, Priority, ProjectRepo, Result,
-    RunPatch, RunRecord, Scope, Status, Task, TaskKey, TaskNote, Tracker, Verdict, VerdictKind, is_factory_agent,
-    is_raised_by,
+    Answered, Credential, Error, FollowUpTask, Grade, HumanContext, NewPlanTask, Notice, Picture, PlanTask,
+    PlanTaskUpdate, Priority, ProjectRepo, Result, RunPatch, RunRecord, Scope, Spec, Status, Task, TaskKey, TaskNote,
+    TaskPlan, Tracker, Verdict, VerdictKind, is_factory_agent, is_raised_by,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,8 @@ struct State {
     agents: HashMap<String, Agent>,
     next: HashMap<String, u32>,
     parents: HashMap<TaskKey, TaskKey>,
+    /// Each task's blockers, finished or not.
+    blockers: HashMap<TaskKey, Vec<TaskKey>>,
     priorities: HashMap<TaskKey, Priority>,
     context_fails: bool,
     /// The agents a human has listed as reviewers, which alone may approve work in review or finish it.
@@ -90,6 +92,8 @@ pub enum TrackerOp {
     InFlight,
     Notify,
     ResolveNotices,
+    /// Creating, changing or cancelling a task of a plan.
+    PlanWrite,
 }
 
 impl std::fmt::Display for TrackerOp {
@@ -108,6 +112,7 @@ impl std::fmt::Display for TrackerOp {
             Self::InFlight => "in_flight",
             Self::Notify => "notify",
             Self::ResolveNotices => "resolve_notices",
+            Self::PlanWrite => "plan_write",
         })
     }
 }
@@ -184,6 +189,7 @@ impl FakeTracker {
                 holder: None,
                 changes_requested: false,
                 run: RunRecord::default(),
+                plan: TaskPlan::default(),
             },
         );
         key
@@ -202,6 +208,62 @@ impl FakeTracker {
     /// The subjects resolved by, oldest first.
     pub fn resolves(&self) -> Vec<String> {
         self.state.lock().unwrap().resolves.clone()
+    }
+
+    /// A spec task: an ungraded ask a planner works, as the server files one.
+    pub fn add_spec(&self, project: &str, title: &str, ask: &str) -> TaskKey {
+        let key = self.add_task(project, title, ask);
+        self.set_plan(&key, TaskPlan { spec: Some(Spec::default()), proposed: None });
+        key
+    }
+
+    /// Sets a task's `metadata.plan`, as the server or a person editing it would.
+    pub fn set_plan(&self, key: &TaskKey, plan: TaskPlan) {
+        self.state.lock().unwrap().tasks.get_mut(key).unwrap().plan = plan;
+    }
+
+    /// A person approves a spec task's plan: each open, ungraded subtask gets the grade proposed for it, and the spec
+    /// is marked approved.
+    pub fn approve_plan(&self, spec: &TaskKey) {
+        let mut s = self.state.lock().unwrap();
+        let children: Vec<TaskKey> = s.parents.iter().filter(|(_, p)| *p == spec).map(|(k, _)| k.clone()).collect();
+        for child in children {
+            let t = s.tasks.get_mut(&child).unwrap();
+            if let (None, Status::Open, Some(p)) = (t.grade, t.status, &t.plan.proposed) {
+                t.grade = Some(p.grade);
+            }
+        }
+        let t = s.tasks.get_mut(spec).unwrap();
+        t.plan.spec.get_or_insert_with(Spec::default).approved = Some(1);
+    }
+
+    /// A person makes `task` wait on `blocker`.
+    pub fn add_blocker(&self, task: &TaskKey, blocker: &TaskKey) {
+        self.state.lock().unwrap().blockers.entry(task.clone()).or_default().push(blocker.clone());
+    }
+
+    /// The task's blockers, finished or not.
+    pub fn blockers(&self, task: &TaskKey) -> Vec<TaskKey> {
+        self.state.lock().unwrap().blockers.get(task).cloned().unwrap_or_default()
+    }
+
+    /// The task's direct subtasks, oldest first.
+    pub fn children(&self, parent: &TaskKey) -> Vec<Task> {
+        let s = self.state.lock().unwrap();
+        let mut out: Vec<Task> =
+            s.tasks.values().filter(|t| s.parents.get(&t.key) == Some(parent)).map(|t| flagged(&s, t)).collect();
+        out.sort_by_key(|t| trailhead_factory::key_number(&t.key));
+        out
+    }
+
+    /// Changes a task the plan holds as an agent may: refused while another agent holds it.
+    fn write_unheld<T>(&self, key: &TaskKey, f: impl FnOnce(&mut Task) -> T) -> Result<T> {
+        self.write(key, |t, me| {
+            if let Some(h) = t.holder.as_deref().filter(|h| *h != me) {
+                return Err(Error::Conflict(format!("{} is held by {h}", t.key.0)));
+            }
+            Ok(f(t))
+        })
     }
 
     /// Makes reading a task's human context fail (or heals it), as a tracker outage would.
@@ -512,6 +574,25 @@ fn push_comment(s: &mut State, key: &TaskKey, author: &str, kind: &str, body: &s
         body: body.to_string(),
         verdict: None,
     });
+}
+
+/// An RFC 7386 merge patch, as core applies to metadata.
+fn merge(into: &mut serde_json::Value, patch: &serde_json::Value) {
+    let serde_json::Value::Object(fields) = patch else {
+        *into = patch.clone();
+        return;
+    };
+    if !into.is_object() {
+        *into = serde_json::Value::Object(Default::default());
+    }
+    let target = into.as_object_mut().expect("an object");
+    for (k, v) in fields {
+        if v.is_null() {
+            target.remove(k);
+        } else {
+            merge(target.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+        }
+    }
 }
 
 /// Core's `Status::can_transition_to`, which the fake must agree with.
@@ -893,6 +974,89 @@ impl Tracker for FakeTracker {
                     && t.title.trim().eq_ignore_ascii_case(title.trim())
             })
             .map(|t| t.key.clone()))
+    }
+
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>> {
+        self.check_live()?;
+        let children = self.children(spec);
+        let s = self.state.lock().unwrap();
+        let unfinished = |k: &TaskKey| s.tasks.get(k).is_some_and(|t| !t.status.is_closed());
+        Ok(children
+            .into_iter()
+            .map(|t| PlanTask {
+                blocked_by: s.blockers.get(&t.key).into_iter().flatten().filter(|k| unfinished(k)).cloned().collect(),
+                key: t.key,
+                title: t.title,
+                description: t.description,
+                status: t.status,
+                grade: t.grade,
+                proposed: t.plan.proposed,
+            })
+            .collect())
+    }
+
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey> {
+        self.inject(TrackerOp::PlanWrite)?;
+        self.check_live()?;
+        {
+            let s = self.state.lock().unwrap();
+            if let Some(missing) = task.blocked_by.iter().find(|k| !s.tasks.contains_key(*k)) {
+                return Err(Error::NotFound(missing.0.clone()));
+            }
+        }
+        let key = self.add_subtask(spec, &task.title, &task.description);
+        let mut s = self.state.lock().unwrap();
+        s.tasks.get_mut(&key).unwrap().plan.proposed = Some(task.proposed.clone());
+        s.blockers.insert(key.clone(), task.blocked_by.clone());
+        Ok(key)
+    }
+
+    async fn update_plan_task(&self, task: &TaskKey, update: &PlanTaskUpdate) -> Result<()> {
+        self.inject(TrackerOp::PlanWrite)?;
+        self.write_unheld(task, |t| {
+            if let Some(title) = &update.title {
+                t.title = title.clone();
+            }
+            if let Some(d) = &update.description {
+                t.description = d.clone();
+            }
+            if let Some(p) = &update.proposed {
+                t.plan.proposed = Some(p.clone());
+            }
+        })?;
+        let mut s = self.state.lock().unwrap();
+        if let Some(missing) = update.add_blockers.iter().find(|k| !s.tasks.contains_key(*k)) {
+            return Err(Error::NotFound(missing.0.clone()));
+        }
+        let blockers = s.blockers.entry(task.clone()).or_default();
+        blockers.retain(|b| !update.remove_blockers.contains(b));
+        for b in &update.add_blockers {
+            if !blockers.contains(b) {
+                blockers.push(b.clone());
+            }
+        }
+        Ok(())
+    }
+
+    async fn cancel(&self, task: &TaskKey) -> Result<()> {
+        self.inject(TrackerOp::PlanWrite)?;
+        self.write_unheld(task, |t| {
+            t.status = Status::Cancelled;
+            t.holder = None;
+        })
+    }
+
+    async fn set_description(&self, task: &TaskKey, description: &str) -> Result<()> {
+        self.write_unheld(task, |t| t.description = description.to_string())
+    }
+
+    async fn patch_plan(&self, task: &TaskKey, patch: serde_json::Value) -> Result<()> {
+        self.write_unheld(task, |t| {
+            let mut plan = serde_json::to_value(&t.plan).unwrap_or_default();
+            merge(&mut plan, &patch);
+            serde_json::from_value(plan).map(|plan| t.plan = plan)
+        })?
+        .map_err(|e| Error::Other(format!("bad plan: {e}")))
     }
 
     async fn create_sub_agent(&self, name: &str, _project: &str, _ttl: Duration) -> Result<Credential> {

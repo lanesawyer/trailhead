@@ -179,6 +179,7 @@ fn request(run: &str, key: TaskKey, credential: Credential) -> RunRequest {
         env: Default::default(),
         credential,
         shots: None,
+        plan: None,
     }
 }
 

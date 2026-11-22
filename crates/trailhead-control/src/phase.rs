@@ -169,6 +169,7 @@ mod tests {
             holder: holder.map(str::to_string),
             changes_requested: false,
             run: merged,
+            plan: Default::default(),
         }
     }
 

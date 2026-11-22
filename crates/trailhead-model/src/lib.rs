@@ -460,6 +460,10 @@ pub struct Spec {
     /// When a person approved the plan, in Unix seconds. The planner is finished with the task from then on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved: Option<i64>,
+    /// The ask as the person wrote it: the task's description before the planner's first spec replaced it. The
+    /// factory keeps it here before that write, so every later turn is still told what was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<String>,
 }
 
 /// The grade a planner proposes for a task it made, and why, for the person approving the plan to take or change.

@@ -87,6 +87,7 @@ impl Factory {
             env: self.config.stack.env.clone(),
             credential,
             shots: self.config.shots(),
+            plan: None,
         };
         let prior = shown.run.spend.unwrap_or_default();
         self.status.phase(&task.key, RunPhase::Reviewing, Some(&sandbox.name));

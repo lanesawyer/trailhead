@@ -299,6 +299,9 @@ pub struct NewTask {
     /// The IANA zone `scheduled_at` was planned in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduled_tz: Option<String>,
+    /// The task's metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     /// Keys of the tasks that must finish first, added with the task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
