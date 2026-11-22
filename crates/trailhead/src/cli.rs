@@ -435,6 +435,9 @@ pub(crate) enum AppCmd {
     /// as `[shell] from` in the user config; `trailhead app` then builds each of that server's builds here and
     /// restarts onto them. Needs cargo on this machine, and no Trailhead server.
     From { endpoint: String },
+    /// On a Mac: put the window in `~/Applications` as Trailhead.app, with its icon, so it starts from Spotlight,
+    /// Launchpad or the Dock. The app runs `trailhead app` with this terminal's PATH. Run it again after the CLI moves.
+    Install,
 }
 
 #[derive(Subcommand)]

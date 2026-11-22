@@ -27,6 +27,7 @@ pub(crate) async fn app(paths: &Paths, url: &str, cmd: Option<&AppCmd>, args: &[
     let read = || ShellBuild { configured: config.is_some() || remote.is_some(), ..layout.read() };
     match cmd {
         Some(AppCmd::From { endpoint }) => build_from(paths, endpoint),
+        Some(AppCmd::Install) => super::app_install::install(),
         None if remote.is_some() => {
             let (from, config) = remote.expect("checked");
             let code = launch_remote(paths, &from, config, &layout, args).await?;

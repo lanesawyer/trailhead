@@ -251,9 +251,17 @@ build of it there, kept current.
   (`TRAILHEAD_SHELL_LOCAL_STATE`), and the window's notice reads the newest build from there instead of from the
   server: the server's newest isn't one this machine can start until it has compiled it, a minute or two later. What
   the update brings is still the server's list of commits.
-- **Not built:** a macOS app bundle or dock icon (the window is started from a terminal with `trailhead app`), and
-  the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from there.
-- **Not verified:** nothing has run on macOS. The first try is Lane's laptop.
+- **A macOS app.** `trailhead app install` there writes `~/Applications/Trailhead.app`: Trailhead's icon
+  (`crates/trailhead/assets/trailhead.icns`, drawn by the shell's `icon` module with macOS's margin) and a script
+  that runs `trailhead app` with the PATH of the terminal that installed it, since an app started from the Dock has
+  no cargo on its PATH. What the launcher prints goes to `~/Library/Logs/Trailhead/launcher.log`. The bundle is the
+  launcher, not the window (`LSUIElement`, so it has no Dock tile of its own); signing in and allowing the machine
+  still need one start from a terminal.
+- **Not built:** the window's own Dock tile wearing the icon (winit sets no window icon on macOS, so the running
+  window shows a plain one), and the CLI or MCP reaching the server from another machine (TRAIL-71). The window is
+  the way in from there.
+- **Verified on Lane's Mac (2026-11-21):** the first build and the window signing in. Not yet: an update arriving
+  there, and the app bundle.
 
 ## Other things to settle
 
