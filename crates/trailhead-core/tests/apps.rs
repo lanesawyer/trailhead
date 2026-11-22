@@ -68,7 +68,7 @@ fn declarations_parse_and_say_what_is_wrong() {
     refused("[collections.a]\n", "needs `fields");
     refused("[collections.Snoozes]\nfields = { x = \"string\" }", "collection name `Snoozes`");
     refused("[collections.a]\nfields = { Item = \"string\" }", "field name `Item`");
-    refused("[collections.a]\nfields = { x = \"time\" }", "field `x`: unknown kind `time`");
+    refused("[collections.a]\nfields = { x = \"time\" }", "field `x`: `time` isn't a field type");
     refused("[collections.a]\nfields = { x = \"string?[]\" }", "string[]?");
     refused("[collections.a]\nfields = { x = 1 }", "its type is a string");
     refused("[collections.a]\nfields = {}", "has no fields");

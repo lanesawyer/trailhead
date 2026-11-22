@@ -134,12 +134,23 @@ impl FieldKind {
     }
 }
 
+/// A scheme, `:` and the rest, with no spaces or control characters; an `http` or `https` URL also names a host.
 fn is_url(s: &str) -> bool {
     let Some((scheme, rest)) = s.split_once(':') else { return false };
+    let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+    let has_host =
+        || rest.strip_prefix("//").and_then(|r| r.split(['/', '?', '#']).next()).is_some_and(|h| !h.is_empty());
     scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
         && !rest.is_empty()
-        && !s.chars().any(char::is_whitespace)
+        && (!web || has_host())
+        && !s.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+impl fmt::Display for FieldKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl FromStr for FieldKind {
@@ -171,22 +182,31 @@ impl FieldType {
         FieldType { kind, list: false, optional: true }
     }
 
-    /// Whether `v` (not null) is a value of this type; `Err` says what it should be.
-    fn check(self, field: &str, v: &Value) -> Result<(), ParseError> {
+    /// Parses a type as `collections.toml` and `connector.toml` write it, like `string[]?`.
+    pub fn parse(text: &str) -> Result<FieldType, ParseError> {
+        text.parse()
+    }
+
+    /// Whether `v` is a value of this type, `null` only for an optional one. `Err` says what it should be, as
+    /// "should be a string, not 1", for the caller to put the field's name in front of.
+    pub fn check(self, v: &Value) -> Result<(), ParseError> {
+        if v.is_null() {
+            return if self.optional { Ok(()) } else { Err(err(format!("should be {}, not null", self.described()))) };
+        }
         let ok = if self.list {
             v.as_array().is_some_and(|items| items.iter().all(|i| !i.is_null() && self.kind.accepts(i)))
         } else {
             self.kind.accepts(v)
         };
-        if ok {
-            return Ok(());
-        }
-        let should = if self.list {
+        if ok { Ok(()) } else { Err(err(format!("should be {}, not {}", self.described(), shown(v)))) }
+    }
+
+    fn described(self) -> String {
+        if self.list {
             format!("a list of {}", self.kind.described().trim_start_matches("a ").trim_start_matches("an "))
         } else {
             self.kind.described().to_string()
-        };
-        Err(err(format!("field `{field}` should be {should}, not {}", shown(v))))
+        }
     }
 }
 
@@ -207,7 +227,14 @@ impl FromStr for FieldType {
                 "`{s}`: write `{kind}[]?` for an optional list; a list's items are never missing"
             )));
         }
-        Ok(FieldType { kind: t.parse()?, list, optional })
+        let kind = t.parse().map_err(|_: ParseError| {
+            let all: Vec<&str> = FieldKind::ALL.iter().map(|k| k.as_str()).collect();
+            err(format!(
+                "`{s}` isn't a field type: use one of {}, then `[]` for a list and `?` for optional",
+                all.join(", ")
+            ))
+        })?;
+        Ok(FieldType { kind, list, optional })
     }
 }
 
@@ -257,7 +284,7 @@ impl Collection {
                     data.remove(name);
                 }
                 None | Some(Value::Null) => return Err(err(format!("field `{name}` is missing"))),
-                Some(v) => ty.check(name, v)?,
+                Some(v) => ty.check(v).map_err(|e| err(format!("field `{name}` {e}")))?,
             }
         }
         Ok(data)
@@ -511,7 +538,7 @@ mod tests {
         let t: FieldType = "day[]?".parse().unwrap();
         assert_eq!(t, FieldType { kind: FieldKind::Day, list: true, optional: true });
         assert!("string?[]".parse::<FieldType>().unwrap_err().0.contains("string[]?"));
-        assert!("time".parse::<FieldType>().unwrap_err().0.contains("unknown kind `time`"));
+        assert!("time".parse::<FieldType>().unwrap_err().0.contains("`time` isn't a field type"));
     }
 
     #[test]
@@ -555,5 +582,34 @@ mod tests {
         assert!(refused(json!({"item": "x", "link": "not a url"})).contains("URL"));
         assert!(refused(json!({"item": "x", "on": "22/11/2026"})).contains("a day"));
         assert!(refused(json!(["item"])).contains("JSON object"));
+    }
+
+    #[test]
+    fn values_are_checked_one_by_one() {
+        let ty = |s: &str| FieldType::parse(s).unwrap();
+        assert_eq!(ty("string").check(&json!(1)).unwrap_err().0, "should be a string, not 1");
+        assert!(ty("string").check(&json!(null)).unwrap_err().0.contains("not null"));
+        ty("string?").check(&json!(null)).unwrap();
+        ty("string[]?").check(&json!(null)).unwrap();
+        ty("json").check(&json!({"a": [1]})).unwrap();
+        let ts = ty("timestamp");
+        for ok in ["2026-11-22T10:00:00Z", "2026-11-22T10:00:00.123+02:00", "2026-11-22t10:00:00-07:00"] {
+            ts.check(&json!(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in ["2026-11-22", "2026-11-22T10:00:00", "2026-13-22T10:00:00Z", "2026-11-22T25:00:00Z", "yesterday"] {
+            assert!(ts.check(&json!(bad)).is_err(), "{bad}");
+        }
+        let day = ty("day");
+        day.check(&json!("2024-02-29")).unwrap();
+        assert!(day.check(&json!("2026-02-29")).is_err());
+        assert!(day.check(&json!("2026-1-2")).is_err());
+        let url = ty("url");
+        for ok in ["https://example.com/a?b=1", "http://example.com", "mailto:lane@example.com", "ftp://example.com"] {
+            url.check(&json!(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in ["https://", "https:///path", "http:example.com", "https://a b", "https://a\u{7}b", "no-scheme"] {
+            assert!(url.check(&json!(bad)).is_err(), "{bad}");
+        }
+        assert_eq!(FieldKind::Url.to_string(), "url");
     }
 }

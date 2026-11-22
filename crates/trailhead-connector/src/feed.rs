@@ -55,7 +55,7 @@ impl FeedSpec {
                         return Err(FeedError::Missing { feed, key, field });
                     }
                     Some(value) => {
-                        if let Err(problem) = ty.check(value) {
+                        if let Err(problem) = ty.check(value).map_err(|e| e.0) {
                             let (feed, key, field) = at(field);
                             return Err(FeedError::Mistyped { feed, key, field, problem });
                         }
@@ -116,7 +116,7 @@ mod tests {
         let mut wrong = good();
         wrong["draft"] = json!("no");
         let e = check(&[record("7", wrong)]).unwrap_err().to_string();
-        assert!(e.starts_with("feed `pull_requests`, record `7`, field `draft`: expected boolean"), "{e}");
+        assert!(e.starts_with("feed `pull_requests`, record `7`, field `draft`: should be true or false"), "{e}");
     }
 
     #[test]

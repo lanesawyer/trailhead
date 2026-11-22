@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::field::FieldType;
+use crate::FieldType;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -206,7 +206,7 @@ impl Manifest {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::field::FieldKind;
+    use crate::FieldKind;
 
     pub(crate) const GITHUB: &str = r#"
 id = "github"
@@ -258,7 +258,7 @@ fields = { title = "string", url = "url", author = "string", draft = "boolean", 
         fails(&GITHUB.replace("id = \"github\"", "id = \"GitHub\""), "id `GitHub`");
         fails(&GITHUB.replace("pull_requests", "pull-requests"), "feed `pull-requests`");
         fails(&GITHUB.replace("title =", "Title ="), "field `Title`");
-        fails(&GITHUB.replace("\"timestamp\"", "\"date\""), "not a field type");
+        fails(&GITHUB.replace("\"timestamp\"", "\"date\""), "`date` isn't a field type");
         fails(&GITHUB.replace("secrets = [\"token\"]", "secrets = [\"Token\"]"), "secret `Token`");
         fails(&GITHUB.replace("kind = \"list\"", "kind = \"set\""), "set");
         fails(&GITHUB.replace("hosts = [\"api.github.com\"]", "hosts = []"), "hosts is empty");
