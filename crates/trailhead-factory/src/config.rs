@@ -168,7 +168,7 @@ pub struct DaemonConfig {
     pub disk_limit_bytes: u64,
 }
 
-/// 16 GiB: a Trailhead sandbox with its cargo `target` trimmed to 6 GiB uses about 10 GiB (docs/factory/sandbox.md).
+/// 16 GiB. For scale, Trailhead's own `trim` check caps its cargo `target` at 12 GiB (docs/factory/sandbox.md).
 pub const DEFAULT_DISK_WARN_BYTES: u64 = 16 << 30;
 
 fn default_disk_warn_bytes() -> u64 {

@@ -76,7 +76,9 @@ Remote machines reach the server through a tunnel (iroh via `dumbpipe`, Tailscal
 | `trailhead-daemon` | The in-sandbox daemon and its side of the iroh transport | `iroh` |
 | `trailhead-wire` | The iroh protocols the control plane, the daemon and Lookout share: framing, keys, `RemoteDaemon`, the API tunnel, `trailhead/ui/0` | `iroh` |
 | `trailhead-plugins` | The harnesses and model providers a build carries, by the names config gives them | |
-| `trailhead-testkit` | In-memory fakes for every seam and an in-process daemon | |
+| `trailhead-testkit` | In-memory fakes for every seam, an in-process daemon and the fixtures the factory's tests share | |
+| `trailhead-builder` | Builds the shell from a person's apps repo for the server, and keeps the builds (`docs/app-platform.md`) | `tokio` |
+| `clients/*` | Not default members: the UI kit (`trailhead-ui`), the shell (`trailhead-shell`), the example app, Lookout and the desktop binary that assembles them | `bevy` |
 
 The vendor implementations (Sprites compute, the Claude Code harness, Anthropic, GitHub, the REST tracker) are listed in `docs/factory/seams.md`. Factory crates are `publish = false` while the factory is built from this repo; it ships in the `trailhead` CLI behind the default `factory` feature (TRAIL-1073).
 
