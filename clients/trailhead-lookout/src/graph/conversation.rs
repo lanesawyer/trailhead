@@ -179,9 +179,11 @@ pub fn build_plan(input: &Input, task: &Task, thread: Thread) -> Option<PlanView
     })
 }
 
-/// The ask: the task's description as the conversation's first message, cut to [`ASK_CHARS`].
+/// The ask as the conversation's first message, cut to [`ASK_CHARS`]: what the person wrote, which the factory keeps
+/// in the plan once the planner's spec has replaced the description, else the description.
 fn ask(task: &Task, text: &Wording, author: String, mine: bool) -> Said {
-    let whole = task.description.trim();
+    let kept = TaskPlan::of(&task.metadata).and_then(|plan| plan.spec).and_then(|spec| spec.ask);
+    let whole = kept.as_deref().unwrap_or(&task.description).trim();
     let whole = if whole.is_empty() { task.title.trim() } else { whole };
     let clamped = whole.chars().count() > ASK_CHARS;
     let body = if clamped {
@@ -575,6 +577,13 @@ mod tests {
         let ask = &plan_of(&task, &[], Thread::default()).messages[0];
         assert!(ask.clamped && ask.body.ends_with('…'));
         assert!(ask.body.chars().count() <= ASK_CHARS + 1);
+    }
+
+    #[test]
+    fn the_first_message_is_the_ask_the_factory_kept_once_the_description_is_the_spec() {
+        let mut task = spec("needs_input", json!({"spec": {"ask": "Make me a todo app."}}));
+        task.description = "# Spec\n\nA list of todos, kept in the app's store.".into();
+        assert_eq!(plan_of(&task, &[], Thread::default()).messages[0].body, "Make me a todo app.");
     }
 
     #[test]
