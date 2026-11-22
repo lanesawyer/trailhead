@@ -8420,6 +8420,7 @@ dependencies = [
  "bevy",
  "directories",
  "iroh",
+ "jiff",
  "png",
  "reqwest",
  "serde",

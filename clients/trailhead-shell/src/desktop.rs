@@ -1,10 +1,14 @@
 //! The desktop's own notifications (`docs/app-platform.md#notifications`, "On the desktop"): what the shell shows
 //! there for a notification that arrives while the window has no focus. With focus the bell's ring is the notice, and
-//! this shows nothing.
+//! this shows nothing. Which ones come here is the person's settings' to say ([`crate::notification_settings`]): only
+//! those from a source that interrupts, and none during quiet hours or focus.
 //!
 //! - A few arriving together are shown one by one; more than [`BURST`] in [`BURST_WAIT`] become one saying how many.
-//! - What was raised while the window wasn't running is one too, at launch, if the window starts without focus. The
-//!   newest notification announced is kept in the shell's `LocalStore` entry (`announced`), per machine.
+//! - What was raised while the window wasn't running is one too, at launch, if the window starts without focus, once
+//!   the settings have been read. The newest notification announced is kept in the shell's `LocalStore` entry
+//!   (`announced`), per machine. At a launch during quiet hours or focus it is held for their end.
+//! - When quiet hours or focus end without window focus, what arrived meanwhile is one, saying how many.
+//! - The desktop plays its theme's message sound with one when the settings' sound is on.
 //! - One read or resolved since, here or on another machine, is taken down.
 //! - Pressing one brings the window forward with the bell's panel open. Its link buttons open in the browser and need
 //!   no window.
@@ -17,10 +21,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use bevy::prelude::*;
-use trailhead_model::Notification;
+use trailhead_model::{Notification, NotificationLevel};
 use uuid::Uuid;
 
 use crate::mirror::{Mirror, Mirrored, NotificationArrived};
+use crate::notification_settings::{Clock, Interrupt, NotificationPrefs, Quiet, QuietEnded, minute_of_day};
 use crate::notifications::source_label;
 use crate::notifications_panel::OpenNotifications;
 use crate::{Apps, LocalStore, SHELL};
@@ -91,16 +96,6 @@ impl Desktop {
     }
 }
 
-/// Whether a notification that arrives interrupts on the desktop with a sound. A later settings page sets it.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DesktopSound(pub bool);
-
-impl Default for DesktopSound {
-    fn default() -> Self {
-        DesktopSound(true)
-    }
-}
-
 /// What is waiting to be shown, and what is up.
 #[derive(Resource, Debug, Default)]
 struct Announcer {
@@ -119,8 +114,17 @@ struct Announcer {
 #[derive(bevy::ecs::system::SystemParam)]
 struct Out<'w> {
     desktop: Res<'w, Desktop>,
-    sound: Res<'w, DesktopSound>,
+    prefs: Res<'w, NotificationPrefs>,
+    clock: Res<'w, Clock>,
     apps: Res<'w, Apps>,
+}
+
+impl Out<'_> {
+    /// Whether nothing interrupts now.
+    fn quiet(&self) -> bool {
+        let now = self.clock.now();
+        self.prefs.settings.is_quiet(now.timestamp(), minute_of_day(&now))
+    }
 }
 
 fn focused(windows: &Query<&mut Window>) -> bool {
@@ -143,13 +147,11 @@ fn digest(of: &[Notification], sound: bool) -> Toast {
     if of.len() > DIGEST_TITLES {
         body.push(format!("and {} more", of.len() - DIGEST_TITLES));
     }
-    Toast {
-        key: DIGEST.into(),
-        title: format!("{} things need you", of.len()),
-        body: body.join("\n"),
-        actions: Vec::new(),
-        sound,
-    }
+    let title = match of.len() {
+        1 => "1 thing needs you".to_string(),
+        n => format!("{n} things need you"),
+    };
+    Toast { key: DIGEST.into(), title, body: body.join("\n"), actions: Vec::new(), sound }
 }
 
 /// Remembers the newest of `seen` as announced on this machine.
@@ -162,24 +164,33 @@ fn remember(store: &mut LocalStore, seen: impl IntoIterator<Item = Uuid>) {
     }
 }
 
-/// Gathers what arrives while the window has no focus. With focus the bell rings for it, and it is only remembered.
+/// Remembers every arrival as announced, and gathers those that interrupt while the window has no focus, as the
+/// settings decided.
 fn gather(
     mut arrived: MessageReader<NotificationArrived>,
-    windows: Query<&mut Window>,
+    mut interrupts: MessageReader<Interrupt>,
     time: Res<Time<Real>>,
     mut announcer: ResMut<Announcer>,
     mut store: ResMut<LocalStore>,
 ) {
-    let new: Vec<Notification> = arrived.read().map(|a| a.0.clone()).collect();
-    if new.is_empty() {
-        return;
+    let seen: Vec<Uuid> = arrived.read().map(|a| a.0.id).collect();
+    if !seen.is_empty() {
+        remember(&mut store, seen);
     }
-    remember(&mut store, new.iter().map(|n| n.id));
-    if focused(&windows) {
+    let new: Vec<Notification> = interrupts.read().map(|i| i.0.clone()).collect();
+    if new.is_empty() {
         return;
     }
     announcer.since.get_or_insert(time.elapsed());
     announcer.pending.extend(new);
+}
+
+/// Quiet hours or focus ended without window focus: one notification for what arrived meanwhile.
+fn after_quiet(mut ended: MessageReader<QuietEnded>, out: Out, mut announcer: ResMut<Announcer>) {
+    for QuietEnded(meanwhile) in ended.read() {
+        out.desktop.0.send(ToDesktop::Show(digest(meanwhile, out.prefs.settings.sound)));
+        announcer.digest = meanwhile.iter().map(|n| n.id).collect();
+    }
 }
 
 /// Shows what was gathered, once [`BURST_WAIT`] has passed since the first: each on its own, or one for them all.
@@ -201,7 +212,7 @@ fn announce(
 }
 
 fn show(out: &Out, announcer: &mut Announcer, of: &[Notification]) {
-    let (desktop, apps, sound) = (&out.desktop, &out.apps, out.sound.0);
+    let (desktop, apps, sound) = (&out.desktop, &out.apps, out.prefs.settings.sound);
     match of.len() {
         0 => {}
         n if n <= BURST => {
@@ -217,7 +228,8 @@ fn show(out: &Out, announcer: &mut Announcer, of: &[Notification]) {
     }
 }
 
-/// At the first snapshot: what was raised since this machine last announced one, if the window started without focus.
+/// At the first snapshot, once the settings are known: what was raised since this machine last announced one from a
+/// source that interrupts, if the window started without focus. During quiet hours or focus it waits for their end.
 fn at_launch(
     mirror: Res<Mirror>,
     out: Out,
@@ -225,18 +237,29 @@ fn at_launch(
     mirrored: Query<&Mirrored<Notification>>,
     mut announcer: ResMut<Announcer>,
     mut store: ResMut<LocalStore>,
+    mut quiet: ResMut<Quiet>,
 ) {
-    if announcer.launched || mirror.snapshots() == 0 {
+    if announcer.launched || mirror.snapshots() == 0 || !out.prefs.heard() {
         return;
     }
     announcer.launched = true;
     let kept: Option<Uuid> = store.get(SHELL, ANNOUNCED);
-    let mut missed: Vec<Notification> =
-        mirrored.iter().map(|m| &m.0).filter(|n| n.is_unread() && kept.is_none_or(|k| n.id > k)).cloned().collect();
+    let interrupts = |n: &Notification| out.prefs.settings.level_of(&n.source) == NotificationLevel::Interrupt;
+    let mut missed: Vec<Notification> = mirrored
+        .iter()
+        .map(|m| &m.0)
+        .filter(|n| n.is_unread() && kept.is_none_or(|k| n.id > k) && interrupts(n))
+        .cloned()
+        .collect();
     missed.sort_by_key(|n| std::cmp::Reverse(n.id));
     remember(&mut store, mirrored.iter().map(|m| m.0.id));
     // A machine that has never announced one has nothing it missed: everything unread is old news there.
-    if kept.is_some() && !focused(&windows) {
+    if kept.is_none() || focused(&windows) {
+        return;
+    }
+    if out.quiet() {
+        quiet.hold(missed.iter().map(|n| n.id));
+    } else {
         show(&out, &mut announcer, &missed);
     }
 }
@@ -301,9 +324,9 @@ pub(crate) struct DesktopPlugin;
 
 impl Plugin for DesktopPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Announcer>().init_resource::<DesktopSound>().add_systems(
+        app.init_resource::<Announcer>().add_systems(
             Update,
-            (gather, at_launch, announce, withdraw, hear).chain().run_if(resource_exists::<Desktop>),
+            (gather, at_launch, announce, after_quiet, withdraw, hear).chain().run_if(resource_exists::<Desktop>),
         );
     }
 }
@@ -516,6 +539,8 @@ mod tests {
         .insert_resource(Desktop(Box::new(fake.clone())))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(1)))
         .add_plugins(ShellPlugin::new().with(Notes).with(Other).windowed());
+        // As a shell is once the server has said how the person wants to be told: the defaults.
+        app.world_mut().resource_mut::<NotificationPrefs>().answered = true;
         let window = app.world_mut().spawn(Window { focused: has_focus, ..default() }).id();
         settle(&mut app);
         (app, fake, window)
@@ -668,5 +693,60 @@ mod tests {
         fill(&mut app, Snapshot { at: 1, notifications: vec![raised("n1", "server", json!({}))], ..default() });
         settle(&mut app);
         assert!(fake.take().is_empty());
+    }
+
+    fn settings(app: &mut App, settings: trailhead_model::NotificationSettings) {
+        app.world_mut().resource_mut::<NotificationPrefs>().settings = settings;
+    }
+
+    /// Sets the window's clock to `at`, in a zone of the test's own.
+    fn at(app: &mut App, at: &'static str) {
+        let now: jiff::Zoned = at.parse().unwrap();
+        app.insert_resource(Clock::new(move || now.clone()));
+    }
+
+    #[test]
+    fn only_an_interrupting_source_reaches_the_desktop_and_the_sound_follows_the_setting() {
+        use trailhead_model::NotificationSettings;
+        let (mut app, fake, _) = shell(false);
+        fill(&mut app, Snapshot { at: 1, ..default() });
+        let levels = [("notes", NotificationLevel::Silent), ("factory", NotificationLevel::Bell)];
+        let levels = levels.into_iter().map(|(s, l)| (s.to_string(), l)).collect();
+        settings(&mut app, NotificationSettings { levels, sound: false, ..Default::default() });
+        arrive(&mut app, 2, "n1", "notes", json!({}));
+        arrive(&mut app, 3, "n2", "factory", json!({}));
+        arrive(&mut app, 4, "n3", "server", json!({}));
+        settle(&mut app);
+        let asked = fake.take();
+        let toasts = shown(&asked);
+        assert_eq!(toasts.iter().map(|t| (t.key.clone(), t.sound)).collect::<Vec<_>>(), [(sid("n3"), false)]);
+    }
+
+    #[test]
+    fn a_launch_during_quiet_hours_waits_and_their_end_is_one_notification_for_what_arrived() {
+        use trailhead_model::NotificationSettings;
+        let (mut app, fake, _) = shell(false);
+        at(&mut app, "2026-11-21T23:00:00-08:00[America/Los_Angeles]");
+        let night = trailhead_model::QuietHours { start: 22 * 60, end: 7 * 60 };
+        settings(&mut app, NotificationSettings { quiet_hours: Some(night), ..Default::default() });
+        app.world_mut().resource_mut::<LocalStore>().set(SHELL, ANNOUNCED, sid("n1").parse::<Uuid>().unwrap());
+        let mut missed = vec![raised("n1", "server", json!({}))];
+        missed.extend(["n2", "n3"].iter().filter(|n| sid(n) > sid("n1")).map(|n| raised(n, "server", json!({}))));
+        let held = missed.len() - 1;
+        fill(&mut app, Snapshot { at: 1, notifications: missed, ..default() });
+        arrive(&mut app, 2, "n4", "server", json!({}));
+        settle(&mut app);
+        assert!(fake.take().is_empty(), "nothing interrupts during quiet hours");
+
+        at(&mut app, "2026-11-22T07:00:00-08:00[America/Los_Angeles]");
+        settle(&mut app);
+        let asked = fake.take();
+        let toasts = shown(&asked);
+        assert_eq!(toasts.len(), 1, "{asked:?}");
+        let words =
+            if held + 1 == 1 { "1 thing needs you".to_string() } else { format!("{} things need you", held + 1) };
+        assert_eq!((toasts[0].key.as_str(), toasts[0].title.as_str()), (DIGEST, words.as_str()));
+        settle(&mut app);
+        assert!(fake.take().is_empty(), "said once");
     }
 }

@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
-    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction, Priority,
-    Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook,
-    WebhookDelivery,
+    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
+    NotificationSettings, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token,
+    UndoReport, Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -73,6 +73,8 @@ pub mod routes {
     pub const READ_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/read");
     pub const UNREAD_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/unread");
     pub const RESOLVE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/resolve");
+    pub const NOTIFICATION_SETTINGS: Route = Route::new(Method::GET, "/v1/notifications/settings");
+    pub const SET_NOTIFICATION_SETTINGS: Route = Route::new(Method::PUT, "/v1/notifications/settings");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
@@ -107,7 +109,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 46] {
+    pub fn all() -> [Route; 50] {
         [
             READY,
             LIST_TASKS,
@@ -155,6 +157,10 @@ pub mod routes {
             WEBHOOK_DELIVERIES,
             LIST_USERS,
             EVENT_STREAM,
+            RAISE_NOTIFICATION,
+            RESOLVE_NOTIFICATIONS,
+            NOTIFICATION_SETTINGS,
+            SET_NOTIFICATION_SETTINGS,
         ]
     }
 }
@@ -462,6 +468,15 @@ pub enum Call {
     UnreadNotification(String),
     /// Marks every notification read.
     ReadAllNotifications,
+    /// Raises a notification.
+    RaiseNotification(NewNotification),
+    /// Resolves every open notification `source` raised about `subject`.
+    ResolveNotifications {
+        source: String,
+        subject: String,
+    },
+    /// Replaces how the person wants to be told with these settings, whole. Only a person may.
+    SetNotificationSettings(NotificationSettings),
 }
 
 impl Call {
@@ -480,6 +495,9 @@ impl Call {
             Call::ReadNotification(id) => (routes::READ_NOTIFICATION, Some(id)),
             Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, Some(id)),
             Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, None),
+            Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, None),
+            Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, None),
+            Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, None),
         }
     }
 
@@ -503,6 +521,11 @@ impl Call {
             Call::Revert(b) => Some(json(b)),
             Call::CreateProject(b) => Some(json(b)),
             Call::UpdateProject { update, .. } => Some(json(update)),
+            Call::RaiseNotification(b) => Some(json(b)),
+            Call::ResolveNotifications { source, subject } => {
+                Some(serde_json::json!({ "source": source, "subject": subject }))
+            }
+            Call::SetNotificationSettings(b) => Some(json(b)),
         }
     }
 
@@ -851,6 +874,16 @@ impl Client {
         self.send::<Count>(self.request(routes::RESOLVE_NOTIFICATIONS, None).json(&body)).await.map(|c| c.count)
     }
 
+    /// `GET /v1/notifications/settings`: how the person wants to be told, the defaults until they set any.
+    pub async fn notification_settings(&self) -> Result<NotificationSettings> {
+        self.send(self.request(routes::NOTIFICATION_SETTINGS, None)).await
+    }
+
+    /// `PUT /v1/notifications/settings`: replaces them whole, and answers them as kept. Only a person may.
+    pub async fn set_notification_settings(&self, settings: &NotificationSettings) -> Result<NotificationSettings> {
+        self.send(self.request(routes::SET_NOTIFICATION_SETTINGS, None).json(settings)).await
+    }
+
     /// `POST /v1/comments/{id}/resolve`, optionally with an answer.
     pub async fn resolve_comment(&self, id: Uuid, answer: Option<&str>) -> Result<Comment> {
         let req = self.request(routes::RESOLVE_COMMENT, Some(&id.to_string()));
@@ -1144,5 +1177,24 @@ mod tests {
         assert_eq!((read.method(), read.path(), read.body()), (Method::POST, "/v1/notifications/n1/read".into(), None));
         assert_eq!(Call::UnreadNotification("n1".into()).path(), "/v1/notifications/n1/unread");
         assert_eq!(Call::ReadAllNotifications.path(), "/v1/notifications/read-all");
+        let raise = Call::RaiseNotification(NewNotification {
+            source: "example".into(),
+            kind: "example.milestone".into(),
+            title: "Ten presses".into(),
+            subject: Some("count".into()),
+            ..Default::default()
+        });
+        assert_eq!((raise.method(), raise.path()), (Method::POST, "/v1/notifications".into()));
+        assert_eq!(
+            raise.body(),
+            Some(serde_json::json!({"source": "example", "kind": "example.milestone", "title": "Ten presses",
+                                    "body": "", "subject": "count"}))
+        );
+        let resolve = Call::ResolveNotifications { source: "example".into(), subject: "count".into() };
+        assert_eq!((resolve.method(), resolve.path()), (Method::POST, "/v1/notifications/resolve".into()));
+        assert_eq!(resolve.body(), Some(serde_json::json!({"source": "example", "subject": "count"})));
+        let settings = Call::SetNotificationSettings(NotificationSettings { sound: false, ..Default::default() });
+        assert_eq!((settings.method(), settings.path()), (Method::PUT, "/v1/notifications/settings".into()));
+        assert_eq!(settings.body().unwrap()["sound"], serde_json::json!(false));
     }
 }

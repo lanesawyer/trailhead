@@ -3,6 +3,10 @@
 //! while the window has focus ([`Ring`], not while the desktop asks for less motion), and opens the panel when pressed.
 //! Each app's button on the rail gets the count of its own.
 //!
+//! At the panel's top, focus: whether it is on and until when, with buttons that start it for an hour or until it is
+//! ended, and that end it, each a save of the person's settings with only focus changed
+//! ([`crate::notification_settings`]).
+//!
 //! The panel lists them newest first, one card each: its source's icon and name, its age, its title and body, and its
 //! buttons, Mark read (Mark unread on a read one) and one per action, which opens its link in the desktop's browser.
 //! The unread ones carry a dot; the resolved ones say so, their title dim. A switch shows the unread ones or all of
@@ -19,7 +23,7 @@ use trailhead_model::{Notification, NotificationAction};
 use trailhead_ui::{
     Appearance, ButtonGroup, ButtonKind, CountBadge, Hint, Icon, Keyed, Modal, ModalSlots, Notice, Picked, Ring, Tone,
     badge, button, button_group, count_badge, display, dot, icon_text, link_button, list_card, notice, open_modal,
-    patch_node, row, set_display, set_text, size, space, text_dim, text_toned, token,
+    patch_node, row, set_display, set_text, size, space, text, text_dim, text_toned, token,
 };
 use uuid::Uuid;
 
@@ -27,9 +31,12 @@ use crate::Apps;
 use crate::commands::{CommandDone, Outcome, Request, Submit};
 use crate::connection::Connection;
 use crate::mirror::Mirrored;
+use crate::notification_settings::{
+    Clock, NotificationPrefs, RingBells, SaveNotificationSettings, focus_text, with_focus,
+};
 use crate::notifications::{
-    BELL_HINT, NotificationArrived, NotificationBell, NotificationCounts, NotificationHistory, ShowOlder, age,
-    app_count, known, source_label, unread_counts,
+    BELL_HINT, NotificationBell, NotificationCounts, NotificationHistory, ShowOlder, age, app_count, known,
+    source_label, unread_counts,
 };
 use crate::rail::AppCount;
 
@@ -80,6 +87,21 @@ pub struct EmptyLine;
 /// The panel's notice, saying why a mark or a read of older ones failed.
 #[derive(Component)]
 pub struct PanelNotice;
+
+/// The line that says whether focus is on, and until when.
+#[derive(Component)]
+pub struct FocusLine;
+
+/// A button that starts or ends focus.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FocusAct {
+    /// Focus for an hour from now.
+    #[default]
+    Hour,
+    /// Focus until it is ended.
+    UntilEnded,
+    End,
+}
 
 /// The button under the list that reads older ones.
 #[derive(Component, Clone, Copy, Default)]
@@ -176,6 +198,7 @@ impl Plugin for NotificationsUiPlugin {
             .add_observer(on_mark_one)
             .add_observer(on_mark_all)
             .add_observer(on_show_older)
+            .add_observer(on_focus)
             .add_systems(
                 Update,
                 (
@@ -183,7 +206,7 @@ impl Plugin for NotificationsUiPlugin {
                     show_counts,
                     ring_bells,
                     fill_panel,
-                    (show_filter, sync_cards, show_footer, show_answers).chain(),
+                    (show_filter, show_focus, sync_cards, show_footer, show_answers).chain(),
                 )
                     .chain(),
             );
@@ -230,17 +253,20 @@ fn show_counts(
     mirrored: Query<&Mirrored<Notification>>,
     changed: Query<(), Changed<Mirrored<Notification>>>,
     mut removed: RemovedComponents<Mirrored<Notification>>,
-    history: Res<NotificationHistory>,
-    shown: Res<NotificationCounts>,
+    (history, shown, prefs): (Res<NotificationHistory>, Res<NotificationCounts>, Res<NotificationPrefs>),
     new: Query<(), NewCounts>,
     bells: Query<(&BellCount, &mut Hint)>,
     mut badges: Query<(&mut CountBadge, Option<&AppCount>)>,
 ) {
     let gone = removed.read().count() > 0;
-    if changed.is_empty() && !gone && !history.is_changed() && !shown.is_changed() && new.is_empty() {
+    let still = !history.is_changed() && !shown.is_changed() && !prefs.is_changed();
+    if changed.is_empty() && !gone && still && new.is_empty() {
         return;
     }
-    let (total, by_source) = unread_counts(&known(mirrored.iter().map(|m| &m.0), &history));
+    // A silent source is listed, never counted.
+    let mut counted = known(mirrored.iter().map(|m| &m.0), &history);
+    counted.retain(|n| prefs.settings.level_of(&n.source) != trailhead_model::NotificationLevel::Silent);
+    let (total, by_source) = unread_counts(&counted);
     let hint = match total {
         0 => BELL_HINT.to_string(),
         n => format!("{BELL_HINT}: {n} unread"),
@@ -261,20 +287,19 @@ fn show_counts(
     }
 }
 
-/// Rings every bell when one arrives while the window has focus. A desktop that asks for less motion sees only the
+/// Rings every bell when the settings say one is to be rung for ([`RingBells`]): an arrival while the window has
+/// focus, from a source that rings, outside quiet hours and focus. A desktop that asks for less motion sees only the
 /// count change.
 fn ring_bells(
-    mut arrived: MessageReader<NotificationArrived>,
-    windows: Query<&Window>,
+    mut rings: MessageReader<RingBells>,
     appearance: Option<Res<Appearance>>,
     bells: Query<Entity, With<NotificationBell>>,
     mut commands: Commands,
 ) {
-    if arrived.read().count() == 0 {
+    if rings.read().count() == 0 {
         return;
     }
-    let still = appearance.is_some_and(|a| a.reduce_motion());
-    if still || !windows.iter().any(|w| w.focused) {
+    if appearance.is_some_and(|a| a.reduce_motion()) {
         return;
     }
     for bell in &bells {
@@ -290,6 +315,15 @@ fn fill_panel(
     mut commands: Commands,
 ) {
     for slots in &new {
+        commands.spawn_scene(text("", size::BODY)).insert((FocusLine, ChildOf(slots.body)));
+        let acts = commands.spawn_scene(row()).insert(ChildOf(slots.body)).id();
+        for (act, words, icon) in [
+            (FocusAct::Hour, "Focus for an hour", Some(Icon::Moon)),
+            (FocusAct::UntilEnded, "Focus until I end it", None),
+            (FocusAct::End, "End focus", None),
+        ] {
+            commands.spawn_scene(button(words, icon, ButtonKind::Normal)).insert((act, ChildOf(acts)));
+        }
         let options = vec![("Unread".to_string(), None), ("All".to_string(), None)];
         let chosen = Some(usize::from(*filter == NotificationFilter::All));
         let switch = bsn! { @button_group(options, chosen) FilterPick Node { align_self: AlignSelf::FlexStart } };
@@ -310,6 +344,52 @@ fn fill_panel(
         let all = bsn! { @button("Mark all read", Some(Icon::CheckCheck), ButtonKind::Normal) MarkAllRead };
         commands.spawn_scene(all).insert(ChildOf(slots.footer));
     }
+}
+
+/// Says whether focus is on and until when, as the clock moves; the buttons are pressable over a live connection
+/// once the settings are read, End only while focus is on.
+fn show_focus(
+    lines: Query<&mut Text, With<FocusLine>>,
+    acts: Query<(Entity, &FocusAct, Has<InteractionDisabled>)>,
+    prefs: Res<NotificationPrefs>,
+    clock: Res<Clock>,
+    connection: Res<State<Connection>>,
+    mut commands: Commands,
+) {
+    if lines.is_empty() && acts.is_empty() {
+        return;
+    }
+    let now = clock.now();
+    let words = focus_text(&prefs.settings, &now);
+    for line in lines {
+        set_text(line, &words);
+    }
+    let ready = *connection.get() == Connection::Live && prefs.answered;
+    let on = prefs.settings.focused(now.timestamp());
+    for (button, act, disabled) in &acts {
+        enable(&mut commands, button, disabled, ready && (*act != FocusAct::End || on));
+    }
+}
+
+/// Starts or ends focus: the settings last read, with only focus changed.
+fn on_focus(
+    activate: On<Activate>,
+    acts: Query<&FocusAct>,
+    prefs: Res<NotificationPrefs>,
+    clock: Res<Clock>,
+    mut commands: Commands,
+) {
+    let Ok(act) = acts.get(activate.entity) else { return };
+    let focus = match act {
+        FocusAct::Hour => {
+            let until = clock.now().timestamp().checked_add(jiff::SignedDuration::from_hours(1)).ok();
+            Some(trailhead_model::Focus { until })
+        }
+        FocusAct::UntilEnded => Some(trailhead_model::Focus { until: None }),
+        FocusAct::End => None,
+    };
+    let settings = with_focus(&prefs.settings, focus);
+    commands.trigger(SaveNotificationSettings { source: activate.entity, settings });
 }
 
 fn on_filter(picked: On<Picked>, picks: Query<(), With<FilterPick>>, mut filter: ResMut<NotificationFilter>) {
@@ -531,10 +611,11 @@ fn on_show_older(activate: On<Activate>, buttons: Query<(), With<ShowOlderButton
     }
 }
 
-/// A button that marks notifications read or unread.
-type MarkButtons = Or<(With<MarkOne>, With<MarkAllRead>)>;
+/// A button that marks notifications read or unread, or starts or ends focus.
+type MarkButtons = Or<(With<MarkOne>, With<MarkAllRead>, With<FocusAct>)>;
 
-/// Says in the panel's notice why a mark failed, or a read of older ones; a mark that went through clears it.
+/// Says in the panel's notice why a mark or a change to focus failed, or a read of older ones; one that went through
+/// clears it.
 fn show_answers(
     mut done: MessageReader<CommandDone>,
     mine: Query<(), MarkButtons>,
@@ -733,6 +814,71 @@ mod tests {
             ]
         );
         answer(&mut app, out[1].source, Outcome::Failed("the server is busy".into()));
+        let notice = one::<With<PanelNotice>>(&mut app);
+        assert_eq!(app.world().get::<Notice>(notice).unwrap().message, "the server is busy");
+    }
+
+    #[test]
+    fn a_silent_source_is_listed_but_never_counted() {
+        let mut app = filled();
+        let mut prefs = app.world_mut().resource_mut::<NotificationPrefs>();
+        prefs.settings.levels.insert("notes".into(), trailhead_model::NotificationLevel::Silent);
+        settle(&mut app);
+        assert_eq!(counts(&mut app), (0, vec![(NOTES, 0), (crate::testing::OTHER, 0)]));
+        open(&mut app);
+        assert_eq!(cards(&mut app).iter().map(|c| c.1.as_str()).collect::<Vec<_>>(), ["about n3"], "still listed");
+    }
+
+    fn focus_line(app: &mut App) -> String {
+        let line = one::<With<FocusLine>>(app);
+        app.world().get::<Text>(line).unwrap().0.clone()
+    }
+
+    fn focus_button(app: &mut App, act: FocusAct) -> (Entity, bool) {
+        let world = app.world_mut();
+        let mut buttons = world.query::<(Entity, &FocusAct, Has<InteractionDisabled>)>();
+        let (entity, _, disabled) = buttons.iter(world).find(|(_, a, _)| **a == act).unwrap();
+        (entity, !disabled)
+    }
+
+    #[test]
+    fn the_panel_says_whether_focus_is_on_and_its_buttons_save_only_focus() {
+        let mut app = filled();
+        let now: jiff::Zoned = "2026-11-21T12:00:00-08:00[America/Los_Angeles]".parse().unwrap();
+        let clock = now.clone();
+        app.insert_resource(Clock::new(move || clock.clone()));
+        open(&mut app);
+        assert!(!focus_button(&mut app, FocusAct::Hour).1, "not until the settings are read");
+        {
+            let mut prefs = app.world_mut().resource_mut::<NotificationPrefs>();
+            prefs.answered = true;
+            prefs.settings.levels.insert("factory".into(), trailhead_model::NotificationLevel::Bell);
+        }
+        settle(&mut app);
+        assert!(focus_line(&mut app).starts_with("Focus is off"));
+        assert!(focus_button(&mut app, FocusAct::Hour).1 && !focus_button(&mut app, FocusAct::End).1);
+
+        let hour = focus_button(&mut app, FocusAct::Hour).0;
+        app.world_mut().trigger(Activate { entity: hour });
+        settle(&mut app);
+        let out = sent(&mut app);
+        let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!("{:?}", out[0].request.call) };
+        assert_eq!(out[0].request.method(), Method::Put);
+        let until = now.timestamp().checked_add(jiff::SignedDuration::from_hours(1)).unwrap();
+        assert_eq!(put.focus, Some(trailhead_model::Focus { until: Some(until) }));
+        assert_eq!(put.level_of("factory"), trailhead_model::NotificationLevel::Bell, "the rest as read");
+
+        app.world_mut().resource_mut::<NotificationPrefs>().settings = put.clone();
+        settle(&mut app);
+        assert_eq!(focus_line(&mut app), "Focus is on until 13:00.");
+        let end = focus_button(&mut app, FocusAct::End);
+        assert!(end.1);
+        app.world_mut().trigger(Activate { entity: end.0 });
+        settle(&mut app);
+        let out = sent(&mut app);
+        let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!() };
+        assert_eq!(put.focus, None);
+        answer(&mut app, out[0].source, Outcome::Failed("the server is busy".into()));
         let notice = one::<With<PanelNotice>>(&mut app);
         assert_eq!(app.world().get::<Notice>(notice).unwrap().message, "the server is busy");
     }

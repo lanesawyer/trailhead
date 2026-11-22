@@ -239,6 +239,12 @@ One way for the server, the factory and any app to tell a person something needs
 **Kinds.** A kind is the sort of thing a notification is, as a short name: `lookout.question`, `lookout.review`, `factory.run_failed`, `task.due_soon`. Every notification has one. At first a kind is only that name, and levels are set per source (all of an app's, or the factory's). Later, when one app's notifications want different treatment, an app lists the kinds it raises in its manifest, each with the name a person reads ("A question for you") and the level it starts at, and the settings page shows a row for each before any has been raised.
 
 **Levels.** Three: *silent* (in the list only), *bell* (the count, the ring and the sound) and *interrupt* (a desktop notification too). Every one is recorded whatever its level.
+**Built (TRAIL-1680):** the shell holds the person's settings (`notification_settings`), read from the server when
+the connection goes live, every minute and after a save, and does what `NotificationSettings::alert` says for each
+arrival: a silent source is listed and left out of every count, a bell source rings the bell (with the sound) and never
+reaches the desktop, an interrupting one rings the bell with window focus and goes to the desktop without. The
+Notifications page among the shell's own settings sets a level for each app on the rail, then Factory, then
+Trailhead.
 
 **In the window.**
 
@@ -277,9 +283,16 @@ settings page and an app's `Notify`.
 - Quiet hours are a daily span. Focus is switched on by hand, until a time or until switched off, from the bell's panel.
 - When either ends, one desktop notification says what arrived.
 - The settings (levels, quiet hours, the sound, the counts) are kept on the server, so every machine agrees, on a Notifications page among the shell's own in Settings.
+- **Built (TRAIL-1680):** an arrival during either is counted and held; when either ends, what was held and is still
+  unread is said once: one ring of the bell with window focus, one desktop notification ("3 things need you") for those
+  from interrupting sources without. The minute of the day is the window's machine's own clock and zone. Quiet hours
+  (on or off, a start and an end in half-hour steps), the sound and the counts are on the Notifications page; focus is a
+  row at the top of the bell's panel (for an hour, until ended, end it). Each saves the whole settings with a `PUT`,
+  from those last read with only its part changed, and the page shows what a read after the save says. A launch during
+  quiet hours or focus holds what it missed for their end.
 - **Low priority:** a level above interrupt that breaks through both (the factory stopped, a budget breach). Lane may never use it, so it is built last if at all. Ubuntu's own Do Not Disturb hides ours with no work here.
 
-**A sound.** One plays with the ring and with a desktop notification, never during quiet hours or focus, and a setting turns it off. It has to be made by a person, not generated, under an open licence, with its author, source and licence recorded beside the file. **Open: which one.** To look at first: the freedesktop sound theme and Ubuntu's own (Yaru), which the desktop can also play itself when a notification names a theme sound, so only the ring in a focused window would need a file of ours.
+**A sound.** One plays with the ring and with a desktop notification, never during quiet hours or focus, and a setting turns it off. It has to be made by a person, not generated, under an open licence. **Built (TRAIL-1680):** the desktop theme's own message sound (`message-new-instant`), on Ubuntu Yaru's, by Mads Rosendahl under CC-BY-SA-4.0, played by the desktop: a desktop notification names it as a hint, and the ring in a focused window starts `canberra-gtk-play` for it on a thread of its own (silent where the program is missing). No file of ours is shipped, so nothing needs recording beside one.
 
 **How long they are kept.** Everything, forever. The rows are small (a few hundred bytes); pruning is dealt with if the table ever gets too big.
 
@@ -304,7 +317,7 @@ settings page and an app's `Notify`.
 | `trailhead-control` | Raising what the engine cannot see, probably through the `Tracker` trait |
 | `trailhead-shell` | The mirror's records and the `Notify` command, the bell and its panel, the settings page, the desktop notifier behind a trait (so tests use a fake), quiet hours and the burst rule as plain logic |
 | `trailhead-ui` | The ring, and a count badge if the kit lacks one |
-| `trailhead-shell`'s assets | The sound, with its author, source and licence |
+| The desktop's sound theme | The sound (TRAIL-1680: none of ours is shipped) |
 | Lookout | Its link actions; marking a task's notifications read when the task is opened |
 
 **Order:** the table and API with the question and review rules; the bell and its panel; Ubuntu's desktop notifications; levels, quiet hours, focus and the sound; apps raising their own; kinds in the manifest and breaking through quiet hours, if wanted. The first two are enough to say the planner has replied.

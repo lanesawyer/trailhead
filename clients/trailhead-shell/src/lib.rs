@@ -54,7 +54,9 @@ pub mod icon;
 pub mod lint;
 pub mod mirror;
 pub mod net;
+pub mod notification_settings;
 pub mod notifications;
+mod notifications_page;
 mod notifications_panel;
 mod place;
 mod previews;
@@ -64,6 +66,7 @@ pub mod server_settings;
 pub mod settings;
 mod settings_modal;
 mod settings_pages;
+pub mod sound;
 mod store;
 pub mod sync;
 #[cfg(feature = "test-support")]
@@ -330,7 +333,11 @@ impl Plugin for ShellPlugin {
         }
         let connected = app.world().contains_resource::<State<Connection>>();
         if connected {
-            app.add_plugins((server_settings::ServerSettingsPlugin, notifications::NotificationsPlugin));
+            app.add_plugins((
+                server_settings::ServerSettingsPlugin,
+                notifications::NotificationsPlugin,
+                notification_settings::NotificationSettingsPlugin,
+            ));
         }
         let mut pages = settings_pages::shell_pages(connected);
         let apps = app.world().resource::<Apps>();
@@ -358,6 +365,7 @@ impl Plugin for ShellPlugin {
             if connected {
                 app.add_plugins((
                     server_page::ServerPageUiPlugin,
+                    notifications_page::NotificationsPageUiPlugin,
                     notifications_panel::NotificationsUiPlugin,
                     desktop::DesktopPlugin,
                 ));

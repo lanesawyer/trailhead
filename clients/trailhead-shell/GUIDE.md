@@ -67,7 +67,8 @@ app decides is testable without a window, and only what draws needs one.
 
 The window has one settings modal, the shell's: a gear at the rail's foot opens it, as Ctrl and `,` (Cmd on macOS) do
 from anywhere. Its pages are listed down its side: the shell's own first, under Trailhead (Appearance: the theme, the
-text size and how the window switches apps; Connection; Server, the server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
+text size and how the window switches apps; Notifications, how the person wants to be told; Connection; Server, the
+server's user config; About), then each app's under the app's name, in the order of the rail, whichever app is shown.
 An app does not open a settings modal of its own; it adds pages to this one.
 
 ```rust
@@ -414,8 +415,9 @@ each app's button the count of the unread ones whose `source` is that app's id. 
 
 - **Hear one arrive.** `NotificationArrived(Notification)` is a message written when a notification arrives raised and
   unread off the event stream while the shell runs, and wasn't held before: never for one loaded with a snapshot, at
-  launch or after a long disconnect, and never for a change to one (read, unread, resolved). The bell rings on it;
-  read it with a `MessageReader` to do something of your own.
+  launch or after a long disconnect, and never for a change to one (read, unread, resolved). Read it with a
+  `MessageReader` to do something of your own. It is written whatever the person's settings say; what the shell does
+  about it is theirs (below).
 - **Mark the ones about a task read** when the person opens the task: `commands.trigger(ReadNotificationsAbout {
   task_id })` sends a read for each unread one about it. Lookout does this when its task modal opens a task
   (`clients/trailhead-lookout/src/detail.rs`).
@@ -426,13 +428,37 @@ each app's button the count of the unread ones whose `source` is that app's id. 
   `tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain)` with `NotificationBell` on it where the app keeps such
   things (Lookout's sidebar footer, beside the gear) while `Apps::has_rail()` is false. The shell puts the count on it,
   rings it and opens the panel when it is pressed.
-- `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps'; `source_label` names a
-  source as the panel does (an app's icon and name, Trailhead for `server`, Factory for `factory`).
+- `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps', and follows the person's
+  setting; `source_label` names a source as the panel does (an app's icon and name, Trailhead for `server`, Factory
+  for `factory`).
+
+**The person's settings** (`trailhead_shell::notification_settings`) decide what the shell does with each one. They are
+kept on the server and held in `NotificationPrefs { settings, answered, error }`, read when the connection goes live,
+every minute while it is, after a save and when the Notifications page opens; until the server has said them, the
+defaults hold (every source interrupts, the sound and the counts on). An arrival does what
+`settings.alert(source, now, minute of the day)` says, with the time and zone from the `Clock` resource (the
+machine's own; a test inserts `Clock::new(..)` to set it):
+
+| Alert | What the shell does |
+| --- | --- |
+| `None` (a silent source) | Listed in the panel only, and left out of every count, the bell's and the rail's. |
+| `Count` (quiet hours or focus) | Counted; no ring, no sound, no desktop notification. Held for the notice at their end. |
+| `Ring` (a bell source) | The bell rings (`RingBells`), with the sound if `settings.sound`; never the desktop. |
+| `Interrupt` | With window focus, the bell rings with the sound; without it, the desktop shows it, with its theme's sound if `settings.sound`. |
+
+When quiet hours or focus end, what arrived meanwhile and is still unread is said once: one ring with focus, one
+desktop notification ("3 things need you") for those from interrupting sources without. The sound inside the window
+is the desktop theme's own message sound, played by the desktop (`canberra-gtk-play`, through the `Sound` resource
+`Shell::run` inserts); the shell ships none. The person sets all of it on the Notifications page among the shell's own
+settings, and focus from the bell's panel; each saves the settings last read with only that part changed
+(`SaveNotificationSettings`, a `PUT` command). An app reads `NotificationPrefs` if it wants to, and changes nothing
+of it.
 
 The desktop's own notifications are the shell's too (`trailhead_shell::desktop`): one that arrives while the window
 has no focus is shown there, with its link buttons, and taken down once it is read or resolved; several arriving
 together are one. An app does nothing for it. A test that wants to see what would be shown inserts a `Desktop` holding
-its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there.
+its own `DesktopLink`, as `src/desktop.rs`'s tests do; without one a shell shows nothing there. The same goes for
+the sound: a `Sound` holding a `Speaker` of the test's own, as `src/notification_settings.rs`'s tests do.
 
 An app raising one of its own (a `Notify` command) is not built yet.
 

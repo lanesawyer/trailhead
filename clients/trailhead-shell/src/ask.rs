@@ -525,7 +525,7 @@ mod tests {
 
         let mut app = shell();
         set_connection(&mut app, Connection::Live);
-        assert_eq!(sent(&mut app).len(), 1, "read when the connection goes live");
+        assert_eq!(sent(&mut app).len(), 2, "read when the connection goes live, beside the notification settings");
         reply(&mut app, targets());
         assert!(app.world().resource::<Askable>().configured());
         show(&mut app, TICKLIST);

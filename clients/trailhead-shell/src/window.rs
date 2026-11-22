@@ -110,6 +110,9 @@ impl Shell {
         if let Some(desktop) = crate::desktop::Desktop::of_this_machine() {
             app.insert_resource(desktop);
         }
+        if let Some(sound) = crate::sound::Sound::of_this_machine() {
+            app.insert_resource(sound);
+        }
         let exit = app
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
             .insert_resource(place)

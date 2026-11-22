@@ -1,7 +1,8 @@
 //! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its plus, Ask
 //! and update buttons and the bell with its counts, the Ask forms in both themes (a change to be planned first, a new
 //! app, and the answer to a planned ask), the update panel listing what a newer build brings, the bell's panel listing
-//! notifications (`notifications`, the unread ones, and `notifications-all`), the settings on each of the
+//! notifications (`notifications`, the unread ones, `notifications-all`, and `notifications-focus` with focus on), the
+//! Notifications settings page (`settings-notifications`), the settings on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
 //! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
@@ -26,8 +27,11 @@ use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoi
 use trailhead_shell::cover::SwitchCover;
 use trailhead_shell::fixture::notification_json;
 use trailhead_shell::net::{ApiAccess, Reason};
+use trailhead_shell::notification_settings::NotificationPrefs;
 use trailhead_shell::server_settings::{SectionState, ServerSettings};
-use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SERVER, SettingsPage, ShellDir};
+use trailhead_shell::settings::{
+    ABOUT, APPEARANCE, CONNECTION, NOTIFICATIONS, OpenSettings, PageId, SERVER, SettingsPage, ShellDir,
+};
 use trailhead_shell::sync::Snapshot;
 use trailhead_shell::testing::fill;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot, shot_with};
@@ -501,6 +505,27 @@ fn notifications(shot: &mut ShotApp) {
     close_modals(shot);
 }
 
+/// The Notifications page as read (the factory at Bell, the server Silent, quiet hours at night, the sound off), then
+/// the bell's panel with focus on until it is ended.
+fn notification_settings(shot: &mut ShotApp) {
+    set_connection(shot, Connection::Live);
+    let mut settings = trailhead_model::NotificationSettings::default();
+    settings.levels.insert("factory".into(), trailhead_model::NotificationLevel::Bell);
+    settings.levels.insert("server".into(), trailhead_model::NotificationLevel::Silent);
+    settings.quiet_hours = Some(trailhead_model::QuietHours { start: 22 * 60, end: 7 * 60 + 30 });
+    settings.sound = false;
+    *shot.world_mut().resource_mut::<NotificationPrefs>() =
+        NotificationPrefs { settings: settings.clone(), answered: true, error: None };
+    open_settings(shot, NOTIFICATIONS);
+    save(shot, "settings-notifications");
+    close_modals(shot);
+    settings.focus = Some(trailhead_model::Focus { until: None });
+    shot.world_mut().resource_mut::<NotificationPrefs>().settings = settings;
+    press::<BellButton>(shot);
+    save(shot, "notifications-focus");
+    close_modals(shot);
+}
+
 /// What a server with an apps repo and a factory says of its user config.
 fn server_config() -> trailhead_model::config::ServerConfig {
     serde_json::from_value(serde_json::json!({
@@ -619,6 +644,12 @@ fn shots() {
     let mut shot =
         trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1500), ..ShotOptions::default() });
     server(&mut shot);
+    drop(shot);
+
+    let mut shot =
+        trailhead_shell::testing::shot::shot(shell(), ShotOptions { size: (1024, 1100), ..ShotOptions::default() });
+    notified(&mut shot);
+    notification_settings(&mut shot);
     drop(shot);
 
     let mut shot = trailhead_shell::testing::shot::shot(
