@@ -26,6 +26,8 @@ struct Fake {
     locked_in_checkout: Mutex<Option<bool>>,
     /// The checkout's `origin` URL, when a test sets one.
     url: Mutex<Option<String>>,
+    /// The connectors each build was asked to build.
+    connectors: Mutex<Vec<Vec<String>>>,
 }
 
 impl Fake {
@@ -80,6 +82,10 @@ impl Tools for Fake {
             let binary = job.target.join("release").join(BINARY);
             std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
             std::fs::write(&binary, &rev).unwrap();
+            self.connectors.lock().unwrap().push(job.connectors.clone());
+            for package in &job.connectors {
+                std::fs::write(binary.with_file_name(package), format!("{package} {rev}")).unwrap();
+            }
             Ok(binary)
         })
     }
@@ -119,12 +125,17 @@ impl Tools for std::sync::Arc<Fake> {
 }
 
 fn rig() -> Rig {
+    rig_with(false)
+}
+
+fn rig_with(connectors: bool) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let layout = Layout::new(dir.path());
     let fake = std::sync::Arc::new(Fake::default());
     *fake.layout.lock().unwrap() = Some(layout.clone());
     let config = ShellConfig::from_user_config("[shell]\nrepo = \"/apps\"\n").unwrap().unwrap();
     let builder = Builder::new(fake.clone(), config, "/apps".into(), layout.clone());
+    let builder = if connectors { builder.with_connectors() } else { builder };
     Rig { _dir: dir, layout, builder, fake }
 }
 
@@ -370,4 +381,44 @@ fn a_tail_is_the_last_lines() {
     assert_eq!(tail(&log, 2), "2\n3");
     assert_eq!(tail(&log, 9), "1\n2\n3");
     assert_eq!(tail(&dir.path().join("none"), 2), "");
+}
+
+fn connector_crate(src: &Path, id: &str, package: &str) {
+    let dir = src.join(CONNECTORS).join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), format!("[package]\nname = \"{package}\"\n")).unwrap();
+    std::fs::write(dir.join("connector.toml"), "id = \"x\"\n").unwrap();
+}
+
+#[tokio::test]
+async fn connectors_are_built_with_the_shell_and_kept_with_its_build() {
+    let rig = rig_with(true);
+    connector_crate(&rig.layout.src(), "github", "github-connector");
+    connector_crate(&rig.layout.src(), "jira", "jira-connector");
+    std::fs::create_dir_all(rig.layout.src().join(CONNECTORS).join("notes")).unwrap();
+    let builds = rig.builder.builds();
+    assert_eq!(builds.connector_program("github"), None, "nothing built yet");
+
+    rig.step_at("a").await;
+    assert_eq!(*rig.fake.connectors.lock().unwrap(), [vec!["github-connector".to_string(), "jira-connector".into()]]);
+    let program = builds.connector_program("github").unwrap();
+    assert_eq!(program, rig.layout.connector("a", "github"));
+    assert_eq!(std::fs::read_to_string(&program).unwrap(), "github-connector a");
+    assert_eq!(builds.connector_program("notes"), None, "a directory with no crate in it");
+
+    rig.fake.failing.lock().unwrap().insert("b".into());
+    rig.step_at("b").await;
+    let program = builds.connector_program("github").unwrap();
+    assert_eq!(std::fs::read_to_string(program).unwrap(), "github-connector a", "a failed build's never runs");
+    rig.step_at("c").await;
+    assert_eq!(std::fs::read_to_string(builds.connector_program("jira").unwrap()).unwrap(), "jira-connector c");
+}
+
+#[tokio::test]
+async fn a_builder_without_connectors_builds_only_the_shell() {
+    let rig = rig();
+    connector_crate(&rig.layout.src(), "github", "github-connector");
+    rig.step_at("a").await;
+    assert_eq!(*rig.fake.connectors.lock().unwrap(), [Vec::<String>::new()]);
+    assert_eq!(rig.builder.builds().connector_program("github"), None);
 }

@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use trailhead_model::shell::{BuildError, MAX_CHANGES, ShellBuild};
 
 pub use config::ShellConfig;
-pub use layout::{BINARY, Built, Layout, State};
+pub use layout::{BINARY, Built, CONNECTORS, Layout, State};
 pub use tools::{Boxed, Job, Origin, System, Tools};
 
 /// How many of cargo's last lines a failure keeps in the state.
@@ -51,6 +51,9 @@ pub struct Builder<T> {
     origin: Arc<std::sync::RwLock<Option<String>>>,
     /// Counts the builds finished, for [`Builds::built`].
     built: Arc<watch::Sender<u64>>,
+    /// Whether it builds the apps repo's connectors with the shell: the server's builder does, a launcher building
+    /// its own window on another machine doesn't.
+    connectors: bool,
 }
 
 impl<T: Tools> Builder<T> {
@@ -63,7 +66,16 @@ impl<T: Tools> Builder<T> {
             checkout: Arc::default(),
             origin: Arc::default(),
             built: Arc::new(watch::Sender::new(0)),
+            connectors: false,
         }
+    }
+
+    /// Builds each connector crate of the apps repo (`connectors/<id>/` with a `Cargo.toml` and a `connector.toml`)
+    /// with the shell, and keeps its program with the build.
+    #[must_use]
+    pub fn with_connectors(mut self) -> Self {
+        self.connectors = true;
+        self
     }
 
     /// What this builder has built, for the server to answer from.
@@ -134,6 +146,7 @@ impl<T: Tools> Builder<T> {
             let _checking_out = self.checkout.write().await;
             self.tools.checkout(&src, origin, rev).await?;
         }
+        let connectors = if self.connectors { connector_crates(&src)? } else { Vec::new() };
         let job = Job {
             src,
             target: self.layout.target(),
@@ -141,18 +154,30 @@ impl<T: Tools> Builder<T> {
             package: self.config.package.clone(),
             profile: self.config.profile.clone(),
             jobs: self.config.jobs,
+            connectors: connectors.iter().map(|(_, package)| package.clone()).collect(),
         };
         let binary = self.tools.build(&job).await?;
-        self.install(&binary, rev).map_err(|e| format!("keeping the build: {e}"))
+        self.install(&binary, &connectors, rev).map_err(|e| format!("keeping the build: {e}"))
     }
 
-    /// Copies the binary into `builds/<rev>`, beside it first, so the launcher never finds half of one.
-    fn install(&self, binary: &Path, rev: &str) -> std::io::Result<()> {
+    /// Copies the binary and the connectors' programs into `builds/<rev>`, beside it first, so the launcher and the
+    /// server never find half of one.
+    fn install(&self, binary: &Path, connectors: &[(String, String)], rev: &str) -> std::io::Result<()> {
         let builds = self.layout.builds();
         let beside = builds.join(format!("{rev}.new"));
         let _ = std::fs::remove_dir_all(&beside);
         std::fs::create_dir_all(&beside)?;
         std::fs::copy(binary, beside.join(BINARY))?;
+        if !connectors.is_empty() {
+            std::fs::create_dir_all(beside.join(CONNECTORS))?;
+        }
+        let built = binary.parent().unwrap_or(Path::new("."));
+        for (id, package) in connectors {
+            let program = built.join(package);
+            std::fs::copy(&program, beside.join(CONNECTORS).join(id)).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("connector {id}'s program {}: {e}", program.display()))
+            })?;
+        }
         let dir = builds.join(rev);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&beside, &dir)
@@ -300,6 +325,12 @@ impl Builds {
         built.then(|| f(&self.layout.src()))
     }
 
+    /// The program of connector `id` in the newest build, when that build has one.
+    pub fn connector_program(&self, id: &str) -> Option<PathBuf> {
+        let rev = self.layout.load().current?.rev;
+        Some(self.layout.connector(&rev, id)).filter(|p| p.is_file())
+    }
+
     /// The source of the build `rev`, as a gzipped tar, for a launcher on another machine to build itself
     /// (`docs/app-platform.md`, "The window on another machine"). Only the builds kept: the newest and the one
     /// before it. `None` for anything else.
@@ -365,7 +396,38 @@ pub fn start(config_dir: &Path, data_dir: &Path) -> Result<Option<Running>, Stri
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let repo = config.checked_repo_dir(home.as_deref())?.expect("a config that was read names a repo");
     tracing::info!(target: "shell", repo = %repo.display(), "the shell's builder is on");
-    Ok(Some(Builder::new(System::new(), config, repo, Layout::new(data_dir)).spawn()))
+    Ok(Some(Builder::new(System::new(), config, repo, Layout::new(data_dir)).with_connectors().spawn()))
+}
+
+/// The connector crates in the checkout at `src`, as (id, package): each `connectors/<id>/` holding a
+/// `connector.toml` and a `Cargo.toml`, in id order.
+pub fn connector_crates(src: &Path) -> Result<Vec<(String, String)>, String> {
+    let dir = src.join(CONNECTORS);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("reading {CONNECTORS}/: {e}")),
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.join("connector.toml").is_file() || !path.join("Cargo.toml").is_file() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(path.join("Cargo.toml"))
+            .map_err(|e| format!("reading {CONNECTORS}/{id}/Cargo.toml: {e}"))?;
+        let manifest: toml::Table =
+            text.parse().map_err(|e: toml::de::Error| format!("{CONNECTORS}/{id}/Cargo.toml: {}", e.message()))?;
+        let package = manifest
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{CONNECTORS}/{id}/Cargo.toml names no package"))?;
+        found.push((id, package.to_string()));
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// A commit's first twelve characters, for the log.
