@@ -8093,9 +8093,13 @@ name = "trailhead-app-example"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
  "trailhead-shell",
  "trailhead-ui",
+ "uuid",
 ]
 
 [[package]]

@@ -6,12 +6,20 @@
 //! switch to another app and a restart of the shell. Its page in the shell's settings ([`COUNT_SETTINGS`]) resets it.
 //! Every [`MILESTONE`]th press raises a notification ([`Notify`]) about the count, and resetting it resolves what was
 //! raised ([`ResolveNotifications`]): how an app tells a person something.
+//!
+//! Under the count it keeps a short list of notes in the app data store ([`notes`]): declared in `collections.toml`,
+//! mirrored by the shell, added to and removed from through the shell's commands. How an app keeps data of its own.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 use trailhead_shell::notifications::{Notify, ResolveNotifications};
+use trailhead_shell::records::Collections;
 use trailhead_shell::settings::{PageId, SettingsPage};
 use trailhead_shell::{ActiveApp, AppId, LocalStore, Manifest, ShellApp};
+
+use crate::notes::{COLLECTIONS, NOTES, Note, NotesPlugin, NotesUiPlugin, spawn_notes};
+
+pub mod notes;
 use trailhead_ui::{
     BesideRail, ButtonKind, Icon, Surface, beside_rail, button, set_text, setting, size, space, text, text_dim,
 };
@@ -69,7 +77,7 @@ impl ShellApp for Example {
 
     fn build(&self, app: &mut App) {
         let kept = app.world().resource::<LocalStore>().get(EXAMPLE, PRESSES).unwrap_or_default();
-        app.insert_resource(Presses(kept)).add_observer(count_press).add_observer(reset_count);
+        app.insert_resource(Presses(kept)).add_observer(count_press).add_observer(reset_count).add_plugins(NotesPlugin);
     }
 
     fn build_ui(&self, app: &mut App) {
@@ -77,11 +85,16 @@ impl ShellApp for Example {
             .add_observer(on_reset_button)
             .add_systems(OnEnter(ActiveApp(EXAMPLE)), spawn_page)
             .add_systems(OnExit(ActiveApp(EXAMPLE)), despawn_page)
-            .add_systems(Update, show_count.run_if(in_state(ActiveApp(EXAMPLE))));
+            .add_systems(Update, show_count.run_if(in_state(ActiveApp(EXAMPLE))))
+            .add_plugins(NotesUiPlugin);
     }
 
     fn settings_pages(&self) -> Vec<SettingsPage> {
         vec![SettingsPage::new(COUNT_SETTINGS.key, "Count", count_settings)]
+    }
+
+    fn collections(&self) -> Collections {
+        Collections::declared(COLLECTIONS).keep::<Note>(NOTES)
     }
 }
 
@@ -157,6 +170,7 @@ fn spawn_page(mut commands: Commands, presses: Res<Presses>) {
         .insert(ChildOf(page));
     commands.queue_spawn_scene(text(count_words(presses.0), size::BODY)).insert((CountLine, ChildOf(page)));
     commands.queue_spawn_scene(button("Press", None, ButtonKind::Normal)).insert((PressButton, ChildOf(page)));
+    spawn_notes(&mut commands, page);
 }
 
 fn despawn_page(mut commands: Commands, pages: Query<Entity, With<ExamplePage>>) {
