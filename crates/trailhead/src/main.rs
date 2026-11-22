@@ -77,6 +77,11 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
         _ => {}
     }
     let repo = repo::find(&std::env::current_dir()?)?.unwrap_or_default();
+    if let Cmd::Connector(cmd) = cli.cmd {
+        let c = Client::connect(&url, cli.token.clone(), None).await?;
+        let cx = Ctx { c, json: cli.json, project: repo.project.clone() };
+        return cmd::connectors::connector(&cx, cmd).await;
+    }
     let env_agent = std::env::var("TRAILHEAD_AGENT").ok().filter(|a| !a.is_empty());
     let agent = match (cli.as_me, cli.agent.clone(), env_agent, repo.agent.clone()) {
         (true, ..) => None,
@@ -92,7 +97,7 @@ async fn run(cli: Cli, matches: &clap::ArgMatches) -> Result<()> {
         Cmd::Factory(_) => unreachable!(),
         #[cfg(not(feature = "factory"))]
         Cmd::Factory { .. } => unreachable!(),
-        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login | Cmd::App { .. } => unreachable!(),
+        Cmd::Serve { .. } | Cmd::Server(_) | Cmd::Login | Cmd::App { .. } | Cmd::Connector(_) => unreachable!(),
         Cmd::Ready { project, grade, limit } => tasks::ready(&cx, project, grade, limit).await,
         Cmd::Ls { project, status, parent, all, today, grade, title, limit } => {
             tasks::ls(&cx, project, status, parent, all, today, grade, title, limit).await
