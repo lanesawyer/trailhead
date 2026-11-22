@@ -82,12 +82,11 @@ fn a_follow_up_edit_adding_a_section_warns_again_with_both() {
 
 #[test]
 fn egress_added_at_runtime_is_not_a_change_to_the_file() {
-    use trailhead_factory::FactoryConfig;
-    let mut config = FactoryConfig::parse_table(BASE_CONFIG, "TRAIL", None).unwrap();
+    let mut config = parse_with("");
     let started = super::started_baseline(&config);
     // What `wire` does in subscription mode, after the baseline is taken.
     config.egress.always.push("api.anthropic.com".into());
-    let reread = FactoryConfig::parse_table(BASE_CONFIG, "TRAIL", None).unwrap();
+    let reread = parse_with("");
     assert!(super::changed_without_restart(&started, reread, &mut None).is_empty());
     assert_ne!(started.egress, config.egress);
 }
