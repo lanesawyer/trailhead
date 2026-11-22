@@ -292,6 +292,8 @@ impl Modify for Common {
         routes::attachments::remove_attachment,
         routes::notifications::list,
         routes::notifications::raise,
+        routes::notifications::settings,
+        routes::notifications::set_settings,
         routes::notifications::read_all,
         routes::notifications::resolve_about,
         routes::notifications::read,

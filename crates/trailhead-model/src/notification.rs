@@ -90,6 +90,128 @@ pub struct NotificationAction {
     pub url: String,
 }
 
+/// How far a notification reaches for the person's attention. Every one is recorded whatever its level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationLevel {
+    /// In the list only.
+    Silent,
+    /// The count, the bell's ring and the sound.
+    Bell,
+    /// A desktop notification too, when the window has no focus.
+    #[default]
+    Interrupt,
+}
+
+/// A daily span, in minutes from midnight in the local time of the machine showing the window, in which nothing
+/// interrupts. One that ends before it starts runs through midnight; one that starts and ends together is empty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct QuietHours {
+    pub start: u16,
+    pub end: u16,
+}
+
+impl QuietHours {
+    pub fn holds(&self, minute: u16) -> bool {
+        if self.start <= self.end {
+            (self.start..self.end).contains(&minute)
+        } else {
+            minute >= self.start || minute < self.end
+        }
+    }
+}
+
+/// Focus, switched on by hand: nothing interrupts until `until`, or until it is switched off when there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct Focus {
+    pub until: Option<Timestamp>,
+}
+
+/// What a notification does on arriving, once its source's level, quiet hours and focus are counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Alert {
+    /// It is listed, and nothing else.
+    None,
+    /// It is counted, without a ring, a sound or a desktop notification: its source rings, but it is quiet now.
+    Count,
+    /// The bell rings, with the sound if that is on.
+    Ring,
+    /// The bell rings while the window has focus; without focus the desktop shows it.
+    Interrupt,
+}
+
+/// How a person wants to be told, kept on the server so every machine agrees.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct NotificationSettings {
+    /// The level of each source that has one of its own: an app's id, `factory` or `server`. The rest interrupt.
+    #[serde(default)]
+    pub levels: std::collections::BTreeMap<String, NotificationLevel>,
+    #[serde(default)]
+    pub quiet_hours: Option<QuietHours>,
+    #[serde(default)]
+    pub focus: Option<Focus>,
+    /// Whether a sound plays with the ring and the desktop notification.
+    #[serde(default = "yes")]
+    pub sound: bool,
+    /// Whether the bell and the apps on the rail show how many are unread.
+    #[serde(default = "yes")]
+    pub counts: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        NotificationSettings { levels: Default::default(), quiet_hours: None, focus: None, sound: true, counts: true }
+    }
+}
+
+impl NotificationSettings {
+    pub fn level_of(&self, source: &str) -> NotificationLevel {
+        self.levels.get(source).copied().unwrap_or_default()
+    }
+
+    /// Whether focus is on at `now`.
+    pub fn focused(&self, now: Timestamp) -> bool {
+        self.focus.is_some_and(|f| f.until.is_none_or(|until| now < until))
+    }
+
+    /// Whether nothing interrupts at `now`, which is `minute` minutes past midnight where the window is.
+    pub fn is_quiet(&self, now: Timestamp, minute: u16) -> bool {
+        self.focused(now) || self.quiet_hours.is_some_and(|q| q.holds(minute))
+    }
+
+    /// What a notification from `source` does on arriving at `now`.
+    pub fn alert(&self, source: &str, now: Timestamp, minute: u16) -> Alert {
+        match (self.level_of(source), self.is_quiet(now, minute)) {
+            (NotificationLevel::Silent, _) => Alert::None,
+            (_, true) => Alert::Count,
+            (NotificationLevel::Bell, false) => Alert::Ring,
+            (NotificationLevel::Interrupt, false) => Alert::Interrupt,
+        }
+    }
+
+    /// The settings, checked: sources named as [`notification_name`] has them, quiet hours inside a day.
+    pub fn checked(mut self) -> Result<Self, ParseError> {
+        self.levels = std::mem::take(&mut self.levels)
+            .into_iter()
+            .map(|(source, level)| Ok((notification_name("source", &source)?, level)))
+            .collect::<Result<_, ParseError>>()?;
+        if let Some(q) = self.quiet_hours
+            && (q.start >= 24 * 60 || q.end >= 24 * 60)
+        {
+            return Err(ParseError("quiet hours start and end at a minute of the day, 0 to 1439".into()));
+        }
+        Ok(self)
+    }
+}
+
 /// A source, kind or subject, trimmed: 1 to [`MAX_NOTIFICATION_NAME`] characters, none of them a control character.
 pub fn notification_name(what: &str, name: &str) -> Result<String, ParseError> {
     text(what, name, MAX_NOTIFICATION_NAME, false)
@@ -187,5 +309,49 @@ mod tests {
             notification_actions(vec![NotificationAction { label: " ".into(), url: "https://a.b".into() }]).is_err()
         );
         assert!(notification_actions(vec![link("https://a.b"); MAX_NOTIFICATION_ACTIONS + 1]).is_err());
+    }
+    #[test]
+    fn quiet_hours_run_through_midnight() {
+        let night = QuietHours { start: 22 * 60, end: 7 * 60 };
+        assert!(night.holds(23 * 60) && night.holds(0) && night.holds(6 * 60 + 59));
+        assert!(!night.holds(7 * 60) && !night.holds(12 * 60) && !night.holds(21 * 60 + 59));
+        let lunch = QuietHours { start: 12 * 60, end: 13 * 60 };
+        assert!(lunch.holds(12 * 60) && !lunch.holds(13 * 60) && !lunch.holds(0));
+        assert!(!QuietHours { start: 60, end: 60 }.holds(60));
+    }
+
+    #[test]
+    fn a_level_quiet_hours_and_focus_decide_what_an_arrival_does() {
+        let now: Timestamp = "2026-11-21T20:00:00Z".parse().unwrap();
+        let mut s = NotificationSettings::default();
+        s.levels.insert("ticklist".into(), NotificationLevel::Bell);
+        s.levels.insert("noisy".into(), NotificationLevel::Silent);
+        assert_eq!(s.alert("lookout", now, 600), Alert::Interrupt, "a source with no level of its own interrupts");
+        assert_eq!((s.alert("ticklist", now, 600), s.alert("noisy", now, 600)), (Alert::Ring, Alert::None));
+
+        s.quiet_hours = Some(QuietHours { start: 22 * 60, end: 7 * 60 });
+        assert_eq!(s.alert("lookout", now, 23 * 60), Alert::Count);
+        assert_eq!(s.alert("noisy", now, 23 * 60), Alert::None);
+        assert_eq!(s.alert("lookout", now, 12 * 60), Alert::Interrupt);
+
+        s.focus = Some(Focus { until: Some("2026-11-21T21:00:00Z".parse().unwrap()) });
+        assert_eq!(s.alert("lookout", now, 12 * 60), Alert::Count);
+        assert_eq!(s.alert("lookout", "2026-11-21T21:00:00Z".parse().unwrap(), 12 * 60), Alert::Interrupt);
+        s.focus = Some(Focus { until: None });
+        assert!(s.focused("2030-01-01T00:00:00Z".parse().unwrap()), "focus with no end holds until switched off");
+    }
+
+    #[test]
+    fn settings_read_from_nothing_and_are_checked() {
+        let s: NotificationSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s, NotificationSettings::default());
+        assert!(s.sound && s.counts);
+        let late = NotificationSettings { quiet_hours: Some(QuietHours { start: 0, end: 1440 }), ..Default::default() };
+        assert!(late.checked().is_err());
+        let mut named = NotificationSettings::default();
+        named.levels.insert(" lookout ".into(), NotificationLevel::Bell);
+        assert_eq!(named.clone().checked().unwrap().level_of("lookout"), NotificationLevel::Bell);
+        named.levels.insert(String::new(), NotificationLevel::Bell);
+        assert!(named.checked().is_err());
     }
 }

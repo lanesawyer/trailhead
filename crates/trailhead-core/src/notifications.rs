@@ -10,14 +10,16 @@ use crate::error::{Error, Result};
 use crate::store::{Ctx, EventIn, Store, Tx};
 use crate::tasks::find_task;
 use trailhead_model::{
-    Comment, CommentKind, DUE_SOON, Entity, Notification, NotificationAction, OVERDUE, QUESTION, RAISED, READ,
-    RESOLVED, REVIEW, SOURCE_SERVER, Status, Task, UNREAD, clip, notification_actions, notification_body,
+    Comment, CommentKind, DUE_SOON, Entity, Notification, NotificationAction, NotificationSettings, OVERDUE, QUESTION,
+    RAISED, READ, RESOLVED, REVIEW, SOURCE_SERVER, Status, Task, UNREAD, clip, notification_actions, notification_body,
     notification_name, notification_title,
 };
 
 const COLS: &str = "id, workspace_id, source, kind, title, body, subject, task_id, actions, raised_by, created_at, \
      read_at, resolved_at, (SELECT key FROM tasks WHERE tasks.id = notifications.task_id)";
 
+/// The name the notification settings are kept under.
+const SETTINGS: &str = "notifications";
 /// The most one page of [`Store::list_notifications`] holds.
 const MAX_PAGE: i64 = 200;
 /// How much of a title or a question a rule puts in a notification.
@@ -184,6 +186,45 @@ impl Store {
             save(tx, &before, &after, RESOLVED).await
         })
         .await
+    }
+
+    /// How the person wants to be told. The defaults until they have set anything.
+    pub async fn notification_settings(&self, ctx: &Ctx) -> Result<NotificationSettings> {
+        let mut rows = self
+            .reader()?
+            .query(
+                "SELECT value FROM settings WHERE workspace_id = ?1 AND name = ?2",
+                [ctx.workspace_id.to_string(), SETTINGS.to_string()],
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => Ok(serde_json::from_str(&row.get::<String>(0)?)?),
+            None => Ok(NotificationSettings::default()),
+        }
+    }
+
+    /// Replaces how the person wants to be told. Theirs alone to set.
+    pub async fn set_notification_settings(
+        &self,
+        ctx: &Ctx,
+        settings: NotificationSettings,
+    ) -> Result<NotificationSettings> {
+        if !ctx.is_human() {
+            return Err(Error::Forbidden("only a person sets how they are told".into()));
+        }
+        let settings = settings.checked().map_err(|e| Error::Invalid(e.0))?;
+        self.write_quiet(ctx, async |tx| {
+            tx.conn
+                .execute(
+                    "INSERT INTO settings (workspace_id, name, value, updated_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (workspace_id, name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    libsql::params![tx.ws(), SETTINGS, serde_json::to_string(&settings)?, tx.now_str()],
+                )
+                .await?;
+            Ok(())
+        })
+        .await?;
+        Ok(settings)
     }
 
     /// Resolves every open one `source` raised about `subject`, and says how many that was.

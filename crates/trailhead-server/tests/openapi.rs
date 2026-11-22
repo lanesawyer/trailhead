@@ -42,6 +42,8 @@ const ROUTES: &[(&str, &str)] = &[
     ("delete", "/v1/attachments/{id}"),
     ("get", "/v1/notifications"),
     ("post", "/v1/notifications"),
+    ("get", "/v1/notifications/settings"),
+    ("put", "/v1/notifications/settings"),
     ("post", "/v1/notifications/read-all"),
     ("post", "/v1/notifications/resolve"),
     ("post", "/v1/notifications/{id}/read"),

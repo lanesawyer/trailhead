@@ -65,6 +65,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/history", get(events::task_history))
         .route("/comments/{id}/resolve", post(comments::resolve_comment))
         .route("/notifications", get(notifications::list).post(notifications::raise))
+        .route("/notifications/settings", get(notifications::settings).put(notifications::set_settings))
         .route("/notifications/read-all", post(notifications::read_all))
         .route("/notifications/resolve", post(notifications::resolve_about))
         .route("/notifications/{id}/read", post(notifications::read))

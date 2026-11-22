@@ -309,3 +309,26 @@ async fn undo_leaves_notifications_alone() {
         .unwrap();
     assert!(changes.iter().all(|e| e.entity != Entity::Notification));
 }
+
+#[tokio::test]
+async fn how_the_person_is_told_is_kept_and_theirs_to_set() {
+    use trailhead_core::{Focus, NotificationLevel, NotificationSettings, QuietHours};
+    let env = Env::new().await;
+    assert_eq!(env.store.notification_settings(&env.human).await.unwrap(), NotificationSettings::default());
+
+    let mut new = NotificationSettings { sound: false, counts: false, ..Default::default() };
+    new.levels.insert(" ticklist ".into(), NotificationLevel::Bell);
+    new.quiet_hours = Some(QuietHours { start: 22 * 60, end: 7 * 60 });
+    new.focus = Some(Focus { until: None });
+    let saved = env.store.set_notification_settings(&env.human, new).await.unwrap();
+    assert_eq!(saved.level_of("ticklist"), NotificationLevel::Bell);
+    assert_eq!(env.store.notification_settings(&env.human).await.unwrap(), saved);
+
+    let agent = env.agent("worker").await;
+    assert_eq!(env.store.notification_settings(&agent).await.unwrap(), saved, "anyone may read them");
+    let reset = env.store.set_notification_settings(&agent, NotificationSettings::default()).await;
+    assert!(matches!(reset, Err(Error::Forbidden(_))));
+    let bad = NotificationSettings { quiet_hours: Some(QuietHours { start: 0, end: 2000 }), ..Default::default() };
+    assert!(matches!(env.store.set_notification_settings(&env.human, bad).await, Err(Error::Invalid(_))));
+    assert_eq!(env.store.notification_settings(&env.human).await.unwrap(), saved);
+}

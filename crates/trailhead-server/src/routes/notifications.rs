@@ -4,7 +4,7 @@
 use axum::extract::State;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
-use trailhead_core::{NewNotification, Notification, NotificationAction, NotificationFilter};
+use trailhead_core::{NewNotification, Notification, NotificationAction, NotificationFilter, NotificationSettings};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -156,4 +156,28 @@ pub(crate) struct About {
 )]
 pub(crate) async fn resolve_about(State(s): S, Auth(ctx): Auth, Json(b): Json<About>) -> ApiResult<Json<Count>> {
     Ok(Json(Count { count: s.store.resolve_notifications_about(&ctx, &b.source, &b.subject).await? }))
+}
+
+#[utoipa::path(
+    get, path = "/v1/notifications/settings", tag = "notifications",
+    responses((status = 200, description = "How the person wants to be told: a level per source, quiet hours, focus, the sound and the counts. The defaults until they set any", body = NotificationSettings))
+)]
+pub(crate) async fn settings(State(s): S, Auth(ctx): Auth) -> ApiResult<Json<NotificationSettings>> {
+    Ok(Json(s.store.notification_settings(&ctx).await?))
+}
+
+#[utoipa::path(
+    put, path = "/v1/notifications/settings", tag = "notifications", request_body = NotificationSettings,
+    responses(
+        (status = 200, description = "The settings as kept. They replace what was there", body = NotificationSettings),
+        (status = 400, description = "`invalid`: a source with no name, or quiet hours outside a day", body = ErrorBody),
+        (status = 403, description = "`forbidden`: only a person sets them", body = ErrorBody),
+    )
+)]
+pub(crate) async fn set_settings(
+    State(s): S,
+    Auth(ctx): Auth,
+    Json(b): Json<NotificationSettings>,
+) -> ApiResult<Json<NotificationSettings>> {
+    Ok(Json(s.store.set_notification_settings(&ctx, b).await?))
 }

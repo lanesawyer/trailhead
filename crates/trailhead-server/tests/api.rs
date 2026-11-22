@@ -1203,3 +1203,24 @@ async fn the_event_stream_carries_a_notifications_life() {
     assert!(got.contains("event: notification.raised"), "{got}");
     assert!(got.contains("\"entity\":\"notification\"") && got.contains("\"title\":\"Hello\""), "{got}");
 }
+
+#[tokio::test]
+async fn notification_settings_are_read_and_replaced_over_http() {
+    let api = Api::new().await;
+    let got = api.as_human("GET", "/v1/notifications/settings", None).await;
+    assert_eq!(got.body, json!({"levels": {}, "quiet_hours": null, "focus": null, "sound": true, "counts": true}));
+    let new = json!({"levels": {"ticklist": "bell"}, "quiet_hours": {"start": 1320, "end": 420}, "counts": false});
+    let put = api.as_human("PUT", "/v1/notifications/settings", Some(new)).await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    let got = api.as_human("GET", "/v1/notifications/settings", None).await;
+    assert_eq!((got.body["levels"]["ticklist"].as_str(), got.body["counts"].as_bool()), (Some("bell"), Some(false)));
+    assert_eq!((got.body["quiet_hours"]["start"].as_i64(), got.body["sound"].as_bool()), (Some(1320), Some(true)));
+    let bad = api
+        .as_human("PUT", "/v1/notifications/settings", Some(json!({"quiet_hours": {"start": 0, "end": 5000}})))
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "worker"}))).await;
+    let agent = agent.body["secret"].as_str().unwrap().to_string();
+    let r = api.call(Some(&agent), "PUT", "/v1/notifications/settings", Some(json!({})), &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+}
