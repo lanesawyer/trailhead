@@ -235,6 +235,7 @@ field. The Trailhead shell's Server settings list the factory's repos with it.
 | `PanelTitle` | component | Marks the header's title text, so a changing title is set in place with `set_text`. |
 | `PanelTools` | component | The row at the header's right, ending with the X: insert a panel's own controls at its start. |
 | `sidebar_card` | `sidebar_card() -> impl Scene` | A raised box in a sidebar for something to keep an eye on (a usage meter), spawned just before the `sidebar_footer`. |
+| `list_card` | `list_card() -> impl Scene` | One item of a list read item by item rather than scanned (a notification): a raised, padded, rounded column whose lines read as one block. Stack them `space::CARDS` apart and spawn the item's lines (a heading `row`, its words, a row of buttons) as its children. |
 | `spawn_detail_panes` | `spawn_detail_panes(commands: &mut Commands, parent: Entity) -> DetailPanes` | A detail modal's body: a wide main column beside a narrower sidebar of facts, spawned under `parent` (a modal's body). Use it in a modal `extent::DETAIL_WIDTH` wide. |
 | `DetailPanes` | `DetailPanes { main: Entity, side: Entity }` | The two columns to fill. `DetailMain` and `DetailSide` mark them. |
 | `spawn_accordion` | `spawn_accordion(commands: &mut Commands, title: &str, fold: Fold, level: SectionLevel) -> AccordionParts` | A section that opens and closes, drawn as a feathers pane (`SectionLevel::Pane`, a division of a panel) or group (`SectionLevel::Group`, a section inside one). A press on the header toggles it. Do not nest a pane in a pane. |
@@ -330,6 +331,8 @@ view.
 | `Progress`, `ProgressTone`, `MeterPart` | components | As above. | |
 | `badge` | `badge(label: Into<String>, icon: Option<Icon>, tone: Option<Token>) -> impl Scene` | A short label in a small rounded chip, after an icon when given: what a card or row says about its item. Without a tone the text is dim, so a row of badges stays quiet beside the title. | `BadgeEdit::set(badge, label: &str, icon: Option<Icon>, tone: Option<Token>)` and `BadgeEdit::set_shown(badge, shown: bool)`, which write only what differs. A badge that comes and goes keeps its entity and is hidden. |
 | `BadgeEdit`, `BadgeIcon`, `BadgeLabel` | system parameter; components | The badge's editor and the parts it finds. | |
+| `count_badge` | `count_badge(count: usize) -> impl Scene` | How many of something wait behind a button (unread notifications on a bell, an app's own on its rail button): a small accent pill over the button's top right corner, `space::COUNT_OFFSET` out past it, hidden at 0, `99+` past `MOST_COUNTED`. Spawn it as the button's last child, after the button's own children are down. It takes no presses. | Set its `CountBadge { count }` with `set_if_neq`; the kit rewrites the figure and hides it at 0. |
+| `CountBadge`, `CountWords`, `count_words`, `MOST_COUNTED` | `CountBadge { count: usize }` (component on the root); marker; `count_words(count: usize) -> String`; `usize` (99) | The count's state, its figure, and what a count says. | |
 | `chip` | `chip(tone: Token, words: Into<String>, hint: Into<String>) -> impl Scene` | A colored dot and a few words, with the full explanation in a hint: state that is always there and rarely needs reading (a connection). | `ChipEdit::set(chip, tone, words: &str, hint: &str)`, which writes only what differs. |
 | `dot` | `dot(tone: Token) -> impl Scene` | The chip's dot on its own. | A new `BackgroundTone`. |
 | `ChipEdit`, `ChipDot`, `ChipWords` | system parameter; components | The chip's editor and the parts it finds. | |
@@ -478,13 +481,15 @@ these, or compares first, so the UI does not lay itself out when nothing on scre
 | `ease_in` | `ease_in(t: f32) -> f32` | Starts slow, ends at full speed (`t` 0 to 1, clamped): something arriving to cover what is there. |
 | `ease_out` | `ease_out(t: f32) -> f32` | Starts at full speed and settles: something leaving to show what is under it. |
 | `BackgroundFade` | `BackgroundFade(pub f32)` (component; default 1) | A node's background drawn at this share of its tone's opacity, beside a `BackgroundTone` or `Surface`: something fading in or out. The kit repaints it after the theme does, so it holds through a theme change. Set it with `set_if_neq`. |
+| `Ring` | `Ring::default()` (component) | Rings a node as a bell rings, to say something arrived: it swings either way, less each time, and grows a little and shrinks back, over `RING_TIME` (half a second) of real time. Insert it to ring, again to ring from the start; the kit moves the node's `UiTransform`, puts it back and takes the `Ring` off when done. While `Appearance::reduce_motion()` it is taken off at once, unmoved; a caller that has something else to show (a count) shows only that. The Trailhead shell rings its bell with it. |
+| `ring_pose`, `RING_TIME` | `ring_pose(t: f32) -> (f32, f32)`; `Duration` | Where a ring is `t` of the way through (its turn in radians, clockwise, and its scale), and how long it lasts. |
 
 Something that moves is driven by real time (`Res<Time<Real>>`), so a slow frame carries it further instead of
 stretching it, and is worked out from where it started rather than added to frame by frame. While it moves it writes
 `bevy::window::RequestRedraw` every frame, since the Trailhead shell's window updates only on input otherwise, and it
 stops writing when it stops moving. What moves is set in place each frame (`patch_node`, `set_if_neq` on a
 `BackgroundFade`), which is an in-place update, not a redraw. The kit's own: the scrollbar's fade, the skeleton's
-pulse; the shell's: the cover drawn while it switches apps.
+pulse, the ring; the shell's: the cover drawn while it switches apps.
 
 ### The theme and the plugins
 
@@ -497,7 +502,7 @@ pulse; the shell's: the cover drawn while it switches apps.
 | `Theme` | `new()`, `set(&Token, Color)`, `set_accent(&Token, Color)`, `alias(&Token, &Token)`, `paint(&Token, Color)`, `paint_both(&Token, dark: Color, light: Color)`, `color(&Token) -> Color`, `color_on(&Token, Surface) -> Color`, `has(&Token) -> bool`, `repeated_colors() -> Vec<String>`, `light() -> Theme`, `with_accent(Color) -> Theme` | Every token and its color (section 3). |
 | `palette` | `GRAY_0` .. `GRAY_3`, `WHITE`, `ACCENT` | The raw colors the theme is painted from, named only where a theme is built. |
 | `ThemePlugin` | `ThemePlugin { theme: Theme, choice: ThemeChoice, follow_desktop: bool }`, `ThemePlugin::new(theme)` (follows the desktop), `ThemePlugin::fixed(theme, choice)` (never asks it) | Feathers' controls and the theme they are drawn in. The shell adds it; its screenshots add it `fixed`, so nothing asynchronous changes the theme under a shot. |
-| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. |
+| `Appearance` | resource: `choice: ThemeChoice`, `new(choice)`, `is_dark()`, `reduce_motion()`, `with_reduce_motion(bool) -> Self`, `wear(&Theme) -> Theme` | The theme being worn: the person's choice and what the desktop says. Set `choice` to change it. `reduce_motion()` says the desktop asks for less motion (on Linux the portal's `reduced-motion`, or GNOME's animations turned off): what would move to show a change should make it at once. `with_reduce_motion` sets what the desktop would say, where there is no desktop to ask (a test, a shot). |
 | `ThemeColors` | system param: `color(&Token) -> Color`, `is_changed() -> bool` | The worn theme's colors for what no tone component reaches, such as a 3D scene's materials and lights (Lookout's trail map), so they follow the light theme and the accent too. A node's colors stay `BackgroundTone`, `TextTone` and `BorderTone`. |
 | `ThemeChoice` | `Desktop` (default), `Light`, `Dark`; `ALL`, `label()`, `icon()` | Where light or dark comes from. Once a person picks light or dark the desktop is no longer followed; the accent is followed either way. |
 | `UiPlugin` | plugin | The icon font, hints, modals, inline widgets, scrolling, the sidebar's drag, reordering lists, canvases and graphs, the `TextSize` and its keys, and the systems in `UiPlace`. The shell adds it. |
@@ -538,12 +543,14 @@ as if it had focus, without running a frame; `press_escape(world, target)` press
   `HoverTone`.** A button with words; one with an icon only; a round check that marks an item done; one that opens a
   URL; a place to go in a sidebar; a row of a menu; a row of a dropdown list; a table row; anything else pressable.
   A setting that is on or off is a `toggle_switch`, not a check.
-- **`badge` / `chip` / `notice`.** Something an item says about itself (a key, a priority); state that is always
-  there, with a dot and a hint; a message about how something went. All three are updated in place.
+- **`badge` / `chip` / `notice` / `count_badge`.** Something an item says about itself (a key, a priority); state that
+  is always there, with a dot and a hint; a message about how something went; how many wait behind a button. All four
+  are updated in place.
 - **`field` / `setting` / `setting_toggle`.** A label over a control in a form; the same in a settings page, with a
   note under it; a setting that is on or off.
-- **`panel` / `section` / `field_well` / `sidebar_card` / `spawn_accordion`.** A surface over the content; a group of
-  rows inside one; a box to set text fields in; a raised box in a sidebar; a section that opens and closes.
+- **`panel` / `section` / `field_well` / `sidebar_card` / `list_card` / `spawn_accordion`.** A surface over the content;
+  a group of rows inside one; a box to set text fields in; a raised box in a sidebar; one item of a list read item by
+  item; a section that opens and closes.
 - **`text` / `text_dim` / `text_toned` / `text_truncated` / `button_text`.** Body text; secondary text; text in a
   status color; one line cut to fit its row; a caption inside a hand-built button.
 - **`spawn_choice_tile` / `spawn_picture`.** A small picture that is one of a row of choices; a picture shown for
@@ -636,6 +643,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `HINT_MARGIN` | 4 | The least room a hint keeps from the window's or its surface's edge |
 | `DOT` | 8 | A status chip's dot, across |
 | `BADGE_INSET` | 2 | Inside a badge |
+| `COUNT_OFFSET` | 4 | How far a count sits out past its button's corner |
 | `LABEL_INSET` | 4 | Inside a small labelled box |
 | `INPUT_INSET` | 4 | Inside an inline text's input, before and after the text |
 | `CONTROL_INSET` | 8 | Inside a card, a field, a hint |
@@ -662,6 +670,7 @@ comment. The scale underneath (`step`: 2, 4, 8, 12) is private to the kit: name 
 | `DRAG_EDGE` | 6 | The strip along a sidebar's edge that drags it |
 | `CONTROL_HEIGHT` | 24 | A control one line high: a button, a select, a one-line text input (feathers' row height) |
 | `CHECK_SIZE` | 16 | A round check's ring, across |
+| `COUNT_SIZE` | 14 | A count over a button's corner, down and at least across |
 | `PROGRESS_HEIGHT` | 6 | A progress bar |
 | `SIDE_PANEL_WIDTH` | 360 | A panel down the right of the window (an inspector) |
 | `MODAL_WIDTH` | 640 | A modal, unless its kind says otherwise |
@@ -684,9 +693,9 @@ Icons are `Icon` variants, glyphs from the embedded Lucide font (`src/assets/luc
 and they take the text color a button gives its caption, so hover and disabled repaint them. The text font has no icon
 glyphs, so anything that is not an `Icon` shows as a box or a question mark.
 
-The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Board` (kanban), `Bot`,
-`Calendar`, `Check`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
-(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Filter`, `Fit` (scan), `Flag`, `Footprints`, `Graph` (network), `Help` (circle-help),
+The variants (the Lucide name in brackets where it differs): `Archive`, `ArchiveRestore`, `Bell`, `Board` (kanban), `Bot`,
+`Calendar`, `Check`, `CheckCheck`, `ChevronDown`, `ChevronRight`, `ChevronUp`, `Circle`, `CircleAlert`, `CircleCheck`, `CircleX`, `Comment`
+(message-square), `Copy`, `Ellipsis`, `Eye`, `ExternalLink`, `Factory`, `Filter`, `Fit` (scan), `Flag`, `Footprints`, `Graph` (network), `Help` (circle-help),
 `Handshake`, `History`, `Info`, `Inspect` (panel-right-open), `LogIn`, `Map`, `Monitor`, `Moon`, `Pencil`, `Plus`,
 `PullRequest` (git-pull-request), `Refresh` (refresh-cw), `Release` (lock-open), `Search`, `Send`, `Settings`,
 `Shield`, `Signpost`, `Stop` (ban), `Sun`, `TriangleAlert`, `Undo` (undo-2), `User`, `Wifi`, `WifiOff`, `X`.

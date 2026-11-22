@@ -248,6 +248,18 @@ One way for the server, the factory and any app to tell a person something needs
 - **A count on an app's rail icon:** its unread ones. A setting hides the counts, the bell's too.
 - **Pressing one in the list does nothing.** What can be done with it is its buttons: Mark read, and its actions.
 
+**Built (TRAIL-1678):** the shell mirrors them (the snapshot loads the newest 200, read or not, and the stream keeps
+them), and tells the rest of the shell of one that arrives raised and unread off the stream as a `NotificationArrived`
+message, for the desktop notification and the sound to hang off. The bell sits at the rail's foot over the gear, with
+the count of unread ones on it, and rings (the kit's `Ring`: a swing that grows a little and settles, half a second of
+real time) when one arrives while the window has focus, not for a desktop that asks for less motion. Its panel lists
+them as cards, newest first, with an Unread and All switch, Show older paging back under All, Mark read or unread on
+each, a link button for each action and Mark all read; resolved ones say so. Each app's button on the rail has the count
+of its own. `NotificationCounts { shown }` is the one switch for the counts, for the settings page to come. A shell with
+one app has no rail, so Lookout puts the bell in its sidebar's footer beside the gear, and opening a task in Lookout
+marks the notifications about it read. Not built: the desktop notifications, levels, quiet hours, focus, the sound, the
+settings page and an app's `Notify`.
+
 **Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. The desktop notification has the same buttons, which Ubuntu draws; a link needs no window focus. Later: buttons that act (Approve, Answer).
 
 **On the desktop.**

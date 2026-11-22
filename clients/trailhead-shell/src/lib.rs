@@ -27,8 +27,9 @@
 //! [`ShellPlugin`], which runs headless under `MinimalPlugins` with `StatesPlugin` for tests;
 //! [`ShellPlugin::windowed`] adds the rail, the panel that says why the connection is not live ([`connect`]), and
 //! each app's drawing. While connected to a server with an apps repo, the rail's Ask button asks it for a change to an
-//! app or a new one ([`ask`]). The gear under it opens the window's [`settings`], whose pages are the shell's own and
-//! those each app adds with [`ShellApp::settings_pages`].
+//! app or a new one ([`ask`]). The bell under it, with the count of unread [`notifications`], opens their panel, and
+//! the gear under that opens the window's [`settings`], whose pages are the shell's own and those each app adds with
+//! [`ShellApp::settings_pages`].
 
 use std::path::PathBuf;
 
@@ -52,6 +53,8 @@ pub mod icon;
 pub mod lint;
 pub mod mirror;
 pub mod net;
+pub mod notifications;
+mod notifications_panel;
 mod place;
 mod previews;
 mod rail;
@@ -70,7 +73,11 @@ mod update_panel;
 pub mod view;
 mod window;
 
-pub use rail::{AskButton, NewAppButton, OpenApp, Rail, SettingsButton, UpdateButton};
+pub use notifications_panel::{
+    BellCount, CardPart, EmptyLine, FilterPick, MarkAllRead, MarkOne, NotificationCard, NotificationFilter,
+    NotificationList, NotificationsPanel, OpenNotifications, PanelNotice, ShowOlderButton,
+};
+pub use rail::{AppCount, AskButton, BellButton, NewAppButton, OpenApp, Rail, SettingsButton, UpdateButton};
 pub use store::LocalStore;
 pub use view::RememberView;
 pub use window::{Shell, ThemeFile, theme_from_word, theme_word};
@@ -322,7 +329,7 @@ impl Plugin for ShellPlugin {
         }
         let connected = app.world().contains_resource::<State<Connection>>();
         if connected {
-            app.add_plugins(server_settings::ServerSettingsPlugin);
+            app.add_plugins((server_settings::ServerSettingsPlugin, notifications::NotificationsPlugin));
         }
         let mut pages = settings_pages::shell_pages(connected);
         let apps = app.world().resource::<Apps>();
@@ -348,7 +355,7 @@ impl Plugin for ShellPlugin {
                 app.add_plugins(connect::ConnectUiPlugin);
             }
             if connected {
-                app.add_plugins(server_page::ServerPageUiPlugin);
+                app.add_plugins((server_page::ServerPageUiPlugin, notifications_panel::NotificationsUiPlugin));
             }
             for shell_app in &self.apps {
                 shell_app.build_ui(app);

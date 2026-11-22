@@ -1,6 +1,7 @@
 //! The whole of the selected task (`GET /v1/tasks/{key}`), for the task modal: what the mirror doesn't hold, such as
 //! its dependencies and every comment (the mirror keeps only open questions and the last handoff). It is fetched when
-//! the task is selected and again when the stream brings an event about it, and the newest answer wins.
+//! the task is selected and again when the stream brings an event about it, and the newest answer wins. Selecting a
+//! task also marks the unread notifications about it read: the person is looking at it.
 
 use bevy::prelude::*;
 use trailhead_client::http::Client;
@@ -8,6 +9,7 @@ use trailhead_model::{Task, TaskDetail, TaskKey};
 use trailhead_shell::connection::{Connection, SendNet};
 use trailhead_shell::mirror::Mirrored;
 use trailhead_shell::net::{Fetch, NetCommand};
+use trailhead_shell::notifications::ReadNotificationsAbout;
 use trailhead_shell::sync::{SyncItem, task_of};
 
 use crate::inspector::{Selection, Subject};
@@ -81,8 +83,14 @@ impl Plugin for DetailPlugin {
     }
 }
 
-/// A different selection starts over: nothing shown from the last task, and a fetch for the new one.
-fn follow_selection(selection: Res<Selection>, mut detail: ResMut<Detail>, mut fetching: ResMut<Fetching>) {
+/// A different selection starts over: nothing shown from the last task, and a fetch for the new one. Its unread
+/// notifications are marked read.
+fn follow_selection(
+    selection: Res<Selection>,
+    mut detail: ResMut<Detail>,
+    mut fetching: ResMut<Fetching>,
+    mut commands: Commands,
+) {
     if !selection.is_changed() {
         return;
     }
@@ -91,6 +99,9 @@ fn follow_selection(selection: Res<Selection>, mut detail: ResMut<Detail>, mut f
         _ => None,
     };
     if detail.id != id {
+        if let Some(task_id) = id.as_deref().and_then(|id| uuid::Uuid::parse_str(id).ok()) {
+            commands.trigger(ReadNotificationsAbout { task_id });
+        }
         *detail = Detail { id: id.clone(), ..Detail::default() };
         fetching.asked = None;
         fetching.stale = id.is_some();
@@ -226,6 +237,19 @@ mod tests {
             json!({"id": 9, "entity": entity, "entity_id": id, "after": after}),
         ));
         app.update();
+    }
+
+    #[test]
+    fn selecting_a_task_asks_for_its_notifications_to_be_marked_read() {
+        #[derive(Resource, Default)]
+        struct Read(Vec<uuid::Uuid>);
+        let mut app = app();
+        app.init_resource::<Read>()
+            .add_observer(|read: On<ReadNotificationsAbout>, mut seen: ResMut<Read>| seen.0.push(read.task_id));
+        select(&mut app, "t7");
+        app.update();
+        select(&mut app, "t7");
+        assert_eq!(app.world().resource::<Read>().0, [trailhead_shell::fixture::id("t7")], "once, as it is opened");
     }
 
     #[test]

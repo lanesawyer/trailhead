@@ -1,6 +1,7 @@
 //! The shell's own chrome drawn to PNGs, named `shell-<view>-<theme>`: the rail holding two apps with its plus, Ask
-//! and update buttons, the Ask forms in both themes (a change to be planned first, a new app, and the answer to a
-//! planned ask), the update panel listing what a newer build brings, the settings on each of the
+//! and update buttons and the bell with its counts, the Ask forms in both themes (a change to be planned first, a new
+//! app, and the answer to a planned ask), the update panel listing what a newer build brings, the bell's panel listing
+//! notifications (`notifications`, the unread ones, and `notifications-all`), the settings on each of the
 //! shell's pages and an app's (Appearance with its previews of switching apps caught partway; Server as read, with an
 //! edit pending, with a refusal and after a save that waits for a restart), the panel that says why
 //! the connection isn't live, and each way of switching apps caught closing (`transition-<kind>-cover`) and opening
@@ -23,16 +24,21 @@ use trailhead_shell::ask::{AskForm, Askable};
 use trailhead_shell::connect::ConnectUiPlugin;
 use trailhead_shell::connection::{Api, Connection, ConnectionStatus, LocalEndpoint};
 use trailhead_shell::cover::SwitchCover;
+use trailhead_shell::fixture::notification_json;
 use trailhead_shell::net::{ApiAccess, Reason};
 use trailhead_shell::server_settings::{SectionState, ServerSettings};
 use trailhead_shell::settings::{ABOUT, APPEARANCE, CONNECTION, OpenSettings, PageId, SERVER, SettingsPage, ShellDir};
+use trailhead_shell::sync::Snapshot;
+use trailhead_shell::testing::fill;
 use trailhead_shell::testing::shot::{ShotApp, ShotOptions, ShotTheme, shot, shot_with};
 use trailhead_shell::testing::{Other, set_connection, settle, show};
 use trailhead_shell::transition::{AppTransition, CoverFrame, Phase, Switching, TransitionKind};
 use trailhead_shell::update::{Newer, UpdateReady};
 use trailhead_shell::{
-    ActiveApp, AppId, Apps, AskButton, Manifest, NewAppButton, OpenApp, ShellApp, ShellPlugin, UpdateButton,
+    ActiveApp, AppId, Apps, AskButton, BellButton, FilterPick, Manifest, NewAppButton, OpenApp, ShellApp, ShellPlugin,
+    UpdateButton,
 };
+use trailhead_ui::Picked;
 use trailhead_ui::{
     BesideRail, Icon, Surface, TextSize, badge, beside_rail, row, setting, setting_toggle, size, space,
     spawn_settings_section, text, text_dim, token,
@@ -423,6 +429,78 @@ fn asking(shot: &mut ShotApp, theme: ShotTheme) {
     shot.set_theme(ShotTheme::Dark);
 }
 
+/// Notifications from the server, the factory and Notes, unread, read and resolved, one with a link; raised long
+/// enough ago that each says its date, so the pictures don't change with the clock.
+fn notified(shot: &mut ShotApp) {
+    let n = |id: &str, source: &str, at: &str, fields: serde_json::Value| {
+        let mut all = serde_json::json!({"id": id, "source": source, "created_at": at});
+        all.as_object_mut().unwrap().extend(fields.as_object().unwrap().clone());
+        notification_json(all)
+    };
+    let notifications = vec![
+        n(
+            "n5",
+            "server",
+            "2026-10-09T10:00:00Z",
+            serde_json::json!({
+                "title": "TRAIL-1678: the planner asks a question",
+                "body": "Should the bell sit above the gear, or under the update notice?",
+            }),
+        ),
+        n(
+            "n4",
+            "factory",
+            "2026-10-08T09:30:00Z",
+            serde_json::json!({
+                "kind": "factory.review", "title": "TRAIL-1650 waits for your review",
+                "body": "Every other gate passed.",
+                "actions": [{"label": "Pull request", "url": "https://github.com/o/r/pull/412"}],
+            }),
+        ),
+        n(
+            "n3",
+            "notes",
+            "2026-10-07T18:00:00Z",
+            serde_json::json!({
+                "title": "Three notes are due today", "body": "",
+            }),
+        ),
+        n(
+            "n2",
+            "server",
+            "2026-10-05T12:00:00Z",
+            serde_json::json!({
+                "title": "TRAIL-1601 is overdue", "body": "It was due on the 4th.",
+                "read_at": "2026-10-05T13:00:00Z",
+            }),
+        ),
+        n(
+            "n1",
+            "factory",
+            "2026-10-02T08:00:00Z",
+            serde_json::json!({
+                "title": "The factory paused", "body": "The five-hour window reached 80%.",
+                "read_at": "2026-10-02T08:05:00Z", "resolved_at": "2026-10-02T13:00:00Z",
+            }),
+        ),
+    ];
+    fill(shot, Snapshot { at: 1, notifications, ..Default::default() });
+}
+
+/// The bell's panel with the unread ones, then with all of them.
+fn notifications(shot: &mut ShotApp) {
+    press::<BellButton>(shot);
+    save(shot, "notifications");
+    let world = shot.world_mut();
+    let switch = world.query_filtered::<Entity, With<FilterPick>>().single(world).unwrap();
+    world.trigger(Picked { entity: switch, index: 1 });
+    settle(shot);
+    save(shot, "notifications-all");
+    let world = shot.world_mut();
+    world.trigger(Picked { entity: switch, index: 0 });
+    close_modals(shot);
+}
+
 /// What a server with an apps repo and a factory says of its user config.
 fn server_config() -> trailhead_model::config::ServerConfig {
     serde_json::from_value(serde_json::json!({
@@ -499,8 +577,11 @@ fn server(shot: &mut ShotApp) {
 #[ignore = "needs a render adapter: run with `mise run shots`"]
 fn shots() {
     let mut shot = shot(shell(), ShotOptions { size: (1024, 720), ..ShotOptions::default() });
+    notified(&mut shot);
     live_with_news(&mut shot);
     save(&mut shot, "rail");
+
+    notifications(&mut shot);
 
     asking(&mut shot, ShotTheme::Dark);
     asking(&mut shot, ShotTheme::Light);
@@ -520,6 +601,7 @@ fn shots() {
     press::<UpdateButton>(&mut shot);
     save(&mut shot, "update");
     close_modals(&mut shot);
+    notifications(&mut shot);
     close_modals(&mut shot);
     appearance(&mut shot);
     drop(shot);

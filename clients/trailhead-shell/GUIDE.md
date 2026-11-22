@@ -263,7 +263,7 @@ The other resources: `Api(ApiAccess { base, token, user, user_id })` once signed
 
 The shell keeps a mirror of the task engine's records as entities (`trailhead_shell::mirror`). Each holds its record
 as its `trailhead-model` type in a `Mirrored<T>` component (`Task`, `Project`, `Comment`, `Claim`, `Agent`, `User`,
-`Dependency`, and `Attachment`, a picture's metadata), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
+`Dependency`, `Attachment`, a picture's metadata, and `Notification`), with its `TrailheadId` and its `Rev`. The sync is the only thing that changes them: a snapshot replaces
 the lot, and an event replaces one entity only if it is newer. An app never writes to them.
 
 ```rust
@@ -404,6 +404,35 @@ fn describe(outcome: &Outcome) -> String {
 `TitleOf` is the app's own component; the observer goes in `build_ui` beside the inline text, and `finish` in `build`.
 Lookout's fuller `describe` is in `author.rs`. Lookout keeps the edit in flight in a `Pending` on the control, which
 also lets it refuse a second edit while the first is unanswered.
+
+### Notifications
+
+The server keeps what a person is told (`docs/app-platform.md`, "Notifications"); the shell mirrors them as
+`Mirrored<Notification>` and shows them: the bell at the rail's foot with the count of unread ones, its panel, and on
+each app's button the count of the unread ones whose `source` is that app's id. An app draws none of it. What it can do
+(`trailhead_shell::notifications`):
+
+- **Hear one arrive.** `NotificationArrived(Notification)` is a message written when a notification arrives raised and
+  unread off the event stream while the shell runs, and wasn't held before: never for one loaded with a snapshot, at
+  launch or after a long disconnect, and never for a change to one (read, unread, resolved). The bell rings on it;
+  read it with a `MessageReader` to do something of your own.
+- **Mark the ones about a task read** when the person opens the task: `commands.trigger(ReadNotificationsAbout {
+  task_id })` sends a read for each unread one about it. Lookout does this when its task modal opens a task
+  (`clients/trailhead-lookout/src/detail.rs`).
+- **Mark one read or unread yourself** with a command, `Call::ReadNotification(id)`, `Call::UnreadNotification(id)` or
+  `Call::ReadAllNotifications`; the stream brings the change back to the mirror, as for any write.
+- **Open the panel**: `commands.trigger(OpenNotifications)`.
+- **Hold a bell of your own** in a shell with one app, which has no rail: put a
+  `tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain)` with `NotificationBell` on it where the app keeps such
+  things (Lookout's sidebar footer, beside the gear) while `Apps::has_rail()` is false. The shell puts the count on it,
+  rings it and opens the panel when it is pressed.
+- `NotificationCounts { shown }` is whether the counts are shown, the bell's and the apps'; `source_label` names a
+  source as the panel does (an app's icon and name, Trailhead for `server`, Factory for `factory`).
+
+An app raising one of its own (a `Notify` command) is not built yet.
+
+To test them, give a snapshot notifications (`fixture::notification_json`) or feed an event with `"entity":
+"notification"` and a kind of `notification.raised`, as `src/notifications.rs`'s tests do.
 
 ### Work of your own on the net thread: `LinkJob`
 
@@ -590,7 +619,7 @@ The person's order is kept (`rail_order` in `shell.json`) and applied over the b
 longer given drops out of it, and a new one goes at the end, in the order given. Everything that follows the rail
 follows it too: which way a switch's cover travels, the apps' settings pages, the About page's list.
 `trailhead_shell::MoveApp { app, to }` moves an app as a drag does, and `Apps` is always in the rail's order. The
-rail's foot (Ask, the update notice, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
+rail's foot (Ask, the update notice, the bell, the gear) is not part of the list. `Shell::new(dir)` keeps what the window remembers on this machine under `dir` (the
 theme picked, in `theme`, and each app's `LocalStore`, under `apps/`); `NetConfig::from_env` puts that under `shell` in
 Trailhead's config directory, or `TRAILHEAD_SHELL_DIR`. `Shell::run` opens the window (titled Trailhead, with the app
 id `trailhead` and its icon), adds Bevy's default plugins, the kit's `ThemePlugin` with every app's `paint` applied and
@@ -602,11 +631,11 @@ whose Restart ends `Shell::run` with the restart code the launcher answers; a bi
 as long as it ends by calling `Shell::run`.
 
 While the connection is live and the server has an apps repo (`[shell] repo`), the foot of the rail also holds an Ask
-button, above the update notice, and under them all is the gear that opens the settings (section 2, "Settings
-pages"). Ask opens a form for asking for a change to one of the apps the server's factory
+button, above the update notice; under them is the bell (section 6, "Notifications"), in any shell with a connection,
+and under it all the gear that opens the settings (section 2, "Settings pages"). Ask opens a form for asking for a change to one of the apps the server's factory
 builds (the projects pointed at the apps repo) or for a new app, which the server turns into a graded task, or a new
 project and its first task (`docs/app-platform.md`, "Asking for an app"). Nothing of it is an app's: a shell with one
-app has no rail, and so no Ask and no update notice.
+app has no rail, and so no Ask and no update notice, and its bell and gear are the app's to place.
 
 ## 10. Views
 

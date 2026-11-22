@@ -108,6 +108,7 @@ mod check_circle;
 mod chip;
 mod choice_tile;
 mod containers;
+mod count;
 mod desktop;
 mod detail;
 mod field_well;
@@ -167,7 +168,8 @@ pub use canvas::{
 pub use check_circle::{CheckCircle, CheckMark, CheckRing, check_circle};
 pub use chip::{ChipDot, ChipEdit, ChipWords, chip, dot};
 pub use choice_tile::{ChoiceCaption, ChoicePicture, ChoiceTile, ChoiceTileParts, spawn_choice_tile};
-pub use containers::{dropdown_item, dropdown_list, field, panel, row, section, section_frame};
+pub use containers::{dropdown_item, dropdown_list, field, list_card, panel, row, section, section_frame};
+pub use count::{CountBadge, CountWords, MOST_COUNTED, count_badge, count_words};
 pub use detail::{DetailMain, DetailPanes, DetailSide, spawn_detail_panes};
 pub use field_well::field_well;
 pub use graph::{
@@ -189,7 +191,7 @@ pub use modal::{
     MAX_HEIGHT_VH, Modal, ModalBody, ModalClosed, ModalFocus, ModalFooter, ModalLocked, ModalPlugin, ModalRoot,
     ModalSlots, open_modal,
 };
-pub use motion::{BackgroundFade, ease_in, ease_out};
+pub use motion::{BackgroundFade, RING_TIME, Ring, ease_in, ease_out, ring_pose};
 pub use nav::{
     BesideRail, BesideSidebar, NavEdit, NavItem, NavPart, SidebarEdge, SidebarWidth, beside_rail, beside_sidebar,
     nav_heading, nav_heading_action, nav_item, nav_item_noted, rail, rail_foot, rail_item, sidebar, sidebar_card,
@@ -252,6 +254,7 @@ impl Plugin for UiPlugin {
             .add_observer(picture::on_view_pick)
             .add_observer(bevy::ui_widgets::slider_self_update)
             .add_systems(Update, (progress::fill_progress, progress::tone_progress).in_set(UiPlace))
+            .add_systems(Update, (count::show_counts, motion::ring_rings).in_set(UiPlace))
             .add_systems(
                 Update,
                 (picture::fill_picture_views, picture::show_pictures, picture::fit_pictures).chain().in_set(UiPlace),

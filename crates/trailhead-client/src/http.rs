@@ -453,6 +453,12 @@ pub enum Call {
         key: String,
         update: ProjectUpdate,
     },
+    /// Marks the notification with this id read.
+    ReadNotification(String),
+    /// Marks the notification with this id unread.
+    UnreadNotification(String),
+    /// Marks every notification read.
+    ReadAllNotifications,
 }
 
 impl Call {
@@ -468,6 +474,9 @@ impl Call {
             Call::Revert(_) => (routes::REVERT, None),
             Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
             Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, Some(key)),
+            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, Some(id)),
+            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, Some(id)),
+            Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, None),
         }
     }
 
@@ -481,7 +490,11 @@ impl Call {
             Call::UpdateTask { update, .. } => Some(json(update)),
             Call::AddComment { comment, .. } => Some(json(comment)),
             Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
-            Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
+            Call::ResolveComment { answer: None, .. }
+            | Call::Release(_)
+            | Call::ReadNotification(_)
+            | Call::UnreadNotification(_)
+            | Call::ReadAllNotifications => None,
             Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
@@ -1124,5 +1137,9 @@ mod tests {
         let aside = Call::SetAside { key: TaskKey("TRAIL-2".into()), note: Some("later".into()) };
         assert_eq!((aside.method(), aside.path()), (Method::POST, "/v1/tasks/TRAIL-2/set-aside".to_string()));
         assert_eq!(aside.body(), Some(serde_json::json!({"note": "later"})));
+        let read = Call::ReadNotification("n1".into());
+        assert_eq!((read.method(), read.path(), read.body()), (Method::POST, "/v1/notifications/n1/read".into(), None));
+        assert_eq!(Call::UnreadNotification("n1".into()).path(), "/v1/notifications/n1/unread");
+        assert_eq!(Call::ReadAllNotifications.path(), "/v1/notifications/read-all");
     }
 }

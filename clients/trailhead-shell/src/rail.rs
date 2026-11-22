@@ -2,20 +2,24 @@
 //! it ([`crate::transition`]), dragged (or moved with Alt and Up or Down) to put the apps in the person's order
 //! ([`crate::MoveApp`]), under them a plus that asks for a new app, and at its foot the window's own buttons: Ask, which
 //! asks for a change to the app shown. Both ([`crate::ask`]) show while connected to a server with an apps repo (Ask
-//! only once there is an app to ask about) and open the form ([`crate::ask_panel`]); then the update notice ([`crate::update`]) while a newer
-//! build is ready, whose button opens the panel saying what it brings ([`crate::update_panel`]); and last the gear,
-//! which opens the window's settings ([`crate::settings`]). A shell with a single app has no rail, and the app has the
+//! only once there is an app to ask about) and open the form ([`crate::ask_panel`]); then the update notice
+//! ([`crate::update`]) while a newer build is ready, whose button opens the panel saying what it brings
+//! ([`crate::update_panel`]); the bell, in a shell with a connection, with the count of unread notifications on it,
+//! which opens their panel ([`crate::notifications`]); and last the gear, which opens the window's settings
+//! ([`crate::settings`]). Each app's button carries the count of its own unread notifications. A shell with a single
+//! app has no rail, and the app has the
 //! whole window.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 use trailhead_ui::{
-    ButtonKind, Hint, Icon, NavItem, ReorderItem, ReorderList, Reordered, rail, rail_foot, rail_item, set_display,
-    tool_button,
+    ButtonKind, Hint, Icon, NavItem, ReorderItem, ReorderList, Reordered, count_badge, rail, rail_foot, rail_item,
+    set_display, tool_button,
 };
 
 use crate::ask::Askable;
 use crate::connection::Connection;
+use crate::notifications::{BELL_HINT, NotificationBell};
 use crate::settings::SettingsGear;
 use crate::transition::{SwitchApp, Switching};
 use crate::update::UpdateReady;
@@ -48,7 +52,16 @@ pub struct NewAppButton;
 #[derive(Component)]
 pub struct UpdateButton;
 
-/// The gear at the [`RailFoot`], under Ask and the update notice, that opens the settings.
+/// The bell at the [`RailFoot`], over the gear, that opens the notifications' panel, shown in a shell with a connection.
+/// It carries [`NotificationBell`].
+#[derive(Component)]
+pub struct BellButton;
+
+/// On the count over an app's button on the rail: the app whose unread notifications it counts.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppCount(pub AppId);
+
+/// The gear at the [`RailFoot`], under Ask, the update notice and the bell, that opens the settings.
 #[derive(Component)]
 pub struct SettingsButton;
 
@@ -65,12 +78,13 @@ impl Plugin for RailUiPlugin {
         app.add_systems(Startup, spawn_rail)
             .add_observer(on_open)
             .add_observer(on_reordered)
-            .add_systems(Update, (order_rail, mark_shown, show_update, show_ask));
+            .add_systems(Update, (order_rail, mark_shown, show_update, show_ask, show_bell));
     }
 }
 
-/// The rail, its items in the order of the apps, a list the person can reorder, then the plus asking for a new app
-/// and the foot with Ask, the update notice and the gear, which aren't part of the list. Each is put down at once (`spawn_scene`), so the foot comes after
+/// The rail, its items in the order of the apps, a list the person can reorder, each with the count of its unread
+/// notifications over its corner, then the plus asking for a new app and the foot with Ask, the update notice, the
+/// bell and the gear, which aren't part of the list. Each is put down at once (`spawn_scene`), so the foot comes after
 /// the items and its buttons' nodes are there to hide before the first frame is drawn.
 fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     if !apps.has_rail() {
@@ -81,7 +95,8 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     for manifest in apps.iter() {
         let hint = format!("{} ({} moves it)", manifest.name, list.keys());
         let item = (OpenApp(manifest.id), ReorderItem(manifest.id.0.to_string()), ChildOf(root));
-        commands.spawn_scene(rail_item(manifest.icon, hint)).insert(item);
+        let item = commands.spawn_scene(rail_item(manifest.icon, hint)).insert(item).id();
+        commands.spawn_scene(count_badge(0)).insert((AppCount(manifest.id), ChildOf(item)));
     }
     let plus = bsn! {
         @tool_button(Icon::Plus, NEW_APP_HINT, ButtonKind::Plain) Node { flex_shrink: 0.0, display: Display::None }
@@ -93,6 +108,8 @@ fn spawn_rail(mut commands: Commands, apps: Res<Apps>) {
     let update =
         bsn! { @tool_button(Icon::Refresh, "Update ready", ButtonKind::Primary) Node { display: Display::None } };
     commands.spawn_scene(update).insert((UpdateButton, ChildOf(foot)));
+    let bell = bsn! { @tool_button(Icon::Bell, BELL_HINT, ButtonKind::Plain) Node { display: Display::None } };
+    commands.spawn_scene(bell).insert((BellButton, NotificationBell, ChildOf(foot)));
     let gear = tool_button(Icon::Settings, "Settings", ButtonKind::Plain);
     commands.spawn_scene(gear).insert((SettingsButton, SettingsGear, ChildOf(foot)));
 }
@@ -111,6 +128,17 @@ fn show_ask(
     let change = askable.as_ref().is_some_and(|a| !a.targets().is_empty());
     for (button, shown) in changes.iter().map(|b| (b, change)).chain(pluses.iter().map(|b| (b, askable.is_some()))) {
         set_display(&mut nodes, button, shown);
+    }
+}
+
+/// Shows the bell in a shell with a connection, whatever its state: what is known is shown while offline too.
+fn show_bell(
+    connection: Option<Res<State<Connection>>>,
+    bells: Query<Entity, With<BellButton>>,
+    mut nodes: Query<&mut Node>,
+) {
+    for bell in &bells {
+        set_display(&mut nodes, bell, connection.is_some());
     }
 }
 
@@ -268,7 +296,9 @@ mod tests {
         assert_eq!(children[children.len() - 2..], [plus, foot], "the plus under the apps, then the foot");
         let (ask, _) = shown::<AskButton>(&mut app);
         let (gear, display) = shown::<SettingsButton>(&mut app);
-        assert_eq!(buttons, [ask, button, gear], "Ask above the update, and the gear last");
+        let (bell, bell_shown) = shown::<BellButton>(&mut app);
+        assert_eq!(buttons, [ask, button, bell, gear], "Ask above the update, the bell, and the gear last");
+        assert_eq!(bell_shown, Display::None, "no bell without a connection");
         assert_eq!(display, Display::Flex, "the gear always shows");
 
         let subjects = ["feat(a): one".to_string(), "fix(a): two".to_string(), "chore: three".to_string()];

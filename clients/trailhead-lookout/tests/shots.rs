@@ -82,7 +82,7 @@ fn snapshot() -> Snapshot {
         agent_json(json!({"id": "a2", "name": "claude"})),
     ];
     let users = vec![user_json(json!({"id": "u1", "name": "lane"}))];
-    Snapshot { at: 1, projects, agents, users, tasks }
+    Snapshot { at: 1, projects, agents, users, tasks, ..Default::default() }
 }
 
 /// The factory's pool: TRAIL-3's run in its sandbox, one sandbox paused and two idle.
