@@ -182,7 +182,7 @@ impl Factory {
                 // memory instead of resetting to a minute. It's a wait only: the count that parks isn't raised.
                 let held = self.backoff.setbacks.lock().unwrap().get(&task.key).map_or(0, |(n, _, _)| *n);
                 self.set_back_waiting(&task.key, held);
-                let update = RunPatch { retries: Patch::Set(retries + 1), ..RunPatch::default() };
+                let update = RunPatch::retries(retries + 1);
                 if let Err(e) = self.tracker.report(&task.key, update).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't skip a used run name");
                 }
@@ -247,10 +247,7 @@ impl Factory {
         question: &str,
     ) -> Result<()> {
         let stuck = state == BreachedSandbox::Stuck;
-        let mark = |parked| RunPatch {
-            worker_breach: Patch::Set(WorkerBreach { parked, stuck, ..breach.clone() }),
-            ..RunPatch::default()
-        };
+        let mark = |parked| RunPatch::worker_breach(WorkerBreach { parked, stuck, ..breach.clone() });
         if let Err(e) = sub.report(key, mark(true)).await {
             tracing::warn!(task = %key, error = %e, "couldn't mark the breach parked; asking anyway");
         }
@@ -369,7 +366,7 @@ impl Factory {
                 {
                     // Recorded so a `mergeable` reading for the head from before the push is ignored, across a restart
                     // too. A request whose head the host couldn't say leaves the mark off; readings count as they come.
-                    let update = RunPatch { stale_head: Patch::Set(stale), ..RunPatch::default() };
+                    let update = RunPatch::stale_head(stale);
                     if let Err(e) = sub.report(&task.key, update).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't record the head from before the push");
                     }
@@ -401,7 +398,7 @@ impl Factory {
                 // before" the next one (TRAIL-727). The failure stays, so the next attempt is still told of it;
                 // `asked` is what the backstop below goes by (TRAIL-805).
                 if task.run.failure.is_some() {
-                    let mark = RunPatch { asked: Patch::Set(attempt), ..RunPatch::default() };
+                    let mark = RunPatch::asked(attempt);
                     if let Err(e) = sub.report(&task.key, mark).await {
                         tracing::warn!(task = %task.key, error = %e, "couldn't record the attempt that asked");
                     }
@@ -468,7 +465,7 @@ impl Factory {
                         sub.claim(&task.key).await?;
                         // Recorded before the question, so a task that is parked has the marker; reopening it is all
                         // a human has to do.
-                        sub.report(&task.key, RunPatch { gave_up: Patch::Set(attempt), ..RunPatch::default() }).await?;
+                        sub.report(&task.key, RunPatch::gave_up(attempt)).await?;
                         if let Err(e) = sub.ask(&task.key, &question).await {
                             // Not parked, so the marker mustn't stand: when the claim lapses and the task runs again,
                             // its count would restart from it. Put back what was there before.
@@ -802,10 +799,7 @@ impl Factory {
         // The request is marked settled, which is how reconcile tells it from one still to act on. The conflict count
         // stays as it was, so reworks that really ran still count toward `max_conflict_reworks`.
         if let Some(requested) = task.run.last_changes() {
-            let settled = RunPatch {
-                changes_requested: Patch::Set(ChangesRequested { settled: true, ..requested.clone() }),
-                ..RunPatch::default()
-            };
+            let settled = RunPatch::changes_requested(ChangesRequested { settled: true, ..requested.clone() });
             self.tracker.report(&task.key, settled).await?;
         }
         // The handoff answers the conflict request, so the task is no longer waiting on a rework. It stays in
@@ -915,7 +909,7 @@ impl Factory {
             }
         };
         if shown.run.pr.as_ref() != Some(pr) {
-            let update = RunPatch { pr: Patch::Set(pr.clone()), ..RunPatch::default() };
+            let update = RunPatch::pr(pr.clone());
             if let Err(e) = sub.report(&task.key, update).await {
                 tracing::warn!(task = %task.key, error = %e, "couldn't record the opened PR");
             }

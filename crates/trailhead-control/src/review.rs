@@ -77,7 +77,7 @@ impl Factory {
             head,
         };
         let name = &round.name;
-        let counted = RunPatch { review_rounds: Patch::Set(round.number), ..RunPatch::default() };
+        let counted = RunPatch::review_rounds(round.number);
         self.tracker.report(&task.key, counted).await?;
         let profile = self.config.reviewer().clone();
         let credential = match self.tracker.create_sub_agent(name, task.key.project(), token_ttl(&profile)).await {
@@ -249,7 +249,7 @@ impl Factory {
                 tracing::warn!(task = %task.key, %reason, "reviewer breached its budget; parking");
                 // Recorded before the task is reopened, so a park cut short is finished by reconcile.
                 let breach = ReviewBreach { round: round.number, attempt, reason: reason.clone(), parked: false };
-                let pending = RunPatch { review_breach: Patch::Set(breach.clone()), ..RunPatch::default() };
+                let pending = RunPatch::review_breach(breach.clone());
                 if let Err(e) = self.tracker.report(&task.key, pending).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the reviewer's breach before parking");
                 }

@@ -163,6 +163,15 @@ macro_rules! run_fields {
                 $( patch.$name.apply(&mut self.$name); )*
             }
         }
+
+        impl RunPatch {
+            $(
+                /// A write that sets this one field and keeps every other.
+                pub fn $name(value: $ty) -> RunPatch {
+                    RunPatch { $name: Patch::Set(value), ..RunPatch::default() }
+                }
+            )*
+        }
     };
 }
 

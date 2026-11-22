@@ -1879,7 +1879,7 @@ async fn a_merge_intent_is_cleared_when_the_head_moves_under_it() {
     let (r, key, pr) = approved_auto_mergeable().await;
 
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
-    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    r.tracker.report(&key, RunPatch::merging(head)).await.unwrap();
     r.codehost.push_to(&pr);
     r.factory.reconcile().await.unwrap();
     let task = r.show(&key).await;
@@ -1894,7 +1894,7 @@ async fn a_merge_intent_is_cleared_when_the_gates_withdraw_the_approval() {
     // The intent names the current head, and the head stays put: only the gates change (a grade
     // raised to one that needs a person).
     let head = trailhead_factory::CodeHost::head(&r.codehost, &pr).await.unwrap();
-    r.tracker.report(&key, RunPatch { merging: Patch::Set(head), ..RunPatch::default() }).await.unwrap();
+    r.tracker.report(&key, RunPatch::merging(head)).await.unwrap();
     let graded = TaskPatch { grade: Some(Some(gr(3))), ..TaskPatch::default() };
     r.store.update_task(&r.human, &key.0, graded, None).await.unwrap();
     r.factory.reconcile().await.unwrap();

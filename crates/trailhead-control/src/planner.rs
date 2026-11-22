@@ -254,7 +254,7 @@ impl Factory {
             }
             _ => self.tracker.clone(),
         };
-        let record = RunPatch { released: Patch::Set(unix_now()), ..RunPatch::default() };
+        let record = RunPatch::released(unix_now());
         if let Err(e) = writer.report(&task.key, record).await {
             tracing::debug!(task = %task.key, error = %e, "couldn't record that an idle planner's sandbox is released; keeping it for now");
             return false;

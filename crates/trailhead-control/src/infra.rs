@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use trailhead_factory::{Error, Patch, RunPatch, TaskKey, Tracker, Usd};
+use trailhead_factory::{Error, RunPatch, TaskKey, Tracker, Usd};
 
 use crate::Factory;
 
@@ -80,7 +80,7 @@ impl Factory {
     /// and its count, or reconcile would take it up again at once. `by` is who holds the task and so may report.
     pub(crate) async fn park_failed(&self, by: &Arc<dyn Tracker>, key: &TaskKey, setback: &Setback) {
         self.back_off(key, setback);
-        let keep = RunPatch { infra_failures: Patch::Set(setback.unparked()), ..RunPatch::default() };
+        let keep = RunPatch::infra_failures(setback.unparked());
         if let Err(e) = by.report(key, keep).await {
             tracing::warn!(task = %key, error = %e, "couldn't keep the infrastructure failure count");
         }
@@ -89,7 +89,7 @@ impl Factory {
     /// Records what a run cost before the infrastructure lost it, as the run's sub-agent: it counts toward the
     /// budget across retries (TRAIL-447). A record that fails is logged, and the failure is handled all the same.
     pub(crate) async fn record_lost_spend(&self, sub: &Arc<dyn Tracker>, key: &TaskKey, spend: Usd) {
-        if let Err(e) = sub.report(key, RunPatch { spend: Patch::Set(spend), ..RunPatch::default() }).await {
+        if let Err(e) = sub.report(key, RunPatch::spend(spend)).await {
             tracing::warn!(task = %key, error = %e, "couldn't record the lost run's spend");
         }
     }

@@ -9,9 +9,7 @@ use tokio::task::{self, JoinSet};
 use tokio::time::Instant;
 use tracing::Instrument;
 use trailhead_factory::messages;
-use trailhead_factory::{
-    ControlState, Labels, Patch, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label,
-};
+use trailhead_factory::{ControlState, Labels, Result, Role, RunPatch, Sandbox, Scope, Status, Task, TaskKey, label};
 
 use crate::notify::PauseChange;
 use crate::phase::{Phase, phase};
@@ -395,7 +393,7 @@ impl Factory {
                 }
             }
             // Recorded before the release, so reconcile and `factory status` don't look for a sandbox that is going.
-            let record = RunPatch { released: Patch::Set(unix_now()), ..RunPatch::default() };
+            let record = RunPatch::released(unix_now());
             if let Err(e) = self.tracker.report(&key, record).await {
                 // Most likely the asker's lease on the task hasn't lapsed yet, which keeps everyone else out of it.
                 tracing::debug!(task = %key, error = %e, "couldn't record that a parked task's sandbox is released; keeping it for now");
@@ -519,7 +517,7 @@ impl Factory {
         if task.run.ungraded != Some(true) {
             return;
         }
-        let update = RunPatch { ungraded: Patch::Set(false), ..RunPatch::default() };
+        let update = RunPatch::ungraded(false);
         if let Err(e) = self.tracker.report(&task.key, update).await {
             // Keep the key out of the set only if nothing was cleared, so a failed write is retried next poll.
             if was_reported {
@@ -536,7 +534,7 @@ impl Factory {
         tracing::info!(task = %task.key, "no grade; skipping it until a human sets one");
         let told = async {
             self.tracker.note(&task.key, &messages::ungraded_note()).await?;
-            self.tracker.report(&task.key, RunPatch { ungraded: Patch::Set(true), ..RunPatch::default() }).await
+            self.tracker.report(&task.key, RunPatch::ungraded(true)).await
         };
         if let Err(e) = told.await {
             tracing::warn!(task = %task.key, error = %e, "couldn't note that the task has no grade");

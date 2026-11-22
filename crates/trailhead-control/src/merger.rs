@@ -184,9 +184,7 @@ impl Factory {
             // The mark goes down before the approval so it can't pass for Lane's. Not again while approving is known
             // to fail, which would write the task every pass.
             if prev.as_ref().is_none_or(|d| d.problem.is_none()) {
-                self.tracker
-                    .report(key, RunPatch { merge: Patch::Set(decision.clone()), ..RunPatch::default() })
-                    .await?;
+                self.tracker.report(key, RunPatch::merge(decision.clone())).await?;
             }
             match self.tracker.approve(key).await {
                 Ok(()) => {
@@ -231,7 +229,7 @@ impl Factory {
             if decision.problem.is_some() && prev.as_ref().is_none_or(|d| d.problem != decision.problem) {
                 self.tracker.note(key, decision.problem.as_deref().unwrap_or_default()).await?;
             }
-            self.tracker.report(key, RunPatch { merge: Patch::Set(decision.clone()), ..RunPatch::default() }).await?;
+            self.tracker.report(key, RunPatch::merge(decision.clone())).await?;
         }
         if let Some(message) = merged_message {
             self.merge(&task, pr, &decision, &message).await?;
@@ -347,9 +345,7 @@ impl Factory {
             return Ok(());
         }
         // Recorded first: if closing the task fails after the merge, reconcile still knows the merger did it.
-        self.tracker
-            .report(&task.key, RunPatch { merging: Patch::Set(decision.head.clone()), ..RunPatch::default() })
-            .await?;
+        self.tracker.report(&task.key, RunPatch::merging(decision.head.clone())).await?;
         let outcome = codehost.merge(pr, &decision.head).await;
         // An error may follow a merge the host accepted, so it keeps the intent and reconcile's `pr_state` decides.
         if matches!(outcome, Ok(MergeOutcome::Conflict | MergeOutcome::HeadMoved | MergeOutcome::Refused(_))) {
@@ -368,9 +364,7 @@ impl Factory {
                         tracing::warn!(task = %task.key, pr = %pr.url, error = %e, "couldn't comment that the PR merged");
                     }
                 }
-                if let Err(e) =
-                    self.tracker.report(&task.key, RunPatch { merge: Patch::Set(merged), ..RunPatch::default() }).await
-                {
+                if let Err(e) = self.tracker.report(&task.key, RunPatch::merge(merged)).await {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the merged message");
                 }
                 let commit = match codehost.pr_state(pr).await? {
@@ -397,7 +391,7 @@ impl Factory {
                 codehost.comment(pr, &note).await?;
                 self.tracker.note(&task.key, &note).await?;
                 let decision = MergeDecision { refused: Some(why), ..decision.clone() };
-                self.tracker.report(&task.key, RunPatch { merge: Patch::Set(decision), ..RunPatch::default() }).await
+                self.tracker.report(&task.key, RunPatch::merge(decision)).await
             }
         }
     }
@@ -466,9 +460,7 @@ impl Factory {
             self.tracker.note(&task.key, &note).await?;
         }
         if current.run.grade.as_ref() != Some(grade) {
-            self.tracker
-                .report(&task.key, RunPatch { grade: Patch::Set(grade.clone()), ..RunPatch::default() })
-                .await?;
+            self.tracker.report(&task.key, RunPatch::grade(grade.clone())).await?;
         }
         Ok(())
     }
