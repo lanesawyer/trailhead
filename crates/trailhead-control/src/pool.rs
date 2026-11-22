@@ -233,39 +233,7 @@ impl Factory {
             prepared = p.daemon.prepare(&sandbox.id, PrepareRequest { setup: None, ..prepare }).await;
         }
         if let Err(e) = prepared {
-            self.forget_install_opened(&sandbox);
-            p.daemon.forget(&sandbox.id).await;
-            if matches!(e, Error::SetupFailed(_)) {
-                // The code failed, not the sandbox, and the same error would come from any other: it is released
-                // rather than destroyed as broken. Release restores a warm checkpoint, so a sandbox that was idle
-                // returns to the pool; a new one has none yet (the checkpoint comes after a good prepare) and is
-                // destroyed, costing nothing a retry wouldn't pay again, as `setup` would fail on it too.
-                tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; releasing the sandbox");
-                self.give_back(&sandbox, &busy).await;
-                return Err(e);
-            }
-            // One failure is as likely a network blip or a briefly broken `main` as a bad sandbox, and releasing
-            // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
-            // again and again means the sandbox itself is the problem, so it leaves the pool.
-            let failures = {
-                let mut counts = self.pool.prepare_failures.lock().unwrap();
-                let n = counts.entry(sandbox.id.clone()).or_default();
-                *n += 1;
-                *n
-            };
-            if failures < PREPARE_FAILURES_BEFORE_DESTROY {
-                tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed; releasing the sandbox");
-                self.give_back(&sandbox, &busy).await;
-                return Err(e);
-            }
-            tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
-            self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
-            match p.compute.destroy(&sandbox.id).await {
-                Ok(()) => self.forget_sandbox(&sandbox.id),
-                Err(d) => {
-                    tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
-                }
-            }
+            self.prepare_failed(p, &sandbox, &busy, &e).await;
             return Err(e);
         }
         self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
@@ -377,6 +345,44 @@ impl Factory {
         }
         self.pool.short_preflights.lock().unwrap().remove(&sandbox.id);
         Ok(restored)
+    }
+
+    /// A worker sandbox whose prepare failed, put where it belongs: back in the pool, or destroyed once it has failed
+    /// too often to be the network's or the code's doing.
+    async fn prepare_failed(&self, p: &Placed, sandbox: &Sandbox, busy: &Labels, e: &Error) {
+        self.forget_install_opened(sandbox);
+        p.daemon.forget(&sandbox.id).await;
+        if matches!(e, Error::SetupFailed(_)) {
+            // The code failed, not the sandbox, and the same error would come from any other: it is released
+            // rather than destroyed as broken. Release restores a warm checkpoint, so a sandbox that was idle
+            // returns to the pool; a new one has none yet (the checkpoint comes after a good prepare) and is
+            // destroyed, costing nothing a retry wouldn't pay again, as `setup` would fail on it too.
+            tracing::warn!(sandbox = %sandbox.name, error = %e, "setup failed on a fresh run; releasing the sandbox");
+            self.give_back(sandbox, busy).await;
+            return;
+        }
+        // One failure is as likely a network blip or a briefly broken `main` as a bad sandbox, and releasing
+        // restores the warm checkpoint, wiping what the prepare left behind, so the cache survives. Failing
+        // again and again means the sandbox itself is the problem, so it leaves the pool.
+        let failures = {
+            let mut counts = self.pool.prepare_failures.lock().unwrap();
+            let n = counts.entry(sandbox.id.clone()).or_default();
+            *n += 1;
+            *n
+        };
+        if failures < PREPARE_FAILURES_BEFORE_DESTROY {
+            tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed; releasing the sandbox");
+            self.give_back(sandbox, busy).await;
+            return;
+        }
+        tracing::warn!(sandbox = %sandbox.name, error = %e, failures, "prepare failed repeatedly; destroying the sandbox");
+        self.pool.prepare_failures.lock().unwrap().remove(&sandbox.id);
+        match p.compute.destroy(&sandbox.id).await {
+            Ok(()) => self.forget_sandbox(&sandbox.id),
+            Err(d) => {
+                tracing::warn!(sandbox = %sandbox.name, error = %d, "couldn't destroy a sandbox that failed to prepare; reconcile will");
+            }
+        }
     }
 
     /// Deals with a worker sandbox that was labelled busy but couldn't be started. `no_room` is a warm sandbox, not
