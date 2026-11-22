@@ -14,6 +14,7 @@ use reqwest::{Method, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use trailhead_model::app_data::{App, AppEvent, AppUndoReport, BatchWrite, BatchWritten, Record, Written};
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
     CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
@@ -110,8 +111,23 @@ pub mod routes {
     pub const LIST_USERS: Route = Route::new(Method::GET, "/v1/users");
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
+    pub const LIST_APPS: Route = Route::new(Method::GET, "/v1/apps");
+    pub const SHOW_APP: Route = Route::new(Method::GET, "/v1/apps/{app}");
+    pub const DECLARE_APP: Route = Route::new(Method::PUT, "/v1/apps/{app}/declaration");
+    pub const LIST_RECORDS: Route = Route::new(Method::GET, "/v1/apps/{app}/records/{collection}");
+    pub const CREATE_RECORD: Route = Route::new(Method::POST, "/v1/apps/{app}/records/{collection}");
+    pub const PATCH_RECORD: Route = Route::new(Method::PATCH, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const DELETE_RECORD: Route = Route::new(Method::DELETE, "/v1/apps/{app}/records/{collection}/{id}");
+    pub const PUT_RECORD: Route = Route::new(Method::PUT, "/v1/apps/{app}/keys/{collection}/{key}");
+    pub const APP_BATCH: Route = Route::new(Method::POST, "/v1/apps/{app}/batch");
+    pub const APP_EVENTS: Route = Route::new(Method::GET, "/v1/apps/{app}/events");
+    pub const APP_UNDO: Route = Route::new(Method::POST, "/v1/apps/{app}/undo");
+    /// No method on [`Client`]: a window follows it as it follows [`EVENT_STREAM`], from a page of records'
+    /// cursor (`super::app_event_stream_path`).
+    pub const APP_EVENT_STREAM: Route = Route::new(Method::GET, "/v1/apps/{app}/events/stream");
+
     /// All of them.
-    pub fn all() -> [Route; 51] {
+    pub fn all() -> [Route; 63] {
         [
             READY,
             LIST_TASKS,
@@ -164,8 +180,61 @@ pub mod routes {
             RESOLVE_NOTIFICATIONS,
             NOTIFICATION_SETTINGS,
             SET_NOTIFICATION_SETTINGS,
+            LIST_APPS,
+            SHOW_APP,
+            DECLARE_APP,
+            LIST_RECORDS,
+            CREATE_RECORD,
+            PATCH_RECORD,
+            DELETE_RECORD,
+            PUT_RECORD,
+            APP_BATCH,
+            APP_EVENTS,
+            APP_UNDO,
+            APP_EVENT_STREAM,
         ]
     }
+}
+
+/// `s` as one path segment: everything but ASCII letters, digits and `-._~` percent-encoded, so a record's key with
+/// `/` or `#` in it (`lanesawyer/trailhead#123`) stays one segment.
+pub fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// The path of an app's event stream, resuming after `after` (a page of records' cursor, or the last event seen), or
+/// from the newest event without it.
+pub fn app_event_stream_path(app: &str, after: Option<i64>) -> String {
+    let path = routes::APP_EVENT_STREAM.path.replace("{app}", &path_segment(app));
+    match after {
+        Some(a) => format!("{path}?after={a}"),
+        None => path,
+    }
+}
+
+/// `GET /v1/apps/{app}/records/{collection}`: a page of records, and the app's newest event as it was read
+/// (`trailhead-event-cursor`): follow the app's stream after it to carry on from the page with nothing missed or
+/// repeated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordsPage {
+    pub records: Vec<Record>,
+    pub event_cursor: i64,
+}
+
+/// `POST /v1/apps/{app}/undo`: one event in the app, or a batch.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppUndo {
+    EventId(i64),
+    BatchId(Uuid),
 }
 
 /// Why a call failed.
@@ -495,33 +564,85 @@ pub enum Call {
     },
     /// Replaces how the person wants to be told with these settings, whole. Only a person may.
     SetNotificationSettings(NotificationSettings),
+    /// Creates a record in an app's collection, with a key unique in it, if any.
+    CreateRecord {
+        app: String,
+        collection: String,
+        key: Option<String>,
+        data: Value,
+    },
+    /// Merges `patch` (RFC 7396) into a record's fields. The version it expects goes in `If-Match`, as for a task.
+    PatchRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+        patch: Value,
+    },
+    /// Removes a record.
+    DeleteRecord {
+        app: String,
+        collection: String,
+        id: Uuid,
+    },
+    /// Makes the record with this key look like `data`, creating it if there is none.
+    PutRecord {
+        app: String,
+        collection: String,
+        key: String,
+        data: Value,
+    },
+    /// Several writes to one app, all or none.
+    AppBatch {
+        app: String,
+        writes: Vec<BatchWrite>,
+    },
+    /// Undoes an event or a batch in one app.
+    UndoApp {
+        app: String,
+        undo: AppUndo,
+    },
 }
 
 impl Call {
     /// The endpoint, and the value of each of its path's parameters.
-    fn route(&self) -> (Route, Vec<(&'static str, &str)>) {
+    fn route(&self) -> (Route, Vec<(&'static str, String)>) {
+        let task = |k: &TaskKey| vec![("task", k.0.clone())];
+        let record = |app: &str, collection: &str, id: &Uuid| {
+            vec![("app", app.to_string()), ("collection", collection.to_string()), ("id", id.to_string())]
+        };
         match self {
             Call::CreateTask(_) => (routes::CREATE_TASK, vec![]),
-            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, vec![("task", &key.0)]),
-            Call::AddComment { key, .. } => (routes::ADD_COMMENT, vec![("task", &key.0)]),
-            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, vec![("id", id)]),
-            Call::Release(key) => (routes::RELEASE, vec![("task", &key.0)]),
-            Call::SetAside { key, .. } => (routes::SET_ASIDE, vec![("task", &key.0)]),
-            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, vec![("task", &key.0)]),
-            Call::AddBlocker { blocked, .. } => (routes::ADD_BLOCKER, vec![("task", &blocked.0)]),
+            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, task(key)),
+            Call::AddComment { key, .. } => (routes::ADD_COMMENT, task(key)),
+            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, vec![("id", id.clone())]),
+            Call::Release(key) => (routes::RELEASE, task(key)),
+            Call::SetAside { key, .. } => (routes::SET_ASIDE, task(key)),
+            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, task(key)),
+            Call::AddBlocker { blocked, .. } => (routes::ADD_BLOCKER, task(blocked)),
             Call::RemoveBlocker { blocked, blocker } => {
-                (routes::REMOVE_BLOCKER, vec![("task", &blocked.0), ("blocker", &blocker.0)])
+                (routes::REMOVE_BLOCKER, vec![("task", blocked.0.clone()), ("blocker", blocker.0.clone())])
             }
             Call::Undo(_) => (routes::UNDO, vec![]),
             Call::Revert(_) => (routes::REVERT, vec![]),
             Call::CreateProject(_) => (routes::CREATE_PROJECT, vec![]),
-            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, vec![("project", key)]),
-            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, vec![("id", id)]),
-            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, vec![("id", id)]),
+            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, vec![("project", key.clone())]),
+            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, vec![("id", id.clone())]),
+            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, vec![("id", id.clone())]),
             Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, vec![]),
             Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, vec![]),
             Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, vec![]),
             Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, vec![]),
+            Call::CreateRecord { app, collection, .. } => {
+                (routes::CREATE_RECORD, vec![("app", app.clone()), ("collection", collection.clone())])
+            }
+            Call::PatchRecord { app, collection, id, .. } => (routes::PATCH_RECORD, record(app, collection, id)),
+            Call::DeleteRecord { app, collection, id, .. } => (routes::DELETE_RECORD, record(app, collection, id)),
+            Call::PutRecord { app, collection, key, .. } => (
+                routes::PUT_RECORD,
+                vec![("app", app.clone()), ("collection", collection.clone()), ("key", key.clone())],
+            ),
+            Call::AppBatch { app, .. } => (routes::APP_BATCH, vec![("app", app.clone())]),
+            Call::UndoApp { app, .. } => (routes::APP_UNDO, vec![("app", app.clone())]),
         }
     }
 
@@ -553,13 +674,21 @@ impl Call {
                 Some(serde_json::json!({ "source": source, "subject": subject }))
             }
             Call::SetNotificationSettings(b) => Some(json(b)),
+            Call::CreateRecord { key, data, .. } => Some(serde_json::json!({ "key": key, "data": data })),
+            Call::PatchRecord { patch, .. } => Some(patch.clone()),
+            Call::DeleteRecord { .. } => None,
+            Call::PutRecord { data, .. } => Some(data.clone()),
+            Call::AppBatch { writes, .. } => Some(serde_json::json!({ "writes": writes })),
+            Call::UndoApp { undo, .. } => Some(json(undo)),
         }
     }
 
-    /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`.
+    /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`, each parameter one percent-encoded segment.
     pub fn path(&self) -> String {
         let (route, params) = self.route();
-        params.iter().fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value))
+        params.iter().fold(route.path.to_string(), |path, (name, value)| {
+            path.replace(&format!("{{{name}}}"), &path_segment(value))
+        })
     }
 
     /// The method this call uses.
@@ -628,6 +757,9 @@ pub struct NewAgent {
     /// Project keys or ids to limit the token to; empty for every project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// App ids whose data the token reaches; empty for none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<i64>,
 }
@@ -643,6 +775,9 @@ pub struct NewToken {
     /// Project keys or ids to limit the token to; empty for every project.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<String>,
+    /// App ids whose data it reaches; empty for the default: none for an agent's token, yours for your own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<i64>,
     /// Seconds until it stops working; unset for never.
@@ -659,6 +794,10 @@ pub struct TokenUpdate {
     /// Requests per minute. `Some(None)` removes the limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_per_minute: Option<Option<i64>>,
+    /// App ids whose data it reaches. `Some(None)` goes back to the default: none for an agent's token, every app for
+    /// a person's not limited to projects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apps: Option<Option<Vec<String>>>,
 }
 
 /// `POST /v1/undo` for a whole batch: everything one request did.
@@ -1138,6 +1277,123 @@ impl Client {
         self.send_empty(self.request(routes::DELETE_WEBHOOK, Some(id))).await
     }
 
+    /// The request for an app route, each `(name, value)` filling `{name}` as one percent-encoded segment.
+    fn app_request(&self, route: Route, params: &[(&str, &str)]) -> RequestBuilder {
+        let encoded: Vec<(&str, String)> = params.iter().map(|(n, v)| (*n, path_segment(v))).collect();
+        let encoded: Vec<(&str, &str)> = encoded.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        self.request_with(route, &encoded)
+    }
+
+    /// Sends a [`Call`], with `version` as `If-Match`, and decodes its answer.
+    async fn send_call<T: DeserializeOwned>(&self, call: &Call, version: Option<i64>) -> Result<T> {
+        let mut req = self.request_for(call);
+        if let Some(v) = version {
+            req = req.header(reqwest::header::IF_MATCH, format!("\"{v}\""));
+        }
+        self.send(req).await
+    }
+
+    /// `GET /v1/apps`: the apps with data the token reaches, each with its collections.
+    pub async fn list_apps(&self) -> Result<Vec<App>> {
+        self.send(self.request(routes::LIST_APPS, None)).await
+    }
+
+    /// `GET /v1/apps/{app}`: the app's collections as last declared.
+    pub async fn show_app(&self, app: &str) -> Result<App> {
+        self.send(self.app_request(routes::SHOW_APP, &[("app", app)])).await
+    }
+
+    /// `PUT /v1/apps/{app}/declaration`: registers the app's collections from its `collections.toml` text. Only a
+    /// person may.
+    pub async fn declare_app(&self, app: &str, collections_toml: &str) -> Result<App> {
+        let req = self.app_request(routes::DECLARE_APP, &[("app", app)]);
+        self.send(req.header(reqwest::header::CONTENT_TYPE, "application/toml").body(collections_toml.to_string()))
+            .await
+    }
+
+    /// `GET /v1/apps/{app}/records/{collection}`: a page of records after `after` (in the order they were made), at
+    /// most `limit` (the server's default 100 without one), and the event cursor it was read at.
+    pub async fn list_records(
+        &self,
+        app: &str,
+        collection: &str,
+        after: Option<Uuid>,
+        limit: Option<i64>,
+    ) -> Result<RecordsPage> {
+        let mut req = self.app_request(routes::LIST_RECORDS, &[("app", app), ("collection", collection)]);
+        if let Some(a) = after {
+            req = req.query(&[("after", a.to_string())]);
+        }
+        if let Some(l) = limit {
+            req = req.query(&[("limit", l)]);
+        }
+        let res = self.dispatch(req).await?;
+        let status = res.status();
+        if !status.is_success() {
+            return Err(api_error(res).await);
+        }
+        let event_cursor = res
+            .headers()
+            .get("trailhead-event-cursor")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let records = match res.json().await {
+            Ok(v) => v,
+            Err(e) if e.is_decode() => return Err(Error::Decode { status: status.as_u16(), source: e }),
+            Err(e) => return Err(Error::Transport(e)),
+        };
+        Ok(RecordsPage { records, event_cursor })
+    }
+
+    /// `POST /v1/apps/{app}/records/{collection}`.
+    pub async fn create_record(&self, app: &str, collection: &str, key: Option<&str>, data: Value) -> Result<Record> {
+        let (app, collection, key) = (app.into(), collection.into(), key.map(String::from));
+        self.send_call(&Call::CreateRecord { app, collection, key, data }, None).await
+    }
+
+    /// `PATCH /v1/apps/{app}/records/{collection}/{id}`: merges `patch` into the record's fields.
+    pub async fn patch_record(
+        &self,
+        app: &str,
+        collection: &str,
+        id: Uuid,
+        patch: Value,
+        version: Option<i64>,
+    ) -> Result<Written> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::PatchRecord { app, collection, id, patch }, version).await
+    }
+
+    /// `DELETE /v1/apps/{app}/records/{collection}/{id}`: the record as it was.
+    pub async fn delete_record(&self, app: &str, collection: &str, id: Uuid, version: Option<i64>) -> Result<Record> {
+        let (app, collection) = (app.into(), collection.into());
+        self.send_call(&Call::DeleteRecord { app, collection, id }, version).await
+    }
+
+    /// `PUT /v1/apps/{app}/keys/{collection}/{key}`: created, changed or unchanged.
+    pub async fn put_record(&self, app: &str, collection: &str, key: &str, data: Value) -> Result<Written> {
+        let (app, collection, key) = (app.into(), collection.into(), key.into());
+        self.send_call(&Call::PutRecord { app, collection, key, data }, None).await
+    }
+
+    /// `POST /v1/apps/{app}/batch`: every write or none.
+    pub async fn app_batch(&self, app: &str, writes: Vec<BatchWrite>) -> Result<BatchWritten> {
+        self.send_call(&Call::AppBatch { app: app.into(), writes }, None).await
+    }
+
+    /// `GET /v1/apps/{app}/events`: the app's events after `after`, oldest first, at most `limit`.
+    pub async fn app_events(&self, app: &str, after: Option<i64>, limit: Option<i64>) -> Result<Vec<AppEvent>> {
+        let query: Vec<(&str, i64)> =
+            [("after", after), ("limit", limit)].into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+        self.send(self.app_request(routes::APP_EVENTS, &[("app", app)]).query(&query)).await
+    }
+
+    /// `POST /v1/apps/{app}/undo`.
+    pub async fn undo_app(&self, app: &str, undo: AppUndo) -> Result<AppUndoReport> {
+        self.send_call(&Call::UndoApp { app: app.into(), undo }, None).await
+    }
+
     /// `GET /v1/webhooks/{id}/deliveries`: the latest `limit` delivery attempts, newest first.
     pub async fn webhook_deliveries(&self, id: &str, limit: usize) -> Result<Vec<WebhookDelivery>> {
         self.send(self.request(routes::WEBHOOK_DELIVERIES, Some(id)).query(&[("limit", limit)])).await
@@ -1243,5 +1499,30 @@ mod tests {
             (Method::DELETE, "/v1/tasks/TRAIL-3/blockers/TRAIL-4".to_string())
         );
         assert_eq!(remove.body(), None);
+    }
+
+    #[test]
+    fn an_app_call_encodes_its_key_as_one_segment() {
+        let put = Call::PutRecord {
+            app: "cairn".into(),
+            collection: "pull_requests".into(),
+            key: "lanesawyer/trailhead#123".into(),
+            data: serde_json::json!({"title": "x"}),
+        };
+        assert_eq!(
+            (put.method(), put.path()),
+            (Method::PUT, "/v1/apps/cairn/keys/pull_requests/lanesawyer%2Ftrailhead%23123".to_string())
+        );
+        assert_eq!(put.body(), Some(serde_json::json!({"title": "x"})));
+        let id = Uuid::nil();
+        let patch =
+            Call::PatchRecord { app: "cairn".into(), collection: "snoozes".into(), id, patch: serde_json::json!({}) };
+        assert_eq!((patch.method(), patch.path()), (Method::PATCH, format!("/v1/apps/cairn/records/snoozes/{id}")));
+        let undo = Call::UndoApp { app: "cairn".into(), undo: AppUndo::BatchId(id) };
+        assert_eq!(undo.body(), Some(serde_json::json!({"batch_id": id})));
+        let batch = Call::AppBatch { app: "cairn".into(), writes: vec![BatchWrite::Delete { id, version: None }] };
+        assert_eq!(batch.body(), Some(serde_json::json!({"writes": [{"op": "delete", "id": id}]})));
+        assert_eq!(app_event_stream_path("cairn", Some(7)), "/v1/apps/cairn/events/stream?after=7");
+        assert_eq!(path_segment("a b/c~d"), "a%20b%2Fc~d");
     }
 }
