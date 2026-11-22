@@ -539,7 +539,8 @@ window simply redraws larger or smaller.
 
 `trailhead_ui::test_support`, behind the kit's `test-support` feature (turn it on in `[dev-dependencies]`):
 `press_key(world: &mut World, target: Entity, key_code: KeyCode, logical_key: Key)` triggers a key press on `target`
-as if it had focus, without running a frame; `press_escape(world, target)` presses Escape.
+as if it had focus, without running a frame; `press_escape(world, target)` presses Escape. `settle(app: &mut App)` applies
+what was queued and runs three frames, enough for a scene spawned through commands to land and be answered.
 
 ### Near-synonyms: which to use when
 

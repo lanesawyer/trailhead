@@ -545,6 +545,7 @@ mod tests {
     use bevy::input_focus::InputFocus;
 
     use super::*;
+    use crate::test_support::settle;
 
     fn app() -> App {
         let mut app = App::new();
@@ -560,13 +561,6 @@ mod tests {
                 (style_select_captions, show_select_hints, show_chosen_icons, fit_select_captions).chain(),
             );
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     /// The texts in the select's button, first to last: its icon, then its caption.

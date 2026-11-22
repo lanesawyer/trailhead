@@ -51,6 +51,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::test_support::settle;
 
     fn app() -> App {
         let mut app = App::new();
@@ -59,13 +60,6 @@ mod tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>();
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     #[test]

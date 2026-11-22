@@ -539,6 +539,7 @@ mod tests {
 
     use super::*;
     use crate::board::BoardPlugin;
+    use trailhead_shell::testing::settle;
 
     fn task(id: &str, key: &str, status: &str, parent: Option<&str>) -> Value {
         let mut t = json!({"id": id, "key": key, "title": format!("task {key}"), "project_id": "p1",
@@ -714,12 +715,6 @@ mod tests {
         app.world_mut().trigger(OpenGraph(sid("p")));
         settle(&mut app);
         (app, parts.root)
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     /// Each node's box and the card drawn in it, by key.

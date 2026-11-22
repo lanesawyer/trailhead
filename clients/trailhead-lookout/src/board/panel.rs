@@ -476,6 +476,7 @@ mod in_place_tests {
     use bevy::state::app::StatesPlugin;
 
     use super::*;
+    use trailhead_shell::testing::settle;
 
     fn card(title: &str, badges: &[&str], actions: Vec<CardAction>) -> Card {
         Card {
@@ -507,12 +508,6 @@ mod in_place_tests {
                 (dress_cards, update_cards, update_card_badges, sync_card_rows, dress_slots, relabel_more).chain(),
             );
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     fn subtree(app: &App, root: Entity) -> Vec<Entity> {

@@ -124,6 +124,7 @@ pub(crate) fn round_group_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::settle;
 
     #[derive(Resource, Default)]
     struct Picks(Vec<usize>);
@@ -140,13 +141,6 @@ mod tests {
             .add_observer(|picked: On<Picked>, mut picks: ResMut<Picks>| picks.0.push(picked.index))
             .add_systems(Update, paint_groups);
         app
-    }
-
-    fn settle(app: &mut App) {
-        app.world_mut().flush();
-        for _ in 0..3 {
-            app.update();
-        }
     }
 
     fn variants(app: &mut App) -> Vec<ButtonVariant> {

@@ -398,6 +398,7 @@ mod tests {
     use crate::board::BoardPlugin;
     use crate::project::ProjectPlugin;
     use crate::widgets::{NavPart, Truncated};
+    use trailhead_shell::testing::settle;
 
     fn app() -> App {
         app_with(Apps::new(vec![crate::Lookout::new().manifest()]))
@@ -427,12 +428,6 @@ mod tests {
         app.world_mut().write_message(SyncItem::Snapshot(Snapshot { at: 1, projects, tasks, ..Default::default() }));
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     #[test]
