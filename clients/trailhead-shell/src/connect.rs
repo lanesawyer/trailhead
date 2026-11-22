@@ -162,7 +162,7 @@ fn input_row(
 }
 
 /// Shows the panel while not live, the token row while the server wants one, and the `allow` command once known.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 fn show(
     connection: Res<State<Connection>>,
     status: Res<ConnectionStatus>,

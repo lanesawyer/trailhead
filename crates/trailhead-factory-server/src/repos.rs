@@ -110,7 +110,7 @@ pub fn validate(specs: &[RepoSpec]) -> Result<()> {
             return Err(conflict(
                 other,
                 spec,
-                ConflictKind::SameQueue { project: repo.project.clone(), task: shared.to_string() },
+                ConflictKind::SameQueue { project: repo.project.clone(), task: shared.clone() },
             ));
         }
         // A repo with no queue takes every ready task in its project, so it overlaps any other repo there.

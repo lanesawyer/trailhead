@@ -420,10 +420,7 @@ impl ProtocolHandler for DaemonProtocol {
             return Ok(());
         }
         loop {
-            let (send, recv) = match conn.accept_bi().await {
-                Ok(streams) => streams,
-                Err(_) => return Ok(()),
-            };
+            let Ok((send, recv)) = conn.accept_bi().await else { return Ok(()) };
             let this = self.clone();
             tokio::spawn(async move {
                 if let Err(e) = this.serve_stream(send, recv).await {

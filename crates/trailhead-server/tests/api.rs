@@ -848,7 +848,7 @@ async fn shell_build_says_whether_a_builder_runs_and_what_it_built() {
 }
 
 #[tokio::test]
-async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
+async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task_or_a_spec_task() {
     let api = Api::new().await;
     let r = api.as_human("GET", "/v1/shell/ask", None).await;
     assert_eq!((r.status, &r.body), (StatusCode::OK, &json!({"configured": false, "repo": null, "targets": []})));
@@ -899,7 +899,7 @@ async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
     assert_eq!(
         r.body,
         json!({"project": {"key": "TICK", "name": "Ticklist", "created": false},
-               "task": {"key": "TICK-1", "title": "A Completed view"}, "notes": []})
+               "task": {"key": "TICK-1", "title": "A Completed view"}, "planned": false, "notes": []})
     );
     let task = api.as_human("GET", "/v1/tasks/TICK-1", None).await;
     assert_eq!((&task.body["task"]["grade"], &task.body["task"]["priority"]), (&json!(2), &json!(2)), "{}", task.body);
@@ -908,9 +908,37 @@ async fn asking_from_the_window_is_a_persons_and_makes_a_graded_task() {
         api.as_human("POST", "/v1/shell/ask", Some(json!({"text": "notes", "new_app": {"name": "Trail Notes"}}))).await;
     assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
     assert_eq!(r.body["project"], json!({"key": "TN", "name": "Trail Notes", "created": true}));
-    assert_eq!(r.body["task"]["key"], "TN-1");
+    assert_eq!((&r.body["task"]["key"], &r.body["planned"]), (&json!("TN-1"), &json!(true)));
+    let spec = api.as_human("GET", "/v1/tasks/TN-1", None).await;
+    assert_eq!(spec.body["task"]["grade"], json!(null), "{}", spec.body);
+    assert_eq!(spec.body["task"]["metadata"]["plan"]["spec"]["ready"], json!(false), "{}", spec.body);
+    let plan = json!({"text": "Sync with CalDAV", "project": "TICK", "plan": true, "model": "opus"});
+    let r = api.as_human("POST", "/v1/shell/ask", Some(plan)).await;
+    assert_eq!((r.status, &r.body["planned"]), (StatusCode::CREATED, &json!(true)), "{}", r.body);
     let project = api.as_human("GET", "/v1/projects/TN", None).await;
     assert_eq!(project.body["metadata"]["factory"], json!({"repo": "lane/trailhead-apps", "path": "apps/trail-notes"}));
+}
+
+#[tokio::test]
+async fn approving_a_plan_over_http_grades_its_tasks() {
+    let api = Api::new().await;
+    api.as_human("POST", "/v1/projects", Some(json!({"key": "TICK", "name": "Ticklist"}))).await;
+    let spec = json!({"project": "TICK", "title": "Plan it", "metadata": {"plan": {"spec": {}}}});
+    assert_eq!(api.as_human("POST", "/v1/tasks", Some(spec)).await.status, StatusCode::CREATED);
+    for title in ["a", "b"] {
+        let child = json!({"project": "TICK", "title": title, "parent": "TICK-1"});
+        assert_eq!(api.as_human("POST", "/v1/tasks", Some(child)).await.status, StatusCode::CREATED);
+    }
+    let partial = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(json!({"grades": {"TICK-2": 2}}))).await;
+    assert_eq!((partial.status, &partial.body["error"]["code"]), (StatusCode::BAD_REQUEST, &json!("invalid")));
+    let bad = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(json!({"grades": {"TICK-2": 9}}))).await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    let grades = json!({"grades": {"TICK-2": 1, "TICK-3": 3}});
+    let r = api.as_human("POST", "/v1/tasks/TICK-1/plan/approve", Some(grades)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert!(r.body["metadata"]["plan"]["spec"]["approved"].is_i64(), "{}", r.body);
+    let b = api.as_human("GET", "/v1/tasks/TICK-3", None).await;
+    assert_eq!(b.body["task"]["grade"], json!(3));
 }
 
 /// A server whose user config is `text`, in a directory of its own, read as what the server started with.
@@ -1087,4 +1115,112 @@ async fn without_the_factory_its_table_is_neither_shown_nor_changed() {
     let r = api.as_human("PATCH", "/v1/config", Some(change)).await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.body);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "[factory]\nrepos = []\n");
+}
+
+#[tokio::test]
+async fn notifications_are_raised_listed_read_and_resolved_over_http() {
+    let api = Api::new().await;
+    api.seed().await;
+    api.as_human("POST", "/v1/tasks", Some(json!({"project": "AUTH", "title": "Pick a colour"}))).await;
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "worker"}))).await;
+    let agent = agent.body["secret"].as_str().unwrap().to_string();
+
+    // An agent's question tells the person, by the engine's rule.
+    let q = json!({"kind": "question", "body": "Red or blue?"});
+    let q = api.call(Some(&agent), "POST", "/v1/tasks/AUTH-1/comments", Some(q), &[]).await;
+    assert_eq!(q.status, StatusCode::CREATED, "{}", q.body);
+
+    // An app raises its own through the window, as the person.
+    let raise = json!({
+        "source": "ticklist", "kind": "ticklist.streak", "title": "A streak", "body": "Seven days.",
+        "subject": "streak", "actions": [{"label": "See it", "url": "https://example.com/streak"}],
+    });
+    let mine = api.as_human("POST", "/v1/notifications", Some(raise)).await;
+    assert_eq!(mine.status, StatusCode::CREATED, "{}", mine.body);
+    let id = mine.body["id"].as_str().unwrap().to_string();
+    let bad = json!({"source": "ticklist", "kind": "k", "title": "t", "actions": [{"label": "x", "url": "file:///x"}]});
+    let bad = api.as_human("POST", "/v1/notifications", Some(bad)).await;
+    assert_eq!((bad.status, bad.body["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid")));
+
+    let list = api.as_human("GET", "/v1/notifications", None).await;
+    assert_eq!(list.body["unread"], 2, "{}", list.body);
+    let got = list.body["notifications"].as_array().unwrap();
+    assert_eq!((got[0]["title"].as_str(), got[0]["actions"][0]["label"].as_str()), (Some("A streak"), Some("See it")));
+    assert_eq!((got[1]["kind"].as_str(), got[1]["source"].as_str()), (Some("task.question"), Some("server")));
+    assert_eq!((got[1]["task_key"].as_str(), got[1]["body"].as_str()), (Some("AUTH-1"), Some("Red or blue?")));
+    let page = api.as_human("GET", &format!("/v1/notifications?before={id}&limit=5"), None).await;
+    assert_eq!(page.body["notifications"].as_array().unwrap().len(), 1);
+
+    // Only the person says what they have seen.
+    let r = api.call(Some(&agent), "POST", &format!("/v1/notifications/{id}/read"), None, &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/read"), None).await;
+    assert!(r.body["read_at"].is_string(), "{}", r.body);
+    let list = api.as_human("GET", "/v1/notifications?unread=true", None).await;
+    assert_eq!((list.body["unread"].as_i64(), list.body["notifications"].as_array().unwrap().len()), (Some(1), 1));
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/unread"), None).await;
+    assert!(r.body["read_at"].is_null(), "{}", r.body);
+
+    // The raiser resolves by subject; the engine resolves its own when the task is finished.
+    let about = json!({"source": "ticklist", "subject": "streak"});
+    let r = api.as_human("POST", "/v1/notifications/resolve", Some(about)).await;
+    assert_eq!(r.body["count"], 1, "{}", r.body);
+    let r = api.as_human("POST", &format!("/v1/notifications/{id}/resolve"), None).await;
+    assert!(r.body["resolved_at"].is_string(), "{}", r.body);
+    api.as_human("PATCH", "/v1/tasks/AUTH-1", Some(json!({"status": "cancelled"}))).await;
+    assert_eq!(api.as_human("GET", "/v1/notifications", None).await.body["unread"], 0);
+
+    let again =
+        api.as_human("POST", "/v1/notifications", Some(json!({"source": "s", "kind": "k", "title": "t"}))).await;
+    assert_eq!(again.status, StatusCode::CREATED);
+    assert_eq!(api.as_human("POST", "/v1/notifications/read-all", None).await.body["count"], 1);
+    let missing = api.as_human("POST", &format!("/v1/notifications/{}/read", uuid::Uuid::now_v7()), None).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_event_stream_carries_a_notifications_life() {
+    let api = Api::new().await;
+    api.seed().await;
+    let res = api
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stream")
+                .header(header::AUTHORIZATION, format!("Bearer {}", api.human))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reader = tokio::spawn(read_sse(res.into_body(), |s| s.contains("event: notification.read")));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let n =
+        api.as_human("POST", "/v1/notifications", Some(json!({"source": "s", "kind": "k", "title": "Hello"}))).await;
+    api.as_human("POST", &format!("/v1/notifications/{}/read", n.body["id"].as_str().unwrap()), None).await;
+    let got = reader.await.unwrap();
+    assert!(got.contains("event: notification.raised"), "{got}");
+    assert!(got.contains("\"entity\":\"notification\"") && got.contains("\"title\":\"Hello\""), "{got}");
+}
+
+#[tokio::test]
+async fn notification_settings_are_read_and_replaced_over_http() {
+    let api = Api::new().await;
+    let got = api.as_human("GET", "/v1/notifications/settings", None).await;
+    assert_eq!(got.body, json!({"levels": {}, "quiet_hours": null, "focus": null, "sound": true, "counts": true}));
+    let new = json!({"levels": {"ticklist": "bell"}, "quiet_hours": {"start": 1320, "end": 420}, "counts": false});
+    let put = api.as_human("PUT", "/v1/notifications/settings", Some(new)).await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    let got = api.as_human("GET", "/v1/notifications/settings", None).await;
+    assert_eq!((got.body["levels"]["ticklist"].as_str(), got.body["counts"].as_bool()), (Some("bell"), Some(false)));
+    assert_eq!((got.body["quiet_hours"]["start"].as_i64(), got.body["sound"].as_bool()), (Some(1320), Some(true)));
+    let bad = api
+        .as_human("PUT", "/v1/notifications/settings", Some(json!({"quiet_hours": {"start": 0, "end": 5000}})))
+        .await;
+    assert_eq!(bad.status, StatusCode::BAD_REQUEST, "{}", bad.body);
+    let agent = api.as_human("POST", "/v1/agents", Some(json!({"name": "worker"}))).await;
+    let agent = agent.body["secret"].as_str().unwrap().to_string();
+    let r = api.call(Some(&agent), "PUT", "/v1/notifications/settings", Some(json!({})), &[]).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN, "{}", r.body);
 }

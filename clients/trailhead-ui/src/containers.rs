@@ -42,6 +42,22 @@ pub fn section_frame() -> impl Scene {
     }
 }
 
+/// One item of a list that is read item by item rather than scanned (a notification): a raised, padded and rounded
+/// column, its lines reading as one block. Stack the cards [`space::CARDS`] apart, and spawn the item's lines (a
+/// heading [`row`], its words, a row of buttons) as its children.
+pub fn list_card() -> impl Scene {
+    bsn! {
+        Node {
+            flex_direction: FlexDirection::Column,
+            flex_shrink: { 0.0_f32 },
+            row_gap: { px(space::LIST_ITEMS) },
+            padding: { UiRect::all(px(space::CONTROL_INSET)) },
+            border_radius: { BorderRadius::all(px(radius::CONTROL)) },
+        }
+        Surface::Raised
+    }
+}
+
 /// A row of controls side by side, centered on each other.
 pub fn row() -> impl Scene {
     bsn! {

@@ -79,12 +79,76 @@ pub fn render(size: u32) -> Vec<u8> {
 
 /// Encode [`render`] as a PNG.
 pub fn render_png(size: u32) -> Vec<u8> {
+    encode(size, &render(size))
+}
+
+fn encode(size: u32, rgba: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut encoder = png::Encoder::new(&mut bytes, size, size);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header().and_then(|mut w| w.write_image_data(&render(size))).expect("encoding into memory");
+    encoder.write_header().and_then(|mut w| w.write_image_data(rgba)).expect("encoding into memory");
     bytes
+}
+
+/// How much of a macOS icon's side the drawing takes: the system's own icons leave a margin around the shape, and one
+/// drawn to the edge looks oversized beside them in the Dock.
+const MAC_FILL: f32 = 0.8;
+
+/// The `.icns` entry types that hold a PNG, with the side of each in pixels.
+pub const ICNS: [(&[u8; 4], u32); 8] = [
+    (b"ic11", 32),
+    (b"ic12", 64),
+    (b"ic07", 128),
+    (b"ic13", 256),
+    (b"ic08", 256),
+    (b"ic14", 512),
+    (b"ic09", 512),
+    (b"ic10", 1024),
+];
+
+/// [`render`] on a transparent `size` x `size` canvas with macOS's margin around it.
+pub fn render_mac(size: u32) -> Vec<u8> {
+    let inner = (size as f32 * MAC_FILL).round() as u32;
+    let (offset, drawing) = ((size - inner) / 2, render(inner));
+    let mut out = vec![0; (size * size * 4) as usize];
+    for row in 0..inner {
+        let (from, to) = ((row * inner * 4) as usize, (((row + offset) * size + offset) * 4) as usize);
+        out[to..to + (inner * 4) as usize].copy_from_slice(&drawing[from..from + (inner * 4) as usize]);
+    }
+    out
+}
+
+/// The icon as a macOS `.icns`, for the app bundle `trailhead app install` writes: a header, then each of [`ICNS`] as
+/// its type, its length and a PNG.
+pub fn icns() -> Vec<u8> {
+    let mut entries = Vec::new();
+    for (kind, size) in ICNS {
+        let png = encode(size, &render_mac(size));
+        entries.extend_from_slice(kind);
+        entries.extend_from_slice(&(png.len() as u32 + 8).to_be_bytes());
+        entries.extend_from_slice(&png);
+    }
+    let mut out = b"icns".to_vec();
+    out.extend_from_slice(&(entries.len() as u32 + 8).to_be_bytes());
+    out.extend_from_slice(&entries);
+    out
+}
+
+/// The PNGs in an `.icns`, by entry type.
+pub fn icns_entries(icns: &[u8]) -> Vec<([u8; 4], &[u8])> {
+    let mut entries = Vec::new();
+    let mut rest = icns.get(8..).unwrap_or_default();
+    while rest.len() >= 8 {
+        let kind = [rest[0], rest[1], rest[2], rest[3]];
+        let len = u32::from_be_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+        if len < 8 || len > rest.len() {
+            break;
+        }
+        entries.push((kind, &rest[8..len]));
+        rest = &rest[len..];
+    }
+    entries
 }
 
 /// Decode an RGBA PNG into its width, height and pixels.
@@ -154,6 +218,37 @@ mod tests {
                 "{size}.png is stale (off by {worst}): run `cargo run -p trailhead-shell --example make_icon`"
             );
         }
+    }
+
+    #[test]
+    fn the_committed_icns_holds_every_size_and_matches_the_drawing() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../crates/trailhead/assets/trailhead.icns");
+        let bytes = std::fs::read(path).expect("trailhead.icns");
+        assert_eq!(&bytes[..4], b"icns");
+        assert_eq!(u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize, bytes.len());
+        let entries = icns_entries(&bytes);
+        assert_eq!(entries.len(), ICNS.len());
+        for ((kind, png), (expected, size)) in entries.iter().zip(ICNS) {
+            assert_eq!(kind, expected);
+            let (w, h, pixels) = decode(png).expect("decodes");
+            assert_eq!((w, h), (size, size));
+            let worst = pixels.iter().zip(&render_mac(size)).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+            assert!(
+                worst <= TOLERANCE,
+                "trailhead.icns is stale at {size} px (off by {worst}): run `cargo run -p trailhead-shell --example make_icon`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mac_icon_leaves_a_margin_around_the_drawing() {
+        let pixels = render_mac(100);
+        let alpha = |x: usize, y: usize| pixels[(y * 100 + x) * 4 + 3];
+        assert_eq!(alpha(5, 50), 0, "the margin is transparent");
+        assert_eq!(alpha(50, 5), 0);
+        assert_eq!(alpha(12, 50), 255, "the drawing starts a tenth in");
+        assert_eq!(alpha(50, 50), 255);
     }
 
     #[test]

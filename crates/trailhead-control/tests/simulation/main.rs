@@ -49,7 +49,7 @@ fn events(seed: u64) -> (Vec<u8>, Vec<Event>) {
 
 fn event(rng: &mut Rng) -> Event {
     let task = rng.below(2) as usize;
-    match rng.below(104) {
+    match rng.below(113) {
         0..22 => Event::Tick(rng.next()),
         22..44 => Event::Reconcile(rng.next()),
         44..48 => Event::Restart,
@@ -71,6 +71,9 @@ fn event(rng: &mut Rng) -> Event {
         // A pass makes a few dozen tracker calls, most of them early reads, so writes get their own, shorter count.
         97..101 => Event::Fault(Fault::TrackerFailsWrite(1 + rng.below(10) as u32)),
         101..102 => Event::Fault(Fault::TrackerFailsCall(1 + rng.below(40) as u32)),
+        102..104 => Event::PersonAsksForPlan,
+        104..108 => Event::PersonAnswersPlan,
+        108..110 => Event::PersonApprovesPlan,
         _ => Event::Fault(
             [
                 Fault::RunFails,
@@ -145,7 +148,7 @@ async fn check(world: &World) -> Result<(), (String, String)> {
             ));
         }
     }
-    for key in &world.tasks {
+    for key in &world.all_tasks().await {
         let task = world.show(key).await;
         let moves = world.moves(key).await;
         let stuck = |why: &str| {
@@ -161,6 +164,8 @@ async fn check(world: &World) -> Result<(), (String, String)> {
             Status::NeedsInput => return stuck("it is parked without an open question"),
             // Set aside: the factory leaves it until a person grades it again.
             Status::Open if task.grade.is_none() && task.run.set_aside.is_some() => {}
+            // An approved spec task is finished with, and a plan's task waits for a person to grade it.
+            Status::Open if task.plan_approved() || task.held_by_plan() => {}
             Status::Open if task.run.sandbox.is_none() => return stuck("the factory never started it"),
             Status::Open => return stuck("it is back in the queue and the factory doesn't start it"),
             Status::InProgress => return stuck("it is in progress with no run going"),
@@ -246,4 +251,29 @@ fn every_history_settles_with_someone_owing_the_next_move() {
     let reports: Vec<String> =
         kinds.iter().map(|(kind, (count, report))| format!("{kind} ({count} seeds), first at {report}")).collect();
     assert!(kinds.is_empty(), "seeds {seeds:?} failed in {} ways.\n\n{}", kinds.len(), reports.join("\n\n----\n\n"));
+}
+
+/// A plan from ask to work: a person asks, the planner turns, the person replies and approves, and the plan's tasks
+/// are worked once graded, beside an ordinary task, with the world's trouble around it.
+#[test]
+fn a_plan_is_asked_for_answered_approved_and_worked() {
+    use world::Event::*;
+    replay(
+        &[2],
+        &[
+            PersonAsksForPlan,
+            Tick(7),
+            PersonAnswersPlan,
+            Tick(11),
+            PersonAnswersPlan,
+            Tick(19),
+            Reconcile(5),
+            Fault(world::Fault::TrackerFailsWrite(3)),
+            PersonAnswersPlan,
+            Tick(31),
+            PersonApprovesPlan,
+            Tick(23),
+            Reconcile(29),
+        ],
+    );
 }

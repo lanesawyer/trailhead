@@ -4,9 +4,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, GateKind, PrGrade, PrRef, Result, Usd, Verdict};
+use crate::{Error, GateKind, NewPlanTask, PlanTask, PlanTaskUpdate, PrGrade, PrRef, Result, TaskPlan, Usd, Verdict};
 
-pub use trailhead_model::{AttachmentRole, Grade, Priority, ProjectRepo, SetAside, Status, TaskKey, key_number};
+pub use trailhead_model::{
+    AttachmentRole, Grade, NotificationAction, Priority, ProjectRepo, SOURCE_FACTORY, SetAside, Status, TaskKey,
+    key_number,
+};
 
 /// The key in task metadata that the factory's run fields ([`RunRecord`]) live under.
 pub const METADATA_KEY: &str = trailhead_model::TASK_FACTORY_KEY;
@@ -31,12 +34,16 @@ pub struct Task {
     pub changes_requested: bool,
     /// The `factory` object in the task's metadata ([`RunRecord`] fields).
     pub run: RunRecord,
+    /// The task's part in a plan (`metadata.plan`): a spec task a planner works, or a task a planner proposed.
+    #[serde(default)]
+    pub plan: TaskPlan,
 }
 
 impl Task {
     /// The factory's view of a Trailhead task. `holder` is the name of the agent holding its claim, if any.
     pub fn from_model(task: trailhead_model::Task, holder: Option<String>) -> Result<Task> {
         let run = RunRecord::of(&task).map_err(|e| Error::Other(format!("{}: bad factory metadata: {e}", task.key)))?;
+        let plan = TaskPlan::of(&task.metadata).unwrap_or_default();
         let key = task.key;
         Ok(Task {
             project: key.project().to_string(),
@@ -49,7 +56,28 @@ impl Task {
             holder,
             changes_requested: false,
             run,
+            plan,
         })
+    }
+
+    /// Whether this is a spec task a person approved the plan of: the planner is finished with it, and nothing else
+    /// in the factory works it.
+    pub fn plan_approved(&self) -> bool {
+        self.plan.spec.as_ref().is_some_and(|s| s.approved.is_some())
+    }
+
+    /// Whether a spec task keeps the pooled sandbox its last planner turn ran in, for the next turn to carry on the
+    /// agent's session there: it still awaits its planner, the sandbox wasn't given up, and the turn didn't breach its
+    /// budget, whose sandbox was cut off.
+    pub fn keeps_planner_sandbox(&self) -> bool {
+        let breached = self.run.worker_breach.as_ref().is_some_and(|b| self.run.sandbox.as_ref() == Some(&b.run));
+        self.plan.awaits_planner() && self.run.released.is_none() && !breached
+    }
+
+    /// Whether the factory leaves this task alone without a word whatever its scope: an approved spec task, or a task
+    /// a planner proposed that no person has graded yet.
+    pub fn held_by_plan(&self) -> bool {
+        self.plan_approved() || (self.plan.proposed.is_some() && self.grade.is_none())
     }
 }
 
@@ -260,6 +288,10 @@ pub struct MergeDecision {
     /// the decision changed.
     #[serde(default)]
     pub history: Vec<Said>,
+    /// The factory told the person the PR waits on them alone, with a [`NOTICE_REVIEW`] notification it hasn't
+    /// resolved yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notified: bool,
 }
 
 /// How many statuses the merger's status comment lists in its History.
@@ -589,6 +621,28 @@ impl std::fmt::Debug for Picture {
     }
 }
 
+/// A pull request waits on a person's review (`docs/factory/operating.md#notifications`).
+pub const NOTICE_REVIEW: &str = "factory.review";
+/// The factory stopped starting runs until a usage window resets.
+pub const NOTICE_PAUSED: &str = "factory.paused";
+/// Every task of an approved plan is finished, and the factory closed its spec task.
+pub const NOTICE_PLAN_DONE: &str = "factory.plan_done";
+
+/// A notification the factory raises (`docs/app-platform.md#notifications`), for what the task engine can't see on
+/// its own. Its source is always [`SOURCE_FACTORY`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// [`NOTICE_REVIEW`], [`NOTICE_PAUSED`] or [`NOTICE_PLAN_DONE`].
+    pub kind: String,
+    /// One plain line, starting with the task's key when there is a task.
+    pub title: String,
+    pub body: String,
+    /// What it is about, which [`Tracker::resolve_notices`] resolves it by.
+    pub subject: String,
+    pub task: Option<TaskKey>,
+    pub actions: Vec<NotificationAction>,
+}
+
 /// A task tracker, bound to one identity. The control plane holds one for its
 /// own agent and reaches its sandboxes' sub-agents through [`Tracker::sub_agent`];
 /// a daemon holds one for its sub-agent's token.
@@ -674,11 +728,31 @@ pub trait Tracker: Send + Sync {
     /// An unfinished task in `project` with this title (ignoring case and surrounding space), if there is one.
     async fn find_open_by_title(&self, project: &str, title: &str) -> Result<Option<TaskKey>>;
 
+    /// The direct subtasks of the spec task `spec`, which are its plan, each with its grade, proposal and unfinished
+    /// blockers, oldest first.
+    async fn plan_tasks(&self, spec: &TaskKey) -> Result<Vec<PlanTask>>;
+    /// Adds a task to `spec`'s plan: its subtask, ungraded, with the proposal in `metadata.plan.proposed` and its
+    /// blockers, in one write.
+    async fn create_plan_task(&self, spec: &TaskKey, task: &NewPlanTask) -> Result<TaskKey>;
+    /// Changes a task of a plan: its title, description and proposal in one write, then each blocker added or taken
+    /// away.
+    async fn update_plan_task(&self, task: &TaskKey, update: &PlanTaskUpdate) -> Result<()>;
+    /// Cancels a task.
+    async fn cancel(&self, task: &TaskKey) -> Result<()>;
+    async fn set_description(&self, task: &TaskKey, description: &str) -> Result<()>;
+    /// Merges `patch` into the task's `metadata.plan`, as a JSON merge patch.
+    async fn patch_plan(&self, task: &TaskKey, patch: serde_json::Value) -> Result<()>;
+
     /// Creates (or reuses) a project-scoped sub-agent and a fresh token for it that expires after `ttl`,
     /// in case revoking it is missed.
     async fn create_sub_agent(&self, name: &str, project: &str, ttl: Duration) -> Result<Credential>;
     /// Revokes a sub-agent and its tokens. Revoking one that's already gone is fine.
     async fn revoke_sub_agent(&self, name: &str) -> Result<()>;
+
+    /// Raises a notification from the factory.
+    async fn notify(&self, notice: &Notice) -> Result<()>;
+    /// Resolves every open notification the factory raised about `subject`. None open is fine.
+    async fn resolve_notices(&self, subject: &str) -> Result<()>;
 }
 
 #[cfg(test)]
@@ -750,6 +824,7 @@ mod tests {
             holder: None,
             changes_requested,
             run: RunRecord::default(),
+            plan: TaskPlan::default(),
         }
     }
 

@@ -4,6 +4,7 @@
 //! It covers the endpoints the CLI and `RestTracker` (`trailhead-tracker-rest`) use; the rest follow as Lookout moves over.
 //! Every endpoint is a [`Route`] in [`routes`], so a test can check them against the server's OpenAPI document.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use trailhead_model::{
     Agent, Attachment, AttachmentRole, Claim, ClaimResult, Comment, CommentKind, CreatedAgent, CreatedTask,
-    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Priority, Project, ProjectStatus, SearchHit,
-    Status, Task, TaskDetail, TaskKey, Token, UndoReport, Verdict, Webhook, WebhookDelivery,
+    CreatedToken, CreatedWebhook, Dependency, Event, Grade, HeldClaim, Me, Notification, NotificationAction,
+    NotificationSettings, Priority, Project, ProjectStatus, SearchHit, Status, Task, TaskDetail, TaskKey, Token,
+    UndoReport, Verdict, Webhook, WebhookDelivery,
 };
 use uuid::Uuid;
 
@@ -58,6 +60,7 @@ pub mod routes {
     pub const RENEW: Route = Route::new(Method::POST, "/v1/tasks/{task}/renew");
     pub const RELEASE: Route = Route::new(Method::POST, "/v1/tasks/{task}/release");
     pub const SET_ASIDE: Route = Route::new(Method::POST, "/v1/tasks/{task}/set-aside");
+    pub const APPROVE_PLAN: Route = Route::new(Method::POST, "/v1/tasks/{task}/plan/approve");
     pub const MY_CLAIMS: Route = Route::new(Method::GET, "/v1/claims");
     pub const SEARCH: Route = Route::new(Method::GET, "/v1/search");
     pub const RESOLVE_COMMENT: Route = Route::new(Method::POST, "/v1/comments/{id}/resolve");
@@ -65,6 +68,15 @@ pub mod routes {
     pub const ADD_ATTACHMENT: Route = Route::new(Method::POST, "/v1/tasks/{task}/attachments");
     pub const READ_ATTACHMENT: Route = Route::new(Method::GET, "/v1/attachments/{id}");
     pub const REMOVE_ATTACHMENT: Route = Route::new(Method::DELETE, "/v1/attachments/{id}");
+    pub const LIST_NOTIFICATIONS: Route = Route::new(Method::GET, "/v1/notifications");
+    pub const RAISE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications");
+    pub const READ_ALL_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/read-all");
+    pub const RESOLVE_NOTIFICATIONS: Route = Route::new(Method::POST, "/v1/notifications/resolve");
+    pub const READ_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/read");
+    pub const UNREAD_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/unread");
+    pub const RESOLVE_NOTIFICATION: Route = Route::new(Method::POST, "/v1/notifications/{id}/resolve");
+    pub const NOTIFICATION_SETTINGS: Route = Route::new(Method::GET, "/v1/notifications/settings");
+    pub const SET_NOTIFICATION_SETTINGS: Route = Route::new(Method::PUT, "/v1/notifications/settings");
     pub const UNDO: Route = Route::new(Method::POST, "/v1/undo");
     pub const REVERT: Route = Route::new(Method::POST, "/v1/revert");
     pub const CREATE_PROJECT: Route = Route::new(Method::POST, "/v1/projects");
@@ -99,7 +111,7 @@ pub mod routes {
     pub const EVENT_STREAM: Route = Route::new(Method::GET, "/v1/events/stream");
 
     /// All of them.
-    pub fn all() -> [Route; 46] {
+    pub fn all() -> [Route; 51] {
         [
             READY,
             LIST_TASKS,
@@ -111,6 +123,7 @@ pub mod routes {
             RENEW,
             RELEASE,
             SET_ASIDE,
+            APPROVE_PLAN,
             UNDO,
             REVERT,
             MY_CLAIMS,
@@ -147,6 +160,10 @@ pub mod routes {
             WEBHOOK_DELIVERIES,
             LIST_USERS,
             EVENT_STREAM,
+            RAISE_NOTIFICATION,
+            RESOLVE_NOTIFICATIONS,
+            NOTIFICATION_SETTINGS,
+            SET_NOTIFICATION_SETTINGS,
         ]
     }
 }
@@ -228,6 +245,37 @@ pub struct NewAttachment {
     pub set: Option<String>,
 }
 
+/// `GET /v1/notifications`: a page of them, newest first, and how many are unread in all.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
+pub struct NotificationList {
+    pub notifications: Vec<Notification>,
+    pub unread: i64,
+}
+
+/// `POST /v1/notifications`.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct NewNotification {
+    /// What raises it: an app's id, `factory` or `server`.
+    pub source: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// What it is about, as the raiser names it, to resolve by later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    /// The key or id of the task it is about.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<NotificationAction>,
+}
+
+/// How many notifications a call changed.
+#[derive(Debug, Deserialize)]
+struct Count {
+    count: usize,
+}
+
 /// `POST /v1/tasks`.
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct NewTask {
@@ -260,6 +308,9 @@ pub struct NewTask {
     /// The IANA zone `scheduled_at` was planned in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scheduled_tz: Option<String>,
+    /// The task's metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
     /// Keys of the tasks that must finish first, added with the task.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
@@ -407,6 +458,21 @@ pub enum Call {
         key: TaskKey,
         note: Option<String>,
     },
+    /// Approves the plan under the spec task `key`, grading each of its open, ungraded subtasks (by key).
+    ApprovePlan {
+        key: TaskKey,
+        grades: BTreeMap<String, Grade>,
+    },
+    /// `blocker` must finish before `blocked`.
+    AddBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
+    /// `blocked` no longer waits on `blocker`.
+    RemoveBlocker {
+        blocked: TaskKey,
+        blocker: TaskKey,
+    },
     Undo(Undo),
     Revert(Revert),
     CreateProject(NewProject),
@@ -414,21 +480,48 @@ pub enum Call {
         key: String,
         update: ProjectUpdate,
     },
+    /// Marks the notification with this id read.
+    ReadNotification(String),
+    /// Marks the notification with this id unread.
+    UnreadNotification(String),
+    /// Marks every notification read.
+    ReadAllNotifications,
+    /// Raises a notification.
+    RaiseNotification(NewNotification),
+    /// Resolves every open notification `source` raised about `subject`.
+    ResolveNotifications {
+        source: String,
+        subject: String,
+    },
+    /// Replaces how the person wants to be told with these settings, whole. Only a person may.
+    SetNotificationSettings(NotificationSettings),
 }
 
 impl Call {
-    fn route(&self) -> (Route, Option<&str>) {
+    /// The endpoint, and the value of each of its path's parameters.
+    fn route(&self) -> (Route, Vec<(&'static str, &str)>) {
         match self {
-            Call::CreateTask(_) => (routes::CREATE_TASK, None),
-            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, Some(&key.0)),
-            Call::AddComment { key, .. } => (routes::ADD_COMMENT, Some(&key.0)),
-            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, Some(id)),
-            Call::Release(key) => (routes::RELEASE, Some(&key.0)),
-            Call::SetAside { key, .. } => (routes::SET_ASIDE, Some(&key.0)),
-            Call::Undo(_) => (routes::UNDO, None),
-            Call::Revert(_) => (routes::REVERT, None),
-            Call::CreateProject(_) => (routes::CREATE_PROJECT, None),
-            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, Some(key)),
+            Call::CreateTask(_) => (routes::CREATE_TASK, vec![]),
+            Call::UpdateTask { key, .. } => (routes::UPDATE_TASK, vec![("task", &key.0)]),
+            Call::AddComment { key, .. } => (routes::ADD_COMMENT, vec![("task", &key.0)]),
+            Call::ResolveComment { id, .. } => (routes::RESOLVE_COMMENT, vec![("id", id)]),
+            Call::Release(key) => (routes::RELEASE, vec![("task", &key.0)]),
+            Call::SetAside { key, .. } => (routes::SET_ASIDE, vec![("task", &key.0)]),
+            Call::ApprovePlan { key, .. } => (routes::APPROVE_PLAN, vec![("task", &key.0)]),
+            Call::AddBlocker { blocked, .. } => (routes::ADD_BLOCKER, vec![("task", &blocked.0)]),
+            Call::RemoveBlocker { blocked, blocker } => {
+                (routes::REMOVE_BLOCKER, vec![("task", &blocked.0), ("blocker", &blocker.0)])
+            }
+            Call::Undo(_) => (routes::UNDO, vec![]),
+            Call::Revert(_) => (routes::REVERT, vec![]),
+            Call::CreateProject(_) => (routes::CREATE_PROJECT, vec![]),
+            Call::UpdateProject { key, .. } => (routes::UPDATE_PROJECT, vec![("project", key)]),
+            Call::ReadNotification(id) => (routes::READ_NOTIFICATION, vec![("id", id)]),
+            Call::UnreadNotification(id) => (routes::UNREAD_NOTIFICATION, vec![("id", id)]),
+            Call::ReadAllNotifications => (routes::READ_ALL_NOTIFICATIONS, vec![]),
+            Call::RaiseNotification(_) => (routes::RAISE_NOTIFICATION, vec![]),
+            Call::ResolveNotifications { .. } => (routes::RESOLVE_NOTIFICATIONS, vec![]),
+            Call::SetNotificationSettings(_) => (routes::SET_NOTIFICATION_SETTINGS, vec![]),
         }
     }
 
@@ -442,19 +535,31 @@ impl Call {
             Call::UpdateTask { update, .. } => Some(json(update)),
             Call::AddComment { comment, .. } => Some(json(comment)),
             Call::ResolveComment { answer: Some(a), .. } => Some(serde_json::json!({ "answer": a })),
-            Call::ResolveComment { answer: None, .. } | Call::Release(_) => None,
+            Call::ResolveComment { answer: None, .. }
+            | Call::Release(_)
+            | Call::RemoveBlocker { .. }
+            | Call::ReadNotification(_)
+            | Call::UnreadNotification(_)
+            | Call::ReadAllNotifications => None,
+            Call::AddBlocker { blocker, .. } => Some(serde_json::json!({ "blocker": blocker })),
             Call::SetAside { note, .. } => Some(serde_json::json!({ "note": note })),
+            Call::ApprovePlan { grades, .. } => Some(serde_json::json!({ "grades": grades })),
             Call::Undo(b) => Some(json(b)),
             Call::Revert(b) => Some(json(b)),
             Call::CreateProject(b) => Some(json(b)),
             Call::UpdateProject { update, .. } => Some(json(update)),
+            Call::RaiseNotification(b) => Some(json(b)),
+            Call::ResolveNotifications { source, subject } => {
+                Some(serde_json::json!({ "source": source, "subject": subject }))
+            }
+            Call::SetNotificationSettings(b) => Some(json(b)),
         }
     }
 
     /// The path this call goes to, e.g. `/v1/tasks/TRAIL-1`.
     pub fn path(&self) -> String {
-        let (route, param) = self.route();
-        route.url(param)
+        let (route, params) = self.route();
+        params.iter().fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value))
     }
 
     /// The method this call uses.
@@ -622,8 +727,7 @@ impl Client {
 
     /// The request for a [`Call`], with its body, ready for the caller to add headers to and send.
     pub fn request_for(&self, call: &Call) -> RequestBuilder {
-        let (route, param) = call.route();
-        let req = self.request(route, param);
+        let req = self.http.request(call.method(), format!("{}{}", self.base, call.path())).bearer_auth(&self.token);
         match call.body() {
             Some(body) => req.json(&body),
             None => req,
@@ -762,6 +866,50 @@ impl Client {
         self.send(self.request(routes::REMOVE_ATTACHMENT, Some(&id.to_string()))).await
     }
 
+    /// `GET /v1/notifications`: newest first, only the unread ones if asked, those raised before `before` to page back.
+    pub async fn list_notifications(&self, unread: bool, before: Option<Uuid>, limit: i64) -> Result<NotificationList> {
+        let mut query = vec![("unread", unread.to_string()), ("limit", limit.to_string())];
+        query.extend(before.map(|b| ("before", b.to_string())));
+        self.send(self.request(routes::LIST_NOTIFICATIONS, None).query(&query)).await
+    }
+
+    /// `POST /v1/notifications`.
+    pub async fn raise_notification(&self, new: &NewNotification) -> Result<Notification> {
+        self.send(self.request(routes::RAISE_NOTIFICATION, None).json(new)).await
+    }
+
+    /// `POST /v1/notifications/{id}/read` or `/unread`. Only a person may.
+    pub async fn mark_notification(&self, id: Uuid, read: bool) -> Result<Notification> {
+        let route = if read { routes::READ_NOTIFICATION } else { routes::UNREAD_NOTIFICATION };
+        self.send(self.request(route, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/read-all`: how many were unread. Only a person may.
+    pub async fn mark_all_notifications_read(&self) -> Result<usize> {
+        self.send::<Count>(self.request(routes::READ_ALL_NOTIFICATIONS, None)).await.map(|c| c.count)
+    }
+
+    /// `POST /v1/notifications/{id}/resolve`: what it is about no longer needs the person.
+    pub async fn resolve_notification(&self, id: Uuid) -> Result<Notification> {
+        self.send(self.request(routes::RESOLVE_NOTIFICATION, Some(&id.to_string()))).await
+    }
+
+    /// `POST /v1/notifications/resolve`: resolves every open one `source` raised about `subject`.
+    pub async fn resolve_notifications_about(&self, source: &str, subject: &str) -> Result<usize> {
+        let body = serde_json::json!({ "source": source, "subject": subject });
+        self.send::<Count>(self.request(routes::RESOLVE_NOTIFICATIONS, None).json(&body)).await.map(|c| c.count)
+    }
+
+    /// `GET /v1/notifications/settings`: how the person wants to be told, the defaults until they set any.
+    pub async fn notification_settings(&self) -> Result<NotificationSettings> {
+        self.send(self.request(routes::NOTIFICATION_SETTINGS, None)).await
+    }
+
+    /// `PUT /v1/notifications/settings`: replaces them whole, and answers them as kept. Only a person may.
+    pub async fn set_notification_settings(&self, settings: &NotificationSettings) -> Result<NotificationSettings> {
+        self.send(self.request(routes::SET_NOTIFICATION_SETTINGS, None).json(settings)).await
+    }
+
     /// `POST /v1/comments/{id}/resolve`, optionally with an answer.
     pub async fn resolve_comment(&self, id: Uuid, answer: Option<&str>) -> Result<Comment> {
         let req = self.request(routes::RESOLVE_COMMENT, Some(&id.to_string()));
@@ -783,6 +931,13 @@ impl Client {
         self.send(self.request(routes::RELEASE, Some(key.as_str())).json(&serde_json::json!({}))).await
     }
 
+    /// `POST /v1/tasks/{task}/plan/approve`, as a person: each of the spec task's open, ungraded subtasks gets its grade
+    /// from `grades` (by key, naming every one and nothing else), and the spec task comes back with its plan approved.
+    pub async fn approve_plan(&self, key: &TaskKey, grades: &BTreeMap<String, Grade>) -> Result<Task> {
+        let body = serde_json::json!({ "grades": grades });
+        self.send(self.request(routes::APPROVE_PLAN, Some(key.as_str())).json(&body)).await
+    }
+
     /// `POST /v1/tasks/{task}/set-aside`: the task, open and ungraded, its questions resolved with a note saying so.
     pub async fn set_aside(&self, key: &TaskKey, note: Option<&str>) -> Result<Task> {
         self.send(self.request(routes::SET_ASIDE, Some(key.as_str())).json(&serde_json::json!({ "note": note }))).await
@@ -800,7 +955,7 @@ impl Client {
         let path = params
             .iter()
             .fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value));
-        self.http.request(route.method.clone(), format!("{}{path}", self.base)).bearer_auth(&self.token)
+        self.http.request(route.method, format!("{}{path}", self.base)).bearer_auth(&self.token)
     }
 
     /// Sends `req` to an endpoint that answers `204 No Content`.
@@ -1051,5 +1206,42 @@ mod tests {
         let aside = Call::SetAside { key: TaskKey("TRAIL-2".into()), note: Some("later".into()) };
         assert_eq!((aside.method(), aside.path()), (Method::POST, "/v1/tasks/TRAIL-2/set-aside".to_string()));
         assert_eq!(aside.body(), Some(serde_json::json!({"note": "later"})));
+        let read = Call::ReadNotification("n1".into());
+        assert_eq!((read.method(), read.path(), read.body()), (Method::POST, "/v1/notifications/n1/read".into(), None));
+        assert_eq!(Call::UnreadNotification("n1".into()).path(), "/v1/notifications/n1/unread");
+        assert_eq!(Call::ReadAllNotifications.path(), "/v1/notifications/read-all");
+        let raise = Call::RaiseNotification(NewNotification {
+            source: "example".into(),
+            kind: "example.milestone".into(),
+            title: "Ten presses".into(),
+            subject: Some("count".into()),
+            ..Default::default()
+        });
+        assert_eq!((raise.method(), raise.path()), (Method::POST, "/v1/notifications".into()));
+        assert_eq!(
+            raise.body(),
+            Some(serde_json::json!({"source": "example", "kind": "example.milestone", "title": "Ten presses",
+                                    "body": "", "subject": "count"}))
+        );
+        let resolve = Call::ResolveNotifications { source: "example".into(), subject: "count".into() };
+        assert_eq!((resolve.method(), resolve.path()), (Method::POST, "/v1/notifications/resolve".into()));
+        assert_eq!(resolve.body(), Some(serde_json::json!({"source": "example", "subject": "count"})));
+        let settings = Call::SetNotificationSettings(NotificationSettings { sound: false, ..Default::default() });
+        assert_eq!((settings.method(), settings.path()), (Method::PUT, "/v1/notifications/settings".into()));
+        assert_eq!(settings.body().unwrap()["sound"], serde_json::json!(false));
+        let grades = BTreeMap::from([("TRAIL-3".to_string(), Grade::new(2).unwrap())]);
+        let approve = Call::ApprovePlan { key: TaskKey("TRAIL-2".into()), grades };
+        assert_eq!((approve.method(), approve.path()), (Method::POST, "/v1/tasks/TRAIL-2/plan/approve".to_string()));
+        assert_eq!(approve.body(), Some(serde_json::json!({"grades": {"TRAIL-3": 2}})));
+        let (blocked, blocker) = (TaskKey("TRAIL-3".into()), TaskKey("TRAIL-4".into()));
+        let add = Call::AddBlocker { blocked: blocked.clone(), blocker: blocker.clone() };
+        assert_eq!((add.method(), add.path()), (Method::POST, "/v1/tasks/TRAIL-3/blockers".to_string()));
+        assert_eq!(add.body(), Some(serde_json::json!({"blocker": "TRAIL-4"})));
+        let remove = Call::RemoveBlocker { blocked, blocker };
+        assert_eq!(
+            (remove.method(), remove.path()),
+            (Method::DELETE, "/v1/tasks/TRAIL-3/blockers/TRAIL-4".to_string())
+        );
+        assert_eq!(remove.body(), None);
     }
 }

@@ -140,7 +140,7 @@ mod tests {
                 let badge = spawn(&mut app, icon, tone.clone());
                 let [label, glyph] = parts(&mut app, badge);
                 let case = format!("icon {icon:?}, tone {tone:?}");
-                let wanted = tone.clone().unwrap_or(token::TEXT_DIM);
+                let wanted = tone.unwrap_or(token::TEXT_DIM);
                 assert_eq!(label, ("label".to_string(), wanted.clone(), true), "{case}");
                 assert_eq!((glyph.1, glyph.2), (wanted, icon.is_some()), "{case}");
             }

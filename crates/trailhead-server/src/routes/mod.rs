@@ -7,6 +7,7 @@ pub(crate) mod comments;
 pub(crate) mod config;
 pub(crate) mod dependencies;
 pub(crate) mod events;
+pub(crate) mod notifications;
 pub(crate) mod projects;
 pub(crate) mod shell;
 pub(crate) mod tasks;
@@ -50,6 +51,7 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/renew", post(claims::renew))
         .route("/tasks/{task}/release", post(claims::release))
         .route("/tasks/{task}/set-aside", post(tasks::set_aside))
+        .route("/tasks/{task}/plan/approve", post(tasks::approve_plan))
         .route("/tasks/{task}/comments", get(comments::list_comments).post(comments::add_comment))
         .route(
             "/tasks/{task}/attachments",
@@ -62,6 +64,13 @@ pub fn v1() -> Router<Arc<AppState>> {
         .route("/tasks/{task}/blockers/{blocker}", delete(dependencies::remove_blocker))
         .route("/tasks/{task}/history", get(events::task_history))
         .route("/comments/{id}/resolve", post(comments::resolve_comment))
+        .route("/notifications", get(notifications::list).post(notifications::raise))
+        .route("/notifications/settings", get(notifications::settings).put(notifications::set_settings))
+        .route("/notifications/read-all", post(notifications::read_all))
+        .route("/notifications/resolve", post(notifications::resolve_about))
+        .route("/notifications/{id}/read", post(notifications::read))
+        .route("/notifications/{id}/unread", post(notifications::unread))
+        .route("/notifications/{id}/resolve", post(notifications::resolve))
         .route("/ready", get(tasks::ready))
         .route("/claims", get(claims::my_claims))
         .route("/search", get(tasks::search))

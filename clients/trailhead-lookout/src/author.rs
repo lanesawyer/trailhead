@@ -388,7 +388,7 @@ impl Starting<'_, '_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn on_act(
     activate: On<Activate>,
     acts: Query<&Act>,
@@ -419,7 +419,7 @@ fn on_act(
         // Comments and answers are written in the task modal's comment box.
         Act::Comment(key) => commands.trigger(OpenComposer { key: key.clone(), answer: None }),
         Act::Answer { key, comment_id, question } => {
-            commands.trigger(OpenComposer { key: key.clone(), answer: Some((comment_id.clone(), question.clone())) })
+            commands.trigger(OpenComposer { key: key.clone(), answer: Some((comment_id.clone(), question.clone())) });
         }
         Act::PickParent(key) => {
             if let Some(open) = &mut form.open {
@@ -761,7 +761,7 @@ fn fill_form(
 
 /// Keeps the form in step with its draft, in place: which parts show, the parent picked, the suggestions under the
 /// search, and the queue dropdown's rows for the project picked.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 fn dress_form(
     form: Res<Form>,
     authoring: Res<Authoring>,

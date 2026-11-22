@@ -139,13 +139,14 @@ pub(crate) async fn save_task(tx: &Tx, before: &Task, mut after: Task) -> Result
             ],
         )
         .await?;
-    match rows.next().await? {
-        Some(row) => task_from_row(&row),
-        None => {
-            let current = load_task(&tx.conn, before.workspace_id, &before.id.to_string(), true).await?;
-            Err(Error::VersionConflict { expected: before.version, current: current.version })
-        }
-    }
+    let Some(row) = rows.next().await? else {
+        let current = load_task(&tx.conn, before.workspace_id, &before.id.to_string(), true).await?;
+        return Err(Error::VersionConflict { expected: before.version, current: current.version });
+    };
+    let saved = task_from_row(&row)?;
+    drop(rows);
+    crate::notifications::on_task_saved(tx, before, &saved).await?;
+    Ok(saved)
 }
 
 pub(crate) async fn update_status(tx: &Tx, before: &Task, status: Status, kind: &str) -> Result<Task> {
@@ -185,15 +186,20 @@ pub(crate) async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()>
         return Ok(());
     }
     let project = load_project(&tx.conn, tx.ctx.workspace_id, &task.project_id.to_string(), true).await?;
-    let in_review = matches!(task.status, Status::InReview | Status::Approved);
+    // Sent for review and not settled since counts as in review whatever status the task was moved through: an
+    // agent that reopens a task in review and claims it is taking the work over, not excusing it from review
+    // (TRAIL-1573).
+    let in_review = matches!(task.status, Status::InReview | Status::Approved) || awaits_review(tx, task).await?;
     let gated = to == Status::Approved || in_review || project.require_review;
     // A delegated reviewer approves like a human would, but not work it did: the
     // claim is released on the way to review, so the event log says who did it.
     if tx.ctx.agent_id.is_some_and(|a| project.reviewers.contains(&a)) {
         if !in_review {
             // Review is for work not yet sent there; a reviewer's own in-progress work
-            // goes through it like any agent's.
-            return if gated { Err(Error::ReviewRequired) } else { Ok(()) };
+            // goes through it like any agent's. A parent whose subtasks are all finished has no work of its own
+            // left to review: each of them went through review itself.
+            let closes_parent = to == Status::Done && finished_parent(tx, task).await?;
+            return if gated && !closes_parent { Err(Error::ReviewRequired) } else { Ok(()) };
         }
         return if did_work(tx, task).await? {
             Err(Error::Forbidden(
@@ -209,6 +215,41 @@ pub(crate) async fn check_review(tx: &Tx, task: &Task, to: Status) -> Result<()>
         ));
     }
     if gated { Err(Error::ReviewRequired) } else { Ok(()) }
+}
+
+/// Whether the task is a parent whose work was its subtasks' and is over: it has subtasks, none of them unfinished,
+/// and at least one done (all cancelled is a plan dropped, not finished).
+async fn finished_parent(tx: &Tx, task: &Task) -> Result<bool> {
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT COALESCE(SUM(status NOT IN ('done', 'cancelled')), 0), COALESCE(SUM(status = 'done'), 0)
+             FROM tasks WHERE parent_id = ?1 AND deleted_at IS NULL",
+            libsql::params![task.id.to_string()],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else { return Ok(false) };
+    Ok(row.get::<i64>(0)? == 0 && row.get::<i64>(1)? > 0)
+}
+
+/// Whether the task was sent for review and nothing has settled that since: no approval, no finish, no cancel. A
+/// move back to open or into progress doesn't settle it, whoever made it.
+async fn awaits_review(tx: &Tx, task: &Task) -> Result<bool> {
+    let mut rows = tx
+        .conn
+        .query(
+            "SELECT 1 FROM events sent
+             WHERE sent.task_id = ?1 AND sent.entity = 'task' AND json_extract(sent.after, '$.status') = 'in_review'
+               AND NOT EXISTS (
+                   SELECT 1 FROM events settled
+                   WHERE settled.task_id = ?1 AND settled.entity = 'task' AND settled.id > sent.id
+                     AND json_extract(settled.after, '$.status') IN ('approved', 'done', 'cancelled')
+               )
+             LIMIT 1",
+            libsql::params![task.id.to_string()],
+        )
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
 /// Whether the acting agent did the work now in review: it made the latest move into review,

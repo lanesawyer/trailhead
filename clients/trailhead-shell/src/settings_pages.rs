@@ -7,6 +7,8 @@
 //! - **Connection**: the server dialed, the state of the link and why it isn't live, who it signed in as, this
 //!   window's endpoint id and the `trailhead factory allow` command for it, both with a copy button, and Re-dial and
 //!   Disconnect. Listed only in a shell with a connection.
+//! - **Notifications**: how the person wants to be told, kept on the server ([`crate::notifications_page`]). Listed
+//!   only in a shell with a connection.
 //! - **Server**: what the server's user config says, edited from the window ([`crate::server_page`]). Listed only in
 //!   a shell with a connection.
 //! - **About**: the build the launcher started (or that the shell was run directly), whether a newer one is ready,
@@ -23,14 +25,14 @@ use bevy::ui::InteractionDisabled;
 use bevy::ui_widgets::Activate;
 use trailhead_ui::{
     Appearance, ButtonGroup, ButtonKind, ChangeTextSize, Icon, Picked, TextSize, ThemeChoice, UiPlace, button,
-    button_group, row, set_text, setting, size, spawn_settings_section, text, tool_button,
+    button_group, copy_block, row, set_text, setting, size, spawn_settings_section, text,
 };
 
 use crate::connect::allow_command;
 use crate::connection::{Api, Connection, ConnectionStatus, Dialed, LocalEndpoint, SendNet};
 use crate::net::NetCommand;
 use crate::previews::transition_setting;
-use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, SERVER, SHELL_GROUP, SettingsPage};
+use crate::settings::{ABOUT, APPEARANCE, CONNECTION, CloseSettings, NOTIFICATIONS, SERVER, SHELL_GROUP, SettingsPage};
 use crate::update::{ThisBuild, UpdateReady};
 use crate::{AppId, Apps, SHELL};
 
@@ -39,14 +41,37 @@ use crate::{AppId, Apps, SHELL};
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct ShellDir(pub PathBuf);
 
-/// The shell's own pages, in the order they are listed: Connection and Server only with a connection.
+// What the settings' search finds each of the shell's pages by: what its settings are called.
+const APPEARANCE_WORDS: &[&str] =
+    &["theme", "light", "dark", "desktop", "text size", "zoom", "switching apps", "transition", "motion"];
+const NOTIFICATION_WORDS: &[&str] =
+    &["levels", "silent", "bell", "interrupt", "quiet hours", "focus", "sound", "counts", "badge"];
+const CONNECTION_WORDS: &[&str] =
+    &["server", "endpoint id", "allow command", "re-dial", "disconnect", "signed in", "state"];
+const SERVER_WORDS: &[&str] = &[
+    "window builds",
+    "apps repo",
+    "build profile",
+    "jobs",
+    "factory",
+    "repos",
+    "usage",
+    "pause",
+    "user config",
+    "restart",
+];
+const ABOUT_WORDS: &[&str] = &["build", "version", "commit", "updates", "apps", "files"];
+
+/// The shell's own pages, in the order they are listed: Notifications, Connection and Server only with a connection.
 pub(crate) fn shell_pages(connected: bool) -> Vec<(AppId, &'static str, SettingsPage)> {
-    let mut pages = vec![SettingsPage::new(APPEARANCE.key, "Appearance", appearance_page)];
+    let mut pages = vec![SettingsPage::new(APPEARANCE.key, "Appearance", appearance_page).keywords(APPEARANCE_WORDS)];
     if connected {
-        pages.push(SettingsPage::new(CONNECTION.key, "Connection", connection_page));
-        pages.push(SettingsPage::new(SERVER.key, "Server", crate::server_page::server_page));
+        let notifications = crate::notifications_page::notifications_page;
+        pages.push(SettingsPage::new(NOTIFICATIONS.key, "Notifications", notifications).keywords(NOTIFICATION_WORDS));
+        pages.push(SettingsPage::new(CONNECTION.key, "Connection", connection_page).keywords(CONNECTION_WORDS));
+        pages.push(SettingsPage::new(SERVER.key, "Server", crate::server_page::server_page).keywords(SERVER_WORDS));
     }
-    pages.push(SettingsPage::new(ABOUT.key, "About", about_page));
+    pages.push(SettingsPage::new(ABOUT.key, "About", about_page).keywords(ABOUT_WORDS));
     pages.into_iter().map(|page| (SHELL, SHELL_GROUP, page)).collect()
 }
 
@@ -90,13 +115,10 @@ fn value(which: Shows, label: &str, note: &str) -> impl Scene {
     setting(label.to_string(), note.to_string(), bsn_list! { @text("", size::BODY) which })
 }
 
-/// A value with a copy button after it.
+/// A value in a box of its own, with the button that copies it.
 fn copyable(which: Shows, label: &str, note: &str, act: ConnectionAct) -> impl Scene {
     let hint = format!("Copy the {}", label.to_lowercase());
-    let control = bsn_list! {
-        @row()
-        Children [ @text("", size::BODY) which -- @tool_button(Icon::Copy, hint, ButtonKind::Plain) act ]
-    };
+    let control = bsn_list! { @copy_block(bsn! { which }, hint, bsn! { act }) };
     setting(label.to_string(), note.to_string(), control)
 }
 
@@ -217,7 +239,7 @@ pub fn files_text(dir: Option<&ShellDir>) -> String {
 }
 
 /// Keeps the Connection page's texts current, and Re-dial pressable only with a server to dial.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn refresh_connection(
     mut texts: Query<(&Shows, &mut Text)>,
     acts: Query<(Entity, &ConnectionAct, Has<InteractionDisabled>)>,

@@ -81,7 +81,7 @@ pub fn output(cmd: &mut Command) -> Output {
     for _ in 0..50 {
         match cmd.output() {
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(20))
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
             r => return r.unwrap(),
         }

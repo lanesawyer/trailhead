@@ -36,7 +36,9 @@ impl Price {
 }
 
 /// First-party API prices as of 2026-10-06 (`claude-api` skill, which says to confirm against Anthropic's pricing
-/// page). Haiku's rate is for prompts up to 100K tokens; longer ones cost five times as much and are underpriced here.
+/// page); Fable's as of 2026-11-03, its cache write taken as 1.25× input like the others. Haiku's rate is for prompts up
+/// to 100K tokens; longer ones cost five times as much and are underpriced here.
+pub const FABLE: Price = Price { input: 8_000_000, output: 40_000_000, cache_read: 200_000, cache_write: 10_000_000 };
 pub const OPUS: Price = Price { input: 4_000_000, output: 20_000_000, cache_read: 200_000, cache_write: 5_000_000 };
 pub const SONNET: Price = Price { input: 2_000_000, output: 10_000_000, cache_read: 200_000, cache_write: 2_500_000 };
 pub const HAIKU: Price = Price { input: 100_000, output: 500_000, cache_read: 10_000, cache_write: 125_000 };
@@ -55,7 +57,9 @@ impl Anthropic {
     /// expensive, so a budget stops early rather than late.
     pub fn price_for(model: &ModelId) -> Price {
         let id = model.0.as_str();
-        if id.starts_with("claude-haiku") {
+        if id.starts_with("claude-fable") {
+            FABLE
+        } else if id.starts_with("claude-haiku") {
             HAIKU
         } else if id.starts_with("claude-sonnet") {
             SONNET
@@ -72,6 +76,7 @@ impl ModelProvider for Anthropic {
     fn resolve(&self, alias: ModelAlias) -> ModelId {
         ModelId(
             match alias {
+                ModelAlias::Fable => "claude-fable-5-2",
                 ModelAlias::Opus => "claude-opus-5-5",
                 ModelAlias::Sonnet => "claude-sonnet-5-5",
                 ModelAlias::Haiku => "claude-haiku-5-5",
@@ -111,6 +116,9 @@ mod tests {
         assert_eq!(a.price(&sonnet, &usage(0, 1_000_000, 0, 0)), Usd::dollars(10.0));
         let opus = a.resolve(ModelAlias::Opus);
         assert_eq!(a.price(&opus, &usage(10_000, 2_000, 50_000, 4_000)), Usd::dollars(0.04 + 0.04 + 0.01 + 0.02));
+        let fable = a.resolve(ModelAlias::Fable);
+        assert_eq!(fable.0, "claude-fable-5-2");
+        assert_eq!(a.price(&fable, &usage(1_000_000, 1_000_000, 0, 0)), Usd::dollars(48.0));
         let haiku = a.resolve(ModelAlias::Haiku);
         assert_eq!(
             a.price(&haiku, &usage(1_000_000, 1_000_000, 1_000_000, 1_000_000)),

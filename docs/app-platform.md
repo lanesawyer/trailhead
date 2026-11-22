@@ -50,7 +50,7 @@ Every app is written against it, so a change to it later is a change to every ap
 
 **Teardown is of what is drawn, not of what is known. Built.** A switched-away app has no entities on screen, but its logic keeps running: Lookout's mirror stays in step with the server while another app is shown, so coming back needs no reload. Keeping an app's drawing alive is the later fix if rebuilding it is slow enough to annoy.
 
-**The rail is in the person's order. Built (TRAIL-1621).** Dragging an app's button up or down the rail (or Alt and Up or Down on it) moves it there, on the kit's reorderable list (`trailhead_ui::ReorderList`): a press that moves a few pixels lifts the button and the others slide aside, and the release that drops it never also opens the app. The order is kept in the shell's `LocalStore` entry (`rail_order`) and applied at the next launch over the order the binary gives, an app no longer given dropped and a new one added at the end; the first app shown, the direction a switch's cover travels and the apps' settings pages follow it. The rail's foot (Ask, the update notice, the gear) stays put.
+**The rail is in the person's order. Built (TRAIL-1621).** Dragging an app's button up or down the rail (or Alt and Up or Down on it) moves it there, on the kit's reorderable list (`trailhead_ui::ReorderList`): a press that moves a few pixels lifts the button and the others slide aside, and the release that drops it never also opens the app. The order is kept in the shell's `LocalStore` entry (`rail_order`) and applied at the next launch over the order the binary gives, an app no longer given dropped and a new one added at the end; the first app shown, the direction a switch's cover travels and the apps' settings pages follow it. The plus under the apps and the rail's foot (Ask, the update notice, the gear) stay put.
 
 **A place to draw is the window beside the rail. Built.** The shell hands over no parent entity. An app fills the kit's `beside_rail`, or has a kit `sidebar` and fills `beside_sidebar`; the kit moves both over when a rail exists. A shell with one app has no rail and the app has the whole window, so Lookout alone looks as it did.
 
@@ -142,11 +142,12 @@ Before any of it: the Lookout and factory changes now in review are merged, grad
 4. **Ticklist,** in the apps repo, on the existing task API. First target: Lane moves his Todoist workflow onto it. Backups come with it.
 5. **Asking for an app.** A request in the shell becomes a project, a brief and tasks; a planner run writes the spec and asks its questions through `needs_input`, which Lookout already shows.
    **Built (TRAIL-1580), without the planner:**
-   - The rail's foot has an Ask button (a plus, "Ask for a change or a new app") while the connection is live and the server has an apps repo. It opens a form: a dropdown of what the ask is about (each app the factory builds, by name, then "A new app", the app shown chosen first), the new app's name, and the ask itself. Once the server has made it, the form says what: "Asked: TICK-17" and the task's title, and for a new app "Made the project TN, Trail Notes".
-   - `GET /v1/shell/ask` lists what can be asked about: the active projects whose `metadata.factory.repo` is the apps repo, which the builder reads from its checkout's `origin`. `POST /v1/shell/ask` takes `{"text", "project"}` or `{"text", "new_app": {"name"}}`. Only a person may ask (an agent gets 403); the server acts as that person, so it may give the first grade and point a project at the repo with no new engine rule, and everything one ask writes is one batch to undo.
+   - The rail's foot has an Ask button (a plus, "Ask for a change or a new app") while the connection is live and the server has an apps repo. It opens a form: a dropdown of what the ask is about (each app the factory builds, by name, then "A new app", the app shown chosen first), the new app's name, and the ask itself. Once the server has made it, the form says what: "Asked: TICK-17" and the task's title, and for a new app "Made the project TN, Trail Notes". TRAIL-1673 split it in two, below.
+   - `GET /v1/shell/ask` lists what can be asked about: the active projects whose `metadata.factory.repo` is the apps repo, which the builder reads from its checkout's `origin`. `POST /v1/shell/ask` takes `{"text", "project"}` or `{"text", "new_app": {"name", "key"?}}`. Only a person may ask (an agent gets 403); the server acts as that person, so it may give the first grade and point a project at the repo with no new engine rule, and everything one ask writes is one batch to undo.
    - **A change** is one task in the app's project: titled from the ask's first line, its whole text in the description, grade 2 and priority 2, so the factory takes it from its next poll.
-   - **A new app** gets an id from its name (lowercase words joined by `-`, starting with a letter, 2 to 32 characters, a name cargo takes for a crate, not `shell`, `lookout` or `example`, and not an app's that exists) and a project key (the first four letters of one word, the initials of several, a digit added until unique). Its project is named for it, pointed at `apps/<id>`, requires review, has the `factory` agent as reviewer when the factory has run here (the reply says so when it hasn't), and has a brief naming the path, the kit and the commit subjects. Its first task, at grade 2, is to scaffold the crate, register it in the shell and build a first version of what was asked; adding a crate touches `Cargo.toml` and `shell/`, so the PR is graded 3 and a person approves the new app.
-   - **Not built:** the planner run. An ask is one task, its text the spec, with no questions asked first. No project default grade either: every task in an asked-for project so far is a person's ask, which carries its own grade. Asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
+   - **A new app** gets an id from its name (lowercase words joined by `-`, starting with a letter, 2 to 32 characters, a name cargo takes for a crate, not `shell`, `lookout` or `example`, and not an app's that exists) and a project key: the one the person typed in the form (`new_app.key`, 2 to 10 letters or digits starting with a letter, refused when another project has it), else one made from the name (one word of up to six letters whole, so Cairn is CAIRN, a longer one its first four; the initials of several; a digit added until unique). The form's key field is optional, and a line under it says which key the tasks will carry (TRAIL-1688). Its project is named for it, pointed at `apps/<id>`, requires review, has the `factory` agent as reviewer when the factory has run here (the reply says so when it hasn't), and has a brief naming the path, the kit and the commit subjects. Its first task, at grade 2, is to scaffold the crate, register it in the shell and build a first version of what was asked; adding a crate touches `Cargo.toml` and `shell/`, so the PR is graded 3 and a person approves the new app.
+   - **Built (TRAIL-1673): the window's two ways in.** A plus under the apps on the rail ("Ask for a new app") opens "Ask for a new app": its name, the ask, and a dropdown of the planner's model ("The repo's default", which sends none, then Fable, Opus, Sonnet and Haiku); a new app is always planned. The Ask button at the rail's foot is now a pencil ("Ask for a change to this app"), shown once the apps repo has an app to ask about, and opens "Ask for a change": the app (the app shown first, else the first app; "A new app" is no longer among them), the ask, and a "Plan this first" switch, off at first, with a note saying a planner talks the ask over and proposes tasks to approve before any work starts; on, the planner's model shows under it. The form sends `Ask::change` or `Ask::new_app`, with `.planned(model)` when planned. For a planned ask the answer says "Sent to the planner: TN-1" and that the planner comes back with questions or a plan to approve, on that task in Lookout as a question waiting on the person.
+   - **The planner run is built** (TRAIL-1669), designed in [Planning an ask](#planning-an-ask). **Not offered:** asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
 6. **The app data store.**
 7. **Connectors.**
 
@@ -161,8 +162,170 @@ The engine has due days and times, scheduled days and times, reminders, prioriti
 - Recurring tasks (in PLAN.md's Later list).
 - Labels (TRAIL-155).
 - A one-time import from Todoist (PLAN.md phase 9).
-- Reminders that reach the person: the engine emits events, and nothing shows a desktop notification yet.
+- Reminders that reach the person: the engine emits events, which the shell turns into notifications ([Notifications](#notifications)).
 - Quick capture without opening the shell. The CLI covers it today.
+
+## Planning an ask
+
+Decided with Lane, 2026-11-21. Built so far (TRAIL-1609's subtasks have the rest): the server's side of asking and of approving. `POST /v1/shell/ask` takes `plan` and `model` and makes a spec task (ungraded, `metadata.plan.spec`) for a planned change and for every new app; `POST /v1/tasks/{task}/plan/approve` takes a grade for each open, ungraded subtask of a spec task and, as the person, in one write, grades them, resolves the spec task's questions and marks its plan approved (`Store::approve_plan`). The spec task then stays open, ungraded, as the parent of the work. And the window's two buttons (TRAIL-1673): the plus under the apps asks for a new app with the planner's model, and the Ask button asks for a change with "Plan this first" and, when on, the model (phase 5 above). And the planner run (TRAIL-1669, [lifecycle.md](factory/lifecycle.md#the-flow-for-one-task)): a spec task is planned by turns, its session kept on the held sandbox, its plan written as ungraded subtasks with proposed grades, and nothing of it worked until a person grades it. No live sandbox has run a planner yet. And the chat panel (TRAIL-1670): a spec task's card and task modal always offer its graph, which shows the conversation beside the canvas ("No tasks are planned yet" until the planner has drawn some up): the ask (cut short, read whole in the task modal), every comment as a message, the reader's on the right, a line saying whose turn it is (the planner working, waiting on you, queued for the planner, approved), and a reply box that answers the newest open question as the task modal's answer form does, disabled with the reason when there is none. And approval on the graph (TRAIL-1674): on a plan not yet approved, each open, ungraded task shows a grade dropdown preset to the planner's proposal ("Grade…" without one), with why in its hint and among its facts in the task modal; Approve in the page's header sends the chosen grades for exactly those tasks, disabled with the reason beside it while the planner is working, there are no tasks, or one has no grade. Once approved, the dropdowns and Approve go and the turn line says approved. And editing by hand (TRAIL-1675): on the graph of any parent, Add in the header (a title and an optional description) makes an ungraded subtask, and each node's ⋯ menu offers Depends on… (any other task of the plan it doesn't wait on that wouldn't make a cycle), No longer depends on… (one it waits on in the plan), Split (a second task with its parent, dependencies, dependents and description, titled "<title> (2)") and Remove (cancels it, once confirmed); each is one ordinary write, so undo covers it.
+
+**Asking.**
+
+- **A plus below the app list** asks for a new app. It always goes to the planner, and its plan always needs a person's approval.
+- **The Ask button** asks for a change to the app shown, with a "Plan this first" toggle, off by default. Off, the ask is one grade 2 task straight to a worker, as now. On, it goes to the planner, and the form shows a dropdown of the planner's model.
+- A person says which asks are big; nothing guesses. A worker that finds a small ask is a big one stops and asks through `needs_input`, as any worker does.
+
+**The planner run.**
+
+- An ask to be planned becomes a **spec task**, the parent of everything the ask produces.
+- The planner is a factory run with a job of its own: a sandbox with the repo checked out, so it plans against the real code and kit, and no PR. What it leaves is the spec and the subtasks.
+- Its model defaults to an entry in `.trailhead.toml`. The dropdown at asking time overrides it, and the choice is kept on the spec task, so every turn of one conversation uses it. No settings page for it yet.
+
+**The conversation.**
+
+- The spec task's comments are the conversation, by turns: the planner posts and parks the task, the person replies, and the factory resumes the planner with the reply. This is `needs_input`, used more than once. Nothing streams.
+- The window draws that thread as a chat panel on the spec task.
+- The planner keeps its context from turn to turn: the factory remembers its Claude Code session and resumes it (a run resumed after an answer starts a new session today). The session is on the sandbox's disk, so the sandbox is held, paused, while the conversation is open, and released once it has sat idle for some hours; a reply after that starts a new session from the thread.
+- Each turn the planner is given the plan as it stands in the engine and what a person changed in it since its last turn. The engine holds the plan, not the planner's memory.
+
+**The plan.**
+
+- The spec is written into the spec task's description.
+- Each piece of work is a subtask with acceptance criteria, `blocked_by` the pieces it needs. A subtask is one worker run and one PR; a piece too big for that is several subtasks. Subtasks have no subtasks of their own: the plan is one level deep, though the engine allows more, and nesting can come back later as grouping (a big plan's phases drawn around their nodes).
+- Subtasks are created ungraded, each carrying the grade the planner proposes and a line saying why. The factory skips an ungraded task, so nothing starts early.
+- A person changes the plan by replying in the conversation, or by hand in the graph.
+- **No plan document is committed.** The breakdown and the conversation are history, which the engine keeps. What later work needs is what the app is now: each app has a `README.md` in its folder saying what it does and why, written from the spec by the plan's first task and kept up by any task that changes what the app does, as one of its acceptance criteria.
+
+**Approval.**
+
+- Approving the plan is the person setting the grades: each subtask shows its proposed grade in a dropdown, the person changes any, and presses Approve. The server sets them as that person, in one batch to undo.
+- After approval the planner is finished. The subtasks are ordinary factory tasks, taken as their dependencies clear.
+- **The spec task is closed when the plan is finished. Built (TRAIL-1687).** Once every task of an approved plan is done or cancelled, at least one of them done, the factory closes the spec task with a handoff naming them and raises a notification (`factory.plan_done`). The spec task has no work of its own, so the engine lets a delegated reviewer finish a parent whose subtasks are all finished without a review of its own; nobody else may, and a parent with no subtasks, or one whose subtasks were all cancelled, still needs its review. A plan whose tasks were all cancelled is left open for the person.
+
+**The graph.** A second way to look at work, beside the board, which is every task by status: one parent task's subtasks by what depends on what.
+
+- It opens from any parent task, so an epic made by hand has it too.
+- A node is a subtask in its status's colors, a line is `blocked_by`, and it changes as the factory works. Clicking a node opens the inspector.
+- It lies on a canvas that pans and zooms with no edge, so a large plan can be read. The canvas and the graph laid out on it are kit widgets (`trailhead-ui`), for any app.
+- First: read-only, with the grade dropdowns and Approve on a plan not yet approved. Then editing by hand: add a node, remove one, split one (a second node with the same parent and dependencies), and add or remove a dependency. No merge (cancel one, edit the other) and no moving to another parent (there is one).
+
+**Left out:** planning again after approval (follow-ups are ordinary tasks); the planner filing kit tasks for what an app needs from the kit (TRAIL-1612); a streaming conversation, over ACP or otherwise, which could replace the turns without changing the panel or the thread; saving the session out of the sandbox so a waiting planner holds none. Telling a person the planner has replied waits on [notifications](#notifications) for the whole shell, a piece of its own.
+
+**Order:** the graph, read-only (it needs nothing else here); the planner run; the chat panel; approval; the two buttons; editing by hand. The middle four prove themselves only together: the first real test is asking for a small new app and approving its plan.
+
+## Notifications
+
+Decided with Lane, 2026-11-21 (TRAIL-1671), except what is marked **Open**. What is built is marked so below.
+
+One way for the server, the factory and any app to tell a person something needs them. The shell shows them, in the window and on the desktop.
+
+**The server owns them.**
+
+- A notification is a row in a table of its own in the server, beside the tasks. Each change to one (raised, read, unread, resolved) is an event, which is how it reaches every window, but not a change undo covers: undo leaves them alone, as it does the reminders. **Built (TRAIL-1676, TRAIL-1677):** the table, the rules below, `/v1/notifications` and `trailhead inbox`.
+- It carries its source (an app's id, `factory` or `server`), a kind, a title, a body in plain text, a subject (what it is about: a task's key, or a string of the app's own), its actions, and when it was raised, read and resolved.
+- It has no recipient. There is one person.
+- **Read and resolved are two things.** Read: the person saw it. Resolved: the thing no longer needs them, whoever dealt with it and wherever (a question answered from the CLI). The server resolves by rule; a resolved one stays in the history.
+- The window gets them on the event stream, as one more kind of record in the shell's mirror, so every app and the bell read the same ones, and a second machine agrees on what is read.
+
+**What raises one.**
+
+- **The server, by rule, from the engine's events:** an agent's question that isn't put to another agent (which covers the planner replying and a plan ready to approve, both questions on the spec task), a task an agent sent for review in a project where no agent may approve (where one may, whoever runs the review says when a person is needed, as the factory does), and the reminders the engine already emits (`task.due_soon`, `task.overdue`; TRAIL-1505 shares their names). The same rules resolve them: the answer, the approval, the task done.
+- **The factory,** for what the engine cannot see: a run that failed, a task it parked, a budget breach, the factory paused. This takes TRAIL-111's place.
+  **Built (TRAIL-1682):** through the `Tracker` trait, the factory raises `factory.review` when a PR waits on a person alone (every other gate passed), with a link to the pull request, and `factory.paused` once per usage pause; it resolves each when that stops. A failed run it gives up on, a park and a budget breach are each a question the factory asks on the task, which the first rule above already raises, so the factory raises nothing more for them ([operating.md](factory/operating.md#notifications)).
+- **An app, while the window runs,** with a `Notify` command the shell sends to the server. An app cannot raise one while the window is closed; rules over an app's own data wait on the app data store.
+  **Built (TRAIL-1681):** `trailhead_shell::notifications::Notify` (source, kind, title, body, subject, task, links),
+  triggered from an app's code and sent as `POST /v1/notifications` while the connection is live, and
+  `ResolveNotifications { source, subject }` as `POST /v1/notifications/resolve`. The example app raises one every tenth
+  press and resolves it when the count is reset.
+- An agent already has `ask`, which raises one by the first rule.
+
+**Trust.** No rate limits and no guard against an app that raises too many. Lane asks for the apps; one that misbehaves gets changed. The shell does say which app raised each one.
+
+**Kinds.** A kind is the sort of thing a notification is, as a short name: `lookout.question`, `lookout.review`, `factory.run_failed`, `task.due_soon`. Every notification has one. At first a kind is only that name, and levels are set per source (all of an app's, or the factory's). Later, when one app's notifications want different treatment, an app lists the kinds it raises in its manifest, each with the name a person reads ("A question for you") and the level it starts at, and the settings page shows a row for each before any has been raised.
+
+**Levels.** Three: *silent* (in the list only), *bell* (the count, the ring and the sound) and *interrupt* (a desktop notification too). Every one is recorded whatever its level.
+**Built (TRAIL-1680):** the shell holds the person's settings (`notification_settings`), read from the server when
+the connection goes live, every minute and after a save, and does what `NotificationSettings::alert` says for each
+arrival: a silent source is listed and left out of every count, a bell source rings the bell (with the sound) and never
+reaches the desktop, an interrupting one rings the bell with window focus and goes to the desktop without. The
+Notifications page among the shell's own settings sets a level for each app on the rail, then Factory, then
+Trailhead.
+
+**In the window.**
+
+- **A bell at the rail's foot,** with the count unread. When one arrives while the window has focus the bell rings: it swings, grows a little and shrinks back. A desktop that asks for less motion sees only the count change.
+- **Its panel** lists them, newest first, each with its source's icon and name, title, body, age and action buttons; the unread ones marked. Each can be marked read or unread, and all read at once. A switch between Unread and All; All pages back through everything the server keeps.
+- They are listed one by one. Nothing is folded together in the list.
+- **A count on an app's rail icon:** its unread ones. A setting hides the counts, the bell's too.
+- **Pressing one in the list does nothing.** What can be done with it is its buttons: Mark read, and its actions.
+
+**Built (TRAIL-1678):** the shell mirrors them (the snapshot loads the newest 200, read or not, and the stream keeps
+them), and tells the rest of the shell of one that arrives raised and unread off the stream as a `NotificationArrived`
+message, for the desktop notification and the sound to hang off. The bell sits at the rail's foot over the gear, with
+the count of unread ones on it, and rings (the kit's `Ring`: a swing that grows a little and settles, half a second of
+real time) when one arrives while the window has focus, not for a desktop that asks for less motion. Its panel lists
+them as cards, newest first, with an Unread and All switch, Show older paging back under All, Mark read or unread on
+each, a link button for each action and Mark all read; resolved ones say so. Each app's button on the rail has the count
+of its own. `NotificationCounts { shown }` is the one switch for the counts, for the settings page to come. A shell with
+one app has no rail, so Lookout puts the bell in its sidebar's footer beside the gear, and opening a task in Lookout
+marks the notifications about it read. The desktop notifications, levels, quiet hours, focus, the sound, the
+settings page and an app's `Notify` are built since, each marked below.
+
+**Actions.** A notification can carry buttons. First, one sort: a link, which the shell opens in the desktop's browser (Lookout's review notification links the pull request on GitHub). The shell opens it, since an app may start no process. The desktop notification has the same buttons, which Ubuntu draws; a link needs no window focus. Later: buttons that act (Approve, Answer).
+
+**On the desktop.**
+
+- The shell sends them while it runs, on Ubuntu (GNOME), over the desktop's notification service on D-Bus, under the desktop entry `mise run shell-install` writes so they carry Trailhead's name and icon. The Mac and Windows are later.
+- **Only when the window does not have focus.** With focus, the bell's ring is the notice.
+- **A burst is one notification.** Several at once, those raised during quiet hours, and those raised while the window was not running become one: "10 things need you". The shell keeps the last one it announced in its `LocalStore` entry, per machine, to know what a launch missed.
+- **Pressing one brings the window forward with the bell's panel open.** It goes no further than that (phase 2). To check on Ubuntu: that GNOME on Wayland lets the window come forward from the press; if it does not, the panel is still open when the person gets there.
+- One read or resolved elsewhere is taken down.
+- **Built (TRAIL-1679),** in `clients/trailhead-shell/src/desktop.rs`: arrivals without focus are gathered for a second and a half, then shown one by one, or as one saying how many when more than three came; a launch without focus says what was raised since this machine last announced one (`announced` in the shell's `LocalStore` entry); the desktop plays its own theme's message sound with it. It talks to `org.freedesktop.Notifications` with `zbus`, which the keyring already brought in, so no package was added. **Not yet seen on a real desktop:** a press reaching the window, and whether GNOME on Wayland lets the window come forward; a trial notification sent the same way did show.
+
+**Quiet hours and focus.**
+
+- They gate the interruption, never the record: no desktop notification and no ring, while the list and the count carry on.
+- Quiet hours are a daily span. Focus is switched on by hand, until a time or until switched off, from the bell's panel.
+- When either ends, one desktop notification says what arrived.
+- The settings (levels, quiet hours, the sound, the counts) are kept on the server, so every machine agrees, on a Notifications page among the shell's own in Settings.
+- **Built (TRAIL-1680):** an arrival during either is counted and held; when either ends, what was held and is still
+  unread is said once: one ring of the bell with window focus, one desktop notification ("3 things need you") for those
+  from interrupting sources without. The minute of the day is the window's machine's own clock and zone. Quiet hours
+  (on or off, a start and an end in half-hour steps), the sound and the counts are on the Notifications page; focus is a
+  row at the top of the bell's panel (for an hour, until ended, end it). Each saves the whole settings with a `PUT`,
+  from those last read with only its part changed, and the page shows what a read after the save says. A launch during
+  quiet hours or focus holds what it missed for their end.
+- **Low priority:** a level above interrupt that breaks through both (the factory stopped, a budget breach). Lane may never use it, so it is built last if at all. Ubuntu's own Do Not Disturb hides ours with no work here.
+
+**A sound.** One plays with the ring and with a desktop notification, never during quiet hours or focus, and a setting turns it off. It has to be made by a person, not generated, under an open licence. **Built (TRAIL-1680):** the desktop theme's own message sound (`message-new-instant`), on Ubuntu Yaru's, by Mads Rosendahl under CC-BY-SA-4.0, played by the desktop: a desktop notification names it as a hint, and the ring in a focused window starts `canberra-gtk-play` for it on a thread of its own (silent where the program is missing). No file of ours is shipped, so nothing needs recording beside one.
+
+**How long they are kept.** Everything, forever. The rows are small (a few hundred bytes); pruning is dealt with if the table ever gets too big.
+
+**Phase 2: going to the thing.** Pressing a notification, in the window or on the desktop, opens what it is about. Put off because each part is hard:
+
+- A notification would carry a target naming the thing, not a view: a task (and a comment on it) or a project, for which the shell picks the app that opens tasks, or an app and a route only that app reads. The shell switches `ActiveApp` and triggers an event the app observes.
+- A press can arrive before the mirror has synced, so the shell holds the target until the connection is live.
+- A stored route outlives the build that wrote it, so an app has to cope with one it does not know, and with a thing since deleted.
+- A settings modal or an unsent draft may be in the way.
+- Raising the window from the desktop's notification needs an activation token on Wayland; whether winit passes one through is not checked.
+- Until then a notification's text has to say where to look (the task's key), and its link does the rest.
+
+**Also phase 2 or later:** a tray icon, so notifications arrive with the window closed (likely an effort of its own); snoozing one; hiding the text on a locked screen; the Mac. **Not planned:** email or a push to a phone.
+
+**Where it lands.**
+
+| Where | What |
+| --- | --- |
+| `trailhead-model` | The notification, its action, the kinds' names (with TRAIL-1505) |
+| `trailhead-core` | A `notifications` table in a new migration; raise, read, resolve; the rules that raise and resolve from events |
+| `trailhead-server` | `/v1/notifications` (list, raise, read, read all), the records on the sync stream, the settings |
+| `trailhead-control` | Raising what the engine cannot see, probably through the `Tracker` trait |
+| `trailhead-shell` | The mirror's records and the `Notify` command, the bell and its panel, the settings page, the desktop notifier behind a trait (so tests use a fake), quiet hours and the burst rule as plain logic |
+| `trailhead-ui` | The ring, and a count badge if the kit lacks one |
+| The desktop's sound theme | The sound (TRAIL-1680: none of ours is shipped) |
+| Lookout | Its link actions; marking a task's notifications read when the task is opened |
+
+**Order:** the table and API with the question and review rules; the bell and its panel; Ubuntu's desktop notifications; levels, quiet hours, focus and the sound; apps raising their own; kinds in the manifest and breaking through quiet hours, if wanted. The first two are enough to say the planner has replied.
 
 ## Trust, grades and undo
 
@@ -192,7 +355,7 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 
 **Apps that need more care. Leaning.** A grade means the same approvals everywhere in a repo; apps do not get gates of their own, or nobody could say what "grade 2" means. An app differs by where it starts: a path rule gives it a floor (`3 = ["apps/<name>/**"]` for an app holding work or money data), which path rules can already do.
 
-**Grading asked-for tasks. Leaning on the default; an engine change. Not built:** an ask from the window carries grade 2 itself (TRAIL-1580), which covers asks until a planner creates tasks. Only a person can give a task its first grade, and the factory skips ungraded tasks, so tasks a planner creates for an asked-for app would never be worked. A project carries a default grade, set by a person when the app is created, and tasks agents create in it start there. A person still set the first grade, once, for the app.
+**Grading asked-for tasks. Decided (2026-11-21), built:** an ask from the window carries grade 2 itself (TRAIL-1580). Only a person can give a task its first grade, and the factory skips ungraded tasks, which is what holds a planner's tasks back until a person has looked: the planner proposes a grade for each task it creates, and approving the plan is the person setting them ([Planning an ask](#planning-an-ask)). Tasks in one plan differ in grade, so a default grade on the project, the earlier leaning, is dropped.
 
 **A grader agent. Open, leaning not yet.** An agent that grades each task before work starts would add little: the task's grade is only a floor, the diff's paths raise the PR by what it really touched, and a reviewer can already raise it for a risk no path shows. If it is wanted later it is a duty of the planner, never of the worker (the author does not grade its own work), and it may only raise above the project's default; lowering stays a person's.
 
@@ -209,7 +372,7 @@ Grades 1 to 3 merge themselves; Treeline moves up to sit above grade 3.
 
 Lane wants UI changes shown, live if possible. Three steps, each useful alone, chosen by how much a change needs. **Leaning.**
 
-1. **Screenshots.** The sandbox renders the changed views headless and attaches the images to the task; Lookout shows them on the task, before and after, and the UX reviewer reads the same images. The local half is built (TRAIL-1614, on TRAIL-802's spike): `trailhead_shell::testing::shot` draws the shell to PNGs with no window, display or GPU (software rendering with Mesa's lavapipe, byte for byte the same from run to run on one renderer), and each app has an `#[ignore]`d `tests/shots.rs` that draws its views, named `<app>-<view>-<theme>` (`<app>-<view>-150-<theme>` at a text size of 150%) and set up from fixtures; `mise run shots` runs them all (the shell's guide, section 7). Where they go is built (TRAIL-1630): a task carries pictures in the engine, not on the code host (`POST /v1/tasks/{task}/attachments` with the PNG as the body, a `name` such as `ticklist-today-dark`, a `role` of `before` or `after` and a `set` naming the run), and Lookout's task modal shows them under Pictures, each set's pairs by name, before beside after, a new, removed or unchanged view said as such, and a pair opens large side by side or flipped in place (`docs/factory/ui.md`). Not built: lavapipe in the sandbox image, and the factory drawing the shots before and after a change and attaching them. CI does not run the shots yet, having no render adapter.
+1. **Screenshots.** The sandbox renders the changed views headless and attaches the images to the task; Lookout shows them on the task, before and after, and the UX reviewer reads the same images. The local half is built (TRAIL-1614, on TRAIL-802's spike): `trailhead_shell::testing::shot` draws the shell to PNGs with no window, display or GPU (software rendering with Mesa's lavapipe, byte for byte the same from run to run on one renderer), and each app has an `#[ignore]`d `tests/shots.rs` that draws its views, named `<app>-<view>-<theme>` (`<app>-<view>-150-<theme>` at a text size of 150%) and set up from fixtures; `mise run shots` runs them all (the shell's guide, section 7). Where they go is built (TRAIL-1630): a task carries pictures in the engine, not on the code host (`POST /v1/tasks/{task}/attachments` with the PNG as the body, a `name` such as `ticklist-today-dark`, a `role` of `before` or `after` and a `set` naming the run), and Lookout's task modal shows them under Pictures, each set's pairs by name, before beside after, a new, removed or unchanged view said as such, and a pair opens large side by side or flipped in place (`docs/factory/ui.md`). The sandbox image has lavapipe, and the factory draws the shots before and after a change and attaches them (`[factory.shots]`, TRAIL-1614). CI does not run the shots yet, having no render adapter.
 2. **Try it, on your machine.** A button on the task in Lookout has the builder build that PR's shell into a separate slot and open it as a second window beside the running one. It is the real app, live, built on demand. Offered only once checks and the agent gates have passed, since it runs unmerged code. **Open:** what data it runs on. A copy of the app's SQLite file is cheap, which is one more reason for a file per app; tasks have no such copy, so a previewed Ticklist would act on real tasks, with undo behind it, unless the server grows a preview scope.
 3. **Live from the sandbox. Later, maybe.** The sandbox runs the shell and streams frames to Lookout over iroh, with input sent back: watching an agent's work as it happens, with no unmerged code on your machine, and usable from a phone. It needs a frame stream built and software rendering fast enough to watch.
 - **Instead of the single review, or as well. Open.** Proposal: instead. The engineer is today's reviewer under another name, and reviewing twice buys nothing.
@@ -243,17 +406,35 @@ build of it there, kept current.
   build's source unpacked, and cargo builds it into the same layout (`<data dir>/shell`), which the launcher starts
   from as it always has. It needs cargo, and no Trailhead server on that machine.
 - **Two endpoints to allow.** The launcher has its own iroh identity (`launcher.key` beside the window's
-  `endpoint.key`), since it keeps building while the window runs and two processes can't share one. Until the server
-  answers, `trailhead app` prints both `trailhead factory allow` lines to run there. It signs in with the token saved
+  `endpoint.key`), since it keeps building while the window runs and two processes can't share one. While the server
+  hasn't answered, `trailhead app` dials its endpoint to learn which it is: refused (the dial is taken, then closed
+  as not allowed), and it prints both `trailhead factory allow` lines to run there; or not reached, and it says so
+  and prints no lines, since allowing the machine again changes nothing (TRAIL-1667). It signs in with the token saved
   for that server, else `TRAILHEAD_SHELL_TOKEN`, else one pasted at its prompt (`trailhead --as-me token add laptop`
   on the server), and saves it where the window looks, so it is asked for once.
 - **An update is offered when this machine has built it.** The launcher names its builder's state file to the window
   (`TRAILHEAD_SHELL_LOCAL_STATE`), and the window's notice reads the newest build from there instead of from the
   server: the server's newest isn't one this machine can start until it has compiled it, a minute or two later. What
   the update brings is still the server's list of commits.
-- **Not built:** a macOS app bundle or dock icon (the window is started from a terminal with `trailhead app`), and
-  the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from there.
-- **Not verified:** nothing has run on macOS. The first try is Lane's laptop.
+- **One launcher at a time.** `trailhead app` holds `launcher.lock` in the shell's directory while it runs, and a
+  second one is refused. Two would dial the server as the same two endpoints, and the relay sends the server's
+  answers to whichever dialed last, so the other's dials time out for as long as both run (TRAIL-1665: seen on the
+  Mac, reproduced with two relay-only clients on one key).
+- **A macOS app.** `trailhead app install` there writes `~/Applications/Trailhead.app`: Trailhead's icon
+  (`crates/trailhead/assets/trailhead.icns`, drawn by the shell's `icon` module with macOS's margin) and a script
+  that runs `trailhead app` with the PATH of the terminal that installed it, since an app started from the Dock has
+  no cargo on its PATH. What the launcher prints goes to `~/Library/Logs/Trailhead/launcher.log`. The window the
+  launcher starts takes the bundle's identity, so it is "Trailhead" with the icon in the Dock and the menu bar (which
+  is why the bundle isn't an `LSUIElement` agent: the window then had neither). The script sets `TRAILHEAD_APP_LOG`,
+  which tells the launcher nobody reads what it prints, so it says in a dialog (`osascript`,
+  `crates/trailhead/src/cmd/app_notice.rs`) why there is no window: while it waits for the server, with Quit, Show
+  Log and Keep Waiting, taken down when the server answers; and when it gives up (another launcher holds the lock, a
+  build failed, no token). Signing in still needs one start from a terminal, for the prompt. The dialogs have not
+  been seen on a Mac yet (TRAIL-1666).
+- **Not built:** the CLI or MCP reaching the server from another machine (TRAIL-71). The window is the way in from
+  there.
+- **Verified on Lane's Mac (2026-11-21):** the first build, the window signing in, an update arriving and being
+  taken from the rail, and the app started from Spotlight with its icon.
 
 ## Other things to settle
 

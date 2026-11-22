@@ -16,7 +16,8 @@ queue = ["TRAIL-102", "TRAIL-685", "TRAIL-888"]
 kind = "docker"
 
 [factory.stack]
-tools = { rust = "stable" }
+# Exact, and the same Rust as mise.toml (docs/factory/operating.md, "Tool versions" in the framework's docs).
+tools = { rust = "1.100.0" }
 
 [factory.checks]
 # Runs while install egress is open, so the warm checkpoint has every locked crate. Lookout is built too, though it
@@ -32,6 +33,11 @@ test = "cargo test"
 # Lookout isn't a default member, so the checks above skip it; these run when a change touches the UI (TRAIL-691).
 ui-lint = { run = "cargo clippy -p trailhead-ui -p trailhead-lookout --all-targets -- -D warnings", paths = ["clients/**"] }
 ui-test = { run = "cargo test -p trailhead-ui -p trailhead-lookout", paths = ["clients/**"] }
+
+# Pictures of what a UI change draws, before and after, for the task and the reviewer (docs/factory/sandbox.md#pictures).
+[factory.shots]
+run = "TZ=UTC CARGO_TARGET_DIR=\"$TRAILHEAD_CHECKOUT/target\" cargo test -p trailhead-shell -p trailhead-app-example -p trailhead-lookout --test shots -- --ignored"
+paths = ["clients/**"]
 
 [factory.egress]
 # crates.io stays open while the agent works, so it can add dependencies; a person approves any Cargo.lock change.
@@ -78,3 +84,12 @@ adapter = "claude-code"
 provider = "anthropic"
 model = "opus"
 budget = { usd = 2, minutes = 20, steps = 30 }
+
+# Plans a spec task with a person, by turns, into ungraded subtasks (docs/app-platform.md, "Planning an ask"). A spec
+# task's own `metadata.plan.spec.model` overrides the model.
+[factory.profiles.planner]
+role = "planner"
+adapter = "claude-code"
+provider = "anthropic"
+model = "fable"
+budget = { usd = 5, minutes = 30, steps = 80 }

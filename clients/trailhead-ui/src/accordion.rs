@@ -344,7 +344,7 @@ pub(crate) fn sync_accordions(
 }
 
 /// Make room at the end of a header once a control is added beside its title.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(crate) fn pad_accordion_headers(
     mut headers: Query<(&mut Node, &Children), (With<AccordionHeaderRow>, Changed<Children>)>,
 ) {

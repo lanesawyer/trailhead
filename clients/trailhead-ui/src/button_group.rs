@@ -13,7 +13,7 @@ use bevy::feathers::rounded_corners::RoundedCorners;
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
 
-use super::{Icon, Picked, button_icon, button_text, space};
+use super::{Icon, Picked, button_icon, button_text, extent, radius, space};
 
 /// A group's state, on its row: which option is chosen, if any.
 #[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -25,8 +25,9 @@ pub struct ButtonGroup {
 #[derive(Component, Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct GroupOption(usize);
 
-/// A group of `options` (a caption, after an icon when there is one), `chosen` showing as chosen. It fills the width
-/// it is given, the options sharing it evenly.
+/// A group of `options` (a caption, after an icon when there is one), `chosen` showing as chosen. Each option is as
+/// wide as its caption, and at least [`extent::GROUP_OPTION_MIN`]; a group with more options than its room holds
+/// wraps onto further rows, each row rounded at its own two ends.
 pub fn button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>) -> impl Scene {
     let last = options.len().saturating_sub(1);
     let buttons: Vec<Box<dyn SceneList>> = options
@@ -46,13 +47,18 @@ pub fn button_group(options: Vec<(String, Option<Icon>)>, chosen: Option<usize>)
             let variant = if Some(i) == chosen { ButtonVariant::Primary } else { ButtonVariant::Normal };
             Box::new(bsn_list! {
                 @FeathersButton { @caption: { inside }, @corners: { corners }, @variant: { variant } }
-                Node { column_gap: { px(space::ICON_LABEL) }, flex_grow: 1.0 }
+                Node { column_gap: { px(space::ICON_LABEL) }, min_width: { px(extent::GROUP_OPTION_MIN) } }
                 GroupOption({ i })
             })
         })
         .collect();
     bsn! {
-        Node { width: percent(100), column_gap: { px(space::SEAM) } }
+        Node {
+            max_width: percent(100),
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: { px(space::SEAM) },
+            row_gap: { px(space::SEAM) },
+        }
         ButtonGroup { chosen: { chosen } }
         Children [ { buttons } ]
     }
@@ -83,6 +89,33 @@ pub(crate) fn paint_groups(
             if let Ok((GroupOption(index), mut variant)) = options.get_mut(child) {
                 let wanted = if group.chosen == Some(*index) { ButtonVariant::Primary } else { ButtonVariant::Normal };
                 variant.set_if_neq(wanted);
+            }
+        }
+    }
+}
+
+/// Rounds each row of a group's options at its two ends and squares the joins between them, so a group that has
+/// wrapped reads as rows of joined buttons, not one row cut at the wrap.
+pub(crate) fn round_group_rows(
+    groups: Query<&Children, With<ButtonGroup>>,
+    mut options: Query<(&mut Node, &UiGlobalTransform), With<GroupOption>>,
+) {
+    for children in &groups {
+        let tops: Vec<Option<i32>> =
+            children.iter().map(|c| options.get(c).ok().map(|(_, at)| at.translation.y.round() as i32)).collect();
+        for (i, child) in children.iter().enumerate() {
+            let Ok((mut node, _)) = options.get_mut(child) else { continue };
+            let starts = i == 0 || tops[i - 1] != tops[i];
+            let ends = i + 1 == tops.len() || tops[i + 1] != tops[i];
+            let corners = match (starts, ends) {
+                (true, true) => RoundedCorners::All,
+                (true, false) => RoundedCorners::Left,
+                (false, true) => RoundedCorners::Right,
+                (false, false) => RoundedCorners::None,
+            };
+            let wanted = corners.to_border_radius(radius::CONTROL);
+            if node.border_radius != wanted {
+                node.border_radius = wanted;
             }
         }
     }
@@ -147,5 +180,37 @@ mod tests {
         app.world_mut().get_mut::<ButtonGroup>(group).unwrap().chosen = Some(1);
         settle(&mut app);
         assert_eq!(variants(&mut app), [Normal, Primary, Normal]);
+    }
+
+    #[test]
+    fn a_group_that_wrapped_rounds_each_row_at_its_own_ends() {
+        let mut app = App::new();
+        app.add_systems(Update, round_group_rows);
+        let group = app.world_mut().spawn(ButtonGroup::default()).id();
+        // Five options, three on the first row and two on the second.
+        let options: Vec<Entity> = [(0.0, 10.0), (70.0, 10.0), (140.0, 10.0), (0.0, 35.0), (70.0, 35.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (x, y))| {
+                let at = UiGlobalTransform::from_translation(Vec2::new(x, y));
+                app.world_mut().spawn((GroupOption(i), Node::default(), at, ChildOf(group))).id()
+            })
+            .collect();
+        app.update();
+        let corners: Vec<BorderRadius> =
+            options.iter().map(|o| app.world().get::<Node>(*o).unwrap().border_radius).collect();
+        let radius = |c: RoundedCorners| c.to_border_radius(radius::CONTROL);
+        use RoundedCorners::{Left, None, Right};
+        assert_eq!(corners, [Left, None, Right, Left, Right].map(radius));
+
+        // Back on one row, the join where it wrapped is squared again.
+        for (i, option) in options.iter().enumerate() {
+            let at = UiGlobalTransform::from_translation(Vec2::new(70.0 * i as f32, 10.0));
+            app.world_mut().entity_mut(*option).insert(at);
+        }
+        app.update();
+        let corners: Vec<BorderRadius> =
+            options.iter().map(|o| app.world().get::<Node>(*o).unwrap().border_radius).collect();
+        assert_eq!(corners, [Left, None, None, None, Right].map(radius));
     }
 }

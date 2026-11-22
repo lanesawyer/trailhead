@@ -4,9 +4,12 @@
 //! [`Press`] event, which runs headless); the page ([`Example::build_ui`]) is spawned on entering the app, despawned
 //! on leaving it, and its count line is updated in place. The count is kept in the [`LocalStore`], so it outlives a
 //! switch to another app and a restart of the shell. Its page in the shell's settings ([`COUNT_SETTINGS`]) resets it.
+//! Every [`MILESTONE`]th press raises a notification ([`Notify`]) about the count, and resetting it resolves what was
+//! raised ([`ResolveNotifications`]): how an app tells a person something.
 
 use bevy::prelude::*;
 use bevy::ui_widgets::Activate;
+use trailhead_shell::notifications::{Notify, ResolveNotifications};
 use trailhead_shell::settings::{PageId, SettingsPage};
 use trailhead_shell::{ActiveApp, AppId, LocalStore, Manifest, ShellApp};
 use trailhead_ui::{
@@ -18,6 +21,12 @@ pub const EXAMPLE: AppId = AppId("example");
 
 /// Where the count is kept in the [`LocalStore`].
 const PRESSES: &str = "presses";
+
+/// Every this many presses, the app raises a notification.
+pub const MILESTONE: u32 = 10;
+
+/// What the app's notifications are about, to resolve them by.
+const COUNT_SUBJECT: &str = "count";
 
 /// The app's page in the shell's settings: `OpenSettings { page: Some(COUNT_SETTINGS) }` opens it.
 pub const COUNT_SETTINGS: PageId = PageId::new(EXAMPLE, "count");
@@ -93,14 +102,21 @@ fn on_reset_button(activate: On<Activate>, buttons: Query<(), With<ResetButton>>
     }
 }
 
-fn count_press(_: On<Press>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>) {
+fn count_press(_: On<Press>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>, mut commands: Commands) {
     presses.0 += 1;
     store.set(EXAMPLE, PRESSES, presses.0);
+    if presses.0.is_multiple_of(MILESTONE) {
+        let notify = Notify::new(EXAMPLE, "example.milestone", count_words(presses.0))
+            .body("The example app's button. Resetting the count in its settings resolves this.")
+            .subject(COUNT_SUBJECT);
+        commands.trigger(notify);
+    }
 }
 
-fn reset_count(_: On<ResetCount>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>) {
+fn reset_count(_: On<ResetCount>, mut presses: ResMut<Presses>, mut store: ResMut<LocalStore>, mut commands: Commands) {
     presses.set_if_neq(Presses(0));
     store.set(EXAMPLE, PRESSES, 0);
+    commands.trigger(ResolveNotifications { source: EXAMPLE, subject: COUNT_SUBJECT.into() });
 }
 
 /// What the count line says.
@@ -193,6 +209,35 @@ mod tests {
         assert_eq!(first.world().resource::<LocalStore>().get::<u32>(EXAMPLE, PRESSES), Some(2));
         drop(first);
         assert_eq!(count(&headless(shell())), 2);
+    }
+
+    #[test]
+    fn every_tenth_press_raises_a_notification_and_a_reset_resolves_it() {
+        use trailhead_shell::commands::Method;
+        use trailhead_shell::connection::Connection;
+        use trailhead_shell::testing::{sent, set_connection};
+
+        let mut app = headless(ShellPlugin::new().with(Example));
+        set_connection(&mut app, Connection::Live);
+        for _ in 0..MILESTONE - 1 {
+            app.world_mut().trigger(Press);
+        }
+        app.update();
+        assert!(sent(&mut app).is_empty(), "nothing until the tenth");
+        app.world_mut().trigger(Press);
+        app.update();
+        let out = sent(&mut app);
+        let raised: Vec<_> = out.iter().map(|s| (s.request.method(), s.request.call.path())).collect();
+        assert_eq!(raised, [(Method::Post, "/v1/notifications".to_string())]);
+        let body = out[0].request.call.body().unwrap();
+        assert_eq!((body["source"].as_str(), body["subject"].as_str()), (Some("example"), Some("count")));
+        assert_eq!(body["title"], "Pressed 10 times");
+
+        app.world_mut().trigger(ResetCount);
+        app.update();
+        let out = sent(&mut app);
+        assert_eq!(out.iter().map(|s| s.request.call.path()).collect::<Vec<_>>(), ["/v1/notifications/resolve"]);
+        assert_eq!(out[0].request.call.body().unwrap()["subject"], "count");
     }
 
     #[test]

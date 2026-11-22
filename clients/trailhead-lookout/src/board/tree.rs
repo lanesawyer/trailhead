@@ -202,7 +202,7 @@ mod in_place_tests {
         q.iter(app.world()).map(|(e, c)| (c.0.key.to_lowercase(), e)).collect()
     }
 
-    fn column_of(app: &mut App, card: Entity) -> Status {
+    fn column_of(app: &App, card: Entity) -> Status {
         let body = app.world().get::<ChildOf>(card).expect("a card has a column").parent();
         app.world().get::<ColumnBody>(body).expect("in a column body").0
     }
@@ -276,13 +276,13 @@ mod in_place_tests {
     fn a_card_that_changes_column_keeps_its_entity_and_leaves_no_copy() {
         let mut app = app();
         let before = cards(&mut app);
-        assert_eq!(column_of(&mut app, before["t1"]), Status::Open);
+        assert_eq!(column_of(&app, before["t1"]), Status::Open);
 
         update_task(&mut app, "t1", "in_progress");
         let after = cards(&mut app);
         assert_eq!(after, before);
         assert_eq!(count_cards(&mut app), 4, "no stale copy in the old column");
-        assert_eq!(column_of(&mut app, after["t1"]), Status::InProgress);
+        assert_eq!(column_of(&app, after["t1"]), Status::InProgress);
         // The columns' children are what the view says.
         let mut q = app.world_mut().query::<(&ColumnBody, &Children)>();
         let held: HashMap<Status, usize> = q.iter(app.world()).map(|(b, c)| (b.0, c.len())).collect();
@@ -411,7 +411,7 @@ mod in_place_tests {
         settle(&mut app);
         let shown = cards(&mut app);
         assert_eq!(shown.len(), 4);
-        assert_eq!(column_of(&mut app, shown["t1"]), Status::Done);
+        assert_eq!(column_of(&app, shown["t1"]), Status::Done);
         for id in ["t2", "t3", "t4"] {
             assert_eq!(shown[id], before[id]);
         }

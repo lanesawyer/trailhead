@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::LOOKOUT;
 use crate::author::{Act, Authoring};
 use crate::factory::{FactoryStatus, PrLink, pr_link};
+use crate::graph::OpensGraph;
 use crate::inspector::{Neighbours, Selection, Subject};
 use crate::search::{Deep, DeepHit};
 use crate::widgets;
@@ -31,9 +32,9 @@ use crate::widgets::{
     priority_tone, select, space, status_label, token, tool_button,
 };
 
-/// The views of the app: the task board, the trail map, and one project's page ([`crate::project`]). It exists only
-/// while Lookout is the app the shell shows, so switching to another app leaves the view and tears its panel down;
-/// coming back starts on the board.
+/// The views of the app: the task board, the trail map, one project's page ([`crate::project`]), and one task's
+/// subtasks as a graph ([`crate::graph`]). It exists only while Lookout is the app the shell shows, so switching to
+/// another app leaves the view and tears its panel down; coming back starts on the board.
 #[derive(SubStates, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[source(ActiveApp = ActiveApp(LOOKOUT))]
 pub enum View {
@@ -43,6 +44,8 @@ pub enum View {
     Project,
     /// Every project, in a table.
     Projects,
+    /// One task's subtasks, by what depends on what ([`crate::graph`]).
+    Graph,
 }
 
 /// How many cards a column builds at first, and how many more each "show more" adds. A column holds hundreds

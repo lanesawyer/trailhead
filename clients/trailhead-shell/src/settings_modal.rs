@@ -1,13 +1,20 @@
 //! The settings modal ([`crate::settings`]) drawn: the kit's settings tabs down its side, a heading over each group of
 //! pages, and the page shown beside them. The modal follows [`SettingsShown`]: opened when it names a page, closed
 //! when it names none. The page shown is spawned when its tab is picked, filled by its [`PageEntry`]'s system, and
-//! despawned when another is picked; the tabs and the modal's frame stay.
+//! despawned when another is picked; the tabs and the modal's frame stay. A search field over the tabs narrows them
+//! to the pages whose title, group or keywords hold every word typed, and Enter in it turns to the first of those.
 
+use bevy::input::keyboard::{KeyCode, KeyboardInput};
+use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
+use bevy::text::EditableText;
 use bevy::ui_widgets::{ControlOrientation, SelectedTab, ValueChange};
-use trailhead_ui::{Modal, ModalSlots, UiPlace, open_modal, settings_page, spawn_settings_tabs, tab, tab_heading};
+use trailhead_ui::{
+    Modal, ModalSlots, UiPlace, open_modal, set_display, settings_page, size, space, spawn_search_field_filling,
+    spawn_settings_tabs, tab, tab_heading, text_dim,
+};
 
-use crate::settings::{CloseSettings, OpenSettings, PageId, SettingsPages, SettingsShown};
+use crate::settings::{CloseSettings, OpenSettings, PageEntry, PageId, SettingsPages, SettingsShown};
 use crate::settings_pages::SettingsPagesUiPlugin;
 
 /// The settings modal.
@@ -35,6 +42,18 @@ pub struct SettingsStrip;
 #[derive(Component, Debug, Clone, Copy)]
 pub struct SettingsTab(pub PageId);
 
+/// The heading over one group of tabs, by the group's name.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct SettingsGroup(pub &'static str);
+
+/// The search field over the tabs: its text entity.
+#[derive(Component)]
+pub struct SettingsSearch;
+
+/// The line under the tabs that says no page matches what was typed.
+#[derive(Component)]
+pub struct NoPageMatches;
+
 /// Where the page shown goes.
 #[derive(Component)]
 pub struct SettingsPane;
@@ -47,10 +66,10 @@ pub(crate) struct SettingsModalUiPlugin;
 
 impl Plugin for SettingsModalUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(SettingsPagesUiPlugin)
-            .add_observer(on_tab)
-            .add_observer(on_modal_gone)
-            .add_systems(Update, (sync_modal, fill_frame, leave_page, enter_page, mark_tab).chain().before(UiPlace));
+        app.add_plugins(SettingsPagesUiPlugin).add_observer(on_tab).add_observer(on_modal_gone).add_systems(
+            Update,
+            (sync_modal, fill_frame, leave_page, enter_page, mark_tab, narrow_tabs).chain().before(UiPlace),
+        );
     }
 }
 
@@ -80,16 +99,70 @@ fn fill_frame(
         let tabs = spawn_settings_tabs(&mut commands, slots.body);
         commands.entity(tabs.strip).insert(SettingsStrip);
         commands.entity(tabs.pane).insert(SettingsPane);
+        let search = spawn_search_field_filling(&mut commands, "Search settings");
+        commands.entity(search.field).insert(SettingsSearch).observe(on_search_enter);
+        // Lined up with the tabs' captions, and clear of the rule beside them.
+        let inset = Node { padding: UiRect::horizontal(px(space::PANEL_INSET)), ..default() };
+        let over_tabs = commands.spawn((Name::new("settings search"), inset)).add_child(search.entry).id();
+        commands.entity(tabs.side).insert_children(0, &[over_tabs]);
         let mut group = None;
         for page in pages.iter() {
             if group != Some(page.group) {
                 group = Some(page.group);
-                commands.spawn_scene(tab_heading(page.group)).insert(ChildOf(tabs.strip));
+                commands.spawn_scene(tab_heading(page.group)).insert((SettingsGroup(page.group), ChildOf(tabs.strip)));
             }
             commands
                 .spawn_scene(tab(page.title, ControlOrientation::Vertical))
                 .insert((SettingsTab(page.id), ChildOf(tabs.strip)));
         }
+        commands
+            .spawn_scene(bsn! { @text_dim("No settings match", size::SECONDARY) Node { display: Display::None } })
+            .insert((NoPageMatches, ChildOf(tabs.strip)));
+    }
+}
+
+/// Shows the tabs of the pages that match what the search field holds, each group's heading while one of its tabs
+/// shows, and a line saying so when none does. In place: a tab hidden is still there.
+fn narrow_tabs(
+    search: Query<&EditableText, With<SettingsSearch>>,
+    pages: Res<SettingsPages>,
+    tabs: Query<(Entity, &SettingsTab)>,
+    groups: Query<(Entity, &SettingsGroup)>,
+    none: Query<Entity, With<NoPageMatches>>,
+    mut nodes: Query<&mut Node>,
+) {
+    let Ok(typed) = search.single() else { return };
+    let query = typed.value().to_string();
+    let matching: Vec<&PageEntry> = pages.iter().filter(|p| p.matches(&query)).collect();
+    for (tab, SettingsTab(page)) in &tabs {
+        set_display(&mut nodes, tab, matching.iter().any(|p| p.id == *page));
+    }
+    for (heading, SettingsGroup(group)) in &groups {
+        set_display(&mut nodes, heading, matching.iter().any(|p| p.group == *group));
+    }
+    for line in &none {
+        set_display(&mut nodes, line, matching.is_empty());
+    }
+}
+
+/// Enter in the search field turns to the first page that matches.
+fn on_search_enter(
+    key: On<FocusedInput<KeyboardInput>>,
+    search: Query<&EditableText, With<SettingsSearch>>,
+    pages: Res<SettingsPages>,
+    mut commands: Commands,
+) {
+    let pressed = &key.input;
+    if !matches!(pressed.key_code, KeyCode::Enter | KeyCode::NumpadEnter)
+        || !pressed.state.is_pressed()
+        || pressed.repeat
+    {
+        return;
+    }
+    let Ok(typed) = search.get(key.event_target()) else { return };
+    let query = typed.value().to_string();
+    if let Some(page) = pages.iter().find(|p| p.matches(&query)) {
+        commands.trigger(OpenSettings { page: Some(page.id) });
     }
 }
 
@@ -257,6 +330,7 @@ mod tests {
             listed,
             [
                 ("Trailhead", "Appearance"),
+                ("Trailhead", "Notifications"),
                 ("Trailhead", "Connection"),
                 ("Trailhead", "Server"),
                 ("Trailhead", "About"),
@@ -281,8 +355,93 @@ mod tests {
             .collect();
         assert_eq!(
             words,
-            ["Trailhead", "tab appearance", "tab connection", "tab server", "tab about", "Notes", "tab tidy"]
+            [
+                "TRAILHEAD",
+                "tab appearance",
+                "tab notifications",
+                "tab connection",
+                "tab server",
+                "tab about",
+                "NOTES",
+                "tab tidy",
+                "No settings match"
+            ]
         );
+    }
+
+    /// The keys of the tabs showing, the groups whose heading shows, and whether the line saying nothing matches does.
+    fn narrowed(app: &mut App) -> (Vec<&'static str>, Vec<&'static str>, bool) {
+        let showing = |node: &Node| node.display != Display::None;
+        let world = app.world_mut();
+        let mut tabs: Vec<(usize, &'static str)> = Vec::new();
+        let pages: Vec<PageId> = world.resource::<SettingsPages>().iter().map(|p| p.id).collect();
+        for (tab, node) in world.query::<(&SettingsTab, &Node)>().iter(world) {
+            if showing(node) {
+                tabs.push((pages.iter().position(|p| *p == tab.0).unwrap(), tab.0.key));
+            }
+        }
+        tabs.sort();
+        let mut groups: Vec<&'static str> = world
+            .query::<(&SettingsGroup, &Node)>()
+            .iter(world)
+            .filter(|(_, n)| showing(n))
+            .map(|(g, _)| g.0)
+            .collect();
+        groups.sort();
+        let none = world.query_filtered::<&Node, With<NoPageMatches>>().single(world).unwrap();
+        (tabs.into_iter().map(|(_, key)| key).collect(), groups, showing(none))
+    }
+
+    fn search(app: &mut App, words: &str) -> Entity {
+        let field = one::<With<SettingsSearch>>(app);
+        app.world_mut().entity_mut(field).insert(EditableText::new(words));
+        settle(app);
+        field
+    }
+
+    #[test]
+    fn the_search_narrows_the_tabs_in_place_and_enter_turns_to_the_first_that_matches() {
+        let mut app = app();
+        open(&mut app, None);
+        let all = ["appearance", "notifications", "connection", "server", "about", "tidy"];
+        assert_eq!(narrowed(&mut app), (all.to_vec(), vec!["Notes", "Trailhead"], false));
+        let tabs = |app: &mut App| -> Vec<Entity> {
+            let mut tabs: Vec<Entity> =
+                app.world_mut().query_filtered::<Entity, With<SettingsTab>>().iter(app.world()).collect();
+            tabs.sort();
+            tabs
+        };
+        let before = tabs(&mut app);
+
+        // A page's own keywords, its title and its app's name all find it, whatever the case.
+        search(&mut app, "Text SIZE");
+        assert_eq!(narrowed(&mut app), (vec!["appearance"], vec!["Trailhead"], false));
+        search(&mut app, "tidy");
+        assert_eq!(narrowed(&mut app), (vec!["tidy"], vec!["Notes"], false));
+        search(&mut app, "notes");
+        assert_eq!(narrowed(&mut app), (vec!["tidy"], vec!["Notes"], false));
+        search(&mut app, "nothing like this");
+        assert_eq!(narrowed(&mut app), (vec![], vec![], true));
+        assert_eq!(shown(&mut app), [APPEARANCE], "the page shown stays while the tabs narrow");
+
+        let field = search(&mut app, "endpoint");
+        assert_eq!(narrowed(&mut app), (vec!["connection"], vec!["Trailhead"], false));
+        let window = app.world_mut().spawn(Window::default()).id();
+        let enter = KeyboardInput {
+            key_code: KeyCode::Enter,
+            logical_key: Key::Enter,
+            state: ButtonState::Pressed,
+            text: None,
+            repeat: false,
+            window,
+        };
+        app.world_mut().trigger(FocusedInput::new(field, enter, window));
+        settle(&mut app);
+        assert_eq!(shown(&mut app), [CONNECTION]);
+
+        search(&mut app, "");
+        assert_eq!(narrowed(&mut app), (all.to_vec(), vec!["Notes", "Trailhead"], false));
+        assert_eq!(tabs(&mut app), before, "every tab is the entity it was");
     }
 
     #[test]
