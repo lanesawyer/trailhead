@@ -3,7 +3,9 @@
 pub(crate) mod access;
 pub(crate) mod app;
 mod app_install;
+mod app_lock;
 mod app_notice;
+#[cfg(feature = "factory")]
 mod app_remote;
 pub(crate) mod attachments;
 pub(crate) mod claims;

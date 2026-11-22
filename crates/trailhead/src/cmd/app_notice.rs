@@ -8,6 +8,7 @@ use std::process::{Child, Command, Stdio};
 /// app started it.
 pub(crate) const LOG_ENV: &str = "TRAILHEAD_APP_LOG";
 
+#[cfg(any(feature = "factory", test))]
 const QUIT: &str = "Quit";
 const SHOW_LOG: &str = "Show Log";
 
@@ -26,6 +27,7 @@ impl Notice {
 
     /// Says why the launcher is waiting, in place of what it said before. The dialog stays up until it is answered or
     /// the wait is over; the launcher carries on behind it, and [`quit`](Self::quit) reads the answer.
+    #[cfg(feature = "factory")]
     pub(crate) fn waiting(&mut self, text: &str) {
         self.close();
         let dialog = dialog(text, &[QUIT, SHOW_LOG, "Keep Waiting"])
@@ -40,6 +42,7 @@ impl Notice {
     }
 
     /// Whether the dialog was answered with Quit. Show Log opens the log, and the launcher keeps waiting.
+    #[cfg(feature = "factory")]
     pub(crate) fn quit(&mut self) -> bool {
         let answered = self.shown.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
         if !answered {

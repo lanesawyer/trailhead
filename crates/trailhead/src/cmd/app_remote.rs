@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointId, SecretKey};
-use trailhead_builder::{Boxed, Job, Origin, System, Tools};
+use std::ffi::OsString;
+
+use trailhead_builder::{Boxed, Builder, Job, Layout, Origin, ShellConfig, Step, System, Tools};
 use trailhead_client::Health;
 use trailhead_client::creds::{Cred, CredStore};
 use trailhead_core::shell::ShellBuild;
@@ -20,6 +22,8 @@ use trailhead_server::Paths;
 use trailhead_wire::ui::{UiTunnel, dial_ui, open_ui_tunnel, refused};
 use trailhead_wire::{parse_endpoint_id, parse_secret_key};
 
+use super::app::{launch, run, short};
+use super::app_lock::shell_dir;
 use super::app_notice::Notice;
 
 /// The environment variable a pasted user token is read from, as the window reads it.
@@ -38,41 +42,6 @@ pub(crate) struct Link {
     http: reqwest::Client,
     base: String,
     token: String,
-}
-
-/// Where the window keeps its endpoint key and this launcher keeps its own: `TRAILHEAD_SHELL_DIR`, else `shell` in
-/// Trailhead's config directory, as the window reads it.
-pub(crate) fn shell_dir(paths: &Paths) -> PathBuf {
-    std::env::var_os("TRAILHEAD_SHELL_DIR").map_or_else(|| paths.config_dir.join("shell"), PathBuf::from)
-}
-
-/// Held by the one launcher running from a shell directory, until it exits.
-pub(crate) struct OnlyLauncher {
-    _lock: std::fs::File,
-}
-
-/// Takes the shell directory's lock, or says another launcher has it. The launcher and its window dial the server as
-/// the keys in that directory, and a second pair under the same keys doesn't get a second connection: the relay
-/// sends the server's answers to whichever of the two dialed last, so the other's dials time out for as long as both
-/// run (TRAIL-1665: a Mac whose launcher never connected while an earlier one was still up). The lock is the
-/// operating system's, so it goes when the process does, however it ends.
-pub(crate) fn only_launcher(dir: &Path) -> Result<OnlyLauncher> {
-    std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
-    let path = dir.join("launcher.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| path.display().to_string())?;
-    match file.try_lock() {
-        Ok(()) => Ok(OnlyLauncher { _lock: file }),
-        Err(std::fs::TryLockError::WouldBlock) => bail!(
-            "the Trailhead window is already running here (another `trailhead app` holds {}). Use that window; a second one would dial the server under the same identity and cut both off.",
-            path.display()
-        ),
-        Err(std::fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("locking {}", path.display())),
-    }
 }
 
 /// The key in `path`, made and saved when there is none: an endpoint's identity is what a person allows on the
@@ -346,20 +315,64 @@ pub(crate) async fn unpack(tar: &[u8], src: &Path) -> Result<(), String> {
     }
 }
 
+/// Saves `[shell] from` in the user config, so `trailhead app` builds and runs that server's builds here.
+pub(crate) fn build_from(paths: &Paths, endpoint: &str) -> Result<()> {
+    parse_endpoint_id(endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut cfg = crate::config::load(paths)?;
+    let table = cfg.shell.get_or_insert_with(Default::default);
+    if table.contains_key("repo") {
+        bail!(
+            "{} has `[shell] repo`: this machine builds the window from its own apps repo. Remove it to build another server's builds instead",
+            crate::config::path(paths).display()
+        );
+    }
+    table.insert("from".into(), toml::Value::String(endpoint.trim().to_string()));
+    crate::config::save(paths, &cfg)?;
+    println!(
+        "saved in {}. `trailhead app` now builds the window from that server's builds and runs it; the first build takes a while",
+        crate::config::path(paths).display()
+    );
+    Ok(())
+}
+
+/// `trailhead app` with `[shell] from`: reaches the server, builds its newest build here when this machine has
+/// none, keeps building its newer ones while the window runs, and runs the window as the launcher always does.
+pub(crate) async fn launch_remote(
+    paths: &Paths,
+    from: &str,
+    config: ShellConfig,
+    layout: &Layout,
+    args: &[OsString],
+) -> Result<i32> {
+    let link = Link::open(paths, from).await?;
+    let builder = Builder::new(FromServer::new(link, from), config, std::path::PathBuf::new(), layout.clone());
+    if layout.load().current.is_none() {
+        eprintln!(
+            "trailhead app: building the window for the first time, which takes a while (ten minutes or more); cargo's output is in {}",
+            layout.log().display()
+        );
+        if let Step::Failed(rev) = builder.step().await.map_err(anyhow::Error::msg)? {
+            let why = layout.load().error.map(|e| e.message).unwrap_or_default();
+            bail!("the build of {} failed ({why}); its output is in {}", short(&rev), layout.log().display());
+        }
+    }
+    let building = builder.spawn();
+    // The window dials the server it is built from, unless told another.
+    let dial = [OsString::from(from)];
+    let args = if args.is_empty() { &dial[..] } else { args };
+    let state = layout.state_file();
+    let read = || ShellBuild { configured: true, ..layout.read() };
+    // The window runs for hours on this thread; the builder's task carries on beside it.
+    let code = tokio::task::block_in_place(|| {
+        launch(layout, read, |binary, rev| run(binary, rev, args, Some(&state)), &paths.config_dir)
+    });
+    building.stop().await;
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_second_launcher_is_refused_until_the_first_is_gone() {
-        let dir = tempfile::tempdir().unwrap();
-        let shell = dir.path().join("shell");
-        let first = only_launcher(&shell).unwrap();
-        let refused = only_launcher(&shell).err().expect("the lock is held").to_string();
-        assert!(refused.contains("already running") && refused.contains("launcher.lock"), "{refused}");
-        drop(first);
-        only_launcher(&shell).expect("free once the first launcher is gone");
-    }
 
     #[tokio::test]
     async fn a_build_s_source_replaces_what_was_unpacked_before() {
