@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     /// A Docker API on a unix socket that answers every request with an empty list and records the paths asked for.
-    async fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
+    fn recording_docker(dir: &Path) -> (Docker, Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let sock = dir.join("docker.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -1039,7 +1039,7 @@ mod tests {
     #[tokio::test]
     async fn listing_read_only_never_touches_the_gateway() {
         let dir = tempfile::tempdir().unwrap();
-        let (docker, seen) = recording_docker(dir.path()).await;
+        let (docker, seen) = recording_docker(dir.path());
         let config = DockerConfig::new(dir.path().join("state"), Default::default());
         let compute = DockerCompute::read_only_with_client(docker, config);
         assert!(compute.list(&Labels::default()).await.unwrap().is_empty());
@@ -1052,7 +1052,7 @@ mod tests {
     #[tokio::test]
     async fn changing_read_only_is_refused_before_the_gateway() {
         let dir = tempfile::tempdir().unwrap();
-        let (docker, seen) = recording_docker(dir.path()).await;
+        let (docker, seen) = recording_docker(dir.path());
         let config = DockerConfig::new(dir.path().join("state"), Default::default());
         let compute = DockerCompute::read_only_with_client(docker, config);
         assert!(compute.gateway().await.is_err());
@@ -1075,7 +1075,7 @@ mod tests {
     async fn listing_normally_watches_the_gateway() {
         // The control for the test above: the same list without `read_only` does go looking for the gateway.
         let dir = tempfile::tempdir().unwrap();
-        let (docker, seen) = recording_docker(dir.path()).await;
+        let (docker, seen) = recording_docker(dir.path());
         let config = DockerConfig::new(dir.path().join("state"), Default::default());
         let compute = DockerCompute::with_client(docker, config);
         compute.list(&Labels::default()).await.unwrap();

@@ -146,7 +146,7 @@ fn track_events(mut items: MessageReader<SyncItem>, mut latest: ResMut<Latest>) 
     }
 }
 
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn rebuild(
     selection: Res<Selection>,
     latest: Res<Latest>,

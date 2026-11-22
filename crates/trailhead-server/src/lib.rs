@@ -302,7 +302,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
     };
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         use std::sync::atomic::Ordering::SeqCst;
-        #[cfg_attr(not(feature = "factory"), allow(unused_mut))]
+        #[cfg_attr(not(feature = "factory"), expect(unused_mut))]
         let mut upgrade = signals.first().await;
         if upgrade {
             tracing::info!("a newer trailhead is installed; restarting onto it once the factory's runs finish");
@@ -315,7 +315,7 @@ pub async fn serve_local(cfg: LocalConfig) -> Result<Exit, Box<dyn std::error::E
             match factory.runs_in_flight() {
                 0 => tracing::info!("stopping the factory; no runs in flight"),
                 runs => {
-                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight")
+                    tracing::info!(runs, "draining the factory: no new runs; a second signal cancels those in flight");
                 }
             }
             factory.drain();
@@ -517,7 +517,7 @@ impl Signals {
         false
     }
 
-    #[cfg_attr(not(feature = "factory"), allow(dead_code))]
+    #[cfg_attr(not(feature = "factory"), expect(dead_code))]
     async fn next(&mut self) {
         tokio::select! {
             _ = self.int.recv() => tracing::info!("received SIGINT; shutting down"),

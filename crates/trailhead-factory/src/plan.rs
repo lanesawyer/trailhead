@@ -233,7 +233,7 @@ pub fn changes(current: &[PlanTask], tasks: &[ProposedTask]) -> PlanChanges {
                     outer.entry(node.clone()).or_default().push(TaskKey::from(b));
                 }
                 None => {
-                    out.warnings.push(format!("{} waits on `{b}`, which names no task, so it was dropped", name(node)))
+                    out.warnings.push(format!("{} waits on `{b}`, which names no task, so it was dropped", name(node)));
                 }
             }
         }

@@ -191,7 +191,7 @@ pub(crate) fn scroll_range(computed: &ComputedNode) -> Vec2 {
 /// Brings an area's [`ScrollPosition`] back within its range once layout has found it shorter: content that shrank
 /// to fit leaves no position behind for the next growth to jump to. Layout draws within the range anyway; this keeps
 /// the position the wheel starts from honest.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(super) fn clamp_scroll_positions(
     mut areas: Query<
         (&ComputedNode, &mut ScrollPosition),

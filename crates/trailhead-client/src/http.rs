@@ -955,7 +955,7 @@ impl Client {
         let path = params
             .iter()
             .fold(route.path.to_string(), |path, (name, value)| path.replace(&format!("{{{name}}}"), value));
-        self.http.request(route.method.clone(), format!("{}{path}", self.base)).bearer_auth(&self.token)
+        self.http.request(route.method, format!("{}{path}", self.base)).bearer_auth(&self.token)
     }
 
     /// Sends `req` to an endpoint that answers `204 No Content`.

@@ -54,7 +54,7 @@ impl Factory {
         match self.tracker.follow_ups(&task.key).await {
             Ok(follow_ups) => context.follow_ups = follow_ups,
             Err(e) => {
-                tracing::warn!(task = %task.key, error = %e, "couldn't list the task's follow-ups; reviewing without them")
+                tracing::warn!(task = %task.key, error = %e, "couldn't list the task's follow-ups; reviewing without them");
             }
         }
         let head = match &self.codehost {

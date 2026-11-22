@@ -448,7 +448,7 @@ impl World {
         Ok(())
     }
 
-    async fn pass(&mut self, reconcile: bool) -> String {
+    async fn pass(&self, reconcile: bool) -> String {
         if reconcile {
             match self.factory.reconcile().await {
                 Ok(done) => format!("{done:?}"),

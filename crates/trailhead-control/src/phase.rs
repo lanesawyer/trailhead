@@ -222,7 +222,7 @@ mod tests {
     fn a_workers_breach_not_yet_parked_is_finished_unless_the_run_is_still_going() {
         let breach = WorkerBreach { run: "trail-7-a1".into(), reason: "tokens".into(), parked: false, stuck: false };
         let run = RunRecord { worker_breach: Some(breach.clone()), ..RunRecord::default() };
-        let t = task(Status::InProgress, Some("factory/trail-7-a1"), run.clone());
+        let t = task(Status::InProgress, Some("factory/trail-7-a1"), run);
         assert_eq!(phase(&t, ME, false), Phase::WorkerBreachUnparked(&breach));
         assert_eq!(phase(&t, ME, true), Phase::Running, "a busy sandbox is followed first");
 

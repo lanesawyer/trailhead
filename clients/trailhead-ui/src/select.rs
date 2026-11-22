@@ -139,7 +139,6 @@ pub struct SelectHint(pub String);
 pub(crate) struct HintShown;
 
 /// Shows each hinted select's hint while none of its rows is chosen, and hands the caption back when one is.
-#[allow(clippy::type_complexity)]
 pub(crate) fn show_select_hints(
     selects: Query<(Entity, &SelectHint, &SelectTones)>,
     children: Query<&Children>,
@@ -187,7 +186,7 @@ pub struct SelectTones(pub Vec<Option<Token>>);
 
 /// Keeps each select's caption on one line, and in the tone of the option it shows. Feathers copies the chosen row's
 /// words into the caption when a row is selected; this follows it with the row's color.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::type_complexity, clippy::too_many_arguments)]
 pub(crate) fn style_select_captions(
     new_texts: Query<Entity, Added<Text>>,
     chosen_icons: Query<(), With<ChosenIcon>>,
@@ -271,7 +270,6 @@ fn margins(node: &Node) -> f32 {
 }
 
 /// Ends each select's caption with an ellipsis where the select's width cuts it off.
-#[allow(clippy::type_complexity)]
 pub(crate) fn fit_select_captions(
     mut captions: Query<(Entity, &mut CaptionFit, &mut Text, &TextLayoutInfo)>,
     parents: Query<&ChildOf>,

@@ -257,7 +257,7 @@ impl Plugin for TransitionPlugin {
 }
 
 /// A switch asked for: start one, retarget the one under way, or switch at once.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn on_switch(
     switch: On<SwitchApp>,
     apps: Res<Apps>,

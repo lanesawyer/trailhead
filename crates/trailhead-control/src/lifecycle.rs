@@ -311,7 +311,7 @@ impl Factory {
     }
 
     /// What a worker's run came to: the report acted on, or the failure given back to the queue.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) async fn conclude(
         &self,
         task: &Task,
@@ -531,7 +531,7 @@ impl Factory {
     /// claimed the task. An unheld task is claimed only to be parked, never to be released again: a claim and
     /// release of a task waiting in review for its rework reads to core as the factory sending the work to review,
     /// after which it may neither approve nor finish it (TRAIL-1462).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn infra_failed_by(
         &self,
         task: &Task,

@@ -324,7 +324,7 @@ fn update_turn(view: Res<GraphView>, mut lines: Query<(Entity, &Notice), With<Tu
 
 /// One message per comment, kept by key: a new one is spawned, a changed one rewritten in place, and the body scrolls
 /// to the newest when one arrives.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn sync_messages(
     view: Res<GraphView>,
     list: Query<Entity, With<ThreadList>>,
@@ -380,7 +380,7 @@ fn spawn_said(commands: &mut Commands, said: &Said) -> Entity {
 
 /// Reply is pressable with something typed, a question to answer, the connection live and no reply in flight; the
 /// line under the box says why not.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn gate_reply(
     view: Res<GraphView>,
     connection: Res<State<Connection>>,

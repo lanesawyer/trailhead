@@ -324,7 +324,7 @@ impl Factory {
             match codehost.update_branch(pr).await? {
                 BranchUpdate::Conflict => {
                     self.merger.updating.lock().unwrap().remove(&task.key);
-                    self.rework_conflict(task, pr, attempt).await?
+                    self.rework_conflict(task, pr, attempt).await?;
                 }
                 // CI starts over on the new head; the next pass looks at it again.
                 BranchUpdate::Updated => {

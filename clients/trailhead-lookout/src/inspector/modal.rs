@@ -119,7 +119,7 @@ pub(super) fn spawn_tools(commands: &mut Commands, tools: Entity) -> Tools {
 
 /// Keeps the header's controls in line with the task: an arrow is off at its column's end, the menu shows only what
 /// the task offers (and nothing while offline), and the note says where its last command stands.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn sync_tools(
     state: Res<InspectorState>,
     connection: Res<State<Connection>>,

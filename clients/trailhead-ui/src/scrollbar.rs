@@ -94,7 +94,7 @@ fn step(fade: f32, shown: bool, seconds: f32) -> f32 {
 /// Fades each scrollbar in while its target has range to scroll and the pointer is over the node holding the two and
 /// inside the window, or its thumb is being dragged; fades it out otherwise. A holder is given [`Hovered`] the first
 /// time it is seen. While a bar is fading, the app is asked to redraw, since it otherwise only does on input.
-#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn show_scrollbars(
     mut bars: Query<(Entity, &Scrollbar, &ChildOf, &mut Node, Option<&mut ScrollbarFade>)>,
     targets: Query<&ComputedNode>,
@@ -213,7 +213,7 @@ mod tests {
             .insert_resource(Time::<()>::default())
             .insert_resource(Tick(1.0))
             .add_systems(First, |tick: Res<Tick>, mut time: ResMut<Time>| {
-                time.advance_by(std::time::Duration::from_secs_f32(tick.0))
+                time.advance_by(std::time::Duration::from_secs_f32(tick.0));
             })
             .add_systems(Update, show_scrollbars);
         let mut window = Window::default();

@@ -56,7 +56,7 @@ pub(crate) async fn agent(cx: &Ctx, cmd: AgentCmd) -> Result<()> {
                 match saved {
                     Some(Saved::Keyring) => println!("token saved to the OS keyring; use `trailhead --as {name}`"),
                     Some(Saved::File(path)) => {
-                        println!("token saved to {}; use `trailhead --as {name}`", path.display())
+                        println!("token saved to {}; use `trailhead --as {name}`", path.display());
                     }
                     None => println!("token (shown once): {}", created.secret),
                 }

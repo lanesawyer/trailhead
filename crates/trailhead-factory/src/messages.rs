@@ -40,7 +40,7 @@ pub struct Wording {
 /// (shadow).` or `Grade 3 (Cargo.toml changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
 pub fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
-    let message = gate_message(grade, d, &said);
+    let message = gate_message(grade, d, said);
     match said.changes {
         Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
         Some(Rework::Parked) => format!("{message} The latest review asked for changes; the task is parked for Lane."),
@@ -58,8 +58,8 @@ pub fn status_comment(message: &str, history: &[Said]) -> String {
     format!("{message}\n\nHistory:\n{}", lines.join("\n"))
 }
 
-fn gate_message(grade: &PrGrade, d: &MergeDecision, said: &Wording) -> String {
-    let Wording { auto_merge, merging, behind, .. } = *said;
+fn gate_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
+    let Wording { auto_merge, merging, behind, .. } = said;
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),

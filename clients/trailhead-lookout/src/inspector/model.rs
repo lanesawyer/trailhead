@@ -448,7 +448,7 @@ pub(super) fn facts(
     let mut crumbs: Vec<String> = project_key.iter().cloned().collect();
     crumbs.extend(parent.map(|p| p.key.0.clone()));
     crumbs.push(task.key.0.clone());
-    let project = project_key.clone();
+    let project = project_key;
     let parent = parent.map(|p| Subtask {
         id: p.id.to_string(),
         key: p.key.0.clone(),

@@ -564,7 +564,7 @@ impl Runner {
         (out, retried)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn finish(
         &self,
         req: &RunRequest,

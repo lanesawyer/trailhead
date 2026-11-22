@@ -216,7 +216,13 @@ pub fn check(crate_root: impl AsRef<Path>, dirs: &[&str], rules: &[Rule], allowe
                 match allowed.iter().position(|a| a.path == relative && (a.rule == rule.name || a.rule == "*")) {
                     Some(at) => used[at] = true,
                     None => {
-                        found.push(format!("{relative}:{}: [{}] {} ({})", number + 1, rule.name, text.trim(), rule.fix))
+                        found.push(format!(
+                            "{relative}:{}: [{}] {} ({})",
+                            number + 1,
+                            rule.name,
+                            text.trim(),
+                            rule.fix
+                        ));
                     }
                 }
             }

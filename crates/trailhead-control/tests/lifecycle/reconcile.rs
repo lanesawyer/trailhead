@@ -333,7 +333,7 @@ async fn no_worker_starts_on_a_task_whose_pr_closed_meanwhile() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
 
     r.codehost.close(&pr);
     let workers = |r: &Rig| r.daemon.requests().iter().filter(|q| q.role == Role::Worker).count();
@@ -352,7 +352,7 @@ async fn a_closed_pr_whose_claim_fails_leaves_the_task_in_review() {
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     r.tracker.set_status(&key, Status::InReview);
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
     r.codehost.close(&pr);
 
     r.tracker.fail_next("factory", TrackerOp::Claim, 1);
@@ -369,7 +369,7 @@ async fn a_closed_pr_on_an_approved_task_whose_claim_fails_leaves_it_in_review()
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
     r.tracker.set_status(&key, Status::Approved);
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
     r.codehost.close(&pr);
 
     r.tracker.fail_next("factory", TrackerOp::Claim, 1);
@@ -420,7 +420,7 @@ async fn a_parked_task_whose_pr_is_merged_is_finished() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
     r.codehost.close(&pr);
     r.factory.tick().await.unwrap();
     assert_eq!(r.tracker.task(&key).status, Status::NeedsInput);
@@ -440,7 +440,7 @@ async fn a_merged_pr_closes_a_task_still_claimed_by_the_sub_agent_that_parked_it
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
     r.codehost.close(&pr);
     r.factory.tick().await.unwrap();
     let task = r.tracker.task(&key);
@@ -472,7 +472,7 @@ async fn reconcile_finishes_an_open_task_whose_pr_merged() {
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(request_changes("Add a test.")));
     r.factory.tick().await.unwrap();
-    let pr = r.tracker.task(&key).run.pr.clone().expect("a PR");
+    let pr = r.tracker.task(&key).run.pr.expect("a PR");
     // Review asked for changes and the task went back to the queue, unclaimed.
     r.tracker.set_status(&key, Status::Open);
 

@@ -110,7 +110,7 @@ pub(super) fn focus_composer(
 }
 
 /// The comment box's buttons: send, set aside, and stop answering.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn on_compose_press(
     activate: On<Activate>,
     parts: Query<&ComposePart>,

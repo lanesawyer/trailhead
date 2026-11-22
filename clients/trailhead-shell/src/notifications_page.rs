@@ -157,7 +157,7 @@ pub(crate) fn notifications_page(
         let (minutes, chosen) = times(shown.quiet_hours, which);
         let words = minutes.iter().map(|m| time_words(*m)).collect();
         let control = bsn_list! {
-            @select(words, Some(chosen), TIMES_SHOWN) which TimeChoices({ minutes.clone() })
+            @select(words, Some(chosen), TIMES_SHOWN) which TimeChoices({ minutes })
             Node { align_self: AlignSelf::FlexStart }
         };
         commands.spawn_scene(setting(label, note, control)).insert((QuietRow, ChildOf(quiet.rows)));
@@ -253,7 +253,7 @@ fn on_save(activate: On<Activate>, saves: Query<(), With<SaveNotifications>>, mu
 
 /// Shows the settings as read with the edits made: each source's level and its note, the switches, and the quiet
 /// hours' times only while they are on.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn show_choices(
     prefs: Res<NotificationPrefs>,
     state: Res<NotificationsPage>,
@@ -319,7 +319,7 @@ fn show_times(
 
 /// The page's notices, and its Save: enabled only with an edit to save over a live connection, once the settings are
 /// read.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn show_notices(
     prefs: Res<NotificationPrefs>,
     state: Res<NotificationsPage>,

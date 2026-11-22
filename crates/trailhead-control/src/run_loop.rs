@@ -458,7 +458,7 @@ impl Factory {
         let tasks = if waiting == 1 { "task" } else { "tasks" };
         if parked_fill_repo_cap(parked.len(), max_sandboxes) {
             tracing::warn!(
-                held_by = collapse_repeats(parked.clone()).join(", "),
+                held_by = collapse_repeats(parked).join(", "),
                 max_sandboxes,
                 "{waiting} ready {tasks} waiting; all sandboxes held by parked tasks. Answer or cancel them to free a place",
             );

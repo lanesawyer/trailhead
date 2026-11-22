@@ -116,7 +116,7 @@ impl Shell {
         let exit = app
             .add_plugins(DefaultPlugins.set(WindowPlugin { primary_window: Some(window), ..default() }))
             .insert_resource(place)
-            .insert_resource(ShellDir(self.dir.clone()))
+            .insert_resource(ShellDir(self.dir))
             // Update on input, and often enough for news from a background thread to show, instead of redrawing
             // every frame.
             .insert_resource(WinitSettings {

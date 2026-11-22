@@ -224,7 +224,7 @@ pub fn files_text(dir: Option<&ShellDir>) -> String {
 }
 
 /// Keeps the Connection page's texts current, and Re-dial pressable only with a server to dial.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn refresh_connection(
     mut texts: Query<(&Shows, &mut Text)>,
     acts: Query<(Entity, &ConnectionAct, Has<InteractionDisabled>)>,

@@ -1001,7 +1001,7 @@ async fn unnest_commitless_repositories(dir: &Path) {
         };
         match removed {
             Ok(()) => {
-                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit")
+                tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit");
             }
             Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
         }

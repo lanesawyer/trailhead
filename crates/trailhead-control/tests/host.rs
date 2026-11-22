@@ -56,7 +56,7 @@ fn repo(name: &str, extra: &str, compute: &FakeCompute, host: &Arc<Host>) -> Rep
     let harness = Arc::new(ScriptedHarness::new());
     let heads = codehost.clone();
     let daemon = Arc::new(
-        LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+        LocalDaemon::new(harness.clone(), Arc::new(codehost), tracker.clone())
             .with_heads(move |repo, branch| heads.head(repo, branch)),
     );
     let factory = Factory::new(
@@ -168,7 +168,7 @@ async fn two_repos_loops_run_at_once_each_taking_only_its_own_projects_tasks() {
         let harness = Arc::new(ScriptedHarness::new());
         let heads = codehost.clone();
         let daemon = Arc::new(
-            LocalDaemon::new(harness.clone(), Arc::new(codehost.clone()), tracker.clone())
+            LocalDaemon::new(harness.clone(), Arc::new(codehost), tracker.clone())
                 .with_heads(move |repo, branch| heads.head(repo, branch)),
         );
         let factory = Arc::new(Factory::new(

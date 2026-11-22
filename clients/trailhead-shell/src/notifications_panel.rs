@@ -247,8 +247,6 @@ fn give_bells_counts(bells: Query<Entity, BareBells>, mut commands: Commands) {
 type NewCounts = Or<(Added<BellCount>, Added<AppCount>)>;
 
 /// Keeps the counts on the bells and on the apps' buttons, and the bells' hints, in step with what is unread, in place.
-// A Bevy system takes what it reads and writes as parameters.
-#[allow(clippy::too_many_arguments)]
 fn show_counts(
     mirrored: Query<&Mirrored<Notification>>,
     changed: Query<(), Changed<Mirrored<Notification>>>,
@@ -413,7 +411,7 @@ fn now() -> i64 {
 /// A card for each notification the filter lists, kept in step with the mirror and the older ones read: cards are
 /// added, moved, changed and removed in place, never redrawn. Their ages are worked out again every [`AGES_EVERY`].
 // A Bevy system takes what it reads and writes as parameters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn sync_cards(
     lists: Query<Entity, With<NotificationList>>,
     added: Query<(), Added<NotificationList>>,
@@ -555,7 +553,7 @@ impl CardEdit<'_, '_> {
 /// Shows Show older under all of them while there may be more, disabled while a page is read; and Mark all read and
 /// each card's mark, disabled while not live and, for Mark all read, while nothing is unread.
 // A Bevy system takes what it reads and writes as parameters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn show_footer(
     filter: Res<NotificationFilter>,
     history: Res<NotificationHistory>,

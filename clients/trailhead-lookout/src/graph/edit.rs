@@ -240,7 +240,7 @@ pub(super) fn on_add(
 }
 
 /// A node's menu item: a split is sent at once, the rest open their modal.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn on_node_act(
     activate: On<Activate>,
     acts: Query<&NodeAct>,
@@ -271,7 +271,7 @@ pub(super) fn on_node_act(
             }
         }
         NodeEdit::DependsOn => {
-            open(&mut form, &mut commands, PlanEdit::DependsOn(act.id.clone()), format!("{key} depends on…"))
+            open(&mut form, &mut commands, PlanEdit::DependsOn(act.id.clone()), format!("{key} depends on…"));
         }
         NodeEdit::NoLongerDependsOn => open(
             &mut form,
@@ -335,7 +335,7 @@ pub(super) fn fill_modal(
 }
 
 /// The modal's button: the request for its change, from what is typed or chosen.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn on_save(
     activate: On<Activate>,
     saves: Query<(), With<EditSave>>,

@@ -309,7 +309,7 @@ pub(super) fn layout_task(
         add(&mut side, "s/parent", "Parent", vec![row]);
     }
     if !key.is_empty() {
-        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key.clone()))]);
+        add(&mut side, "s/logs", "", vec![(format!("s/logs/{key}"), Block::Logs(key))]);
     }
     add(&mut side, "s/fields", "", field_items(view, live, human));
     let claim = match &facts.claim {
@@ -779,7 +779,7 @@ pub(super) fn dress_note(
 }
 
 /// Brings the parts of changed blocks in line with them: words, notes, disabled buttons, dropdown rows.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn dress(
     shown: Query<(&Shown, Option<&Parts>)>,
     changed: Query<Entity, Changed<Shown>>,

@@ -239,7 +239,7 @@ fn note_failed_search(deep: Option<Res<Deep>>, mut notes: Query<(&mut Node, &mut
 }
 
 /// One entry per project, by key, following the mirror's projects and their tasks.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_projects(
     projects: Query<&Mirrored<Project>>,
     tasks: Query<&Mirrored<Task>>,

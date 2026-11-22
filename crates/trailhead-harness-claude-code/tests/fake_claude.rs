@@ -255,6 +255,7 @@ async fn planner_turns_keep_their_session() {
     // SAFETY: the scenarios run one at a time in a single test.
     unsafe { std::env::set_var("FAKE_GONE", "1") };
     let (out, _) = play(&r, "plan", ctx).await;
+    // SAFETY: as when it was set.
     unsafe { std::env::remove_var("FAKE_GONE") };
     assert!(matches!(&out, RunOutcome::PlanTurn(t) if t.message == "Which colours?"), "a new session: {out:?}");
     let log = std::fs::read_to_string(&r.log).unwrap();

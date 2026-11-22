@@ -497,7 +497,7 @@ async fn moving_under_an_existing_parent_cycle_is_rejected_without_hanging() {
     // `tokio::time::timeout` fire. Run the update on its own thread and wait with a deadline.
     let env = std::sync::Arc::new(env);
     let (tx, rx) = std::sync::mpsc::channel();
-    let worker = env.clone();
+    let worker = env;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let res = rt.block_on(worker.store.update_task(&worker.human, &c.key, under_a, None));

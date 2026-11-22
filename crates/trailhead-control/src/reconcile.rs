@@ -196,7 +196,7 @@ impl Factory {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
                 Err(e) => {
-                    tracing::warn!(task = %task.key, error = %e, "couldn't reconcile a task; the next reconcile retries")
+                    tracing::warn!(task = %task.key, error = %e, "couldn't reconcile a task; the next reconcile retries");
                 }
             }
         }
@@ -222,7 +222,7 @@ impl Factory {
         match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, state, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {
-                tracing::warn!(task = %task.key, error = %e, "couldn't park the breached task; the next reconcile retries")
+                tracing::warn!(task = %task.key, error = %e, "couldn't park the breached task; the next reconcile retries");
             }
         }
     }

@@ -112,7 +112,7 @@ pub(super) fn spawn_bar(commands: &mut Commands, card: Entity, id: &str) -> Enti
         @select_toned(names, tones, None, 4)
         Node { display: Display::None, flex_grow: 1.0, min_width: { px(0) } }
         SelectHint({ "Grade…".to_string() })
-        GradePick({ id.clone() })
+        GradePick({ id })
     };
     commands.spawn_scene(pick).insert(ChildOf(bar));
     bar
@@ -153,7 +153,7 @@ pub(super) fn tidy_choices(page: Res<GraphPage>, view: Res<GraphView>, mut choic
 }
 
 /// Keeps each node's dropdown in step: shown on a task to grade, set to its chosen grade, with the planner's why.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn sync_picks(
     view: Res<GraphView>,
     choices: Res<GradeChoices>,
@@ -187,7 +187,7 @@ pub(super) fn sync_picks(
 }
 
 /// Shows Approve while there is a plan to approve, enabled when it can be sent, with why not beside it.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn gate_approve(
     view: Res<GraphView>,
     choices: Res<GradeChoices>,

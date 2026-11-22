@@ -446,10 +446,10 @@ mod tests {
             let id = self.0;
             app.init_resource::<Seen>()
                 .add_systems(OnEnter(ActiveApp(id)), move |mut seen: ResMut<Seen>| {
-                    seen.0.push(format!("enter {}", id.0))
+                    seen.0.push(format!("enter {}", id.0));
                 })
                 .add_systems(OnExit(ActiveApp(id)), move |mut seen: ResMut<Seen>| {
-                    seen.0.push(format!("exit {}", id.0))
+                    seen.0.push(format!("exit {}", id.0));
                 });
         }
 

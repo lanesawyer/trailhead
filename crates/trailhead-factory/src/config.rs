@@ -779,7 +779,7 @@ impl FactoryConfig {
         #[serde(deny_unknown_fields)]
         struct File {
             project: Option<String>,
-            #[allow(dead_code)]
+            #[expect(dead_code)]
             agent: Option<String>,
             factory: Option<toml::Table>,
         }
@@ -1036,7 +1036,7 @@ mod tests {
         assert!(config.prepare_request(Role::Reviewer, None).env.is_empty());
         let plain = parse(&with).unwrap();
         assert_ne!(config.stack.tag(), plain.stack.tag(), "setup runs with the env, so it can change the checkpoint");
-        assert_eq!(plain.stack.tag(), Stack { tools: plain.stack.tools.clone(), env: Default::default() }.tag());
+        assert_eq!(plain.stack.tag(), Stack { tools: plain.stack.tools, env: Default::default() }.tag());
     }
 
     #[test]

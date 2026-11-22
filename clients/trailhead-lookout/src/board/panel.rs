@@ -515,7 +515,7 @@ mod in_place_tests {
         }
     }
 
-    fn subtree(app: &mut App, root: Entity) -> Vec<Entity> {
+    fn subtree(app: &App, root: Entity) -> Vec<Entity> {
         let mut found = vec![root];
         let mut at = 0;
         while at < found.len() {
@@ -527,7 +527,7 @@ mod in_place_tests {
         found
     }
 
-    fn texts(app: &mut App, root: Entity) -> Vec<String> {
+    fn texts(app: &App, root: Entity) -> Vec<String> {
         let all = subtree(app, root);
         all.into_iter().filter_map(|e| app.world().get::<Text>(e).map(|t| t.0.clone())).collect()
     }
@@ -547,7 +547,7 @@ mod in_place_tests {
             .add_systems(Update, (dress_cards, make_once, update_cards, update_card_badges, sync_card_rows).chain());
         settle(&mut app);
         let shell = app.world_mut().query_filtered::<Entity, With<BoardCard>>().single(app.world()).unwrap();
-        let shown = texts(&mut app, shell);
+        let shown = texts(&app, shell);
         assert!(shown.contains(&"P1".to_string()) && shown.contains(&"grade 2".to_string()), "{shown:?}");
         let mut tools = app.world_mut().query::<&ToolKind>();
         assert_eq!(tools.iter(app.world()).count(), 1);
@@ -558,13 +558,13 @@ mod in_place_tests {
         let mut app = app();
         let shell = app.world_mut().spawn(BoardCard(card("old", &["P1", "grade 2"], vec![CardAction::Edit]))).id();
         settle(&mut app);
-        let before = subtree(&mut app, shell);
-        assert!(texts(&mut app, shell).contains(&"old".to_string()));
+        let before = subtree(&app, shell);
+        assert!(texts(&app, shell).contains(&"old".to_string()));
         app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 =
             card("new", &["P3", "grade 2"], vec![CardAction::Edit]);
         settle(&mut app);
-        assert_eq!(subtree(&mut app, shell), before, "the same entities, none respawned");
-        let shown = texts(&mut app, shell);
+        assert_eq!(subtree(&app, shell), before, "the same entities, none respawned");
+        let shown = texts(&app, shell);
         assert!(shown.contains(&"new".to_string()) && !shown.contains(&"old".to_string()));
         assert!(shown.contains(&"P3".to_string()) && !shown.contains(&"P1".to_string()));
         // A badge and a button added later join; the ones there stay.
@@ -572,9 +572,9 @@ mod in_place_tests {
         app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 =
             card("new", &["P3", "grade 2", "holder"], vec![CardAction::Edit, answer]);
         settle(&mut app);
-        let after = subtree(&mut app, shell);
+        let after = subtree(&app, shell);
         assert!(before.iter().all(|e| after.contains(e)));
-        assert!(texts(&mut app, shell).contains(&"holder".to_string()));
+        assert!(texts(&app, shell).contains(&"holder".to_string()));
         let mut tools = app.world_mut().query::<&ToolKind>();
         assert_eq!(tools.iter(app.world()).count(), 2);
     }
@@ -607,12 +607,12 @@ mod in_place_tests {
         let mut app = app();
         let more = app.world_mut().spawn(ColumnMore { status: Status::Open, next: 25 }).id();
         settle(&mut app);
-        let before = subtree(&mut app, more);
-        assert!(texts(&mut app, more).contains(&"Show 25 more".to_string()));
+        let before = subtree(&app, more);
+        assert!(texts(&app, more).contains(&"Show 25 more".to_string()));
         app.world_mut().get_mut::<ColumnMore>(more).unwrap().next = 7;
         settle(&mut app);
-        assert_eq!(subtree(&mut app, more), before);
-        assert!(texts(&mut app, more).contains(&"Show 7 more".to_string()));
+        assert_eq!(subtree(&app, more), before);
+        assert!(texts(&app, more).contains(&"Show 7 more".to_string()));
     }
 }
 
