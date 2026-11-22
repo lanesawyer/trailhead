@@ -126,7 +126,58 @@ The personal todo app lives in the apps repo, not in `trailhead`: it is the app 
 
 **Tasks or records. Proposal.** Many apps are a list of items, and the engine already allows a task nobody works (review.md: an ungraded task, "like an item on a shopping list"). The rule: something that gets done is a task, in a project of its own, and Ticklist shows it; something that is kept (a contact, a bookmark) is a record in the store. Records do not become tasks, because tasks carry status, claims and the ready queue, which a kept thing has no use for. The kit has one list widget that both are shown with.
 
-**Open:** how a collection's shape changes once it holds data (who writes the migration, when it runs, how undo crosses it).
+How the store and connectors work is settled in the next section.
+
+## The app data store and connectors
+
+**Decided (2026-11-22, with Lane), not built.** The first app to need it is Cairn (CAIRN-1), which ranks a person's work from GitHub pull requests and Jira tickets. Phase 6 is the store (TRAIL-1581), phase 7 connectors (TRAIL-1582).
+
+### The store
+
+- **The app is the data boundary.** Each app has one SQLite file, `apps/<app id>.db` in the server's data directory, opened only by the server. It holds the app's records and their event log, written in one transaction. Apps may later share a collection; nothing does yet.
+- **A collection's shape is declared in a file,** `apps/<id>/collections.toml` in the apps repo, not in the app's Rust: the server has to check writes and a connector has to know the shape, and neither links the app. The server reads the files from the checkout its builder last built, so a shape goes live with the window that uses it.
+
+  ```toml
+  [collections.snoozes]
+  fields = { item = "string", until = "timestamp" }
+
+  [collections.pull_requests]
+  from = "github.pull_requests"
+  ```
+
+  A field is `string`, `integer`, `number`, `boolean`, `timestamp`, `day`, `url` or `json`; `?` after it makes it optional and `[]` a list. A write with a missing, unknown or mistyped field is refused.
+- **A shape changes by addition only:** a new collection or a new optional field. Anything else is a new collection, with the records moved through the API so the move can be undone. A real migration system may come later.
+- **A record** has an id, its collection, its fields, a version, and optionally a **key**: the name something outside gave it (`lanesawyer/trailhead#123`), unique in its collection. Writing by key means "make the record with this key look like this", so writing the same thing twice leaves one record, and a write that changes nothing records no event and moves no version.
+- **Every change is an event** in the app's file, with the same batch, actor and before and after as the task log, so undoing an event or a batch and reverting an agent work the same way and run over each file in turn. Old events are archived as the task log's are.
+- **Something done elsewhere is a record, not a task.** A pull request or a Jira ticket is finished in GitHub or Jira, so mirroring it as a task would be the sync principle 6 refuses. Tasks stay what is done in Trailhead.
+- **Who may reach it.** A person, everything. A token carries the apps it may reach, as it carries projects; one that names none reaches no app data, so the factory's workers and reviewers never see it.
+- **The API** is under `/v1/apps/{app}`: its collections; records listed, read, created, changed and removed, and written by key; a batch of several writes; its events, as a list and as a stream; undo. MCP gets the same for an agent whose token reaches the app.
+- **In the window,** the shell keeps a second mirror beside the tasks': per app, a snapshot of its records and then its event stream, with a cursor per app since each file numbers its own events. An app reads its records from the mirror as typed values and writes through the shell's commands, so it still never opens the network. The shell's `testing` module gives an app's tests records from fixtures.
+
+### Connectors
+
+- **A connector is a small Rust program under `connectors/<id>/` in the apps repo,** which the path rules already put at grade 4, so a person reads every one. It has no UI and is the only code of an app repo that may open the network. The builder builds it beside the window.
+- **One sync per outside service, routed to the apps that want it.** A connector knows nothing of apps. It declares **feeds** (`github.pull_requests`), each with a shape, and each run hands the server the feed's whole current set, keyed. An app's collection says `from = "github.pull_requests"` and takes the feed's shape; the server writes the set into every such collection, each in its own file, adding, changing and removing what differs. A collection filled from a feed is read-only to everything else.
+- **`connector.toml`** beside the code declares the feeds, the hosts it may reach, the settings it takes (which repos, the Jira site, who "me" is), the secrets it needs by name, and how often it runs.
+- **The connector kit, `trailhead-connector`, is a crate in the `trailhead` repo.** It gives a connector its settings and secrets, an HTTP client that refuses a host the connector did not declare, paging and backoff, a small saved state (a cursor, an ETag), the call that hands over a feed, and a client that replays recorded answers so a connector is tested in a sandbox with no network and no token. A connector is then "fetch and map". The host check is in the library, not the OS; a container behind the factory's egress proxy is the stronger later step.
+- **The server runs it on a schedule,** one run at a time with a time limit, as a process of its own acting as its own agent (`connector/<id>`) with a token that may only hand over its own feeds. A crash costs one run. "Sync now" runs it at once.
+- **Polling, not push.** GitHub's and Jira's webhooks need an address the internet can reach, and the server has none. A poll that asks only for what changed is cheap, and a set that matches what is stored writes nothing.
+- **In only.** Nothing is written back to an outside service.
+- **Merging doesn't start one.** A person turns a connector on and gives it its secrets, on the server's machine (`trailhead connector login <id>`), kept in the credential store the factory's secrets are in. Whether it is on and its settings are in the server's settings table, so neither needs a restart.
+- **One Connectors page in the window's settings** draws each connector's settings from what it declared, with its last run, its last error and Sync now; a connector that keeps failing raises a notification.
+- **The apps repo's guides say all of this,** so a planner plans with a store and connectors and files a connector as its own grade 4 task.
+
+### Order of work
+
+1. The store in the engine: files, declarations, records, keys, events, undo.
+2. The API, the stream, tokens scoped to apps, MCP.
+3. The window's record mirror and test helpers; the example app keeps a collection.
+4. The connector kit, feeds and their routing, scheduled runs, secrets, the CLI.
+5. The Connectors page and the failure notification.
+6. The builder builds connectors and hands the server the declarations; the apps repo's pin, path rules and guides.
+7. Cairn: a GitHub connector, a Jira connector and the app, planned and built by the factory.
+
+**Left for later:** backups; writing back to a service; push; migrations beyond addition; sharing a collection between apps; giving a secret from the window.
 
 ## Phases
 
@@ -148,8 +199,8 @@ Before any of it: the Lookout and factory changes now in review are merged, grad
    - **A new app** gets an id from its name (lowercase words joined by `-`, starting with a letter, 2 to 32 characters, a name cargo takes for a crate, not `shell`, `lookout` or `example`, and not an app's that exists) and a project key: the one the person typed in the form (`new_app.key`, 2 to 10 letters or digits starting with a letter, refused when another project has it), else one made from the name (one word of up to six letters whole, so Cairn is CAIRN, a longer one its first four; the initials of several; a digit added until unique). The form's key field is optional, and a line under it says which key the tasks will carry (TRAIL-1688). Its project is named for it, pointed at `apps/<id>`, requires review, has the `factory` agent as reviewer when the factory has run here (the reply says so when it hasn't), and has a brief naming the path, the kit and the commit subjects. Its first task, at grade 2, is to scaffold the crate, register it in the shell and build a first version of what was asked; adding a crate touches `Cargo.toml` and `shell/`, so the PR is graded 3 and a person approves the new app.
    - **Built (TRAIL-1673): the window's two ways in.** A plus under the apps on the rail ("Ask for a new app") opens "Ask for a new app": its name, the ask, and a dropdown of the planner's model ("The repo's default", which sends none, then Fable, Opus, Sonnet and Haiku); a new app is always planned. The Ask button at the rail's foot is now a pencil ("Ask for a change to this app"), shown once the apps repo has an app to ask about, and opens "Ask for a change": the app (the app shown first, else the first app; "A new app" is no longer among them), the ask, and a "Plan this first" switch, off at first, with a note saying a planner talks the ask over and proposes tasks to approve before any work starts; on, the planner's model shows under it. The form sends `Ask::change` or `Ask::new_app`, with `.planned(model)` when planned. For a planned ask the answer says "Sent to the planner: TN-1" and that the planner comes back with questions or a plan to approve, on that task in Lookout as a question waiting on the person.
    - **The planner run is built** (TRAIL-1669), designed in [Planning an ask](#planning-an-ask). **Not offered:** asking about Lookout or the `trailhead` repo, and editing or withdrawing an ask from the window, are not offered.
-6. **The app data store.**
-7. **Connectors.**
+6. **The app data store.** Designed in [The app data store and connectors](#the-app-data-store-and-connectors).
+7. **Connectors.** Designed there too.
 
 Later: Android (the only phone target for now; desktop is where this is mostly used), loading views from `bsn` files, the shell on a different machine from the server (the builder then ships binaries over iroh), a local code host. A possible second app for Lane: planning a work day and reviewing code.
 
