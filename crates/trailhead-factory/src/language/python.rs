@@ -11,18 +11,11 @@ impl Language for Python {
         "python"
     }
 
-    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static str]> {
+    fn tool_hosts(&self, backend: &str, name: &str) -> Option<&'static [&'static [&'static str]]> {
         match (backend, name) {
-            ("pipx" | "pypi", _) => Some(PYPI),
+            ("pipx" | "pypi", _) => Some(&[PYPI]),
             // Prebuilt interpreters are GitHub release assets; pip comes from PyPI.
-            ("", "python") => Some(&[
-                "github.com",
-                "api.github.com",
-                "objects.githubusercontent.com",
-                "release-assets.githubusercontent.com",
-                "pypi.org",
-                "files.pythonhosted.org",
-            ]),
+            ("", "python") => Some(&[crate::daemon::GITHUB, PYPI]),
             _ => None,
         }
     }
@@ -101,6 +94,15 @@ fn uv_entry_ok(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_python_interpreter_opens_github_then_pypi() {
+        assert_eq!(hosts_for_python(), [crate::daemon::GITHUB, PYPI].concat());
+    }
+
+    fn hosts_for_python() -> Vec<&'static str> {
+        Python.tool_hosts("", "python").unwrap().concat()
+    }
 
     #[test]
     fn only_narrowing_keys_of_a_known_dependency_are_ok() {

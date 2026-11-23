@@ -372,7 +372,7 @@ pub fn hosts_for(tool: &str) -> Option<Vec<&'static str>> {
     };
     let hosts: &[&[&str]] = match (backend, name) {
         ("github" | "aqua" | "ubi", _) => &[GITHUB],
-        _ => &[crate::language::tool_hosts(backend, name)?],
+        _ => crate::language::tool_hosts(backend, name)?,
     };
     Some(hosts.concat())
 }
