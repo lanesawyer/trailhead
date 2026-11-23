@@ -718,17 +718,9 @@ mod tests {
 
     #[test]
     fn a_task_is_labelled_from_the_gates_of_its_own_projects_repo() {
-        use crate::factory::{FactoryStatus, RepoState};
+        use crate::factory::FactoryStatus;
         let mut app = app();
-        let repo = |queue: &str, human: Vec<Grade>| RepoState {
-            control: trailhead_factory::status::ControlState::Up,
-            queue: vec![queue.into()],
-            last_error: None,
-            holding: None,
-            restart_for: Vec::new(),
-            human_grades: Some(human),
-            usage: Vec::new(),
-        };
+        let repo = crate::factory::RepoState::gated;
         let g = |n| Grade::new(n).unwrap();
         {
             let mut status = app.world_mut().resource_mut::<FactoryStatus>();
@@ -777,8 +769,7 @@ mod tests {
 
     #[test]
     fn a_change_in_the_projects_human_grades_relabels_the_open_picker_and_another_projects_does_not() {
-        use crate::factory::{FactoryStatus, RepoState};
-        use trailhead_factory::status::ControlState;
+        use crate::factory::FactoryStatus;
         use trailhead_ui::SelectOptions;
         let mut app = app();
         // The task's project is only known once the mirror has it.
@@ -805,18 +796,10 @@ mod tests {
         };
         let say = |app: &mut App, repo: &str, queue: &str, grades: Vec<i64>| {
             let human = grades.into_iter().map(|g| Grade::try_from(g).unwrap()).collect();
-            app.world_mut().resource_mut::<FactoryStatus>().repos.insert(
-                repo.into(),
-                RepoState {
-                    control: ControlState::Up,
-                    queue: vec![queue.into()],
-                    last_error: None,
-                    human_grades: Some(human),
-                    holding: None,
-                    restart_for: Vec::new(),
-                    usage: Vec::new(),
-                },
-            );
+            app.world_mut()
+                .resource_mut::<FactoryStatus>()
+                .repos
+                .insert(repo.into(), crate::factory::RepoState::gated(queue, human));
             settle(app);
         };
         let marked = |o: &[String]| o.iter().filter(|s| s.ends_with("above Treeline")).count();
