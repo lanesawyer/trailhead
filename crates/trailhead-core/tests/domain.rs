@@ -1981,7 +1981,7 @@ async fn parent_cycles_order_keys_by_number() {
     for i in 0..10 {
         tasks.push(env.task(&format!("t{i}")).await);
     }
-    // Tasks 9 and 10 (TRAIL-9, TRAIL-10) form a cycle; it starts at the lower number.
+    // Tasks 9 and 10 (AUTH-9, AUTH-10) form a cycle; it starts at the lower number.
     let (nine, ten) = (&tasks[8], &tasks[9]);
     let conn = env.raw_conn().await;
     for (task, parent) in [(nine, ten), (ten, nine)] {

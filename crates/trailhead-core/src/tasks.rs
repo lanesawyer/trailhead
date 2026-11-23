@@ -746,8 +746,9 @@ impl Store {
     }
 
     /// The parent cycles already in the table (the API refuses to build one, but older data may hold them), each as
-    /// the keys of its tasks in parent order, starting from the lowest key (by number, so `TRAIL-9` before `TRAIL-10`). Deleted tasks count, since walks pass
-    /// through them. Cycles that touch a project outside the context's scope are left out.
+    /// the keys of its tasks in parent order, starting from the lowest key (by number, so `TRAIL-9` before
+    /// `TRAIL-10`). Deleted tasks count, since walks pass through them. Cycles that touch a project outside the
+    /// context's scope are left out.
     pub async fn parent_cycles(&self, ctx: &Ctx) -> Result<Vec<Vec<String>>> {
         use std::collections::{HashMap, HashSet};
         let conn = self.reader()?;
