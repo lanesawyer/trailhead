@@ -22,6 +22,11 @@ use trailhead_model::{
 
 pub(crate) const TASK_COLS: &str = "id, workspace_id, project_id, key, title, description, status, priority, due_at, due_tz, parent_id, metadata, version, source, external_id, created_by, created_at, updated_at, deleted_at, scheduled_on, scheduled_at, scheduled_tz, due_on, grade, duplicate_of";
 
+/// What keys sort by: the number first, then the whole key to settle keys of different projects.
+fn key_order(key: &str) -> (u64, &str) {
+    (trailhead_model::key_number(key), key)
+}
+
 fn prefixed_cols(prefix: &str) -> String {
     TASK_COLS.split(", ").map(|c| format!("{prefix}.{c}")).collect::<Vec<_>>().join(", ")
 }
@@ -741,7 +746,7 @@ impl Store {
     }
 
     /// The parent cycles already in the table (the API refuses to build one, but older data may hold them), each as
-    /// the keys of its tasks in parent order, starting from the lowest key. Deleted tasks count, since walks pass
+    /// the keys of its tasks in parent order, starting from the lowest key (by number, so `TRAIL-9` before `TRAIL-10`). Deleted tasks count, since walks pass
     /// through them. Cycles that touch a project outside the context's scope are left out.
     pub async fn parent_cycles(&self, ctx: &Ctx) -> Result<Vec<Vec<String>>> {
         use std::collections::{HashMap, HashSet};
@@ -769,7 +774,7 @@ impl Store {
                 }
                 if let Some(i) = path.iter().position(|p| *p == id) {
                     let mut cycle: Vec<&String> = path[i..].to_vec();
-                    let lowest = (0..cycle.len()).min_by_key(|&j| &nodes[cycle[j]].0).unwrap_or(0);
+                    let lowest = (0..cycle.len()).min_by_key(|&j| key_order(&nodes[cycle[j]].0)).unwrap_or(0);
                     cycle.rotate_left(lowest);
                     let visible = cycle.iter().all(|c| nodes[*c].2.parse::<Uuid>().is_ok_and(|p| ctx.in_scope(p)));
                     if visible {
@@ -782,7 +787,7 @@ impl Store {
             }
             done.extend(path);
         }
-        cycles.sort();
+        cycles.sort_by(|a, b| a.iter().map(|k| key_order(k)).cmp(b.iter().map(|k| key_order(k))));
         Ok(cycles)
     }
 

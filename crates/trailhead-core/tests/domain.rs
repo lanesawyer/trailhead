@@ -1973,3 +1973,25 @@ async fn a_reviewer_finishes_a_parent_whose_subtasks_are_all_finished_without_a_
     let refused = env.store.update_task(&other, &again.key, status(Status::Done), None).await;
     assert!(matches!(refused, Err(Error::ReviewRequired)), "only a reviewer closes a finished parent: {refused:?}");
 }
+
+#[tokio::test]
+async fn parent_cycles_order_keys_by_number() {
+    let env = Env::new().await;
+    let mut tasks = Vec::new();
+    for i in 0..10 {
+        tasks.push(env.task(&format!("t{i}")).await);
+    }
+    // Tasks 9 and 10 (TRAIL-9, TRAIL-10) form a cycle; it starts at the lower number.
+    let (nine, ten) = (&tasks[8], &tasks[9]);
+    let conn = env.raw_conn().await;
+    for (task, parent) in [(nine, ten), (ten, nine)] {
+        conn.execute(
+            "UPDATE tasks SET parent_id = ?1 WHERE id = ?2",
+            libsql::params![parent.id.to_string(), task.id.to_string()],
+        )
+        .await
+        .unwrap();
+    }
+    let cycles = env.store.parent_cycles(&env.human).await.unwrap();
+    assert_eq!(cycles, vec![vec![nine.key.to_string(), ten.key.to_string()]]);
+}
