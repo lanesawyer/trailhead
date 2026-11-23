@@ -1370,18 +1370,9 @@ mod tests {
 
     #[test]
     fn the_grade_dropdown_follows_the_drafts_project() {
-        use crate::factory::RepoState;
         let g = |n| Grade::new(n).unwrap();
         let mut app = ui_app();
-        let repo = |queue: &str, human: Vec<Grade>| RepoState {
-            control: trailhead_factory::status::ControlState::Up,
-            queue: vec![queue.into()],
-            last_error: None,
-            holding: None,
-            restart_for: Vec::new(),
-            human_grades: Some(human),
-            usage: Vec::new(),
-        };
+        let repo = crate::factory::RepoState::gated;
         {
             let mut status = app.world_mut().resource_mut::<FactoryStatus>();
             status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));

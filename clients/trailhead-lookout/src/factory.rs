@@ -103,6 +103,22 @@ pub struct RepoState {
     pub usage: Vec<UsageWindow>,
 }
 
+#[cfg(test)]
+impl RepoState {
+    /// A control plane that is up, works the one `queue` task and wants a person for `human` grades; the rest empty.
+    pub fn gated(queue: &str, human: Vec<Grade>) -> Self {
+        Self {
+            control: ControlState::Up,
+            queue: vec![queue.into()],
+            last_error: None,
+            human_grades: Some(human),
+            holding: None,
+            restart_for: Vec::new(),
+            usage: Vec::new(),
+        }
+    }
+}
+
 /// A line of live activity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
@@ -714,15 +730,7 @@ mod tests {
     #[test]
     fn a_task_is_labelled_from_the_gates_of_the_repo_that_works_its_project() {
         let g = |n| Grade::new(n).unwrap();
-        let repo = |queue: &str, human: Vec<Grade>| RepoState {
-            control: ControlState::Up,
-            queue: vec![queue.into()],
-            last_error: None,
-            holding: None,
-            restart_for: Vec::new(),
-            human_grades: Some(human),
-            usage: Vec::new(),
-        };
+        let repo = crate::factory::RepoState::gated;
         let mut status = FactoryStatus::default();
         status.repos.insert("o/a".into(), repo("TRAIL-102", vec![g(3), g(4)]));
         status.repos.insert("o/b".into(), repo("OTHER-1", vec![g(2), g(4)]));
