@@ -31,6 +31,10 @@ pub const UI_ALPN: &[u8] = b"trailhead/ui/0";
 /// The application close code on a connection from an endpoint that isn't on the allowlist, so a UI can say so.
 pub const CLOSE_NOT_ALLOWED: u32 = 1;
 /// Why a UI closes its own connection: it dropped its tunnel.
+///
+/// Private on purpose: the control plane doesn't tell a UI that left on purpose from a lost link, so nothing outside this
+/// module needs it. Code 2 is taken, though: if the control plane ever wants to (for logs or status), export it rather
+/// than giving another close code the number.
 const CLOSE_TUNNEL_DROPPED: u32 = 2;
 
 /// How long a UI waits to reach the control plane before a request fails.
