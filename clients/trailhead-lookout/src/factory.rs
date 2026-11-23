@@ -709,6 +709,14 @@ mod tests {
         repos[0].snapshot.human_grades = Some(Vec::new());
         send(&mut app, [FactoryUpdate::Snapshot(repos)]);
         assert!(app.world().resource::<FactoryStatus>().human_grades().is_empty());
+        // One repo that says and one that doesn't: only the one that said counts.
+        let FactoryUpdate::Snapshot(mut two) = snapshot(1, vec![]) else { unreachable!() };
+        two[0].snapshot.human_grades = Some(vec![g(2)]);
+        let silent = two[0].snapshot.clone();
+        two.push(RepoSnapshot { repo: "o/other".into(), snapshot: FactorySnapshot { human_grades: None, ..silent } });
+        let mut app = self::app();
+        send(&mut app, [FactoryUpdate::Snapshot(two)]);
+        assert_eq!(app.world().resource::<FactoryStatus>().human_grades(), [g(2)]);
     }
 
     #[test]
