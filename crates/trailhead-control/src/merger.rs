@@ -87,6 +87,11 @@ impl MergerState {
         self.listed.lock().unwrap().contains_key(task)
     }
 
+    /// Whether anything is kept of what the host said of a task's verdict.
+    pub(crate) fn carries(&self, task: &TaskKey) -> bool {
+        self.carried.lock().unwrap().contains_key(task)
+    }
+
     /// What the host said of this (reviewed, head) pair, if it was asked.
     fn carried(&self, task: &TaskKey, reviewed: &str, head: &str) -> Option<bool> {
         let kept = self.carried.lock().unwrap();
