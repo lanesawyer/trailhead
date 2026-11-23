@@ -635,12 +635,11 @@ impl Plugin for InlinePlugin {
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use bevy::input::ButtonState;
     use bevy::input::keyboard::Key;
     use bevy::input_focus::FocusLost;
 
     use super::*;
-    use crate::test_support::settle;
+    use crate::test_support::{press_key, settle};
 
     #[derive(Resource, Default)]
     struct Edits(Vec<InlineEdited>);
@@ -680,10 +679,7 @@ mod tests {
     }
 
     fn press(app: &mut App, input: Entity, key_code: KeyCode, logical_key: Key) {
-        let window = app.world_mut().spawn_empty().id();
-        let keyboard =
-            KeyboardInput { key_code, logical_key, state: ButtonState::Pressed, text: None, repeat: false, window };
-        app.world_mut().trigger(FocusedInput::new(input, keyboard, window));
+        press_key(app.world_mut(), input, key_code, logical_key);
         settle(app);
     }
 
