@@ -61,13 +61,18 @@ pub(crate) async fn ls(
     } else {
         let waiting = if tasks.iter().any(|t| t.status == Status::InReview) {
             // The server returns at most 100 a page by default, so page until a short one.
-            const PAGE: usize = 100;
+            // `TRAILHEAD_LS_PAGE` shrinks it, so a test can cross a page boundary with a few tasks.
+            let page_size = std::env::var("TRAILHEAD_LS_PAGE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| (1..=100).contains(n))
+                .unwrap_or(100);
             let mut q = TaskQuery {
                 project: q.project,
                 parent: q.parent,
                 status: vec![Status::InReview],
                 changes_requested: Some(true),
-                limit: Some(PAGE),
+                limit: Some(page_size),
                 ..TaskQuery::default()
             };
             let mut keys = HashSet::new();
@@ -76,10 +81,10 @@ pub(crate) async fn ls(
                 q.offset = Some(offset);
                 let page = cx.c.api().list_tasks(&q).await.map_err(api_err)?;
                 keys.extend(page.iter().map(|t| t.task.key.0.clone()));
-                if page.len() < PAGE {
+                if page.len() < page_size {
                     break;
                 }
-                offset += PAGE;
+                offset += page_size;
             }
             keys
         } else {

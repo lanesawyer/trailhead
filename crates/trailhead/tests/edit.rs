@@ -80,14 +80,15 @@ fn add_prints_possible_duplicates() {
 fn ls_flags_every_task_awaiting_changes_past_one_page() {
     let th = Instance::new();
     th.stdout(&["project", "add", "QA", "Queue"]);
-    for n in 1..=101 {
+    for n in 1..=5 {
         let key = format!("QA-{n}");
         th.stdout(&["add", "work", "-p", "QA"]);
         th.stdout(&["review", &key]);
         th.stdout(&["verdict", &key, "request-changes", "no"]);
     }
-    let listed = th.stdout(&["ls", "-p", "QA", "--limit", "200"]);
-    assert_eq!(listed.matches("(changes requested)").count(), 101, "{listed}");
+    // A page of two makes five tasks cross two page boundaries.
+    let listed = th.output_with(&["ls", "-p", "QA", "--limit", "200"], &[("TRAILHEAD_LS_PAGE", "2")]);
+    assert_eq!(listed.matches("(changes requested)").count(), 5, "{listed}");
 }
 
 #[test]
