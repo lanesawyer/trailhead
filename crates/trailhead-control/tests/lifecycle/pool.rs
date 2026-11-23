@@ -777,13 +777,22 @@ async fn a_parked_tasks_stale_stack_sandbox_that_wont_be_destroyed_is_broken_and
     assert_ne!(w2.id, id);
     assert_ne!(w2.labels.get(label::STATE).map(String::as_str), Some(label::BROKEN));
 
-    // It no longer counts toward the cap: another task still gets a place.
+    // It no longer counts toward the cap. A parked task takes one of the two places, so if w1 still counted,
+    // nothing would be left for the next task.
+    let holder = r.tracker.add_task("TRAIL", "Holder", "");
+    r.harness.push(Role::Worker, Script::new(RunOutcome::NeedsInput { question: "Which one?".into() }));
+    let ran = r.factory.tick().await.unwrap();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].0.key, holder);
+    let held = r.tracker.task(&holder).run.host.clone().expect("parked on a sandbox");
+    assert_ne!(held, "trailhead-w1");
     let other = r.tracker.add_task("TRAIL", "Other", "");
     r.harness.push(Role::Worker, Script::new(changes()));
     r.harness.push(Role::Reviewer, Script::new(approve()));
     let ran = r.factory.tick().await.unwrap();
     assert_eq!(ran.len(), 1, "a place for it");
     assert_eq!(ran[0].0.key, other);
+    assert_ne!(r.tracker.task(&other).run.host.as_deref(), Some(held.as_str()), "the holder keeps its own");
 
     r.compute.heal("trailhead-w1");
     // The blip that kept the release from landing backed w1 off; wait it out.
