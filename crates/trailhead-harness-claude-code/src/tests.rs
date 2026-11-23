@@ -111,6 +111,22 @@ async fn an_embedded_repository_is_read_as_its_files() {
 }
 
 #[tokio::test]
+async fn commitless_repositories_nested_in_each_other_are_read_as_their_files() {
+    let (dir, start) = started().await;
+    let outer = dir.path().join("a/outer");
+    let inner = outer.join("deep/inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    std::fs::write(outer.join("o"), "o").unwrap();
+    std::fs::write(inner.join("f"), "x").unwrap();
+    run_git(&["init", "-q"], &outer);
+    run_git(&["init", "-q"], &inner);
+    let mut paths: Vec<_> = changes_since(dir.path(), &start).await.unwrap().into_iter().map(|c| c.path).collect();
+    paths.sort();
+    assert_eq!(paths, ["a/outer/deep/inner/f", "a/outer/o"]);
+    assert!(!outer.join(".git").exists());
+    assert!(!inner.join(".git").exists());
+}
+#[tokio::test]
 async fn a_nested_repository_with_no_commit_is_read_as_its_files() {
     let (dir, start) = started().await;
     let inner = dir.path().join("a/inner");

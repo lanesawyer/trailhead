@@ -42,12 +42,20 @@ pub(crate) async fn changes_since(dir: &Path, start: &str) -> Result<Vec<FileCha
 /// A nested repository with no commit can't be staged as an embedded repository: `git add` fails on it. Remove the
 /// `.git` of each one (git lists a nested repository as a `dir/` entry among the untracked paths), so its files are
 /// staged as ordinary files, and log it. One with a commit is left alone: `read_change` publishes its files.
+/// Git lists only the outermost nested repository, so the pass repeats until it removes nothing: a commitless
+/// repository inside another shows up once the outer `.git` is gone.
 pub(crate) async fn unnest_commitless_repositories(dir: &Path) {
+    while unnest_pass(dir).await > 0 {}
+}
+
+/// One pass of `unnest_commitless_repositories`: how many `.git` entries it removed.
+async fn unnest_pass(dir: &Path) -> usize {
+    let mut count = 0;
     let listed = match git(dir, &["ls-files", "-z", "--others", "--exclude-standard"]).await {
         Ok(listed) => listed,
         Err(e) => {
             tracing::warn!(error = %e, "could not look for nested repositories");
-            return;
+            return 0;
         }
     };
     for name in listed.split(|b| *b == 0).filter(|n| n.ends_with(b"/")) {
@@ -63,11 +71,13 @@ pub(crate) async fn unnest_commitless_repositories(dir: &Path) {
         };
         match removed {
             Ok(()) => {
+                count += 1;
                 tracing::warn!(path = %nested.display(), "removed the .git of a nested repository with no commit");
             }
             Err(e) => tracing::warn!(path = %nested.display(), error = %e, "could not remove a nested .git"),
         }
     }
+    count
 }
 
 /// Reads one changed path into `changes`. Git lists a directory only as an embedded repository (a gitlink),
