@@ -38,15 +38,11 @@ async fn run_in_foreground(bind: &str) -> Result<()> {
 /// Sets or clears `disabled` in `[factory]` of the user config. Needs no server, and touches no other factory key.
 async fn set_enabled(enable: bool) -> Result<()> {
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
-    let mut cfg = config::load(&paths)?;
-    let table = cfg.factory.get_or_insert_with(Default::default);
-    let was_enabled = !table.get("disabled").and_then(toml::Value::as_bool).unwrap_or(false);
-    if enable {
-        table.remove("disabled");
-    } else {
-        table.insert("disabled".into(), toml::Value::Boolean(true));
-    }
-    config::save(&paths, &cfg)?;
+    let cfg = config::load(&paths)?;
+    let was_enabled =
+        !cfg.factory.as_ref().and_then(|t| t.get("disabled")).and_then(toml::Value::as_bool).unwrap_or(false);
+    let setting = if enable { config::Setting::Unset } else { config::Setting::Flag(true) };
+    config::set(&paths, Some("factory"), "disabled", &setting)?;
     let word = if enable { "enabled" } else { "disabled" };
     if was_enabled == enable {
         println!("the factory was already {word}");

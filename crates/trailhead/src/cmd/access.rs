@@ -179,11 +179,10 @@ pub(crate) async fn login(paths: &trailhead_server::Paths, url: &str, json: bool
         None => c.creds.save(Cred::User, secret)?,
     };
     // Logging in to another machine's server makes it this machine's default.
-    let mut cfg = config::load(paths)?;
+    let cfg = config::load(paths)?;
     let new_default = !c.ours && cfg.url.as_deref() != Some(url);
     if new_default {
-        cfg.url = Some(url.to_string());
-        config::save(paths, &cfg)?;
+        config::set(paths, None, "url", &config::Setting::Text(url.to_string()))?;
     }
     if json {
         print_json(&to_json(&me));
