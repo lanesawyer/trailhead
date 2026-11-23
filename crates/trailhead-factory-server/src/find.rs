@@ -105,11 +105,34 @@ mod tests {
     fn load_config_reads_the_file_it_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(CONFIG);
-        let src = include_str!("../../../.trailhead.toml")
-            .replace("[factory.repo]", "[factory.repo]\nowner = \"o\"\nname = \"n\"");
+        let src = r#"
+project = "TRAIL"
+
+[factory.repo]
+owner = "o"
+name = "n"
+
+[factory.compute]
+kind = "docker"
+
+[factory.profiles.worker]
+role = "worker"
+adapter = "claude-code"
+provider = "anthropic"
+model = "sonnet"
+budget = { usd = 5, minutes = 60, steps = 120 }
+
+[factory.profiles.reviewer]
+role = "reviewer"
+adapter = "claude-code"
+provider = "anthropic"
+model = "opus"
+budget = { usd = 2, minutes = 20, steps = 30 }
+"#;
         std::fs::write(&file, src).unwrap();
         let (path, _, config) = load_config(Some(&file)).unwrap();
         assert_eq!(path, file);
-        assert_eq!(repo(Some(&file)).unwrap(), config.repo.repo());
+        assert_eq!(config.repo.repo().slug(), "o/n");
+        assert_eq!(repo(Some(&file)).unwrap().slug(), "o/n");
     }
 }
