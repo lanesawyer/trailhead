@@ -241,6 +241,13 @@ impl<'a> Grader<'a> {
             if let Some(grade) = rule.filter(|_| !comment_edit) {
                 found.push((grade, format!("{} changed", f.path)));
             }
+            // A file renamed out of a rule's paths still changed what the rule covers.
+            if let Some(old) = f.previous_path.as_deref() {
+                let old_rule = rules.iter().filter(|(_, all, _)| all.is_match(old)).map(|(grade, ..)| *grade).max();
+                if let Some(grade) = old_rule {
+                    found.push((grade, format!("{old} renamed")));
+                }
+            }
             let lost_test = |p: &str| is_test_path(p);
             match (f.status, &f.previous_path) {
                 (FileStatus::Removed, _) if lost_test(&f.path) => {
@@ -383,6 +390,18 @@ mod tests {
         assert_eq!(g.reasons, ["601 lines changed, over 600"]);
         let ok = [file("docs/a.md", FileStatus::Modified, 600)];
         assert_eq!(grader(&r).grade(Some(gr(1)), &ok).grade, gr(1), "the limit itself is fine");
+    }
+
+    #[test]
+    fn a_file_renamed_out_of_a_rule_keeps_its_grade() {
+        let r = Rules { two: vec![], three: vec![".github/**".into()], four: vec![] };
+        let moved = ChangedFile {
+            previous_path: Some(".github/workflows/ci.yml".into()),
+            ..file("docs/ci.yml", FileStatus::Renamed, 0)
+        };
+        let g = grader(&r).grade(Some(gr(1)), &[moved]);
+        assert_eq!(g.grade, gr(3));
+        assert_eq!(g.reasons, [".github/workflows/ci.yml renamed"]);
     }
 
     #[test]
