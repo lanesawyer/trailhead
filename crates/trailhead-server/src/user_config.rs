@@ -454,6 +454,41 @@ fn same(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// A value the CLI writes to the user config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Setting {
+    Text(String),
+    Flag(bool),
+    /// Takes the key out.
+    Unset,
+}
+
+/// Sets `key` in `[table]` (the top level when `None`) of the user config, as an edit of the file's own document:
+/// its comments, order and every other key stay. The file is written atomically beside a backup, and is made if
+/// it isn't there.
+pub fn set_setting(paths: &Paths, table: Option<&str>, key: &str, setting: &Setting) -> Result<(), String> {
+    let file = path(paths);
+    let text = read(&file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+    let mut doc: DocumentMut = text.parse().map_err(|e| format!("parsing {}: {e}", file.display()))?;
+    let target: &mut dyn TableLike = match table {
+        Some(name) if matches!(setting, Setting::Unset) && doc.get(name).is_none() => return Ok(()),
+        Some(name) => match section(&mut doc, name) {
+            Ok(t) => t,
+            Err(Refused::Invalid(e)) => return Err(e),
+            Err(_) => return Err(format!("{name} can't be edited")),
+        },
+        None => doc.as_table_mut(),
+    };
+    match setting {
+        Setting::Text(v) => set(target, key, Value::from(v.as_str())),
+        Setting::Flag(v) => set(target, key, Value::from(*v)),
+        Setting::Unset => {
+            target.remove(key);
+        }
+    }
+    write_atomic(&file, &doc.to_string()).map_err(|e| format!("writing {}: {e}", file.display()))
+}
+
 /// Replaces the file at `path` with `text` all at once: a temporary file in the same directory, written and synced,
 /// renamed over it. The file it replaces is kept as [`backup_path`] first, the same way. Both keep the file's
 /// permissions. A file that is a link is written where the link points, so the link stays.

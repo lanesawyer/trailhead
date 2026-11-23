@@ -6,7 +6,12 @@ use trailhead_server::Paths;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:7241";
 
-pub use trailhead_server::user_config::{UserConfig, path};
+pub use trailhead_server::user_config::{Setting, UserConfig, path};
+
+/// Sets one key of the user config, keeping its comments (`table` is `None` for a top-level key).
+pub fn set(paths: &Paths, table: Option<&str>, key: &str, setting: &Setting) -> Result<()> {
+    trailhead_server::user_config::set_setting(paths, table, key, setting).map_err(anyhow::Error::msg)
+}
 
 pub fn load(paths: &Paths) -> Result<UserConfig> {
     let path = path(paths);
@@ -15,12 +20,6 @@ pub fn load(paths: &Paths) -> Result<UserConfig> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(UserConfig::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
-}
-
-pub fn save(paths: &Paths, cfg: &UserConfig) -> Result<()> {
-    std::fs::create_dir_all(&paths.config_dir)?;
-    std::fs::write(path(paths), toml::to_string(cfg)?)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -32,8 +31,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths { data_dir: dir.path().join("data"), config_dir: dir.path().join("config") };
         assert!(load(&paths).unwrap().url.is_none());
-        save(&paths, &UserConfig { url: Some("http://127.0.0.1:7242".into()), factory: None, shell: None }).unwrap();
+        set(&paths, None, "url", &Setting::Text("http://127.0.0.1:7242".into())).unwrap();
         assert_eq!(load(&paths).unwrap().url.as_deref(), Some("http://127.0.0.1:7242"));
+    }
+
+    #[test]
+    fn a_set_keeps_comments_and_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths { data_dir: dir.path().join("data"), config_dir: dir.path().join("config") };
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(path(&paths), "# mine\nurl = \"http://a\"\n\n[factory]\n# how many\nmax_sandboxes = 3\n")
+            .unwrap();
+        set(&paths, Some("factory"), "disabled", &Setting::Flag(true)).unwrap();
+        let text = std::fs::read_to_string(path(&paths)).unwrap();
+        assert!(text.contains("# mine") && text.contains("# how many") && text.contains("max_sandboxes = 3"), "{text}");
+        assert!(text.contains("disabled = true"), "{text}");
+        set(&paths, Some("factory"), "disabled", &Setting::Unset).unwrap();
+        let text = std::fs::read_to_string(path(&paths)).unwrap();
+        assert!(!text.contains("disabled") && text.contains("# how many"), "{text}");
     }
 
     #[test]

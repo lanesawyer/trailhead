@@ -318,16 +318,14 @@ pub(crate) async fn unpack(tar: &[u8], src: &Path) -> Result<(), String> {
 /// Saves `[shell] from` in the user config, so `trailhead app` builds and runs that server's builds here.
 pub(crate) fn build_from(paths: &Paths, endpoint: &str) -> Result<()> {
     parse_endpoint_id(endpoint).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut cfg = crate::config::load(paths)?;
-    let table = cfg.shell.get_or_insert_with(Default::default);
-    if table.contains_key("repo") {
+    let cfg = crate::config::load(paths)?;
+    if cfg.shell.as_ref().is_some_and(|t| t.contains_key("repo")) {
         bail!(
             "{} has `[shell] repo`: this machine builds the window from its own apps repo. Remove it to build another server's builds instead",
             crate::config::path(paths).display()
         );
     }
-    table.insert("from".into(), toml::Value::String(endpoint.trim().to_string()));
-    crate::config::save(paths, &cfg)?;
+    crate::config::set(paths, Some("shell"), "from", &crate::config::Setting::Text(endpoint.trim().to_string()))?;
     println!(
         "saved in {}. `trailhead app` now builds the window from that server's builds and runs it; the first build takes a while",
         crate::config::path(paths).display()
