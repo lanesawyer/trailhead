@@ -32,6 +32,10 @@ mod usage;
 
 pub use core_tracker::CoreTracker;
 pub use pool::Refreshed;
+
+/// `infra::MAX_RESOURCE_WAITS`, for the tests that play out every wait.
+#[doc(hidden)]
+pub const MAX_RESOURCE_WAITS: u32 = infra::MAX_RESOURCE_WAITS;
 pub use status::StatusBoard;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
