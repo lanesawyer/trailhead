@@ -193,7 +193,9 @@ mod tests {
 
     #[test]
     fn escape_in_the_field_empties_it() {
+        use crate::test_support::{press_escape, press_key};
         use bevy::input::keyboard::Key;
+
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_plugins((AssetPlugin::default(), bevy::scene::ScenePlugin))
@@ -203,20 +205,10 @@ mod tests {
         app.world_mut().flush();
         app.update();
         app.world_mut().entity_mut(parts.field).insert(EditableText::new("deep"));
-        let window = app.world_mut().spawn(Window::default()).id();
-        let press = |key_code, logical_key| KeyboardInput {
-            key_code,
-            logical_key,
-            state: bevy::input::ButtonState::Pressed,
-            text: None,
-            repeat: false,
-            window,
-        };
         let value = |app: &App| app.world().get::<EditableText>(parts.field).unwrap().value().to_string();
-        let a = press(KeyCode::KeyA, Key::Character("a".into()));
-        app.world_mut().trigger(FocusedInput::new(parts.field, a, window));
+        press_key(app.world_mut(), parts.field, KeyCode::KeyA, Key::Character("a".into()));
         assert_eq!(value(&app), "deep");
-        app.world_mut().trigger(FocusedInput::new(parts.field, press(KeyCode::Escape, Key::Escape), window));
+        press_escape(app.world_mut(), parts.field);
         assert_eq!(value(&app), "");
     }
 
