@@ -109,7 +109,7 @@ impl Plugin for BoardUiPlugin {
             // Cards are drawn wherever they are, on the board or on a project's page.
             .add_systems(
                 Update,
-                (dress_cards, update_cards, update_card_badges, sync_card_rows, tools_follow_connection)
+                (dress_cards, update_cards, update_card_badges, sync_card_rows, order_tools, tools_follow_connection)
                     .chain()
                     .after(sync_tree),
             );

@@ -146,7 +146,7 @@ pub(super) enum CardPart {
 }
 
 /// Which tool button of a card an entity is, so a changed card keeps the buttons it still has.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ToolKind {
     Edit,
     Comment,
@@ -333,6 +333,26 @@ pub(super) fn sync_card_rows(
     }
 }
 
+/// Puts the tool buttons of a card in their canonical order (the variants of [`ToolKind`]: Edit, Comment, Answer, the
+/// holder, the PR link, the graph). A button added to a card already drawn is spawned at the end of its row, so this
+/// moves it to its place; a row already in order is left alone.
+pub(super) fn order_tools(
+    rows: Query<(Entity, &Children, &CardPart), Changed<Children>>,
+    kinds: Query<&ToolKind>,
+    mut commands: Commands,
+) {
+    for (row, children, part) in &rows {
+        if *part != CardPart::Tools {
+            continue;
+        }
+        let mut sorted: Vec<Entity> = children.iter().collect();
+        sorted.sort_by_key(|e| kinds.get(*e).ok().copied());
+        if sorted.as_slice() != &**children {
+            commands.entity(row).replace_children(&sorted);
+        }
+    }
+}
+
 fn sync_tools(
     card: &Card,
     row: Entity,
@@ -505,7 +525,8 @@ mod in_place_tests {
             .init_state::<Connection>()
             .add_systems(
                 Update,
-                (dress_cards, update_cards, update_card_badges, sync_card_rows, dress_slots, relabel_more).chain(),
+                (dress_cards, update_cards, update_card_badges, sync_card_rows, order_tools, dress_slots, relabel_more)
+                    .chain(),
             );
         app
     }
@@ -539,7 +560,10 @@ mod in_place_tests {
             .init_asset::<bevy::text::Font>()
             .init_asset::<Image>()
             .init_state::<Connection>()
-            .add_systems(Update, (dress_cards, make_once, update_cards, update_card_badges, sync_card_rows).chain());
+            .add_systems(
+                Update,
+                (dress_cards, make_once, update_cards, update_card_badges, sync_card_rows, order_tools).chain(),
+            );
         settle(&mut app);
         let shell = app.world_mut().query_filtered::<Entity, With<BoardCard>>().single(app.world()).unwrap();
         let shown = texts(&app, shell);
@@ -572,6 +596,34 @@ mod in_place_tests {
         assert!(texts(&app, shell).contains(&"holder".to_string()));
         let mut tools = app.world_mut().query::<&ToolKind>();
         assert_eq!(tools.iter(app.world()).count(), 2);
+    }
+
+    #[test]
+    fn a_button_added_later_lands_in_its_canonical_place() {
+        let mut app = app();
+        let mut first = card("t", &[], vec![CardAction::Edit, CardAction::Comment]);
+        first.pr = Some(PrLink { label: "#1".into(), url: "https://example.com/1".into() });
+        let shell = app.world_mut().spawn(BoardCard(first.clone())).id();
+        settle(&mut app);
+        let mut next = first;
+        next.actions.push(CardAction::Answer { comment_id: "c".into(), question: "q?".into() });
+        app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 = next;
+        settle(&mut app);
+        let row = app
+            .world_mut()
+            .query::<(Entity, &CardPart)>()
+            .iter(app.world())
+            .find(|(_, p)| **p == CardPart::Tools)
+            .map(|(e, _)| e)
+            .unwrap();
+        let order: Vec<ToolKind> = app
+            .world()
+            .get::<Children>(row)
+            .unwrap()
+            .iter()
+            .map(|e| *app.world().get::<ToolKind>(e).unwrap())
+            .collect();
+        assert_eq!(order, [ToolKind::Edit, ToolKind::Comment, ToolKind::Answer, ToolKind::Pull]);
     }
 
     #[test]
