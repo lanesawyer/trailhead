@@ -839,6 +839,17 @@ mod tests {
         (entity, !disabled)
     }
 
+    /// [`settle`], taking what was sent after each frame: messages are double-buffered and dropped after two ticks of the
+    /// fixed clock, which a loaded machine reaches while the frames run, so one look at the end can find none.
+    fn settle_sent(app: &mut App) -> Vec<crate::commands::Submit> {
+        let mut out = Vec::new();
+        for _ in 0..4 {
+            app.update();
+            out.extend(sent(app));
+        }
+        out
+    }
+
     #[test]
     fn the_panel_says_whether_focus_is_on_and_its_buttons_save_only_focus() {
         let mut app = filled();
@@ -858,8 +869,7 @@ mod tests {
 
         let hour = focus_button(&mut app, FocusAct::Hour).0;
         app.world_mut().trigger(Activate { entity: hour });
-        settle(&mut app);
-        let out = sent(&mut app);
+        let out = settle_sent(&mut app);
         let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!("{:?}", out[0].request.call) };
         assert_eq!(out[0].request.method(), Method::Put);
         let until = now.timestamp().checked_add(jiff::SignedDuration::from_hours(1)).unwrap();
@@ -872,8 +882,7 @@ mod tests {
         let end = focus_button(&mut app, FocusAct::End);
         assert!(end.1);
         app.world_mut().trigger(Activate { entity: end.0 });
-        settle(&mut app);
-        let out = sent(&mut app);
+        let out = settle_sent(&mut app);
         let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!() };
         assert_eq!(put.focus, None);
         answer(&mut app, out[0].source, Outcome::Failed("the server is busy".into()));
