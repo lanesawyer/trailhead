@@ -858,7 +858,8 @@ mod tests {
 
         let hour = focus_button(&mut app, FocusAct::Hour).0;
         app.world_mut().trigger(Activate { entity: hour });
-        settle(&mut app);
+        // One frame, no more: a message unread for two message updates is dropped, and the clock decides when.
+        app.update();
         let out = sent(&mut app);
         let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!("{:?}", out[0].request.call) };
         assert_eq!(out[0].request.method(), Method::Put);
@@ -872,7 +873,7 @@ mod tests {
         let end = focus_button(&mut app, FocusAct::End);
         assert!(end.1);
         app.world_mut().trigger(Activate { entity: end.0 });
-        settle(&mut app);
+        app.update();
         let out = sent(&mut app);
         let Call::SetNotificationSettings(put) = &out[0].request.call else { panic!() };
         assert_eq!(put.focus, None);
