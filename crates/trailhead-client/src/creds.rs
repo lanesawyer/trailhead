@@ -108,16 +108,17 @@ impl CredStore {
         Ok(Saved::File(path))
     }
 
-    /// Removes the keyring entry and the file copy. Whether either existed; an error only for a file that exists but
-    /// can't be removed.
+    /// Removes the keyring entry and the file copy. Whether either existed; an error for a file that exists but
+    /// can't be removed, or a keyring that failed to delete its entry (a locked keyring, no secret service): the token
+    /// may still be there. The file copy is removed either way.
     pub fn remove(&self, cred: Cred) -> std::io::Result<bool> {
-        let in_keyring = self.entry(cred).is_some_and(|e| e.delete_credential().is_ok());
+        let keyring = self.entry(cred).map(|e| e.delete_credential());
         let in_file = match std::fs::remove_file(self.file(cred)) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => return Err(e),
         };
-        Ok(in_keyring || in_file)
+        Ok(keyring_removed(keyring)? || in_file)
     }
 
     #[cfg(test)]
@@ -126,8 +127,27 @@ impl CredStore {
     }
 }
 
+/// What a keyring delete says: whether an entry was removed. No entry is fine; any other error is surfaced.
+fn keyring_removed(result: Option<keyring::Result<()>>) -> std::io::Result<bool> {
+    match result {
+        None | Some(Err(keyring::Error::NoEntry)) => Ok(false),
+        Some(Ok(())) => Ok(true),
+        Some(Err(e)) => Err(std::io::Error::other(format!("the OS keyring failed to delete the entry: {e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_keyring_failure_is_reported_but_no_entry_is_not() {
+        use super::keyring_removed;
+        assert!(!keyring_removed(None).unwrap());
+        assert!(keyring_removed(Some(Ok(()))).unwrap());
+        assert!(!keyring_removed(Some(Err(keyring::Error::NoEntry))).unwrap());
+        let err = keyring_removed(Some(Err(keyring::Error::NoStorageAccess("locked".into())))).unwrap_err();
+        assert!(err.to_string().contains("keyring"));
+    }
+
     use super::*;
 
     #[test]
