@@ -1420,6 +1420,15 @@ async fn a_failed_marker_write_re_parks_a_claimed_needs_input_task_merged_before
     r.factory.reconcile().await.unwrap();
     let task = r.tracker.task(&key);
     assert_eq!(task.status, Status::NeedsInput, "still parked, not closed as done");
+    assert_eq!(task.run.unapproved_merge, Some(true), "the second pass writes the marker");
+    assert_eq!(asked(&r), before + 2, "and asks once more");
+
+    // With the marker written, a third pass waits through `awaiting_done` rather than asking again.
+    r.tracker.lapse_lease(&key);
+    r.factory.reconcile().await.unwrap();
+    let task = r.tracker.task(&key);
+    assert_eq!(task.status, Status::NeedsInput);
+    assert_eq!(asked(&r), before + 2, "no further question once the marker is written");
 }
 
 /// TRAIL-1220: the stale check and the gates both ask whether an updated head still carries the verdict; the host is
