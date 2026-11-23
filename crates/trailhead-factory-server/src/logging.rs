@@ -31,7 +31,7 @@ pub(crate) fn server_subscriber(
     file: Option<tracing_subscriber::fmt::writer::BoxMakeWriter>,
     factory_on_stdout: bool,
 ) -> impl tracing::Subscriber + Send + Sync {
-    use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn};
+    use tracing_subscriber::filter::{FilterExt, dynamic_filter_fn, filter_fn};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::{Layer, registry::LookupSpan};
 
@@ -64,7 +64,11 @@ pub(crate) fn server_subscriber(
         tracing_subscriber::fmt::layer().with_timer(trailhead_log::local_timer()).with_ansi(false).with_writer(w)
     });
     tracing_subscriber::registry()
-        .with(buffer.layer().with_filter(filter.clone().and(dynamic_filter_fn(factory))))
+        .with(
+            buffer.layer().with_filter(
+                filter.clone().and(filter_fn(trailhead_control::logs::keeps)).and(dynamic_filter_fn(factory)),
+            ),
+        )
         .with(file.with_filter(filter.clone().and(dynamic_filter_fn(factory))))
         .with(
             stdout.with_filter(filter.and(dynamic_filter_fn(move |meta, cx| {
