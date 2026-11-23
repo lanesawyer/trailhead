@@ -651,7 +651,12 @@ fn parse_head(head: &[u8]) -> Result<Request, &'static str> {
             break;
         }
         let (name, value) = l.split_once(':').ok_or("bad header")?;
-        let name = name.trim().to_ascii_lowercase();
+        // RFC 9112 §5.1: whitespace before the colon (or a line starting with it, an obsolete
+        // fold) is rejected, so the upstream can't read a line differently from the gateway.
+        if name.is_empty() || name.contains([' ', '\t']) {
+            return Err("whitespace in header name");
+        }
+        let name = name.to_ascii_lowercase();
         if name == "content-length" || name == "transfer-encoding" {
             let value = value.trim();
             let framing = if name == "content-length" {
@@ -823,12 +828,9 @@ mod tests {
         assert_eq!(port, 80);
         assert!(String::from_utf8(head).unwrap().starts_with("GET /?q=1 HTTP/1.1\r\n"));
         // Framing is rewritten from the parsed body, never forwarded as the client wrote it.
-        for (raw, framing) in [
-            ("Content-Length: +5", "Content-Length: 5"),
-            ("Content-Length : 5", "Content-Length: 5"),
-            ("Transfer-Encoding : chunked", "Transfer-Encoding: chunked"),
-            ("transfer-encoding: CHUNKED", "Transfer-Encoding: chunked"),
-        ] {
+        for (raw, framing) in
+            [("Content-Length: +5", "Content-Length: 5"), ("transfer-encoding: CHUNKED", "Transfer-Encoding: chunked")]
+        {
             let req = format!("POST http://a/ HTTP/1.1\r\nX: y\r\n{raw}\r\n\r\n");
             let Ok(Request::Plain { head, .. }) = parse_head(req.as_bytes()) else { panic!("{raw}") };
             assert_eq!(
@@ -838,6 +840,10 @@ mod tests {
         }
         assert!(parse_head(b"GET /relative HTTP/1.1\r\n\r\n").is_err());
         assert!(parse_head(b"nonsense\r\n\r\n").is_err());
+        for bad in ["X-Foo : bar", "X-Foo\t: bar", " X-Foo: bar", "Content-Length : 1", "Host : a"] {
+            let req = format!("GET http://a/ HTTP/1.1\r\n{bad}\r\n\r\n");
+            assert!(parse_head(req.as_bytes()).is_err(), "{bad}");
+        }
     }
 
     /// A gateway on 127.0.0.1 with one sandbox registered on that address and the given allowlist.
