@@ -1215,7 +1215,8 @@ impl Client {
         self.send(self.request(routes::UNDO, None).json(undo)).await
     }
 
-    /// `POST /v1/revert`: reverts what one actor did since a time, skipping what someone else changed later.
+    /// `POST /v1/revert`: reverts what one actor did since a time, skipping what someone else changed later (`later_event` names that event)
+    /// and a task restore that would form a parent cycle (`later_event` is null, the cause is in `reason`).
     pub async fn revert(&self, revert: &Revert) -> Result<UndoReport> {
         self.send(self.request(routes::REVERT, None).json(revert)).await
     }
