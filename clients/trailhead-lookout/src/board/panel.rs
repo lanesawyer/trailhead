@@ -296,7 +296,8 @@ fn drop_unwanted(row: &[Entity], keep: impl Fn(usize, Entity) -> bool, commands:
 /// A card whose view model changed, or that was just given its parts.
 type ChangedOrDressed = Or<(Changed<BoardCard>, Changed<Children>)>;
 
-type ToolState<'a> = (&'a ToolKind, Option<&'a Act>, Option<&'a ExternalLink>, Option<&'a InspectHolder>);
+type ToolState<'a> =
+    (&'a ToolKind, Option<&'a Act>, Option<&'a ExternalLink>, Option<&'a InspectHolder>, Option<&'a Hint>);
 
 /// Brings the rows of a card whose view model changed to what it now has: badges added or dropped at the end, tool
 /// buttons added, dropped, or given their new target. A badge or button that stays is the same entity.
@@ -385,7 +386,9 @@ fn sync_tools(
     let Some(pr) = &card.pr else { return };
     let hint = format!("Open pull request {}", pr.label);
     match present(ToolKind::Pull) {
-        Some(e) if tools.get(e).is_ok_and(|t| t.2.map(|l| &l.url) != Some(&pr.url)) => {
+        Some(e)
+            if tools.get(e).is_ok_and(|t| t.2.map(|l| &l.url) != Some(&pr.url) || t.4.map(|h| &h.0) != Some(&hint)) =>
+        {
             commands.entity(e).insert((ExternalLink { url: pr.url.clone() }, Hint(hint)));
         }
         Some(_) => {}
@@ -595,6 +598,23 @@ mod in_place_tests {
         app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 = next;
         settle(&mut app);
         assert_eq!(tools(&mut app), before, "Inspect and Pull stay, the same entities");
+    }
+
+    #[test]
+    fn the_pr_hint_follows_the_label_when_the_url_stays() {
+        let mut app = app();
+        let mut first = card("t", &[], vec![]);
+        first.pr = Some(PrLink { label: "#1".into(), url: "https://example.com/1".into() });
+        let shell = app.world_mut().spawn(BoardCard(first.clone())).id();
+        settle(&mut app);
+        let mut next = first;
+        next.pr = Some(PrLink { label: "o/r#1".into(), url: "https://example.com/1".into() });
+        app.world_mut().get_mut::<BoardCard>(shell).unwrap().0 = next;
+        settle(&mut app);
+        let mut q = app.world_mut().query::<(&ToolKind, &Hint)>();
+        let hints: Vec<_> =
+            q.iter(app.world()).filter(|(k, _)| **k == ToolKind::Pull).map(|(_, h)| h.0.clone()).collect();
+        assert_eq!(hints, ["Open pull request o/r#1"]);
     }
 
     #[test]
