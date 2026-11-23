@@ -332,6 +332,12 @@ impl Factory {
         self.merger.lists(task)
     }
 
+    /// Whether the merger remembers what the host said of a carried verdict on this task's PR (for tests).
+    #[doc(hidden)]
+    pub fn remembers_carried(&self, task: &TaskKey) -> bool {
+        self.merger.carries(task)
+    }
+
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
     pub fn new(
         config: FactoryConfig,

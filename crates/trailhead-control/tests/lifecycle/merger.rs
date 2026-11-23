@@ -1017,21 +1017,40 @@ async fn a_queued_update_is_forgotten_when_a_person_merges_the_pr() {
 async fn a_failed_in_flight_listing_keeps_the_merge_path_and_the_tick_still_returns() {
     let (r, queue) = queued_rig_with(&merging());
     let (key, pr) = reviewed(&r, &queue, 1, "docs/a.md").await;
+    // Lane's approval carried over a host-made update leaves a carried entry behind.
+    r.tracker.approve_as_human(&key);
+    r.codehost.set_behind(&pr, true);
+    r.codehost.set_ci(&pr, CiState::Passed);
+    r.factory.reconcile().await.unwrap();
+    r.codehost.set_ci(&pr, CiState::Pending);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.factory.remembers_carried(&key));
+    // Behind again, and this time the host only queues the update.
     r.codehost.queue_updates(true);
     r.codehost.set_behind(&pr, true);
     r.codehost.set_ci(&pr, CiState::Passed);
     r.factory.reconcile().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
     assert!(r.factory.caches_pr_files(&key));
+    assert!(r.factory.remembers_carried(&key));
 
     // The listing is unknown, not empty: reconcile reports it, and the merger forgets nothing.
     r.tracker.fail_next("factory", TrackerOp::InFlight, 100);
     assert!(r.factory.reconcile().await.is_err());
     assert!(r.factory.awaiting_branch_update(&key), "a tracker error must not wipe the tracked update");
     assert!(r.factory.caches_pr_files(&key));
+    assert!(r.factory.remembers_carried(&key), "a tracker error must not wipe the carried verdict");
     r.factory.tick().await.unwrap();
     assert!(r.factory.awaiting_branch_update(&key));
     assert!(r.factory.caches_pr_files(&key));
+    assert!(r.factory.remembers_carried(&key));
+
+    // With the failure cleared, the next reconcile moves the merge path on: the update landed and CI passed.
+    r.tracker.fail_next("factory", TrackerOp::InFlight, 0);
+    r.codehost.set_behind(&pr, false);
+    r.factory.reconcile().await.unwrap();
+    assert!(r.codehost.prs()[0].merged, "the merge path went on once the listing worked");
+    assert!(!r.factory.awaiting_branch_update(&key));
 }
 
 #[tokio::test]
