@@ -124,9 +124,9 @@ pub enum Outcome {
         retry_after: Option<Duration>,
         message: String,
     },
-    /// Any other refusal, with the server's words, or no answer after [`MAX_ATTEMPTS`]. A `409` that isn't about the
-    /// version (`invalid_transition`, `claim_held`, `blocked_by`, `undo_conflict`, ...) is one: sending again on a newer
-    /// version would be refused the same way.
+    /// Any other refusal, with the server's words, or [`MAX_ATTEMPTS`] failures without an answer. A `409` that isn't
+    /// about the version (`invalid_transition`, `claim_held`, `blocked_by`, `undo_conflict`, ...) is one: sending again
+    /// on a newer version would be refused the same way.
     Failed(String),
 }
 
@@ -287,7 +287,7 @@ fn apply_replies(mut replies: MessageReader<Reply>, mut outbox: ResMut<Outbox>, 
                 }
                 if p.failures >= MAX_ATTEMPTS {
                     let p = outbox.pending.remove(at);
-                    let message = format!("no answer after {MAX_ATTEMPTS} tries: {why}");
+                    let message = format!("failed {MAX_ATTEMPTS} times: {why}");
                     done.write(CommandDone { source: p.source, id: p.id, outcome: Outcome::Failed(message) });
                 } else {
                     p.stage = Stage::Queued;
