@@ -378,7 +378,7 @@ impl Factory {
         self.tracker.report(&task.key, RunPatch::conflict_reworks(round)).await?;
         let base = &self.config.repo.base_branch;
         let body = feedback(&pr.url, base);
-        tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
+        tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR is behind the base branch; reworking");
         let head = match &self.codehost {
             Some(codehost) => codehost.head(pr).await.ok(),
             None => None,
