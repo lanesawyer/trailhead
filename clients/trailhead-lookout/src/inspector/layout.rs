@@ -473,13 +473,19 @@ fn spawn_composer(
 ) -> Entity {
     let item =
         commands.spawn(Node { flex_direction: FlexDirection::Column, row_gap: px(space::ROWS), ..default() }).id();
-    let line = commands.spawn_scene(bsn! { @row() }).insert(ChildOf(item)).id();
+    let line = commands
+        .spawn_scene(bsn! { @row() })
+        .insert((
+            ChildOf(item),
+            Node { width: percent(100), column_gap: px(space::CONTROLS), align_items: AlignItems::Center, ..default() },
+        ))
+        .id();
     let words = answering.as_ref().map_or_else(String::new, |q| format!("Answering: {q}"));
     let shown = display(answering.is_some());
     let answering_text = commands
         .spawn_scene(bsn! {
             @text_dim(words, size::SECONDARY)
-            Node { display: { shown }, flex_shrink: 1.0, min_width: px(0) }
+            Node { display: { shown }, flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0) }
         })
         .insert((ComposePart::Answering, ChildOf(line)))
         .id();
