@@ -49,7 +49,8 @@ pub fn repos_text(status: &FactoryStatus) -> String {
     if lines.is_empty() { "none heard of yet".into() } else { lines.join("\n") }
 }
 
-/// Every queue task the factory works, one per line, or the one new tasks go under until a status has listed them.
+/// Every queue task the factory works, one per line, with the one pinned by `LOOKOUT_QUEUE` (if any) first, or the one
+/// new tasks go under until a status has listed them.
 pub fn queues_text(authoring: &Authoring, status: &FactoryStatus, tasks: &[Task]) -> String {
     let mut queues: Vec<String> = Vec::new();
     let pinned = authoring.pinned.then(|| authoring.queue.clone());
