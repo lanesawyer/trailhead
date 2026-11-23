@@ -637,6 +637,32 @@ mod tests {
         assert!(area_children(&mut app).iter().all(|(_, row)| *row));
     }
 
+    /// Each row's own caption, first to last: its words and the tone they are painted in.
+    fn row_captions(app: &mut App) -> Vec<(String, Token)> {
+        let rows: Vec<Entity> = area_children(app).into_iter().map(|(e, _)| e).collect();
+        let world = app.world_mut();
+        rows.into_iter()
+            .map(|row| {
+                let caption = world.get::<Children>(row).unwrap().iter().find(|k| world.get::<Text>(*k).is_some());
+                let caption = caption.expect("a row has a caption");
+                (world.get::<Text>(caption).unwrap().0.clone(), world.get::<TextTone>(caption).unwrap().0.clone())
+            })
+            .collect()
+    }
+
+    /// The tone of every row's icon, first to last: the text inside each row's icon box.
+    fn row_icon_tones(app: &mut App) -> Vec<Token> {
+        let rows: Vec<Entity> = area_children(app).into_iter().map(|(e, _)| e).collect();
+        let world = app.world_mut();
+        rows.into_iter()
+            .map(|row| {
+                let icon_box = world.get::<Children>(row).unwrap()[0];
+                let icon = world.get::<Children>(icon_box).unwrap()[0];
+                world.get::<TextTone>(icon).unwrap().0.clone()
+            })
+            .collect()
+    }
+
     #[test]
     fn changed_options_reuse_the_rows_they_already_have() {
         let mut app = app();
@@ -662,6 +688,7 @@ mod tests {
         let after: Vec<Entity> = area_children(&mut app).iter().map(|(e, _)| *e).collect();
         assert_eq!(after, before[..2]);
         assert_eq!(button_texts(&mut app), vec!["y"]);
+        assert_eq!(row_captions(&mut app), vec![("x".to_string(), token::STATUS_WARN), ("y".to_string(), token::TEXT)]);
         // Grown again: the two stay, one is added.
         assert!(edit(&mut app, vec!["x", "y", "z"], vec![], 2));
         settle(&mut app);
@@ -669,7 +696,10 @@ mod tests {
         assert_eq!(grown.len(), 3);
         assert_eq!(grown[..2], before[..2]);
         assert_eq!(button_texts(&mut app), vec!["z"]);
+        let words: Vec<String> = row_captions(&mut app).into_iter().map(|(w, _)| w).collect();
+        assert_eq!(words, ["x", "y", "z"]);
     }
+
     #[test]
     fn rows_queued_for_a_select_despawned_before_they_spawn_leave_nothing_behind() {
         let mut app = app();
@@ -716,6 +746,19 @@ mod tests {
         app.world_mut().run_system_once(move |mut edit: SelectEdit| edit.set(select, &options, Some(1))).unwrap();
         settle(&mut app);
         assert_eq!(button_texts(&mut app)[..2], [Icon::Help.glyph(), "Question"]);
+        assert_eq!(row_icon_tones(&mut app), vec![token::TEXT, token::TEXT]);
+        // New words and tones reach a kept row's caption and its icon alike.
+        let renamed = vec!["Idea".to_string(), "Question".to_string()];
+        let tones = vec![Some(token::STATUS_OK), None];
+        app.world_mut()
+            .run_system_once(move |mut edit: SelectEdit| edit.set_toned(select, &renamed, &tones, Some(1)))
+            .unwrap();
+        settle(&mut app);
+        assert_eq!(
+            row_captions(&mut app),
+            vec![("Idea".to_string(), token::STATUS_OK), ("Question".to_string(), token::TEXT)]
+        );
+        assert_eq!(row_icon_tones(&mut app), vec![token::STATUS_OK, token::TEXT]);
     }
 
     /// Stands in for layout, which these tests don't run: the button's width, and the width the caption's whole
