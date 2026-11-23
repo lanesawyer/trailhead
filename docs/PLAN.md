@@ -31,7 +31,7 @@ The long-term ambition is to replace other task tools, not to sync with them.
 7. **The factory coordinates; sandboxes act.** The control plane (inside the Trailhead server, one process, since TRAIL-164; `docs/factory/server-control-plane.md`) orchestrates, enforces budgets and decides review gates, and holds no agent credentials. Sandboxes are untrusted and disposable, reach only declared egress, and call model providers and the code host through injected credentials.
 8. **Humans review by risk, not by habit.** Per-repo policy decides when a human is required; loosening it always needs one.
 9. **Pluggable where vendors differ.** Compute, agent harness, model provider, tracker and code host are traits with in-memory fakes, so the whole lifecycle runs in CI with no network or spend.
-10. **The engine works without the factory.** The factory is a default-on `factory` feature of the `trailhead` CLI and server (decided 2026-11-07, TRAIL-164; built in TRAIL-1073): a build with it but no `[factory] repos` runs no factory code, and `--no-default-features` builds the engine with no factory crates at all. `trailhead-core` and `trailhead-client` never depend on the factory crates.
+10. **The engine works without the factory.** The factory is a default-on `factory` feature of the `trailhead` CLI and server (decided 2026-11-07, TRAIL-164; built in TRAIL-1073): a build with it but no `[factory] repos` runs no factory code, and `--no-default-features` builds the engine with no factory runtime crates (`trailhead-wire`, and the types in `trailhead-factory` it needs, stay in for `trailhead app from`, TRAIL-1635). `trailhead-core` and `trailhead-client` never depend on the factory crates.
 
 ## License
 

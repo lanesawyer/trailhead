@@ -116,9 +116,18 @@ impl Drop for NoEcho {
 mod tests {
     use super::*;
 
+    /// Held by every test that changes this process's SIGINT disposition, directly or through a `NoEcho`: from an
+    /// interactive terminal `cargo test`'s stdin is a TTY, and `NoEcho::new` then installs the handler too.
+    static SIGINT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn sigint_lock() -> std::sync::MutexGuard<'static, ()> {
+        SIGINT.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn not_a_terminal_is_a_no_op() {
-        // Under `cargo test` stdin is not a terminal, so there is nothing to change or restore.
+        // Off a terminal (as in CI) there is nothing to change or restore; on one, it is a real `NoEcho`.
+        let _lock = sigint_lock();
         let guard = NoEcho::new();
         assert!(guard.saved.is_none() || std::io::IsTerminal::is_terminal(&std::io::stdin()));
         assert!(guard.saved.is_some() || guard.old_sigint.is_none());
@@ -198,7 +207,9 @@ mod tests {
 
     #[test]
     fn ignored_sigint_stays_ignored() {
-        // The only test that touches this process's SIGINT disposition; the child the Ctrl-C test forks sets its own.
+        // With `not_a_terminal_is_a_no_op`, the only test that touches this process's SIGINT disposition (they share
+        // `SIGINT`); the child the Ctrl-C test forks sets its own.
+        let _lock = sigint_lock();
         // SAFETY: plain `sigaction` calls; the original disposition is put back at the end.
         unsafe {
             let mut ign: libc::sigaction = std::mem::zeroed();
