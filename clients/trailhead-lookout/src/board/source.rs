@@ -169,6 +169,7 @@ mod tests {
             last_error: None,
             human_grades: None,
             holding: None,
+            restart_for: Vec::new(),
             usage: Vec::new(),
         };
         let authoring = Authoring { queue: "TRAIL-1".into(), ..Default::default() };

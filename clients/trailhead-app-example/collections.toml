@@ -1,0 +1,6 @@
+# The example app's collections in the app data store. In an apps repo this file is `apps/<id>/collections.toml`,
+# which the server registers from the checkout its builder last built; this one is registered by the app's tests.
+
+# Short notes a person adds and removes on the example's page.
+[collections.notes]
+fields = { text = "string" }

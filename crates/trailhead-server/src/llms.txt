@@ -14,6 +14,7 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 - A token may expire: `expires_in_seconds` when issuing it (`POST /v1/tokens`, `POST /v1/agents`). An expired token gets `401`. A token never outlives the one that issued it: without `expires_in_seconds` it inherits the issuer's expiry, and asking for longer is `forbidden`.
 - A token may have a per-minute rate limit. Over it: `429 rate_limited` with `Retry-After` seconds and `retry_after` in the body.
 - A human can change a token's scope or limit without reissuing it: `PATCH /v1/tokens/{id} {"projects": ["AUTH"], "rate_limit_per_minute": 60}`; omit a field to keep it, `null` to lift it.
+- A token names the apps whose data it reaches (`"apps": ["cairn"]` when issuing it or in `PATCH /v1/tokens/{id}`, never more than the issuer's). One that names none reaches no app's data if it is an agent's, every app if it is a person's not limited to projects; `null` in a `PATCH` goes back to that default. A sub-agent's token reaches none unless given some.
 
 ## Core loop
 
@@ -37,6 +38,15 @@ Requests and responses are JSON. Tasks are named by key (`AUTH-42`) or UUID, pro
 
 The `description` is the current spec and gets edited; comments are the append-only history.
 
+## Notifications
+
+What a person is told. The server raises one by rule (an agent's question that isn't put to another agent, a task sent for review where no agent may approve, a task due soon or overdue) and resolves it when the thing is dealt with. To ask a person something, ask a `question`; raise one yourself only for what no rule covers.
+
+- `POST /v1/notifications` with `{source, kind, title, body?, subject?, task?, actions?}` raises one. `source` names the raiser and `kind` the sort of thing, each 1 to 64 characters; `title` is one line; `subject` is your name for what it is about; `task` is a key, and finishing that task resolves it; `actions` are up to 4 `{label, url}` web links.
+- `GET /v1/notifications?unread=&before=&limit=` returns `{notifications, unread}`, newest first.
+- `POST /v1/notifications/{id}/resolve`, or `POST /v1/notifications/resolve` with `{source, subject}`, says the thing no longer needs the person. Marking one read (`/read`, `/unread`, `/read-all`) is the person's alone.
+- Each change is an event (`notification.raised`, `.read`, `.unread`, `.resolved`) on the stream; undo leaves them alone.
+
 ## Pictures
 
 A task can carry pictures, such as screenshots of a UI before and after a change. Whoever may comment on a task may attach one.
@@ -45,6 +55,28 @@ A task can carry pictures, such as screenshots of a UI before and after a change
 - `GET /v1/tasks/KEY-1/attachments` lists them, oldest first, without bytes; `GET /v1/tasks?include=attachments` adds the same list to each task, and `GET /v1/tasks/KEY-1` carries it as `attachments`.
 - `GET /v1/attachments/{id}` returns the bytes, with `ETag` (the SHA-256) and an immutable `Cache-Control`; `If-None-Match` gets `304`.
 - `DELETE /v1/attachments/{id}` removes one (undo restores it). A person may remove any; an agent only those it or its sub-agents added (`403` otherwise).
+
+## App data
+
+Each app in the window keeps its own records, in collections its `collections.toml` declares (`[collections.snoozes]` with `fields = { item = "string", until = "timestamp?" }`): a field is `string`, `integer`, `number`, `boolean`, `timestamp` (RFC 3339), `day` (`YYYY-MM-DD`), `url` or `json`, `[]` after it for a list, then `?` for optional. A write with a field missing, unknown or of the wrong type is `400 invalid` naming the field; an optional field sent as `null` is the same as left out. A collection with `from = "<connector>.<feed>"` is filled from a connector's feed and is read-only here (`403 forbidden`). `{app}` is the app's id, such as `cairn`. A token that doesn't reach the app gets `403` on all of these.
+
+- `GET /v1/apps` lists the apps with data you reach, each `{id, collections}`; `GET /v1/apps/{app}` is one. `PUT /v1/apps/{app}/declaration` (a person only) registers an app's `collections.toml`, sent as text, or as its JSON form with `Content-Type: application/json`; the server also registers them itself from the apps repo it builds. A collection that holds records changes only by addition (a new collection or a new optional field).
+- A record is `{id, collection, key, data, version, created_at, updated_at, created_by}`. `key` is optional: the name something outside gave it (`lanesawyer/trailhead#123`), unique in its collection.
+- `GET /v1/apps/{app}/records/{collection}?after=<id>&limit=` pages records in the order they were made (default 100, at most 1000). The `trailhead-event-cursor` header is the app's newest event as the page was read.
+- `POST /v1/apps/{app}/records/{collection}` with `{"data", "key"?}` creates one (`201`; a taken key is `409 already_exists`). `GET`, `PATCH` (a JSON merge patch of `data`), `PUT` (the whole `data`; the key stays) and `DELETE` `/v1/apps/{app}/records/{collection}/{id}`. Reads return `ETag: "<version>"`; send it as `If-Match` on `PATCH`, `PUT` or `DELETE`, and a stale one is `412 version_conflict`. `PATCH` and `PUT` answer `{outcome, record}`, `outcome` being `changed`, or `unchanged` when the record already looked like that (nothing written, no event, same version).
+- `PUT /v1/apps/{app}/keys/{collection}/{key}` with the record's `data` writes by key: `201` `created`, or `200` `changed` or `unchanged`, so writing the same thing twice leaves one record and one event. The key is one percent-encoded path segment: `/` is `%2F`, `#` is `%23`. `GET` the same path reads it.
+- `POST /v1/apps/{app}/batch` with `{"writes": [...]}` applies 1 to 1000 writes in one transaction, all or none: each `{"op": "create", collection, key?, data}`, `{"op": "patch", id, data, version?}`, `{"op": "replace", id, data, version?}`, `{"op": "delete", id, version?}` or `{"op": "put", collection, key, data}`. It answers `{batch_id, results}`, each result an `{outcome, record}`.
+- Every change is an event in the app's own log, numbered per app: `{id, batch_id, actor_id, on_behalf_of, collection, record_id, kind, before, after, undoes, at}`, `kind` being `record.created|updated|deleted|reverted`. `GET /v1/apps/{app}/events?after=&collection=&record=&limit=` lists them; `GET /v1/apps/{app}/events/stream?after=&collection=&record=` streams them as the task stream does (`Last-Event-ID` resumes). To mirror a collection, read its pages, then stream from the first page's `trailhead-event-cursor`: one page misses and repeats nothing, and across pages apply an event only when its `after.version` is newer than the record you hold.
+- `POST /v1/apps/{app}/undo` with `{"event_id"}` or `{"batch_id"}` (the `trailhead-batch` header of the write) undoes it, as for tasks; a collection filled from a feed is left for its next run to set.
+
+## Connectors
+
+A connector is a small program in the apps repo (`connectors/<id>/`) that the server builds and runs on a schedule; each run hands over feeds of records, which the server writes into every app collection that says `from = "<id>.<feed>"`. Only a person reads or changes them here.
+
+- `GET /v1/connectors` lists every connector the last build of the apps repo holds; `GET /v1/connectors/{id}` is one: `{id, name, error?, every_secs, timeout_secs, hosts, settings: [{name, kind, label, help?, required, value?}], secrets: [{name, set}], feeds: [{name, fields, collections}], enabled, missing, running, last_run?, next_run?}`. `missing` says in words what it needs before it can run (a setting, a secret, a build); `last_run` is `{started_at, duration_ms, ok, error?, feeds: {<feed>: {records, created, changed, removed, unchanged, errors?}}}`. A secret's value is never shown.
+- `PATCH /v1/connectors/{id}` with `{"enabled"?, "settings"?}` turns it on or off and merges `settings` into what is set (`null` unsets one); a setting it doesn't declare, or of the wrong kind (`string`, `list`, `boolean`, `integer`), is `400 invalid`. Turning it on makes its agent, `connector/<id>`. Its secrets are given only on the server's machine: `trailhead connector login <id>`.
+- `POST /v1/connectors/{id}/run` starts a run now and answers `202` once it has started (`409 already_exists` while one runs; `400 invalid` when it is off or still needs something).
+- `PUT /v1/connectors/{id}/feeds/{feed}` with `{"records": [{"key", "data"}]}` is how a run hands a feed's whole current set over (at most 64 MB of JSON). Only the connector's own agent may (`403` for anyone else, a person too); its token reaches nothing else. A record that doesn't match the feed's fields is `400 invalid`, naming the feed, the key and the field. The answer is `{feed, records, apps: [{app, collection, created, changed, removed, unchanged, error?}]}`: one app failing stops none of the others, and a set that matches what an app holds writes nothing there.
 
 ## Statuses
 
@@ -97,7 +129,7 @@ Any `/v1` write may send `Idempotency-Key` (1-255 characters). A retry with the 
 
 ## Undo
 
-Every request is one batch; its id is in the `trailhead-batch` response header. `POST /v1/undo` with `{"batch_id"}` or `{"event_id"}` reverts it, as a new write that can itself be undone. If something it touched changed later it fails with `409 undo_conflict` (`later_event`); past 90 days it is `409 undo_window_expired`. A human can `POST /v1/revert` `{"actor_id", "since"}` to revert everything one actor did since a time, skipping and reporting anything someone else changed afterwards, or a task restore that would form a parent cycle (`later_event` null, cause in `reason`).
+Every request is one batch; its id is in the `trailhead-batch` response header. `POST /v1/undo` with `{"batch_id"}` or `{"event_id"}` reverts it, as a new write that can itself be undone. If something it touched changed later it fails with `409 undo_conflict` (`later_event`); past 90 days it is `409 undo_window_expired`. A human can `POST /v1/revert` `{"actor_id", "since"}` to revert everything one actor did since a time, skipping and reporting anything someone else changed afterwards, or a task restore that would form a parent cycle (`later_event` null, cause in `reason`). It reverts the actor's writes to apps' data too, each app on its own after the tasks: `apps` reports each app it changed anything in by id, and `apps_failed` any app whose revert failed, with why; both are left out when empty.
 
 ## Events
 
@@ -131,7 +163,7 @@ Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is
 - `dependency_cycle` 409: the dependency would create a cycle.
 - `undo_conflict` 409: something changed after the event; `later_event`.
 - `undo_window_expired` 409: older than the 90-day undo window.
-- `already_exists` 409: a project with that key exists.
+- `already_exists` 409: a project with that key exists, or a record with that key in its collection.
 - `idempotency_key_in_flight` 409: a request with this key is still running; retry shortly.
 - `version_conflict` 412: stale `If-Match` or `version`; `current_version`.
 - `idempotency_key_reused` 422: this key was used for a different request.
@@ -141,5 +173,5 @@ Every error is `{"error": {"code", "message", ...}}`. Branch on `code`, which is
 ## More
 
 - OpenAPI 3.1, every route and schema: `GET /v1/openapi.json`.
-- MCP (streamable HTTP, same bearer tokens): `/mcp`. Tools `ready`, `list_tasks`, `show`, `create_task`, `update_task` (takes a `handoff`), `claim`, `renew`, `release`, `my_claims`, `comment`, `resolve_question`, `search`, `undo_last`, `list_projects`, `show_project`, `create_project`, `update_project` (name and brief only). Each call is its own undo batch; errors come back as tool errors `error[code]: message`. Project briefs are resources at `trailhead://projects/KEY/brief`.
+- MCP (streamable HTTP, same bearer tokens): `/mcp`. Tools `ready`, `list_tasks`, `show`, `create_task`, `update_task` (takes a `handoff`), `claim`, `renew`, `release`, `my_claims`, `comment`, `resolve_question`, `search`, `undo_last`, `list_projects`, `show_project`, `create_project`, `update_project` (name and brief only), and for apps' data, with a token that reaches the app: `app_collections`, `list_records`, `get_record`, `write_record` (create, change by `id`, or write by `key`) and `delete_record`. Each call is its own undo batch; errors come back as tool errors `error[code]: message`. Project briefs are resources at `trailhead://projects/KEY/brief`.
 - CLI: `trailhead --as <agent> ready|claim|renew|comment|ask|done -m|release|mine|watch`. `trailhead --as <agent> mcp` bridges MCP over stdio.

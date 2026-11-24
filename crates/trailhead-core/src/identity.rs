@@ -79,6 +79,10 @@ pub(crate) async fn lineage_revoked(conn: &Connection, agent: Uuid) -> Result<bo
     Ok(rows.next().await?.is_some())
 }
 
+/// The top-level name no person may give an agent: connectors' agents are `connector/<id>`, made by the server with no
+/// parent, so a `connector` agent's sub-agents could otherwise pass for them.
+const CONNECTORS: &str = "connector";
+
 /// Agent name segments: what `--as` and file names can carry safely.
 fn validate_agent_name(name: &str) -> Result<()> {
     let ok = (1..=40).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
@@ -97,11 +101,22 @@ async fn insert_agent(tx: &Tx, name: &str) -> Result<Agent> {
         None if ctx.is_scoped() => {
             return Err(Error::Forbidden("a token scoped to projects can't create agents".into()));
         }
+        None if name == CONNECTORS => {
+            return Err(Error::Invalid(format!(
+                "the agent name {CONNECTORS:?} is kept for connectors' agents, which the server makes"
+            )));
+        }
         None => (name.to_string(), None),
         Some(me) => {
             (format!("{}/{name}", find_agent(&tx.conn, ctx.workspace_id, &me.to_string()).await?.name), Some(me))
         }
     };
+    insert_agent_named(tx, full, parent).await
+}
+
+/// Inserts an agent under its full name, which must be free.
+pub(crate) async fn insert_agent_named(tx: &Tx, full: String, parent: Option<Uuid>) -> Result<Agent> {
+    let ctx = &tx.ctx;
     // Names are how people and `--as` refer to agents, so they must be unambiguous.
     if find_agent(&tx.conn, ctx.workspace_id, &full).await.is_ok() {
         return Err(Error::AlreadyExists(format!("agent {full:?}")));

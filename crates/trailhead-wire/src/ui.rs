@@ -35,6 +35,8 @@ const CLOSE_TUNNEL_DROPPED: u32 = 2;
 
 /// How long a UI waits to reach the control plane before a request fails.
 const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// How long [`refused`] waits for the control plane's close after a dial.
+const REFUSAL: std::time::Duration = std::time::Duration::from_secs(1);
 /// How long a dropped tunnel keeps its endpoint alive so the close it just sent goes out.
 const CLOSE_FLUSH: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -524,6 +526,17 @@ pub async fn dial_ui(endpoint: &Endpoint, control_plane: EndpointId) -> Result<C
         .map_err(io_err)
 }
 
+/// Whether the control plane closed `conn` because this endpoint isn't on its allowlist. Such an endpoint's dial
+/// succeeds and the close follows it, so this waits a moment for one: a dial that fails, or times out, says only
+/// that the control plane wasn't reached.
+pub async fn refused(conn: &Connection) -> bool {
+    use iroh::endpoint::ConnectionError;
+    matches!(
+        tokio::time::timeout(REFUSAL, conn.closed()).await,
+        Ok(ConnectionError::ApplicationClosed(c)) if c.error_code == CLOSE_NOT_ALLOWED.into()
+    )
+}
+
 /// A UI's end of a [`UiRequest::Status`] stream.
 pub struct StatusStream {
     recv: iroh::endpoint::RecvStream,
@@ -726,6 +739,7 @@ mod tests {
             sandboxes: vec![],
             runs: vec![],
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),

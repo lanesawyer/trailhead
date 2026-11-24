@@ -20,6 +20,7 @@ use trailhead_client::http::{Call, Client};
 
 use crate::connection::{Connection, SendNet};
 use crate::net::NetCommand;
+use crate::records::RecordMirror;
 
 /// Caps real failures: a command is reported failed after this many. A send the net thread refused with
 /// [`NOT_CONNECTED`], or a resend after the link dropped, isn't a failure. It also caps rate-limit retries, counted
@@ -220,16 +221,22 @@ impl Plugin for CommandsPlugin {
 }
 
 /// Takes new commands. Outside `Live` there is nothing to send them over, so they are refused at once rather than
-/// left to go stale behind a greyed-out control.
+/// left to go stale behind a greyed-out control. A write the app's declaration says can't succeed (to a collection
+/// filled from a feed) is refused at once too, as the server would.
 fn accept(
     mut submits: MessageReader<Submit>,
     connection: Res<State<Connection>>,
+    records: Option<Res<RecordMirror>>,
     mut outbox: ResMut<Outbox>,
     mut done: MessageWriter<CommandDone>,
 ) {
     for Submit { source, request } in submits.read() {
         let id = CommandId(outbox.next);
         outbox.next += 1;
+        if let Some(why) = records.as_ref().and_then(|r| r.refusal(&request.call)) {
+            done.write(CommandDone { source: *source, id, outcome: Outcome::Forbidden(why) });
+            continue;
+        }
         if *connection.get() != Connection::Live {
             done.write(CommandDone {
                 source: *source,
@@ -326,7 +333,8 @@ pub async fn execute(api: &Client, request: &Request) -> Result<Outcome, String>
     if status.is_success() {
         let version = etag
             .and_then(|e| e.trim().trim_start_matches("W/").trim_matches('"').parse().ok())
-            .or_else(|| body["version"].as_i64());
+            .or_else(|| body["version"].as_i64())
+            .or_else(|| body["record"]["version"].as_i64());
         return Ok(Outcome::Ok { version });
     }
     let error = &body["error"];

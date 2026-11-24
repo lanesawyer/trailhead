@@ -274,7 +274,7 @@ fn cells(row: &ProjectRow) -> Vec<Box<dyn SceneList>> {
 }
 
 /// One row per project the filter lets through, following the mirror, updated in place.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 fn sync_rows(
     filter: Res<ProjectsFilter>,
     projects: Query<&Mirrored<Project>>,
@@ -352,6 +352,7 @@ mod tests {
     use trailhead_shell::fixture::{project, task};
 
     use super::*;
+    use trailhead_shell::testing::settle;
 
     fn world() -> (Vec<Project>, Vec<Task>) {
         let projects = vec![
@@ -415,12 +416,6 @@ mod tests {
         app.world_mut().resource_mut::<NextState<View>>().set(View::Projects);
         settle(&mut app);
         app
-    }
-
-    fn settle(app: &mut App) {
-        for _ in 0..4 {
-            app.update();
-        }
     }
 
     fn shown(app: &mut App) -> Vec<String> {

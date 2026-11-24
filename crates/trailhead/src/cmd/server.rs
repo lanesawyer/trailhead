@@ -23,7 +23,7 @@ pub(crate) async fn server(url: &str, cmd: &ServerCmd, json: bool) -> Result<()>
         ServerCmd::Status => match health().await {
             Some(info) if json => {
                 let unit = local_scope(&paths, local, &info);
-                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref()))
+                print_json(&status_json(serde_json::to_value(&info)?, unit.as_deref()));
             }
             Some(info) => {
                 let mut parts = vec!["running".to_string()];
@@ -148,7 +148,7 @@ fn restart_onto_new_binary() -> Result<()> {
 
 /// Runs the server in this process until stopped. `factory_on_terminal` also prints the factory's log lines, which
 /// otherwise only go to `factory.log` (`trailhead factory run`).
-#[cfg_attr(not(feature = "factory"), allow(unused_variables))]
+#[cfg_attr(not(feature = "factory"), expect(unused_variables))]
 pub(crate) async fn serve(bind: &str, factory_on_terminal: bool, foreground: bool) -> Result<()> {
     let paths = trailhead_server::Paths::from_env().context("no home directory")?;
     #[cfg(feature = "factory")]

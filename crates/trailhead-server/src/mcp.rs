@@ -23,16 +23,17 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use trailhead_client::text::Text;
+use trailhead_core::app_data::{Collection, Declaration, Outcome, Record, Written};
 use trailhead_core::{
-    Claim, CommentKind, Ctx, Error, EventFilter, Grade, GradeFilter, NewComment, NewProject, NewTask, Priority,
-    Project, ProjectPatch, Status, StoredResponse, Task, TaskFilter, TaskPatch, TaskSort, Verdict,
+    Claim, CommentKind, Ctx, Error, EventFilter, Grade, NewComment, NewProject, NewRecord, NewTask, Priority, Project,
+    ProjectPatch, RecordChange, RecordPage, Status, StoredResponse, Task, TaskFilter, TaskPatch, TaskSort, Verdict,
     idempotency_fingerprint, parse_grade,
 };
 use uuid::Uuid;
 
 use crate::AppState;
 use crate::error::ApiError;
-use crate::params::{parse_date, parse_list, parse_opt_at, parse_opt_date};
+use crate::params::{parse_date, parse_grade_filter, parse_list, parse_opt_at, parse_opt_date};
 
 const BRIEF_PREFIX: &str = "trailhead://projects/";
 
@@ -49,7 +50,11 @@ pub fn service(state: Arc<AppState>) -> StreamableHttpService<TrailheadMcp, Loca
 /// Authenticates `/mcp` requests with the same bearer tokens as REST. The context
 /// rides along in the request extensions, which rmcp hands to each tool.
 pub async fn auth(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
-    match crate::auth::authenticate(&state, req.headers()).await {
+    let authed = match crate::auth::authenticate(&state, req.headers()).await {
+        Ok((ctx, token)) => crate::auth::refuse_connectors(&state, &ctx, None).await.map(|()| (ctx, token)),
+        Err(e) => Err(e),
+    };
+    match authed {
         Ok((ctx, token)) => {
             req.extensions_mut().insert(ctx);
             req.extensions_mut().insert(TokenId(token.id));
@@ -103,10 +108,6 @@ fn clearable<T>(
     parse: impl Fn(&str) -> trailhead_core::Result<T>,
 ) -> trailhead_core::Result<Option<Option<T>>> {
     s.map(str::trim).map(|s| (!s.is_empty()).then(|| parse(s)).transpose()).transpose()
-}
-
-fn parse_grade_filter(s: Option<&str>) -> trailhead_core::Result<GradeFilter> {
-    Ok(s.map(GradeFilter::parse).transpose()?.unwrap_or_default())
 }
 
 fn task_line(t: &Task) -> String {
@@ -352,6 +353,92 @@ pub struct SearchArgs {
     as_agent: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AppArgs {
+    /// The app's id, e.g. `cairn`. Omit to list the apps your token reaches.
+    app: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ListRecordsArgs {
+    app: String,
+    collection: String,
+    /// Only records after this id: the last id of the page before.
+    after: Option<String>,
+    /// Defaults to 100, at most 1000.
+    limit: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetRecordArgs {
+    app: String,
+    collection: String,
+    /// The record's id. Give this or `key`.
+    id: Option<String>,
+    /// The record's key, the name something outside gave it.
+    key: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+pub struct WriteRecordArgs {
+    app: String,
+    collection: String,
+    /// The record's fields, as the collection declares them. With `id`, a merge patch: fields given are set, `null`
+    /// removes an optional one, the rest stay (unless `replace`).
+    data: serde_json::Map<String, serde_json::Value>,
+    /// Change the record with this id.
+    id: Option<String>,
+    /// Without `id`: make the record with this key look like `data`, creating it if there is none. Writing the same
+    /// thing twice leaves one record and changes nothing.
+    key: Option<String>,
+    /// With `id`: `data` is the whole record, not a patch.
+    #[serde(default)]
+    replace: bool,
+    /// With `id`: the version you last saw; the write fails if the record changed since.
+    version: Option<i64>,
+    /// Optional. Retrying with the same key and arguments returns the first call's
+    /// result instead of doing it twice. Keys last 24 hours.
+    #[serde(default, skip_serializing)]
+    idempotency_key: Option<String>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    #[serde(default)]
+    as_agent: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DeleteRecordArgs {
+    app: String,
+    collection: String,
+    id: String,
+    /// The version you last saw; the delete fails if the record changed since.
+    version: Option<i64>,
+    /// Act as one of your registered sub-agents (e.g. `researcher` for `<you>/researcher`).
+    as_agent: Option<String>,
+}
+
+/// One record: `<id> v<version> [key=<key>] <fields as JSON>`.
+fn record_line(r: &Record) -> String {
+    let key = r.key.as_ref().map(|k| format!(" key={k:?}")).unwrap_or_default();
+    format!("{} v{}{key} {}", r.id, r.version, serde_json::Value::Object(r.data.clone()))
+}
+
+/// A collection: `<name>: <field> <type>, ...`, and where a fed one is filled from.
+fn collection_line(name: &str, c: &Collection) -> String {
+    let fields: Vec<String> = c.fields.iter().map(|(f, t)| format!("{f} {t}")).collect();
+    let fed = c.from.as_ref().map(|f| format!(" (filled from {f}; read-only)")).unwrap_or_default();
+    format!("{name}: {}{fed}", fields.join(", "))
+}
+
+fn record_id(s: &str) -> trailhead_core::Result<Uuid> {
+    s.trim().parse().map_err(|_| Error::Invalid(format!("{s:?} isn't a record id")))
+}
+
 #[tool_router]
 impl TrailheadMcp {
     fn new(state: Arc<AppState>) -> Self {
@@ -431,6 +518,36 @@ impl TrailheadMcp {
             out.push_str(&format!("\npossible duplicates: {}", keys.join(", ")));
         }
         text(out)
+    }
+
+    /// The record, if it is in `collection`, as REST addresses it.
+    async fn record_in(&self, ctx: &Ctx, app: &str, collection: &str, id: Uuid) -> trailhead_core::Result<Record> {
+        let r = self.state.store.get_record(ctx, app, id).await?;
+        if r.collection != collection {
+            return Err(Error::NotFound(format!("record {id} in {collection}")));
+        }
+        Ok(r)
+    }
+
+    async fn do_write_record(&self, ctx: &Ctx, a: WriteRecordArgs) -> Result<CallToolResult, ErrorData> {
+        let store = &self.state.store;
+        let data = serde_json::Value::Object(a.data);
+        let w = match (a.id.as_deref(), a.key) {
+            (Some(id), _) => {
+                let id = attempt!(record_id(id));
+                attempt!(self.record_in(ctx, &a.app, &a.collection, id).await);
+                let change = if a.replace { RecordChange::Replace(data) } else { RecordChange::Merge(data) };
+                attempt!(store.update_record(ctx, &a.app, id, change, a.version).await)
+            }
+            (None, Some(key)) => attempt!(store.put_record(ctx, &a.app, &a.collection, &key, data).await),
+            (None, None) => {
+                let new = NewRecord { collection: a.collection, key: None, data };
+                Written { outcome: Outcome::Created, record: attempt!(store.create_record(ctx, &a.app, new).await) }
+            }
+        };
+        let outcome =
+            serde_json::to_value(w.outcome).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        text(format!("{outcome} {}", record_line(&w.record)))
     }
 
     async fn do_comment(&self, ctx: &Ctx, a: CommentArgs) -> Result<CallToolResult, ErrorData> {
@@ -763,6 +880,105 @@ impl TrailheadMcp {
         let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
         let tasks = attempt!(self.state.store.search(&ctx, &a.query, a.limit).await);
         text(task_list(&tasks, "no matches"))
+    }
+
+    #[tool(
+        description = "An app's data collections: one line each with its fields and their types (`?` optional, `[]` a list), and the feed a read-only one is filled from. Without `app`, the apps your token reaches and their collections.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn app_collections(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<AppArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let store = &self.state.store;
+        let Some(app) = a.app else {
+            if ctx.apps.as_ref().is_some_and(Vec::is_empty) {
+                return fail(Error::Forbidden("this token reaches no app's data".into()));
+            }
+            let apps = attempt!(store.list_apps(&ctx).await);
+            if apps.is_empty() {
+                return text("no apps with data");
+            }
+            let line = |(id, d): &(String, Declaration)| {
+                format!("{id}: {}", d.collections.keys().cloned().collect::<Vec<_>>().join(", "))
+            };
+            return text(apps.iter().map(line).collect::<Vec<_>>().join("\n"));
+        };
+        let d = attempt!(store.app_declaration(&ctx, &app).await);
+        if d.collections.is_empty() {
+            return text(format!("{app} declares no collections"));
+        }
+        text(d.collections.iter().map(|(n, c)| collection_line(n, c)).collect::<Vec<_>>().join("\n"))
+    }
+
+    #[tool(
+        description = "A page of an app collection's records, oldest first. One line each: id, version, key if any, fields as JSON. Page with `after` set to the last id.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn list_records(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<ListRecordsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let after = attempt!(a.after.as_deref().map(record_id).transpose());
+        let page = RecordPage { after, limit: a.limit };
+        let records = attempt!(self.state.store.list_records(&ctx, &a.app, &a.collection, page).await);
+        if records.is_empty() {
+            return text("no records");
+        }
+        text(records.iter().map(record_line).collect::<Vec<_>>().join("\n"))
+    }
+
+    #[tool(
+        description = "One record of an app's collection, by `id` or by `key`: id, version, key if any, fields as JSON.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_record(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<GetRecordArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let r = match (a.id.as_deref(), a.key.as_deref()) {
+            (Some(id), None) => attempt!(self.record_in(&ctx, &a.app, &a.collection, attempt!(record_id(id))).await),
+            (None, Some(key)) => attempt!(self.state.store.get_record_by_key(&ctx, &a.app, &a.collection, key).await),
+            _ => return fail(Error::Invalid("give exactly one of id or key".into())),
+        };
+        text(record_line(&r))
+    }
+
+    #[tool(
+        description = "Write a record in an app's collection: with `id`, change it (a merge patch, or the whole record with `replace`); with `key`, make the record with that key look like `data`, creating it if needed (writing the same thing again changes nothing); with neither, create one. Answers created, changed or unchanged, then the record. A collection filled from a feed is read-only.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
+    async fn write_record(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<WriteRecordArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let key = a.idempotency_key.clone();
+        let args = serde_json::to_vec(&a).unwrap_or_default();
+        self.idempotent(&parts, &ctx, key, "write_record", &args, self.do_write_record(&ctx, a)).await
+    }
+
+    #[tool(
+        description = "Remove a record from an app's collection. Undo puts it back (`POST /v1/apps/{app}/undo`).",
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = false)
+    )]
+    async fn delete_record(
+        &self,
+        Extension(parts): Extension<Parts>,
+        Parameters(a): Parameters<DeleteRecordArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let ctx = attempt!(self.ctx_for(&parts, a.as_agent.as_deref()).await);
+        let id = attempt!(record_id(&a.id));
+        attempt!(self.record_in(&ctx, &a.app, &a.collection, id).await);
+        let r = attempt!(self.state.store.delete_record(&ctx, &a.app, id, a.version).await);
+        text(format!("deleted {}", record_line(&r)))
     }
 
     #[tool(

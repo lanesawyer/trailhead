@@ -11,11 +11,15 @@ use trailhead_model::shell::{BuildError, ShellBuild};
 /// The name of the shell's binary, in the apps repo and in each build's directory.
 pub const BINARY: &str = "trailhead-shell";
 
+/// Where an apps repo keeps its connectors, one crate each (`connectors/<id>/`), and where a build keeps their programs.
+pub const CONNECTORS: &str = "connectors";
+
 /// `<data dir>/shell`:
 ///
 /// - `src/`: the builder's own clone of the apps repo.
 /// - `target/`: cargo's target directory for it.
 /// - `builds/<rev>/trailhead-shell`: the current build and the one before it.
+/// - `builds/<rev>/connectors/<id>`: each connector's program from that build, when the builder builds connectors.
 /// - `state.json`: [`State`], written only by the builder.
 /// - `bad`: builds the launcher fell back from, one commit a line, written only by the launcher.
 /// - `build.log`: cargo's output for the last build.
@@ -44,6 +48,11 @@ impl Layout {
     /// The binary built from `rev`.
     pub fn binary(&self, rev: &str) -> PathBuf {
         self.builds().join(rev).join(BINARY)
+    }
+
+    /// The program of connector `id` built from `rev`.
+    pub fn connector(&self, rev: &str, id: &str) -> PathBuf {
+        self.builds().join(rev).join(CONNECTORS).join(id)
     }
 
     pub fn state_file(&self) -> PathBuf {
@@ -105,6 +114,7 @@ impl Layout {
             bad: self.bad(),
             changes: Vec::new(),
             changes_total: 0,
+            repo: None,
         }
     }
 }

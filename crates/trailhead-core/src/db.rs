@@ -26,22 +26,37 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (17, "task_grade", include_str!("../migrations/0017_task_grade.sql")),
     (18, "duplicate_of", include_str!("../migrations/0018_duplicate_of.sql")),
     (19, "attachments", include_str!("../migrations/0019_attachments.sql")),
+    (20, "notifications", include_str!("../migrations/0020_notifications.sql")),
+    (21, "settings", include_str!("../migrations/0021_settings.sql")),
+    (22, "token_apps", include_str!("../migrations/0022_token_apps.sql")),
 ];
 
+/// An app's data file's own migrations, numbered apart from the tasks database's.
+const APP_MIGRATIONS: &[(i64, &str, &str)] = &[(1, "init", include_str!("../migrations/app/0001_init.sql"))];
+
 pub(crate) async fn migrate(conn: &Connection) -> Result<()> {
+    apply_migrations(conn, MIGRATIONS, true).await
+}
+
+pub(crate) async fn migrate_app(conn: &Connection) -> Result<()> {
+    apply_migrations(conn, APP_MIGRATIONS, false).await
+}
+
+/// `tasks_db` runs the tasks database's backfills alongside its migrations.
+async fn apply_migrations(conn: &Connection, migrations: &[(i64, &str, &str)], tasks_db: bool) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)",
         (),
     )
     .await?;
-    for &(version, name, sql) in MIGRATIONS {
+    for &(version, name, sql) in migrations {
         let mut rows = conn.query("SELECT 1 FROM schema_migrations WHERE version = ?1", [version]).await?;
         if rows.next().await?.is_some() {
             continue;
         }
         let tx = conn.transaction().await?;
         tx.execute_batch(sql).await?;
-        if version == 14 {
+        if tasks_db && version == 14 {
             backfill_due_days(&tx).await?;
         }
         tx.execute(

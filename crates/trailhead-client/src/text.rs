@@ -8,7 +8,9 @@
 
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
-use trailhead_model::{Attachment, Claim, Comment, CommentKind, Event, Project, ProjectStatus, Task, TaskDetail};
+use trailhead_model::{
+    Attachment, Claim, Comment, CommentKind, Event, Notification, Project, ProjectStatus, Task, TaskDetail,
+};
 use uuid::Uuid;
 
 /// How a [`Text`] lays things out; see the module docs.
@@ -231,6 +233,26 @@ impl Text {
         parts.push(format!("{}x{}", a.width, a.height));
         parts.push(if a.size < 1024 { format!("{} B", a.size) } else { format!("{} KiB", (a.size + 1023) / 1024) });
         parts.join("  ")
+    }
+
+    /// `● 0193…  2026-10-17 13:00 PDT  server  AUTH-3: claude asks about Login`, then its body and links indented. The
+    /// mark is `●` while it is unread, `✓` once resolved, and a space when only read.
+    pub fn notification(&self, n: &Notification) -> String {
+        let mark = if n.resolved_at.is_some() {
+            "✓"
+        } else if n.read_at.is_none() {
+            "●"
+        } else {
+            " "
+        };
+        let mut out = format!("{mark} {}  {}  {}  {}", n.id, self.time(n.created_at, None), n.source, n.title);
+        for line in n.body.lines().filter(|l| !l.trim().is_empty()) {
+            out.push_str(&format!("\n    {line}"));
+        }
+        for a in &n.actions {
+            out.push_str(&format!("\n    {}: {}", a.label, a.url));
+        }
+        out
     }
 
     /// `#41    2026-10-17 13:00 PDT  task.updated         AUTH-3 (undoes #40)`.

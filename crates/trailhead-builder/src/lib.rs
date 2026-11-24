@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use trailhead_model::shell::{BuildError, MAX_CHANGES, ShellBuild};
 
 pub use config::ShellConfig;
-pub use layout::{BINARY, Built, Layout, State};
+pub use layout::{BINARY, Built, CONNECTORS, Layout, State};
 pub use tools::{Boxed, Job, Origin, System, Tools};
 
 /// How many of cargo's last lines a failure keeps in the state.
@@ -49,11 +49,33 @@ pub struct Builder<T> {
     checkout: Arc<RwLock<()>>,
     /// The checkout's `origin` URL as last read, which [`Builds::repo`] answers from without asking git.
     origin: Arc<std::sync::RwLock<Option<String>>>,
+    /// Counts the builds finished, for [`Builds::built`].
+    built: Arc<watch::Sender<u64>>,
+    /// Whether it builds the apps repo's connectors with the shell: the server's builder does, a launcher building
+    /// its own window on another machine doesn't.
+    connectors: bool,
 }
 
 impl<T: Tools> Builder<T> {
     pub fn new(tools: T, config: ShellConfig, repo: PathBuf, layout: Layout) -> Self {
-        Builder { tools: Arc::new(tools), config, repo, layout, checkout: Arc::default(), origin: Arc::default() }
+        Builder {
+            tools: Arc::new(tools),
+            config,
+            repo,
+            layout,
+            checkout: Arc::default(),
+            origin: Arc::default(),
+            built: Arc::new(watch::Sender::new(0)),
+            connectors: false,
+        }
+    }
+
+    /// Builds each connector crate of the apps repo (`connectors/<id>/` with a `Cargo.toml` and a `connector.toml`)
+    /// with the shell, and keeps its program with the build.
+    #[must_use]
+    pub fn with_connectors(mut self) -> Self {
+        self.connectors = true;
+        self
     }
 
     /// What this builder has built, for the server to answer from.
@@ -63,6 +85,7 @@ impl<T: Tools> Builder<T> {
             tools: self.tools.clone(),
             checkout: self.checkout.clone(),
             origin: self.origin.clone(),
+            built: self.built.clone(),
         }
     }
 
@@ -107,6 +130,9 @@ impl<T: Tools> Builder<T> {
         };
         self.save(&state);
         self.prune(&state);
+        if matches!(step, Step::Built(_)) {
+            self.built.send_modify(|n| *n += 1);
+        }
         Ok(step)
     }
 
@@ -120,6 +146,7 @@ impl<T: Tools> Builder<T> {
             let _checking_out = self.checkout.write().await;
             self.tools.checkout(&src, origin, rev).await?;
         }
+        let connectors = if self.connectors { connector_crates(&src)? } else { Vec::new() };
         let job = Job {
             src,
             target: self.layout.target(),
@@ -127,18 +154,30 @@ impl<T: Tools> Builder<T> {
             package: self.config.package.clone(),
             profile: self.config.profile.clone(),
             jobs: self.config.jobs,
+            connectors: connectors.iter().map(|(_, package)| package.clone()).collect(),
         };
         let binary = self.tools.build(&job).await?;
-        self.install(&binary, rev).map_err(|e| format!("keeping the build: {e}"))
+        self.install(&binary, &connectors, rev).map_err(|e| format!("keeping the build: {e}"))
     }
 
-    /// Copies the binary into `builds/<rev>`, beside it first, so the launcher never finds half of one.
-    fn install(&self, binary: &Path, rev: &str) -> std::io::Result<()> {
+    /// Copies the binary and the connectors' programs into `builds/<rev>`, beside it first, so the launcher and the
+    /// server never find half of one.
+    fn install(&self, binary: &Path, connectors: &[(String, String)], rev: &str) -> std::io::Result<()> {
         let builds = self.layout.builds();
         let beside = builds.join(format!("{rev}.new"));
         let _ = std::fs::remove_dir_all(&beside);
         std::fs::create_dir_all(&beside)?;
         std::fs::copy(binary, beside.join(BINARY))?;
+        if !connectors.is_empty() {
+            std::fs::create_dir_all(beside.join(CONNECTORS))?;
+        }
+        let built = binary.parent().unwrap_or(Path::new("."));
+        for (id, package) in connectors {
+            let program = built.join(package);
+            std::fs::copy(&program, beside.join(CONNECTORS).join(id)).map_err(|e| {
+                std::io::Error::new(e.kind(), format!("connector {id}'s program {}: {e}", program.display()))
+            })?;
+        }
         let dir = builds.join(rev);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::rename(&beside, &dir)
@@ -166,7 +205,6 @@ impl<T: Tools> Builder<T> {
 
     /// Looks every `poll_secs` until stopped. A build in progress when it stops is killed, and `building` cleared.
     async fn run(self, mut stop: watch::Receiver<bool>) {
-        self.clear_building();
         let mut tick = tokio::time::interval(Duration::from_secs(self.config.poll_secs));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_error: Option<String> = None;
@@ -200,6 +238,8 @@ impl<T: Tools> Builder<T> {
 
     /// Runs the builder on its own task until [`Running::stop`].
     pub fn spawn(self) -> Running {
+        // Before it returns, so a reader of the checkout never sees a build a stopped builder left in progress.
+        self.clear_building();
         let (stop, stopped) = watch::channel(false);
         let builds = self.builds();
         Running { stop, builds, task: tokio::spawn(self.run(stopped)) }
@@ -213,13 +253,20 @@ pub struct Builds {
     tools: Arc<dyn Tools>,
     checkout: Arc<RwLock<()>>,
     origin: Arc<std::sync::RwLock<Option<String>>>,
+    built: Arc<watch::Sender<u64>>,
 }
 
 impl Builds {
     /// Builds kept in `layout`, their history read with `tools`. A builder's own is [`Builder::builds`], which
     /// never reads the history while it checks the clone out; this one has no builder to wait for.
     pub fn new(layout: Layout, tools: impl Tools) -> Builds {
-        Builds { layout, tools: Arc::new(tools), checkout: Arc::default(), origin: Arc::default() }
+        Builds {
+            layout,
+            tools: Arc::new(tools),
+            checkout: Arc::default(),
+            origin: Arc::default(),
+            built: Arc::new(watch::Sender::new(0)),
+        }
     }
 
     /// These builds, from an apps repo whose `origin` is `url`, which a builder otherwise learns on its first look.
@@ -235,11 +282,12 @@ impl Builds {
         self.origin.read().unwrap_or_else(|e| e.into_inner()).as_deref().and_then(github_slug)
     }
 
-    /// The state and the bad builds, and with `since` the commits after it up to the newest build
-    /// ([`ShellBuild::changes`]). The changes are left empty, never an error, when `since` isn't a commit hash, is
+    /// The state, the bad builds and the apps repo ([`Builds::repo`]), and with `since` the commits after it up to
+    /// the newest build ([`ShellBuild::changes`]). The changes are left empty, never an error, when `since` isn't a commit hash, is
     /// the newest build or isn't in the builder's clone, and when git doesn't answer within [`CHANGES_WAIT`].
     pub async fn read(&self, since: Option<&str>) -> ShellBuild {
         let mut build = self.layout.read();
+        build.repo = self.repo();
         let Some(since) = since.filter(|s| is_rev(s)) else { return build };
         let Some(newest) = build.newest().filter(|n| is_rev(n) && *n != since).map(String::from) else { return build };
         let src = self.layout.src();
@@ -261,6 +309,28 @@ impl Builds {
 }
 
 impl Builds {
+    /// Changes each time a build finishes, after its state is saved: the moment to read [`Builds::with_built_checkout`]
+    /// again.
+    pub fn built(&self) -> watch::Receiver<u64> {
+        self.built.subscribe()
+    }
+
+    /// Runs `f` on the builder's clone while it holds the newest build's source, and keeps it from being checked out
+    /// meanwhile. `None`, without running `f`, while nothing is built, while a build is in progress (the clone then
+    /// holds a commit not yet built) and after a build failed (it holds the commit that failed).
+    pub async fn with_built_checkout<R>(&self, f: impl FnOnce(&Path) -> R) -> Option<R> {
+        let _reading = self.checkout.read().await;
+        let state = self.layout.load();
+        let built = state.current.is_some() && state.building.is_none() && state.error.is_none();
+        built.then(|| f(&self.layout.src()))
+    }
+
+    /// The program of connector `id` in the newest build, when that build has one.
+    pub fn connector_program(&self, id: &str) -> Option<PathBuf> {
+        let rev = self.layout.load().current?.rev;
+        Some(self.layout.connector(&rev, id)).filter(|p| p.is_file())
+    }
+
     /// The source of the build `rev`, as a gzipped tar, for a launcher on another machine to build itself
     /// (`docs/app-platform.md`, "The window on another machine"). Only the builds kept: the newest and the one
     /// before it. `None` for anything else.
@@ -326,7 +396,38 @@ pub fn start(config_dir: &Path, data_dir: &Path) -> Result<Option<Running>, Stri
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let repo = config.checked_repo_dir(home.as_deref())?.expect("a config that was read names a repo");
     tracing::info!(target: "shell", repo = %repo.display(), "the shell's builder is on");
-    Ok(Some(Builder::new(System::new(), config, repo, Layout::new(data_dir)).spawn()))
+    Ok(Some(Builder::new(System::new(), config, repo, Layout::new(data_dir)).with_connectors().spawn()))
+}
+
+/// The connector crates in the checkout at `src`, as (id, package): each `connectors/<id>/` holding a
+/// `connector.toml` and a `Cargo.toml`, in id order.
+pub fn connector_crates(src: &Path) -> Result<Vec<(String, String)>, String> {
+    let dir = src.join(CONNECTORS);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("reading {CONNECTORS}/: {e}")),
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.join("connector.toml").is_file() || !path.join("Cargo.toml").is_file() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(path.join("Cargo.toml"))
+            .map_err(|e| format!("reading {CONNECTORS}/{id}/Cargo.toml: {e}"))?;
+        let manifest: toml::Table =
+            text.parse().map_err(|e: toml::de::Error| format!("{CONNECTORS}/{id}/Cargo.toml: {}", e.message()))?;
+        let package = manifest
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{CONNECTORS}/{id}/Cargo.toml names no package"))?;
+        found.push((id, package.to_string()));
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// A commit's first twelve characters, for the log.

@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::apps::AppFiles;
 use crate::db::{self, fmt_ts, opt_uuid_value};
 use crate::error::Result;
 use trailhead_model::Entity;
@@ -30,6 +31,9 @@ pub struct Ctx {
     pub rate_limit: Option<i64>,
     /// When the authenticating token expires, so tokens it issues can't outlive it.
     pub expires_at: Option<Timestamp>,
+    /// Apps whose data this context may reach, by id. `None` means every app: a person's. An agent's reaches only
+    /// what its token names.
+    pub apps: Option<Vec<String>>,
 }
 
 impl Ctx {
@@ -42,6 +46,7 @@ impl Ctx {
             projects: None,
             rate_limit: None,
             expires_at: None,
+            apps: None,
         }
     }
 
@@ -54,6 +59,7 @@ impl Ctx {
             projects: None,
             rate_limit: None,
             expires_at: None,
+            apps: Some(Vec::new()),
         }
     }
 
@@ -73,6 +79,15 @@ impl Ctx {
     /// Limits the context to these projects.
     pub fn scoped_to(self, projects: Vec<Uuid>) -> Self {
         Ctx { projects: Some(projects), ..self }
+    }
+
+    /// Limits the context to these apps' data.
+    pub fn with_apps(self, apps: Vec<String>) -> Self {
+        Ctx { apps: Some(apps), ..self }
+    }
+
+    pub fn reaches_app(&self, app: &str) -> bool {
+        self.apps.as_ref().is_none_or(|a| a.iter().any(|x| x == app))
     }
 
     pub fn is_scoped(&self) -> bool {
@@ -106,6 +121,8 @@ pub struct Store {
     /// Bumped after every committed write. Only a wake-up hint for event
     /// streams; the events table stays the source of truth.
     changes: tokio::sync::watch::Sender<u64>,
+    /// Each app's own data file.
+    pub(crate) apps: AppFiles,
 }
 
 /// How long [`Store::ping`] waits on a lock another process holds.
@@ -114,6 +131,13 @@ const PING_BUSY: Duration = Duration::from_millis(300);
 pub(crate) struct ReadConn<'a> {
     conn: Option<Connection>,
     pool: Option<&'a std::sync::Mutex<Vec<Connection>>>,
+}
+
+impl<'a> ReadConn<'a> {
+    /// A connection that goes back to `pool` when dropped.
+    pub(crate) fn pooled(conn: Connection, pool: &'a std::sync::Mutex<Vec<Connection>>) -> Self {
+        ReadConn { conn: Some(conn), pool: Some(pool) }
+    }
 }
 
 impl std::ops::Deref for ReadConn<'_> {
@@ -132,7 +156,8 @@ impl Drop for ReadConn<'_> {
 }
 
 impl Store {
-    /// Opens (or creates) a local SQLite file in WAL mode. `:memory:` works for tests.
+    /// Opens (or creates) a local SQLite file in WAL mode. `:memory:` works for tests. Apps' data files go in `apps/`
+    /// beside it (see [`Store::with_app_dir`]).
     pub async fn open_local(path: impl AsRef<Path>) -> Result<Store> {
         let path = path.as_ref();
         let db = libsql::Builder::new_local(path).build().await?;
@@ -141,7 +166,11 @@ impl Store {
         writer.query("PRAGMA journal_mode = WAL", ()).await?;
         writer.execute("PRAGMA foreign_keys = ON", ()).await?;
         let in_memory = (path.as_os_str() == ":memory:").then(|| writer.clone());
-        Self::finish(db, writer, in_memory).await
+        let app_dir = match &in_memory {
+            Some(_) => None,
+            None => Some(path.parent().unwrap_or(Path::new(".")).join("apps")),
+        };
+        Ok(Self::finish(db, writer, in_memory).await?.with_app_dir_opt(app_dir))
     }
 
     /// Opens a remote libSQL database such as Turso Cloud.
@@ -160,7 +189,19 @@ impl Store {
             in_memory,
             clock: Arc::new(Timestamp::now),
             changes: tokio::sync::watch::Sender::new(0),
+            apps: AppFiles::new(None),
         })
+    }
+
+    /// Keeps apps' data files in `dir`, as `<app id>.db`. A store opened over `:memory:` or a remote database keeps
+    /// none until given one.
+    pub fn with_app_dir(self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.with_app_dir_opt(Some(dir.into()))
+    }
+
+    fn with_app_dir_opt(mut self, dir: Option<std::path::PathBuf>) -> Self {
+        self.apps = AppFiles::new(dir);
+        self
     }
 
     pub(crate) fn reader(&self) -> Result<ReadConn<'_>> {

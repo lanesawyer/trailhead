@@ -133,7 +133,9 @@ impl Factory {
             let labelled = sandbox.labels.get(label::TASK);
             let (mut parked, mut stuck) = (false, false);
             for t in tasks.iter().filter(|t| {
+                // An open spec task keeps its sandbox for its planner's next turn, whose session is on it.
                 (t.status == Status::NeedsInput
+                    || (t.status == Status::Open && t.keeps_planner_sandbox())
                     || matches!(phase(t, self.tracker.agent(), false), Phase::WorkerBreachUnparked(_)))
                     && t.run.released.is_none()
                     && t.run.host.as_deref().or(t.run.sandbox.as_deref()) == Some(sandbox.name.as_str())
@@ -194,7 +196,7 @@ impl Factory {
                 Ok(true) => due.reviews.push(task.clone()),
                 Ok(false) => {}
                 Err(e) => {
-                    tracing::warn!(task = %task.key, error = %e, "couldn't reconcile a task; the next reconcile retries")
+                    tracing::warn!(task = %task.key, error = %e, "couldn't reconcile a task; the next reconcile retries");
                 }
             }
         }
@@ -220,7 +222,7 @@ impl Factory {
         match self.park_worker_breach(&task.key, &self.tracker.sub_agent(name), breach, state, &question).await {
             Ok(()) => done.breached.push(task.key.0.clone()),
             Err(e) => {
-                tracing::warn!(task = %task.key, error = %e, "couldn't park the breached task; the next reconcile retries")
+                tracing::warn!(task = %task.key, error = %e, "couldn't park the breached task; the next reconcile retries");
             }
         }
     }
@@ -290,7 +292,7 @@ impl Factory {
             MergedBy::Merger => messages::merged_unfinished_question(&merged.pr.url),
         };
         let handoff = messages::merged_handoff(merged.by, &merged.pr.url, merged.commit.as_deref(), decision.as_ref());
-        self.tracker.report(&task.key, RunPatch { merged: Patch::Set(merged), ..RunPatch::default() }).await?;
+        self.tracker.report(&task.key, RunPatch::merged(merged)).await?;
         // A parked task can't be finished without a claim: it is claimed where it is, never reopened first, so no other
         // agent can take it from open in between (TRAIL-402).
         // A park cut short after the finish was refused: finish the park, don't try to finish the task (TRAIL-729).
@@ -309,10 +311,7 @@ impl Factory {
                 tracing::warn!(task = %task.key, %why, "the PR is merged but the task can't be finished; parking for a person to finish it");
                 // The marker only lets a later pass finish a cut-short park. If writing it fails, park anyway: a task
                 // left claimed without it lapses to open, and the next pass would let core close it unparked (TRAIL-1378).
-                let marker = self
-                    .tracker
-                    .report(&task.key, RunPatch { unapproved_merge: Patch::Set(true), ..RunPatch::default() })
-                    .await;
+                let marker = self.tracker.report(&task.key, RunPatch::unapproved_merge(true)).await;
                 if let Err(e) = &marker {
                     tracing::warn!(task = %task.key, error = %e, "couldn't record the unapproved merge; parking anyway");
                 }
@@ -376,7 +375,7 @@ impl Factory {
         feedback: fn(&str, &str) -> String,
     ) -> Result<()> {
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
-        self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
+        self.tracker.report(&task.key, RunPatch::conflict_reworks(round)).await?;
         let base = &self.config.repo.base_branch;
         let body = feedback(&pr.url, base);
         tracing::warn!(task = %task.key, pr = %pr.url, round, "the PR conflicts with the base branch; reworking");
@@ -391,6 +390,7 @@ impl Factory {
             kind: RequestKind::Conflict,
             head,
             settled: false,
+            answered: false,
         };
         self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await
     }
@@ -438,7 +438,7 @@ impl Factory {
             self.tracker.unapprove(&task.key).await?;
         }
         let round = task.run.conflict_reworks.unwrap_or(0) + 1;
-        self.tracker.report(&task.key, RunPatch { conflict_reworks: Patch::Set(round), ..RunPatch::default() }).await?;
+        self.tracker.report(&task.key, RunPatch::conflict_reworks(round)).await?;
         tracing::warn!(task = %task.key, pr = %pr.url, round, %head, "CI failed on the PR's head; reworking");
         let head = Some(head.to_string());
         let requested = ChangesRequested {
@@ -448,6 +448,7 @@ impl Factory {
             kind: RequestKind::Ci,
             head,
             settled: false,
+            answered: false,
         };
         self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
         Ok(true)
@@ -498,6 +499,11 @@ impl Factory {
     /// Puts one in-flight task right, by its phase; true when its PR is due a review. For a task whose run isn't
     /// going: one that is, the caller follows.
     pub(crate) async fn reconcile_task(&self, task: &Task, done: &mut Reconciled) -> Result<bool> {
+        self.forget_review_notice_out_of_review(task).await;
+        if self.close_finished_plan(task).await {
+            done.finished.push(task.key.0.clone());
+            return Ok(false);
+        }
         match phase(task, self.tracker.agent(), false) {
             Phase::Untouched | Phase::Closed => Ok(false),
             // A park for the reviewer's breach that was cut short: finish it rather than let a worker rerun the task.
@@ -667,7 +673,7 @@ impl Factory {
             && task.changes_requested
             && let Some(verdict) = self.tracker.last_review(&task.key).await?
             && verdict.kind == VerdictKind::RequestChanges
-            && task.run.last_changes().is_none_or(|c| c.body.trim() != verdict.body.trim())
+            && task.run.last_changes().is_none_or(|c| c.answered || c.body.trim() != verdict.body.trim())
         {
             let requested = ChangesRequested {
                 reviewer: verdict.reviewer,
@@ -676,6 +682,7 @@ impl Factory {
                 kind: RequestKind::Review,
                 head,
                 settled: false,
+                answered: false,
             };
             let round = task.run.review_rounds.unwrap_or(0) + 1;
             self.request_rework(task, requested, round, task.run.retries.unwrap_or(0)).await?;
@@ -693,6 +700,13 @@ impl Factory {
             let stale = recorded.is_some_and(|c| c.settled || task.run.last_changes().is_some()) && standing.is_none();
             let (Some(pr), true) = (&task.run.pr, stale) else { return Ok(false) };
             self.tracker.handoff(&task.key, &messages::stale_request_handoff(&pr.url)).await?;
+            // After the handoff, so a mark that isn't written leaves the request as it was: answered, as before.
+            if let Some(answered) = recorded.filter(|c| !c.answered) {
+                let mark = RunPatch::changes_requested(ChangesRequested { answered: true, ..answered.clone() });
+                if let Err(e) = self.tracker.report(&task.key, mark).await {
+                    tracing::warn!(task = %task.key, error = %e, "couldn't mark the stale request answered");
+                }
+            }
         }
         // Changes were requested on this attempt but never recorded as a review (the request was cut short): finish it.
         if let Some(requested) = standing {

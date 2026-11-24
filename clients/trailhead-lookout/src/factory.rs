@@ -97,6 +97,8 @@ pub struct RepoState {
     pub human_grades: Option<Vec<Grade>>,
     /// Why the merger is holding the repo's merges, when it is (a person's PR goes first).
     pub holding: Option<String>,
+    /// The `[factory]` sections of the repo's file that changed since the server read them and wait for a restart.
+    pub restart_for: Vec<String>,
     /// The subscription's usage windows, as this repo's control plane last heard them.
     pub usage: Vec<UsageWindow>,
 }
@@ -178,12 +180,19 @@ impl FactoryStatus {
         keys
     }
 
-    /// Why each repo's merger is holding merges, for the repos that are.
+    /// What a person should know of each repo's factory beyond its state: why its merger is holding merges, and
+    /// that its settings changed in the file and wait for a restart.
     pub fn holds(&self) -> Vec<String> {
-        self.repos
-            .iter()
-            .filter_map(|(repo, s)| s.holding.as_ref().map(|why| format!("{repo}: holding merges: {why}")))
-            .collect()
+        let mut said = Vec::new();
+        for (repo, s) in &self.repos {
+            if let Some(why) = &s.holding {
+                said.push(format!("{repo}: holding merges: {why}"));
+            }
+            if !s.restart_for.is_empty() {
+                said.push(format!("{repo}: {}", trailhead_factory::status::restart_needed(&s.restart_for)));
+            }
+        }
+        said
     }
 
     /// The subscription's usage windows by name. The readings are host-wide, so every repo should carry the same; where
@@ -301,6 +310,7 @@ impl FactoryMirror {
                 last_error: snapshot.last_error,
                 human_grades: snapshot.human_grades,
                 holding: snapshot.holding,
+                restart_for: snapshot.restart_for,
                 usage: snapshot.usage,
                 queue: snapshot.queue.into_iter().map(|k| k.0).collect(),
             },
@@ -333,6 +343,7 @@ impl FactoryMirror {
             FactoryEvent::Control { control } => state(status).control = control,
             FactoryEvent::Error { message } => state(status).last_error = Some((unix_now(), message)),
             FactoryEvent::Holding { holding } => state(status).holding = holding,
+            FactoryEvent::RestartNeeded { sections } => state(status).restart_for = sections,
             FactoryEvent::Usage { usage } => state(status).usage = usage,
             FactoryEvent::Unknown => unreachable!("returned above"),
             FactoryEvent::SandboxChanged { sandbox } => self.set_campsite(commands, repo, sandbox),
@@ -542,6 +553,7 @@ mod tests {
             sandboxes,
             runs: vec![],
             holding: None,
+            restart_for: Vec::new(),
             targets: Vec::new(),
             human_grades: None,
             queue: Vec::new(),
@@ -671,8 +683,13 @@ mod tests {
         );
         send(&mut app, [event(3, FactoryEvent::Holding { holding: None })]);
         assert!(app.world().resource::<FactoryStatus>().holds().is_empty());
+        send(&mut app, [event(4, FactoryEvent::RestartNeeded { sections: vec!["profiles".into()] })]);
+        let said = app.world().resource::<FactoryStatus>().holds();
+        assert!(said[0].starts_with("o/r: restart the server to apply the changed [factory] settings (profiles)"));
+        send(&mut app, [event(5, FactoryEvent::RestartNeeded { sections: Vec::new() })]);
+        assert!(app.world().resource::<FactoryStatus>().holds().is_empty());
         let err = FactoryEvent::Error { message: "boom".into() };
-        send(&mut app, [event(4, err)]);
+        send(&mut app, [event(6, err)]);
         assert_eq!(app.world().resource::<FactoryStatus>().repos["o/r"].last_error.as_ref().unwrap().1, "boom");
     }
 
@@ -702,6 +719,7 @@ mod tests {
             queue: vec![queue.into()],
             last_error: None,
             holding: None,
+            restart_for: Vec::new(),
             human_grades: Some(human),
             usage: Vec::new(),
         };

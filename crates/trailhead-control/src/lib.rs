@@ -15,9 +15,11 @@ mod infra;
 mod lifecycle;
 pub mod logs;
 mod merger;
+mod notify;
 mod person;
 mod phase;
 mod place;
+mod planner;
 mod pool;
 mod reconcile;
 mod review;
@@ -30,19 +32,24 @@ mod usage;
 
 pub use core_tracker::CoreTracker;
 pub use pool::Refreshed;
+
+/// `infra::MAX_RESOURCE_WAITS`, for the tests that play out every wait.
+#[doc(hidden)]
+pub const MAX_RESOURCE_WAITS: u32 = infra::MAX_RESOURCE_WAITS;
 pub use status::StatusBoard;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::time::Instant;
 use trailhead_factory::{
-    ChangedFile, CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels,
-    MergeMode, ModelProvider, PrRef, Sandbox, SandboxId, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
+    CodeHost, Compute, Daemon, Egress, FactoryConfig, GateKind, Grade, HostConfig, IROH_DOMAINS, Labels, MergeMode,
+    ModelProvider, PrRef, Sandbox, Scope, Target, Task, TaskKey, Tracker, Verdict, label,
 };
 
-use crate::pool::Trouble;
+use crate::infra::Backoff;
+use crate::merger::MergerState;
+use crate::pool::PoolState;
 
 /// How long a daemon has to stop after a cancel before the control plane cuts its sandbox off regardless.
 pub const CANCEL_GRACE: Duration = Duration::from_secs(60);
@@ -71,8 +78,18 @@ pub const UPDATE_ASKS: u32 = 3;
 /// Where a sandbox clones a public GitHub repo from during prepare (`docs/factory/sandbox.md`).
 const CLONE_DOMAINS: &[&str] = &["github.com", "codeload.github.com"];
 
-/// Reads the current `[factory.merge] mode`, or says why it can't.
-pub type MergeModeSource = Box<dyn Fn() -> std::result::Result<MergeMode, String> + Send + Sync>;
+/// Reads the repo's file as it is now: the merge mode, and which other sections wait for a restart. Or says why it
+/// can't.
+pub type LiveSettingsSource = Box<dyn Fn() -> std::result::Result<LiveSettings, String> + Send + Sync>;
+
+/// What the repo's file says now, read again while the factory runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveSettings {
+    /// `[factory.merge] mode`, the one setting that applies without a restart.
+    pub merge_mode: MergeMode,
+    /// The other `[factory]` sections that differ from what the factory started with, which wait for a restart.
+    pub restart_for: Vec<String>,
+}
 
 /// State shared by every [`Factory`] on one host (one per repo): a usage reading from any repo's run pauses them all,
 /// and the sandbox cap can span repos.
@@ -88,6 +105,10 @@ pub struct Host {
     usage_file: Option<std::path::PathBuf>,
     /// The reset a pause was last logged for, so a pause is logged once per host rather than on every poll.
     pause_logged: Mutex<Option<i64>>,
+    /// Whether any repo has looked for a pause yet, so the first look resolves a notice a restart left open.
+    pause_looked: std::sync::atomic::AtomicBool,
+    /// A pause that started or ended and that no repo's pass has told the person about yet.
+    pause_change: Mutex<Option<notify::PauseChange>>,
     /// Every repo's queue task keys, so a factory can tell a run re-parented out of its own queue from another repo's.
     queues: Mutex<HashSet<String>>,
     /// The projects some repo works without a queue, i.e. whole: nothing in them can sit outside a queue.
@@ -200,7 +221,7 @@ pub struct Factory {
     /// doesn't notice merges or closed PRs.
     pub codehost: Option<Arc<dyn CodeHost>>,
     /// Where the merge mode is re-read from before each merge decision, so it can be switched without a restart.
-    merge_mode_source: Option<MergeModeSource>,
+    live_settings: Option<LiveSettingsSource>,
     merger: MergerState,
     pool: PoolState,
     backoff: Backoff,
@@ -218,62 +239,6 @@ pub struct Factory {
     placing: Placing,
     /// What this control plane shows of itself to `factory status` and the UI.
     status: Arc<StatusBoard>,
-}
-
-/// What the factory remembers of tasks that failed on the infrastructure. In memory: a restart starts the waits and
-/// counts again.
-#[derive(Default)]
-struct Backoff {
-    /// Tasks whose last runs failed on the infrastructure: how many in a row, and when to try again.
-    setbacks: Mutex<HashMap<TaskKey, (u32, u32, Instant)>>,
-    /// Tasks whose last runs all failed in `setup`: how many in a row. Any other outcome clears it, so a broken base
-    /// is only declared when `setup` itself failed twice running (TRAIL-876).
-    setup_failures: Mutex<HashMap<TaskKey, u32>>,
-}
-
-/// What the merge path keeps between passes. In memory: a restart reads and asks again.
-#[derive(Default)]
-struct MergerState {
-    /// The merge mode last read from `merge_mode_source`, kept when a later read fails.
-    merge_mode: Mutex<MergeMode>,
-    /// The files last listed for each task's PR and the head they were listed at, so a pass that finds the head
-    /// unchanged grades from them instead of asking the host again (TRAIL-266).
-    listed: Mutex<HashMap<TaskKey, (String, Vec<ChangedFile>)>>,
-    /// What the host last said about whether a task's PR head is only a clean merge of the base into the reviewed
-    /// head, keyed by that (reviewed, head) pair: the answer for a pair doesn't change, so a pass's several
-    /// questions about it (the stale check, the gates) cost one round trip (TRAIL-1220).
-    carried: Mutex<HashMap<TaskKey, (String, String, bool)>>,
-    /// Tasks whose PR the merger asked the host to bring up to date, by the head it asked on. The host queues the merge
-    /// (a 202), so until the head moves the PR is still behind and asking again would only queue another, unless the
-    /// update never lands: after `UPDATE_PATIENCE` the merger asks again, up to `UPDATE_ASKS` times on one head, then
-    /// reworks (TRAIL-490, TRAIL-621). Each entry also counts the asks.
-    updating: Mutex<HashMap<TaskKey, (String, Instant, u32)>>,
-    /// The person's PR with auto-merge on that the merger is holding its merges for (TRAIL-804).
-    held: Mutex<Option<person::Held>>,
-}
-
-/// What the factory remembers of its pooled sandboxes. In memory: a restart counts again from nothing.
-#[derive(Default)]
-struct PoolState {
-    troubled: Mutex<HashMap<String, Trouble>>,
-    /// When each task holding a pooled sandbox was first seen parked, so `release_parked_after` counts from there. In
-    /// memory: a restart starts the wait again (TRAIL-601).
-    parked_since: Mutex<HashMap<TaskKey, Instant>>,
-    /// Held while a worker picks an idle pooled sandbox (or a name for a new one) and labels it busy, so runs
-    /// starting together never take the same sandbox.
-    pool_pick: tokio::sync::Mutex<()>,
-    /// Hosts opened for a sandbox's install on top of the install set, until its run asks the daemon to confirm
-    /// they're blocked again.
-    install_opened: Mutex<HashMap<SandboxId, Vec<String>>>,
-    /// How long each pooled sandbox's last warm checkpoint took, to weigh against its next prepare (TRAIL-707).
-    warm_cost: Mutex<HashMap<SandboxId, Duration>>,
-    /// Consecutive failed prepares of each pooled sandbox, cleared by a good one (TRAIL-561).
-    prepare_failures: Mutex<HashMap<SandboxId, u32>>,
-    /// Consecutive runs that found no room on each warm pooled sandbox's host, cleared by one that did (TRAIL-1633).
-    short_preflights: Mutex<HashMap<SandboxId, u32>>,
-    /// Busy pooled sandboxes a refresh asked for, by name: destroyed on release rather than restored. In memory: a
-    /// restart forgets them, and the refresh is asked again.
-    refresh: Mutex<HashSet<String>>,
 }
 
 /// Where runs being started have been placed, and what the paid targets have cost.
@@ -329,6 +294,8 @@ pub struct Reconciled {
     pub abandoned: Vec<String>,
     /// In-progress tasks left alone because the target they ran on didn't answer.
     pub unknown: Vec<String>,
+    /// Spec tasks closed because every task of their approved plan is finished.
+    pub finished: Vec<String>,
 }
 
 impl Factory {
@@ -336,39 +303,39 @@ impl Factory {
     /// has left it: merged, closed, cancelled or otherwise out of review (TRAIL-680). A new per-task map there is
     /// cleared here too.
     pub(crate) fn forget_merge_path(&self, task: &TaskKey) {
-        self.merger.updating.lock().unwrap().remove(task);
-        self.merger.listed.lock().unwrap().remove(task);
-        self.merger.carried.lock().unwrap().remove(task);
+        self.merger.forget(task);
     }
 
     /// Drops the merge path's entries for every task not in `keep`, the in-review tasks of a successful listing. A
     /// task that left review any way at all (cancelled, deleted, re-parented out of the queue, done by hand) is no
     /// longer listed, so its entries go without each way out needing its own check (TRAIL-680).
     pub(crate) fn retain_merge_path(&self, keep: &HashSet<&TaskKey>) {
-        self.merger.updating.lock().unwrap().retain(|k, _| keep.contains(k));
-        self.merger.listed.lock().unwrap().retain(|k, _| keep.contains(k));
-        self.merger.carried.lock().unwrap().retain(|k, _| keep.contains(k));
+        self.merger.retain(keep);
     }
 
     /// How many sandboxes have an entry in the per-sandbox prepare-failure and warm-cost maps, for tests.
     #[doc(hidden)]
     pub fn sandbox_entries(&self) -> usize {
-        self.pool.prepare_failures.lock().unwrap().len()
-            + self.pool.warm_cost.lock().unwrap().len()
-            + self.pool.short_preflights.lock().unwrap().len()
+        self.pool.entries()
     }
 
     /// Whether the merger is waiting on a branch update it asked the host for on this task's PR (for tests).
     #[doc(hidden)]
     pub fn awaiting_branch_update(&self, task: &TaskKey) -> bool {
-        self.merger.updating.lock().unwrap().contains_key(task)
+        self.merger.update_asked(task).is_some()
     }
 
     /// Whether the merger holds the files it listed for this task's PR, so a pass at the same head can skip the
     /// listing (for tests).
     #[doc(hidden)]
     pub fn caches_pr_files(&self, task: &TaskKey) -> bool {
-        self.merger.listed.lock().unwrap().contains_key(task)
+        self.merger.lists(task)
+    }
+
+    /// Whether the merger remembers what the host said of a carried verdict on this task's PR (for tests).
+    #[doc(hidden)]
+    pub fn remembers_carried(&self, task: &TaskKey) -> bool {
+        self.merger.carries(task)
     }
 
     /// A factory with one target, the default: what a file with `[factory.compute]` (or neither) means.
@@ -397,7 +364,7 @@ impl Factory {
         assert!(targets.windows(2).all(|w| w[0].target.name != w[1].target.name), "two targets share a name");
         host.queues.lock().unwrap().extend(config.repo.queue.iter().cloned());
         host.note_queue_use(&config.repo.project, config.repo.queue.is_empty());
-        let merge_mode = Mutex::new(config.merge.mode);
+        let merger = MergerState::starting(config.merge.mode);
         let status = StatusBoard::new();
         status.human_grades(human_grades(&config));
         status.queue(config.repo.queue.iter().cloned().map(TaskKey).collect());
@@ -406,8 +373,8 @@ impl Factory {
             targets,
             tracker,
             codehost: None,
-            merge_mode_source: None,
-            merger: MergerState { merge_mode, ..MergerState::default() },
+            live_settings: None,
+            merger,
             pool: PoolState::default(),
             backoff: Backoff::default(),
             host,
@@ -420,10 +387,11 @@ impl Factory {
         }
     }
 
-    /// Re-reads the merge mode from `source` before each merge decision, so switching it (to `off` as the quick stop)
-    /// takes effect on the next pass. A failed read keeps the last mode read and is logged.
-    pub fn with_merge_mode_source(mut self, source: MergeModeSource) -> Factory {
-        self.merge_mode_source = Some(source);
+    /// Re-reads the repo's file from `source` before each merge decision, so switching the merge mode (to `off` as
+    /// the quick stop) takes effect on the next pass, and the status board says when other sections changed and wait
+    /// for a restart. A failed read keeps the last mode read and is logged.
+    pub fn with_live_settings(mut self, source: LiveSettingsSource) -> Factory {
+        self.live_settings = Some(source);
         self
     }
 
@@ -448,15 +416,25 @@ impl Factory {
     /// The merge mode now in force.
     fn merge_mode(&self) -> MergeMode {
         let mut mode = self.merger.merge_mode.lock().unwrap();
-        if let Some(source) = &self.merge_mode_source {
+        if let Some(source) = &self.live_settings {
+            let mut unread = self.merger.merge_mode_unread.lock().unwrap();
             match source() {
-                Ok(read) => {
+                Ok(LiveSettings { merge_mode: read, restart_for }) => {
+                    // On the status board, so `factory status` and Lookout say a restart is owed, not only the log.
+                    self.status.restart_for(restart_for);
+                    if unread.take().is_some() {
+                        tracing::info!(mode = ?read, "the merge mode can be read again");
+                    }
                     if read != *mode {
                         tracing::info!(from = ?*mode, to = ?read, "merge mode changed");
                     }
                     *mode = read;
                 }
-                Err(why) => tracing::warn!(%why, mode = ?*mode, "can't re-read the merge mode; keeping the last one"),
+                Err(why) if unread.as_ref() != Some(&why) => {
+                    tracing::warn!(%why, mode = ?*mode, "can't re-read the merge mode; keeping the last one until it reads");
+                    *unread = Some(why);
+                }
+                Err(_) => {}
             }
         }
         *mode
@@ -492,7 +470,7 @@ impl Factory {
     /// Wildcards can't be looked up, so they're left out. That includes the hosts opened for this sandbox's install.
     fn blocked_hosts(&self, sandbox: &Sandbox) -> Vec<String> {
         let agent = self.agent_egress().domains;
-        let opened = self.pool.install_opened.lock().unwrap().remove(&sandbox.id).unwrap_or_default();
+        let opened = self.pool.take_install(&sandbox.id);
         let install = self.install_egress().domains.into_iter().chain(opened);
         let mut blocked: Vec<String> = Vec::new();
         for d in install.filter(|d| !d.contains('*') && !agent.contains(d)) {

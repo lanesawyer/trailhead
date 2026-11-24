@@ -27,7 +27,7 @@ python = ["trailhead-factory-server?/python"]
 node = ["trailhead-factory-server?/node"]
 go = ["trailhead-factory-server?/go"]
 # The factory's control plane in `trailhead serve` (docs/factory/server-control-plane.md).
-factory = ["trailhead-server/factory", "dep:trailhead-factory-server"]
+factory = ["trailhead-server/factory", "dep:trailhead-factory-server", "dep:trailhead-wire", "dep:iroh"]
 docker = ["factory", "trailhead-server/docker"]
 
 [dependencies]
@@ -36,8 +36,9 @@ trailhead-client = { workspace = true, features = ["http"] }
 trailhead-core.workspace = true
 trailhead-server.workspace = true
 trailhead-builder.workspace = true
-trailhead-wire.workspace = true
-iroh.workspace = true
+# For `trailhead app from`, which dials another machine's server: with the factory, never in the engine alone.
+trailhead-wire = { workspace = true, optional = true }
+iroh = { workspace = true, optional = true }
 trailhead-log.workspace = true
 tokio = { workspace = true, features = ["process", "io-std", "io-util"] }
 clap.workspace = true

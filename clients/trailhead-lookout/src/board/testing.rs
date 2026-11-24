@@ -6,7 +6,7 @@ use trailhead_shell::fixture::{agent_json, at, claim_json, comment_json, project
 use super::*;
 
 /// The board's fixture as the API's JSON.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity)]
 pub(super) fn input_json() -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
     let projects =
         vec![project_json(json!({"id": "p1", "key": "TRAIL"})), project_json(json!({"id": "p2", "key": "OPS"}))];

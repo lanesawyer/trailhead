@@ -6,6 +6,15 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input_focus::FocusedInput;
 use bevy::prelude::*;
 
+/// Applies what was queued and runs enough frames for a scene spawned through commands to land and the systems that
+/// answer it to have run.
+pub fn settle(app: &mut App) {
+    app.world_mut().flush();
+    for _ in 0..3 {
+        app.update();
+    }
+}
+
 /// Triggers a key press on `target` as if it had focus, without running a frame.
 ///
 /// The press goes to a real [`Window`] it spawns: it climbs to the window last and stops there, where an entity

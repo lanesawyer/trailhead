@@ -1127,8 +1127,7 @@ async fn a_reviewer_sandbox_short_of_room_is_waited_out_not_counted() {
 
 #[tokio::test(start_paused = true)]
 async fn a_reviewer_sandbox_short_of_room_for_too_long_parks_with_the_resource_wait_question() {
-    // `infra::MAX_RESOURCE_WAITS`.
-    const WAITS: usize = 12;
+    const WAITS: usize = trailhead_control::MAX_RESOURCE_WAITS as usize;
     let r = rig_with(&CONFIG.replace("name = \"trailhead\"", "name = \"trailhead\"\nmax_infra_failures = 2"));
     let key = r.tracker.add_task("TRAIL", "Never finds room", "");
     r.harness.push(Role::Worker, Script::new(changes()));
@@ -1147,7 +1146,7 @@ async fn a_reviewer_sandbox_short_of_room_for_too_long_parks_with_the_resource_w
         }
     }
     let task = r.tracker.task(&key);
-    assert_ne!(task.status, Status::InReview, "{WAITS} waits in a row park the task");
+    assert_eq!(task.status, Status::NeedsInput, "{WAITS} waits in a row park the task");
     let question = trailhead_factory::messages::resource_wait_question(WAITS as u32, "unavailable: out of disk");
     let asked: Vec<_> = r.tracker.comments(&key).into_iter().filter(|c| c.kind == "question").collect();
     assert_eq!(asked.len(), 1, "{asked:?}");

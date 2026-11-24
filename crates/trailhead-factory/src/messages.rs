@@ -40,7 +40,7 @@ pub struct Wording {
 /// (shadow).` or `Grade 3 (Cargo.toml changed): waiting for a person.` `merging` is whether the merger is on and will
 /// try to merge now; the message then says the merge happened, so it is only posted once it has.
 pub fn decision_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
-    let message = gate_message(grade, d, &said);
+    let message = gate_message(grade, d, said);
     match said.changes {
         Some(Rework::Running) => format!("{message} The latest review asked for changes; a rework is running."),
         Some(Rework::Parked) => format!("{message} The latest review asked for changes; the task is parked for Lane."),
@@ -58,8 +58,8 @@ pub fn status_comment(message: &str, history: &[Said]) -> String {
     format!("{message}\n\nHistory:\n{}", lines.join("\n"))
 }
 
-fn gate_message(grade: &PrGrade, d: &MergeDecision, said: &Wording) -> String {
-    let Wording { auto_merge, merging, behind, .. } = *said;
+fn gate_message(grade: &PrGrade, d: &MergeDecision, said: Wording) -> String {
+    let Wording { auto_merge, merging, behind, .. } = said;
     fn join(items: Vec<String>) -> String {
         match items.as_slice() {
             [] => String::new(),
@@ -458,6 +458,37 @@ pub fn gave_up_question(failed: u32, max: u32, reason: &str, last: &str) -> Stri
     )
 }
 
+/// Why a spec task is parked when the repo has no planner to work it.
+pub fn no_planner_profile_question() -> String {
+    "This task asks for a plan, but the repo's `.trailhead.toml` has no planner profile. Add one (a \
+     `[factory.profiles.<name>]` with `role = \"planner\"`, the worker's adapter and provider, a model and a budget), \
+     then reopen the task."
+        .to_string()
+}
+
+/// Why a spec task is parked when the repo's profiles changed after the server read them: a planner profile may
+/// well be in the file, and the factory can't use it until it starts again (TRAIL-1689).
+pub fn planner_profile_needs_restart_question() -> String {
+    "This task asks for a plan, and the factory that is running has no planner profile. The repo's `.trailhead.toml` \
+     has changed its `[factory.profiles]` since the server started, and profiles are only read at start: restart the \
+     server (`trailhead server restart`), then reopen the task."
+        .to_string()
+}
+
+/// What a planner's turn asked for that the factory didn't do, said after the planner's message.
+pub fn plan_not_saved(problems: &[String]) -> String {
+    let mut out = String::from("\n\n---\nThe factory couldn't do all of what the planner proposed:");
+    for p in problems {
+        out.push_str(&format!("\n- {p}"));
+    }
+    out
+}
+
+/// Why a planner's turn failed when it left no turn file the factory can read.
+pub fn no_plan_turn(why: &str) -> String {
+    format!("the planner ended its turn without a readable turn file: {why}")
+}
+
 /// Why a task is parked when the worker found its work already on the base branch, or no longer applicable.
 pub fn already_done_question(evidence: &str) -> String {
     let evidence = if evidence.trim().is_empty() { "(the worker gave no evidence)" } else { evidence.trim() };
@@ -703,6 +734,15 @@ pub fn ci_failure_feedback(
     body
 }
 
+/// The handoff a spec task is closed with once every task of its approved plan is finished.
+pub fn plan_finished_handoff(done: &[String], cancelled: &[String]) -> String {
+    let dropped = match cancelled {
+        [] => String::new(),
+        keys => format!(" Cancelled along the way: {}.", keys.join(", ")),
+    };
+    format!("Every task of the plan is finished, so the factory closed it. Done: {}.{dropped}", done.join(", "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +806,7 @@ mod tests {
             comment: None,
             message: String::new(),
             history: vec![],
+            notified: false,
         }
     }
 

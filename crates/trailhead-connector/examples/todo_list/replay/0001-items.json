@@ -1,0 +1,8 @@
+{
+  "url": "https://todos.example.com/lists/home/items",
+  "headers": { "etag": "\"v1\"" },
+  "json": [
+    { "id": 1, "title": "Buy milk", "done": false },
+    { "id": 2, "title": "Fix the gate", "done": true, "link": "https://todos.example.com/items/2" }
+  ]
+}

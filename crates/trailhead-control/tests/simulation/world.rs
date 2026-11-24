@@ -10,8 +10,9 @@ use trailhead_core::{
     CommentKind, Ctx, EventFilter, Grade, NewComment, NewProject, NewTask, ProjectPatch, Store, TaskPatch,
 };
 use trailhead_factory::{
-    CiState, CodeHost, Commit, EventSink, FactoryConfig, Feedback, FileChange, Harness, HostConfig, PrRef, Result,
-    Role, RunContext, RunEvent, RunOutcome, Status, TaskKey, Tracker, Usage, VerdictKind,
+    CiState, CodeHost, Commit, EventSink, FactoryConfig, Feedback, FileChange, Grade as FactoryGrade, Harness,
+    HostConfig, PlanTurn, PrRef, ProposedTask, Result, Role, RunContext, RunEvent, RunOutcome, Status, TaskKey,
+    Tracker, Usage, VerdictKind,
 };
 use trailhead_testkit::{Connect, FakeCodeHost, FakeCompute, FakeProvider, LocalDaemon};
 
@@ -43,6 +44,13 @@ adapter = "claude-code"
 provider = "anthropic"
 model = "opus"
 budget = { usd = 2, minutes = 20, steps = 20 }
+
+[profiles.planner]
+role = "planner"
+adapter = "claude-code"
+provider = "anthropic"
+model = "fable"
+budget = { usd = 5, minutes = 30, steps = 40 }
 
 [gates.1]
 require = ["checks", "ci", "agent_review"]
@@ -91,6 +99,13 @@ pub enum Event {
     PersonSetsAside(usize),
     /// A person grades an ungraded task again, at the grade it started with.
     PersonGrades(usize),
+    /// A person asks for something big: a spec task for a planner, filed once.
+    PersonAsksForPlan,
+    /// A person replies to the planner's question and reopens the spec task.
+    PersonAnswersPlan,
+    /// A person approves the plan: each open, ungraded task of it gets the grade proposed for it, and the spec is
+    /// marked approved.
+    PersonApprovesPlan,
     Fault(Fault),
 }
 
@@ -128,6 +143,8 @@ pub enum Fault {
 struct Mood {
     seed: Option<u64>,
     runs: u64,
+    /// Planner turns, counted apart so that a history with no spec task plays its workers as it always did.
+    turns: u64,
 }
 
 struct Agents {
@@ -168,10 +185,59 @@ impl Agents {
     }
 }
 
+impl Agents {
+    /// A planner's turn: a question, a plan (keeping the first of its own tasks, dropping the rest and adding one
+    /// that waits on the kept one), a give-up, or more steps than its budget.
+    fn turn(&self, ctx: &RunContext) -> (RunOutcome, u32) {
+        let mut mood = self.mood.lock().unwrap();
+        mood.turns += 1;
+        let n = mood.turns;
+        let roll = mood.seed.map(|seed| Rng::new(seed ^ n.wrapping_mul(0x85EB_CA6B)).below(100));
+        let drafts: Vec<TaskKey> =
+            ctx.plan.iter().flat_map(|p| &p.planning.plan).filter(|t| t.is_draft()).map(|t| t.key.clone()).collect();
+        let grade = FactoryGrade::new(2).unwrap();
+        let mut tasks: Vec<ProposedTask> = drafts
+            .first()
+            .map(|key| ProposedTask {
+                id: None,
+                key: Some(key.clone()),
+                title: format!("Kept {n}"),
+                description: "Done when it works.".into(),
+                blocked_by: Vec::new(),
+                grade,
+                why: "one module".into(),
+            })
+            .into_iter()
+            .collect();
+        tasks.push(ProposedTask {
+            id: Some(format!("t{n}")),
+            key: None,
+            title: format!("Part {n}"),
+            description: "Done when it works.".into(),
+            blocked_by: drafts.first().map(|k| k.0.clone()).into_iter().collect(),
+            grade,
+            why: "one module".into(),
+        });
+        let plan = PlanTurn {
+            message: format!("Here is the plan ({n})."),
+            spec: Some(format!("The spec ({n}).")),
+            tasks: Some(tasks),
+            ready: true,
+        };
+        let question = PlanTurn { message: format!("Which way? ({n})"), spec: None, tasks: None, ready: false };
+        match roll {
+            None | Some(0..45) => (RunOutcome::PlanTurn(plan), 2),
+            Some(45..75) => (RunOutcome::PlanTurn(question), 2),
+            Some(75..90) => (RunOutcome::Failed { reason: format!("the plan broke ({n})") }, 2),
+            Some(_) => (RunOutcome::PlanTurn(plan), 60),
+        }
+    }
+}
+
 #[async_trait]
 impl Harness for Agents {
     async fn run(&self, ctx: RunContext, events: EventSink) -> Result<RunOutcome> {
-        let (outcome, steps) = self.outcome(ctx.role);
+        let (outcome, steps) = if ctx.role == Role::Planner { self.turn(&ctx) } else { self.outcome(ctx.role) };
         for step in 1..=steps {
             let _ = events.send(RunEvent::StepStarted { step });
             let usage = Usage { output_tokens: 1_000, ..Usage::default() };
@@ -195,6 +261,8 @@ pub struct World {
     pub codehost: FakeCodeHost,
     pub daemon: Arc<LocalDaemon>,
     pub tasks: Vec<TaskKey>,
+    /// The spec task a person asked a planner for, once they have.
+    pub spec: Option<TaskKey>,
     /// Each task's grade at the start, which a person grades it at again.
     grades: Vec<u8>,
     /// The factory's own agent, to tell its comments from a reviewer's.
@@ -269,6 +337,7 @@ impl World {
             codehost,
             daemon,
             tasks,
+            spec: None,
             grades: grades.to_vec(),
             factory_agent,
             outage,
@@ -294,6 +363,23 @@ impl World {
             Host::new(&HostConfig::default()),
         )
         .with_codehost(Arc::new(codehost.clone()))
+    }
+
+    /// Every task to check: the world's own, the spec task and the tasks of its plan.
+    pub async fn all_tasks(&self) -> Vec<TaskKey> {
+        let mut all = self.tasks.clone();
+        if let Some(spec) = &self.spec {
+            all.push(spec.clone());
+            let filter = trailhead_core::TaskFilter {
+                parent: Some(trailhead_core::TaskKey(spec.0.clone())),
+                statuses: trailhead_core::Status::ALL.to_vec(),
+                ..Default::default()
+            };
+            let mut children = self.store.list_tasks(&self.human, filter).await.unwrap();
+            children.sort_by_key(|t| trailhead_factory::key_number(&t.key));
+            all.extend(children.into_iter().map(|t| TaskKey(t.key.0)));
+        }
+        all
     }
 
     pub async fn show(&self, key: &TaskKey) -> trailhead_factory::Task {
@@ -339,7 +425,7 @@ impl World {
             return Err(format!("CI on its head was {:?}", host.ci));
         }
         let mut owner = None;
-        for key in &self.tasks {
+        for key in &self.all_tasks().await {
             let task = self.show(key).await;
             if task.run.pr.as_ref() == Some(pr) {
                 owner = Some(task);
@@ -362,7 +448,7 @@ impl World {
         Ok(())
     }
 
-    async fn pass(&mut self, reconcile: bool) -> String {
+    async fn pass(&self, reconcile: bool) -> String {
         if reconcile {
             match self.factory.reconcile().await {
                 Ok(done) => format!("{done:?}"),
@@ -412,6 +498,9 @@ impl World {
                 let key = self.tasks[*i % self.tasks.len()].clone();
                 self.on_task(event, &key).await
             }
+            Event::PersonAsksForPlan | Event::PersonAnswersPlan | Event::PersonApprovesPlan => {
+                self.on_plan(event).await
+            }
         };
         let now = self.states().await;
         self.log.push(format!("{event:?} -> {did}\n      {now}"));
@@ -420,7 +509,7 @@ impl World {
     /// Each task's status and the run fields the lifecycle turns on, in one line.
     async fn states(&self) -> String {
         let mut out = Vec::new();
-        for key in &self.tasks {
+        for key in &self.all_tasks().await {
             let t = self.show(key).await;
             let request = t
                 .run
@@ -500,6 +589,50 @@ impl World {
         done.err().unwrap_or_default()
     }
 
+    /// What a person does about a plan: ask for one, reply to the planner, or approve what it proposed.
+    async fn on_plan(&mut self, event: &Event) -> String {
+        let done = match (event, self.spec.clone()) {
+            (Event::PersonAsksForPlan, None) => {
+                let new = NewTask {
+                    project: "TRAIL".into(),
+                    title: "A big ask".into(),
+                    description: "Build the whole thing.".into(),
+                    metadata: Some(serde_json::json!({ "plan": { "spec": {} } })),
+                    ..Default::default()
+                };
+                match self.store.create_task(&self.human, new).await {
+                    Ok(task) => {
+                        self.spec = Some(TaskKey(task.key.0));
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            (Event::PersonAnswersPlan, Some(spec)) if self.show(&spec).await.status == Status::NeedsInput => {
+                self.answer(&spec).await;
+                self.set_status(&spec, trailhead_core::Status::Open).await
+            }
+            (Event::PersonApprovesPlan, Some(spec)) if self.show(&spec).await.plan.awaits_planner() => {
+                self.approve_plan(&spec).await
+            }
+            _ => return "nothing to do".into(),
+        };
+        done.err().unwrap_or_default()
+    }
+
+    /// Grades each open, ungraded task of the plan at its proposed grade and marks the spec approved, as a person.
+    async fn approve_plan(&self, spec: &TaskKey) -> std::result::Result<(), String> {
+        for key in self.all_tasks().await.into_iter().filter(|k| k != spec && !self.tasks.contains(k)) {
+            let task = self.show(&key).await;
+            let (None, Status::Open, Some(proposed)) = (task.grade, task.status, task.plan.proposed) else { continue };
+            let patch = TaskPatch { grade: Some(Some(proposed.grade)), ..Default::default() };
+            self.store.update_task(&self.human, &key.0, patch, None).await.map_err(|e| e.to_string())?;
+        }
+        let approved = serde_json::json!({ "plan": { "spec": { "approved": 1 } } });
+        let patch = TaskPatch { metadata: Some(approved), ..Default::default() };
+        self.store.update_task(&self.human, &spec.0, patch, None).await.map(|_| ()).map_err(|e| e.to_string())
+    }
+
     async fn answer(&self, key: &TaskKey) {
         let task = self.store.get_task(&self.human, &key.0).await.unwrap();
         let open = self.store.open_questions(&self.human, &[task.id]).await.unwrap();
@@ -531,7 +664,7 @@ impl World {
     /// and the sandboxes. Two passes with the same print wrote nothing between them.
     pub async fn print(&self) -> String {
         let mut out = String::new();
-        for key in &self.tasks {
+        for key in &self.all_tasks().await {
             let task = self.store.get_task(&self.human, &key.0).await.unwrap();
             let comments = self.store.list_comments(&self.human, &key.0).await.unwrap().len();
             out.push_str(&format!("{} v{} {:?} c{comments}\n", key.0, task.version, task.status));
@@ -607,6 +740,12 @@ impl World {
     }
 
     /// Whether a person has an unanswered question on the task.
+    /// Whether an unfinished task blocks this one: the move is then owed to the blocker, which the check looks at
+    /// in its own turn.
+    pub async fn blocked(&self, key: &TaskKey) -> bool {
+        !self.store.task_detail(&self.human, &key.0).await.unwrap().blocked_by.is_empty()
+    }
+
     pub async fn asked(&self, key: &TaskKey) -> bool {
         let task = self.store.get_task(&self.human, &key.0).await.unwrap();
         let open = self.store.open_questions(&self.human, &[task.id]).await.unwrap();

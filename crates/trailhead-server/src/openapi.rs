@@ -40,7 +40,6 @@ pub const ERROR_CODES: &[&str] = &[
 
 /// A task in `GET /v1/tasks`. `claim`, `open_questions`, `last_handoff`, `last_review`, `blocked_by` and `attachments` are present only when named in `include`; `blocked_by_hidden` comes with `blocked_by`.
 #[derive(Serialize, ToSchema)]
-#[allow(dead_code, reason = "schema only; the handler adds claim to the JSON")]
 pub struct ListedTask {
     #[serde(flatten)]
     task: trailhead_core::Task,
@@ -67,7 +66,7 @@ pub struct ListedTask {
 /// Path and header parameters many routes share, declared once for the docs.
 #[derive(IntoParams)]
 #[into_params(parameter_in = Path)]
-#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+#[expect(dead_code, reason = "schema only; handlers take Path<String>")]
 pub struct TaskParam {
     /// Task key, e.g. `AUTH-42`, or id
     task: String,
@@ -75,7 +74,7 @@ pub struct TaskParam {
 
 #[derive(IntoParams)]
 #[into_params(parameter_in = Path)]
-#[allow(dead_code, reason = "schema only; handlers take Path<String>")]
+#[expect(dead_code, reason = "schema only; handlers take Path<String>")]
 pub struct ProjectParam {
     /// Project key, e.g. `AUTH`, or id
     project: String,
@@ -83,7 +82,7 @@ pub struct ProjectParam {
 
 #[derive(IntoParams)]
 #[into_params(parameter_in = Header, names("If-Match"))]
-#[allow(dead_code, reason = "schema only; handlers read the header with if_match")]
+#[expect(dead_code, reason = "schema only; handlers read the header with if_match")]
 pub struct IfMatch(
     /// Expected version, e.g. `"3"`. A stale version gets 412 `version_conflict`.
     Option<String>,
@@ -222,7 +221,7 @@ impl Modify for Common {
         for (path, item) in api.paths.paths.iter_mut() {
             let public = PUBLIC.contains(&path.as_str());
             if !public && path.starts_with("/v1/") {
-                for op in [&mut item.post, &mut item.patch, &mut item.delete].into_iter().flatten() {
+                for op in [&mut item.post, &mut item.put, &mut item.patch, &mut item.delete].into_iter().flatten() {
                     op.parameters.get_or_insert_with(Vec::new).push(idempotency_key.clone().into());
                     let r = &mut op.responses.responses;
                     r.entry("409".into())
@@ -232,7 +231,8 @@ impl Modify for Common {
                     });
                 }
             }
-            let ops: [&mut Option<Operation>; 4] = [&mut item.get, &mut item.post, &mut item.patch, &mut item.delete];
+            let ops: [&mut Option<Operation>; 5] =
+                [&mut item.get, &mut item.post, &mut item.put, &mut item.patch, &mut item.delete];
             for op in ops.into_iter().flatten() {
                 if !public {
                     let r = &mut op.responses.responses;
@@ -256,7 +256,7 @@ impl Modify for Common {
 #[openapi(
     info(
         title = "Trailhead",
-        description = "Headless task engine for humans and agents. Errors are `{\"error\": {\"code\", \"message\", ...}}` with a stable `code`. Task and project reads return an `ETag` of the version; send it back as `If-Match` on writes, and a stale version gets `412 version_conflict`.",
+        description = "Headless task engine for humans and agents. Errors are `{\"error\": {\"code\", \"message\", ...}}` with a stable `code`. Task, project and app record reads return an `ETag` of the version; send it back as `If-Match` on writes, and a stale version gets `412 version_conflict`.",
     ),
     modifiers(&Common),
     security(("bearer" = [])),
@@ -283,12 +283,22 @@ impl Modify for Common {
         routes::claims::renew,
         routes::claims::release,
         routes::tasks::set_aside,
+        routes::tasks::approve_plan,
         routes::comments::list_comments,
         routes::comments::add_comment,
         routes::attachments::list_attachments,
         routes::attachments::add_attachment,
         routes::attachments::read_attachment,
         routes::attachments::remove_attachment,
+        routes::notifications::list,
+        routes::notifications::raise,
+        routes::notifications::settings,
+        routes::notifications::set_settings,
+        routes::notifications::read_all,
+        routes::notifications::resolve_about,
+        routes::notifications::read,
+        routes::notifications::unread,
+        routes::notifications::resolve,
         routes::dependencies::list_blockers,
         routes::dependencies::add_blocker,
         routes::dependencies::remove_blocker,
@@ -313,6 +323,26 @@ impl Modify for Common {
         routes::webhooks::webhook_deliveries,
         routes::access::revoke_token,
         routes::access::update_token,
+        routes::apps::list_apps,
+        routes::apps::get_app,
+        routes::apps::put_declaration,
+        routes::apps::list_records,
+        routes::apps::create_record,
+        routes::apps::get_record,
+        routes::apps::patch_record,
+        routes::apps::replace_record,
+        routes::apps::delete_record,
+        routes::apps::get_by_key,
+        routes::apps::put_by_key,
+        routes::apps::batch,
+        routes::apps::list_events,
+        crate::stream::app_events,
+        routes::apps::undo,
+        routes::connectors::list,
+        routes::connectors::show,
+        routes::connectors::change,
+        routes::connectors::run,
+        routes::connectors::hand_over,
     ),
     components(schemas(ErrorBody, ErrorDetail))
 )]
@@ -341,7 +371,7 @@ pub(crate) mod tests {
 
     /// Adding an `Error` variant breaks this match until the list below and
     /// `ERROR_CODES` are updated too.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn every_variant_is_listed(e: &Error) {
         match e {
             Error::NotFound(_)

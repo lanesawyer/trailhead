@@ -42,7 +42,7 @@ Mostly done: Trailhead is one server reachable over an iroh tunnel (`dumbpipe`),
 trailhead add "Unattended tunnel access: sandboxes open the dumbpipe tunnel and use a token passed in at start" -p TRAIL -P 2
 ```
 
-## 6. Grades (TRAIL-201)
+## 6. Grades (TRAIL-201, done)
 
 Decided (2026-10-29): tasks get an optional `grade`, 1 to 4 ([review.md](review.md#grades)). A human sets the first grade, lowers it or clears it; an agent can only raise it, checked in core on updates and on undo and revert, like `require_review`. In the event log, the CLI (`--grade`), REST, MCP, and as a filter on `ready` and `list`.
 

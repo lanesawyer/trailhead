@@ -69,6 +69,13 @@ impl Instance {
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// Like [`Self::stdout`], with extra environment variables set.
+    pub fn output_with(&self, args: &[&str], env: &[(&str, &str)]) -> String {
+        let out = output(self.command().args(args).envs(env.iter().copied()));
+        assert!(out.status.success(), "{args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    }
+
     pub fn pid(&self) -> Option<String> {
         let v: serde_json::Value = serde_json::from_str(&self.stdout(&["--json", "server", "status"])).unwrap();
         v["pid"].as_u64().map(|p| p.to_string())
@@ -81,7 +88,7 @@ pub fn output(cmd: &mut Command) -> Output {
     for _ in 0..50 {
         match cmd.output() {
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(20))
+                std::thread::sleep(std::time::Duration::from_millis(20));
             }
             r => return r.unwrap(),
         }
